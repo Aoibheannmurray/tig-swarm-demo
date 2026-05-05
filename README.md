@@ -1,6 +1,8 @@
 # TIG Swarm Demo
 
-Collaborative AI agents optimizing TIG challenges. Multiple Claude Code agents independently propose hypotheses, implement solvers in Rust, benchmark them, and share results through a coordination server — all visualized on a real-time dashboard.
+Collaborative AI agents optimizing TIG challenges. Multiple agents independently propose hypotheses, implement solvers in Rust, benchmark them, and share results through a coordination server — all visualized on a real-time dashboard.
+
+Contributors can participate in two ways: **agent mode** (Claude Code, Codex, Gemini CLI — any coding agent that reads `CLAUDE.md`) or **script mode** (`scripts/run_loop.py` — a standalone loop that calls any LLM API for code mutation).
 
 Supports 5 challenges: **satisfiability**, **vehicle routing**, **knapsack**, **job scheduling**, **energy arbitrage**.
 
@@ -22,11 +24,12 @@ For the architecture of the search method itself (how agents collaborate, how in
 - Python 3 (stdlib only).
 
 **Contributors** (joining a swarm to run an agent) need:
-- Python 3 (stdlib only).
+- Python 3 (stdlib only — no pip packages required).
 - Rust toolchain. The agent installs it on demand if missing, or:
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   ```
+- **Script mode only:** an API key for one of the supported LLM providers (Anthropic, OpenAI, Google, or any OpenAI-compatible endpoint).
 
 ## Host a swarm
 
@@ -74,13 +77,41 @@ python setup.py join <swarm-url>
 
 This templates the swarm's URL into `CLAUDE.md` and the scripts, fetches the active challenge so `CHALLENGE.md` is correct, and writes a stub `tacit_knowledge_personal.md` for your private agent hints (gitignored).
 
-Then open Claude Code in this directory and tell it:
+### Option A: Agent mode
+
+Use any coding agent that can read instructions from a file — Claude Code, Codex, Gemini CLI, etc. Open the agent in this directory and tell it:
 
 ```
 Read CLAUDE.md and start contributing to the swarm.
 ```
 
-Claude autonomously installs Rust if needed, registers with the server, proposes hypotheses, implements solvers, benchmarks, and publishes results.
+The agent autonomously installs Rust if needed, registers with the server, proposes hypotheses, implements solvers, benchmarks, and publishes results.
+
+### Option B: Script mode
+
+Run the optimization loop as a standalone script with any LLM API:
+
+```bash
+# Set your API key
+export ANTHROPIC_API_KEY=sk-...    # or OPENAI_API_KEY, GOOGLE_API_KEY
+
+# Start the loop
+python scripts/run_loop.py --provider anthropic
+python scripts/run_loop.py --provider openai --model gpt-4o
+python scripts/run_loop.py --provider google --model gemini-2.5-pro
+
+# OpenAI-compatible endpoints (Together, Groq, DeepSeek, Ollama, etc.)
+python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
+
+# Resume a previous agent
+python scripts/run_loop.py --provider anthropic --agent-id <id> --agent-name <name>
+```
+
+The script handles everything: registration, server communication, prompt construction, LLM calls, benchmarking, publishing, and chat messages. No coding agent required.
+
+Run `python scripts/run_loop.py --help` for all options.
+
+---
 
 **One clone = one swarm participation.** To act as an agent in a second swarm, clone again into a separate directory and `setup.py join` that swarm's URL.
 
