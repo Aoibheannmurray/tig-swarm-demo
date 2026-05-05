@@ -1,6 +1,6 @@
 pub mod algorithm;
+pub mod baselines;
 mod challenge;
-pub mod solomon;
 mod solution;
 
 pub use challenge::*;
@@ -128,7 +128,7 @@ impl Challenge {
             due_times,
         };
 
-        let solomon_solution = solomon::run(&c)?;
+        let solomon_solution = baselines::solomon::run(&c)?;
         c.fleet_size = solomon_solution.routes.len() + 2;
 
         Ok(c)
@@ -208,7 +208,7 @@ impl Challenge {
         // change to the existing Solomon-format challenge files (HG/*) and
         // matches the upstream contract for the other vendored challenges,
         // which also call `compute_*_baseline()` inline.
-        let baseline_solution = crate::vehicle_routing::solomon::run(self)?;
+        let baseline_solution = crate::vehicle_routing::baselines::solomon::run(self)?;
         let baseline_distance = self.evaluate_total_distance(&baseline_solution)?;
         if baseline_distance <= 0 {
             return Ok(0);
