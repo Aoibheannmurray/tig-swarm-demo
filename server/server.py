@@ -185,6 +185,7 @@ async def periodic_stats():
                 total_agents = await db.get_agent_count(conn, active_only=False)
                 total_exp = (await (await conn.execute("SELECT COUNT(*) as c FROM experiments")).fetchone())["c"]
                 total_hyp = (await (await conn.execute("SELECT COUNT(*) as c FROM hypotheses")).fetchone())["c"]
+                total_traj = (await (await conn.execute("SELECT COUNT(*) as c FROM trajectories")).fetchone())["c"]
 
             best_route_data = best["route_data"] if best else None
             num_instances = get_num_instances(config, best_route_data)
@@ -201,6 +202,7 @@ async def periodic_stats():
                 "total_agents": total_agents,
                 "total_experiments": total_exp,
                 "hypotheses_count": total_hyp,
+                "total_trajectories": total_traj,
                 "best_score": best_score,
                 "baseline_score": baseline,
                 "num_instances": num_instances,
@@ -281,28 +283,20 @@ def _pick_inspiration(
     return random.choice(pool)
 
 
-FEED_PER_AGENT_MAX = 20
-
-
 @app.get("/api/state")
-async def get_state(agent_id: str | None = None, feed_per_agent: int = 5):
+async def get_state(agent_id: str | None = None):
     """Return current swarm state.
 
     When `agent_id` is supplied, the agent receives its own current best
-    code (or the challenge seed on first run) plus its own hypothesis
-    history.  When stagnating (runs_since_improvement >= stagnation_threshold
-    from config), a stagnation_hint field (50/50 "tacit_knowledge" or
-    "inspiration") and inspiration_code are included.
-
-    `feed_per_agent` (default 5, capped at FEED_PER_AGENT_MAX=20) controls
-    how many of *each other active* agent's most recent hypotheses are
-    returned in the `ideas_in_flight` field — used by the requester to
-    avoid duplicating work currently being explored elsewhere in the swarm.
-    Set to 0 to disable.
+    code (or the challenge seed on first run). When stagnating past the
+    `hypothesis_recall_threshold`, prior failed hypotheses for the current
+    program are included with a directive to try something different.
+    When stagnating past `stagnation_threshold`, a stagnation_hint field
+    (50/50 "tacit_knowledge" or "inspiration") and inspiration_code are
+    included.
 
     When `agent_id` is omitted, returns a global dashboard view.
     """
-    feed_per_agent = max(0, min(feed_per_agent, FEED_PER_AGENT_MAX))
     config = await get_config_cached()
     direction = await get_direction()
 
@@ -319,6 +313,9 @@ async def get_state(agent_id: str | None = None, feed_per_agent: int = 5):
         )).fetchone())["c"]
         total_hyp = (await (await conn.execute(
             "SELECT COUNT(*) as c FROM hypotheses"
+        )).fetchone())["c"]
+        total_traj = (await (await conn.execute(
+            "SELECT COUNT(*) as c FROM trajectories"
         )).fetchone())["c"]
 
         # ── Agent-specific view ──
@@ -346,58 +343,63 @@ async def get_state(agent_id: str | None = None, feed_per_agent: int = 5):
                 # Deactivate the current trajectory
                 cur_traj_id = None
                 cur_traj_row = await conn.execute(
-                    "SELECT current_trajectory_id FROM agents WHERE id = ?",
+                    "SELECT current_trajectory_id, current_program_id FROM agents WHERE id = ?",
                     (agent_id,),
                 )
                 cur_traj = await cur_traj_row.fetchone()
+                old_program_id = cur_traj["current_program_id"] if cur_traj else None
                 if cur_traj and cur_traj["current_trajectory_id"]:
                     cur_traj_id = cur_traj["current_trajectory_id"]
                     await db.deactivate_trajectory(conn, cur_traj_id, timestamp)
 
-                await db.deposit_inactive(
-                    conn, agent_id, my_best["algorithm_code"],
-                    my_best["score"], timestamp,
-                )
-                # Tag the inactive algorithm with its trajectory
-                if cur_traj_id:
-                    await conn.execute(
-                        "UPDATE inactive_algorithms SET trajectory_id = ? "
-                        "WHERE agent_id = ? AND deposited_at = ?",
-                        (cur_traj_id, agent_id, timestamp),
-                    )
+                # Pick from the inactive pool BEFORE depositing, so the
+                # agent can't re-adopt its own just-deposited code.
                 n_inactive = await db.count_inactive(conn)
-                # Uniform pick: 1/(n_inactive+1) for fresh, 1/(n_inactive+1) for each inactive
                 new_traj_id = None
-                if random.randint(0, n_inactive) == 0:
+                new_program_id = None
+                # Uniform pick: 1/(n_inactive+1) for fresh, rest for each inactive
+                if n_inactive == 0 or random.randint(0, n_inactive) == 0:
                     new_code = load_initial_algorithm(config)
+                    new_program_id = new_id()
                     trajectory_reset = {"type": "fresh_start"}
                 else:
                     picked = await db.pick_random_inactive(conn)
                     if picked:
                         new_code = picked["algorithm_code"]
+                        new_program_id = picked.get("program_id") or new_id()
                         await db.remove_inactive(conn, picked["id"])
                         trajectory_reset = {
                             "type": "adopted_inactive",
                             "prior_score": picked["score"],
                         }
-                        # Reactivate the adopted trajectory
                         if picked.get("trajectory_id"):
                             new_traj_id = picked["trajectory_id"]
                             await db.reactivate_trajectory(conn, new_traj_id)
                             await db.increment_trajectory_agents(conn, new_traj_id)
                     else:
                         new_code = load_initial_algorithm(config)
+                        new_program_id = new_id()
                         trajectory_reset = {"type": "fresh_start"}
+
+                # Now deposit the stagnated code into the inactive pool.
+                await db.deposit_inactive(
+                    conn, agent_id, my_best["algorithm_code"],
+                    my_best["score"], timestamp,
+                )
+                # Tag the deposited inactive with trajectory and program_id
+                # so adopters inherit the hypothesis history.
+                await conn.execute(
+                    "UPDATE inactive_algorithms SET trajectory_id = ?, program_id = ? "
+                    "WHERE agent_id = ? AND deposited_at = ?",
+                    (cur_traj_id, old_program_id, agent_id, timestamp),
+                )
 
                 await db.clear_agent_best(conn, agent_id)
                 await conn.execute(
                     "UPDATE agents SET runs_since_improvement = 0, "
-                    "best_score = NULL, current_trajectory_id = ? WHERE id = ?",
-                    (new_traj_id, agent_id),
-                )
-                await conn.execute(
-                    "DELETE FROM hypotheses WHERE agent_id = ?",
-                    (agent_id,),
+                    "best_score = NULL, current_trajectory_id = ?, "
+                    "current_program_id = ? WHERE id = ?",
+                    (new_traj_id, new_program_id, agent_id),
                 )
                 await conn.commit()
                 my_best = None
@@ -421,51 +423,41 @@ async def get_state(agent_id: str | None = None, feed_per_agent: int = 5):
                 my_best_score = my_best["score"] if my_best else None
                 my_best_experiment_id = my_best["experiment_id"] if my_best else None
 
-            # Hypotheses scoped to this agent's current best
-            if my_best_experiment_id is not None:
-                hyp_clause = "AND h.agent_id = ? AND h.target_best_experiment_id = ?"
-                hyp_params: list = [agent_id, my_best_experiment_id]
-            else:
-                hyp_clause = "AND h.agent_id = ? AND h.target_best_experiment_id IS NULL"
-                hyp_params = [agent_id]
-
-            cursor = await conn.execute(
-                f"""SELECT h.id, h.title, h.strategy_tag, h.description
-                    FROM hypotheses h
-                    WHERE 1=1 {hyp_clause}
-                    ORDER BY h.created_at DESC LIMIT 20""",
-                hyp_params,
+            # ── Program ID management ──
+            prog_cursor = await conn.execute(
+                "SELECT current_program_id FROM agents WHERE id = ?",
+                (agent_id,),
             )
-            recent_hypotheses = [dict(row) for row in await cursor.fetchall()]
-
-            # ── Ideas in flight (top-N per other active agent) ──
-            # Each requester sees, for every *other* agent whose last_heartbeat
-            # is within the active window, that agent's `feed_per_agent` most
-            # recent hypotheses. Used to avoid duplicating work being explored
-            # elsewhere right now. SQLite window function: rank per agent_id by
-            # created_at DESC, keep ranks <= N.
-            ideas_in_flight: list[dict] = []
-            if feed_per_agent > 0:
-                cursor = await conn.execute(
-                    """WITH ranked AS (
-                           SELECT h.title, h.strategy_tag, h.created_at,
-                                  h.agent_id, a.name AS agent_name,
-                                  ROW_NUMBER() OVER (
-                                      PARTITION BY h.agent_id
-                                      ORDER BY h.created_at DESC
-                                  ) AS rn
-                           FROM hypotheses h
-                           JOIN agents a ON a.id = h.agent_id
-                           WHERE h.agent_id != ?
-                             AND a.last_heartbeat >= ?
-                       )
-                       SELECT title, strategy_tag, agent_name, created_at
-                       FROM ranked
-                       WHERE rn <= ?
-                       ORDER BY created_at DESC""",
-                    (agent_id, cutoff_ts, feed_per_agent),
+            prog_row = await prog_cursor.fetchone()
+            current_program_id = prog_row["current_program_id"] if prog_row else None
+            if not current_program_id:
+                current_program_id = new_id()
+                await conn.execute(
+                    "UPDATE agents SET current_program_id = ? WHERE id = ?",
+                    (current_program_id, agent_id),
                 )
-                ideas_in_flight = [dict(row) for row in await cursor.fetchall()]
+                await conn.commit()
+
+            # ── Prior hypotheses (program-scoped, shown only after threshold) ──
+            hypothesis_recall_threshold = int(config.get("hypothesis_recall_threshold", "3"))
+            prior_hypotheses: list[dict] = []
+            hypothesis_recall_message: str | None = None
+            if runs_since >= hypothesis_recall_threshold:
+                cursor = await conn.execute(
+                    """SELECT h.title, h.strategy_tag, h.description, e.score
+                       FROM hypotheses h
+                       LEFT JOIN experiments e ON e.hypothesis_id = h.id
+                       WHERE h.program_id = ? AND h.status = 'failed'
+                       ORDER BY h.created_at DESC LIMIT 20""",
+                    (current_program_id,),
+                )
+                prior_hypotheses = [dict(row) for row in await cursor.fetchall()]
+                if prior_hypotheses:
+                    hypothesis_recall_message = (
+                        "The following strategies were tried on this program and "
+                        "did not improve the score. Try something structurally "
+                        "different from these approaches."
+                    )
 
             # Inspiration on stagnation (only when not trajectory-resetting)
             inspiration_code = None
@@ -517,13 +509,8 @@ async def get_state(agent_id: str | None = None, feed_per_agent: int = 5):
                 "total_agents": total_agents,
                 "total_experiments": total_exp,
                 "hypotheses_count": total_hyp,
-                "recent_hypotheses": [
-                    {"id": h["id"], "title": h["title"],
-                     "strategy_tag": h["strategy_tag"],
-                     "description": h["description"]}
-                    for h in recent_hypotheses
-                ],
-                "ideas_in_flight": ideas_in_flight,
+                "prior_hypotheses": prior_hypotheses,
+                "hypothesis_recall_message": hypothesis_recall_message,
                 "inspiration_code": inspiration_code,
                 "inspiration_agent_name": inspiration_agent_name,
                 "stagnation_hint": stagnation_hint,
@@ -576,6 +563,7 @@ async def get_state(agent_id: str | None = None, feed_per_agent: int = 5):
         "total_agents": total_agents,
         "total_experiments": total_exp,
         "hypotheses_count": total_hyp,
+        "total_trajectories": total_traj,
         "recent_experiments": [
             {
                 "id": e["id"],
@@ -637,14 +625,28 @@ async def create_iteration(req: IterationCreate):
         )
         hyp_status = "succeeded" if beats_own_best else "failed"
 
+        # ── Program ID: tag hypothesis with current program ──
+        prog_cursor = await conn.execute(
+            "SELECT current_program_id FROM agents WHERE id = ?",
+            (req.agent_id,),
+        )
+        prog_row = await prog_cursor.fetchone()
+        current_program_id = prog_row["current_program_id"] if prog_row else None
+        if not current_program_id:
+            current_program_id = new_id()
+            await conn.execute(
+                "UPDATE agents SET current_program_id = ? WHERE id = ?",
+                (current_program_id, req.agent_id),
+            )
+
         await conn.execute(
             """INSERT INTO hypotheses
                (id, agent_id, title, description, strategy_tag, status,
-                fingerprint, target_best_experiment_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                fingerprint, target_best_experiment_id, program_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (hyp_id, req.agent_id, req.title, req.description,
              req.strategy_tag, hyp_status, fp, target_best_experiment_id,
-             timestamp),
+             current_program_id, timestamp),
         )
 
         delta_vs_best_pct: float | None = None
@@ -698,19 +700,21 @@ async def create_iteration(req: IterationCreate):
         )
 
         if beats_own_best:
+            new_program_id = new_id()
             await conn.execute(
                 f"""UPDATE agents SET
                     experiments_completed = experiments_completed + 1,
                     runs_since_improvement = 0,
                     improvements = improvements + 1,
                     best_score = ?,
+                    current_program_id = ?,
                     best_ever_score = CASE
                         WHEN best_ever_score IS NULL THEN ?
                         WHEN ? {('>' if direction == 'max' else '<')} best_ever_score THEN ?
                         ELSE best_ever_score
                     END
                    WHERE id = ?""",
-                (req.score, req.score, req.score, req.score, req.agent_id),
+                (req.score, new_program_id, req.score, req.score, req.score, req.agent_id),
             )
             await db.upsert_agent_best(
                 conn, agent_id=req.agent_id, experiment_id=exp_id,
@@ -904,12 +908,6 @@ async def create_experiment(req: ExperimentCreate):
         baseline = await get_baseline_score(conn)
 
         is_new_best = prev_best is None or db.is_better(direction, req.score, prev_best["score"])
-        # beats_own_best: did this experiment improve the publishing agent's
-        # own branch? Drives both agent_bests updates and the hypothesis
-        # success/fail label — "succeeded" now means "improved my branch".
-        # Score-only: the per-instance infeasibility penalty (1,000,000) is
-        # baked into score, so any mixed/fully-infeasible result already
-        # loses to a feasible one on score alone.
         beats_own_best = (
             prev_agent_best is None
             or db.is_better(direction, req.score, prev_agent_best["score"])
@@ -926,35 +924,61 @@ async def create_experiment(req: ExperimentCreate):
                 improvement_pct(prev_agent_best["score"], req.score, direction), 6
             )
 
+        # ── Trajectory tracking ──
+        traj_cursor = await conn.execute(
+            "SELECT current_trajectory_id FROM agents WHERE id = ?",
+            (req.agent_id,),
+        )
+        traj_row = await traj_cursor.fetchone()
+        trajectory_id = traj_row["current_trajectory_id"] if traj_row else None
+        if not trajectory_id:
+            trajectory_id = new_id()
+            await db.create_trajectory(
+                conn, trajectory_id, timestamp,
+                current_score=req.score if beats_own_best else None,
+            )
+            await conn.execute(
+                "UPDATE agents SET current_trajectory_id = ?, "
+                "num_trajectories = num_trajectories + 1 WHERE id = ?",
+                (trajectory_id, req.agent_id),
+            )
+
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, hypothesis_id, algorithm_code, score, feasible,
                 num_vehicles, total_distance, runtime_seconds, notes, route_data,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
-                created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                trajectory_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, req.hypothesis_id, req.algorithm_code, req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
              req.runtime_seconds, req.notes, route_data_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
              1 if beats_own_best else 0,
-             timestamp),
+             trajectory_id, timestamp),
+        )
+
+        await db.update_trajectory_after_edit(
+            conn, trajectory_id, beats_own_best,
+            new_score=req.score if beats_own_best else None,
         )
 
         if beats_own_best:
+            new_program_id = new_id()
             await conn.execute(
                 f"""UPDATE agents SET
                     experiments_completed = experiments_completed + 1,
                     runs_since_improvement = 0,
                     improvements = improvements + 1,
                     best_score = ?,
+                    current_program_id = ?,
                     best_ever_score = CASE
                         WHEN best_ever_score IS NULL THEN ?
                         WHEN ? {('>' if direction == 'max' else '<')} best_ever_score THEN ?
                         ELSE best_ever_score
                     END
                    WHERE id = ?""",
-                (req.score, req.score, req.score, req.score, req.agent_id),
+                (req.score, new_program_id, req.score, req.score, req.score, req.agent_id),
             )
             await db.upsert_agent_best(
                 conn,
@@ -967,6 +991,7 @@ async def create_experiment(req: ExperimentCreate):
                 total_distance=req.total_distance,
                 route_data=route_data_json,
                 updated_at=timestamp,
+                trajectory_id=trajectory_id,
             )
         else:
             await conn.execute(
@@ -1243,8 +1268,11 @@ async def get_agent_experiments(agent_id: str):
                     "registered_at": None, "experiments": []}
 
         cursor = await conn.execute(
-            "SELECT id, score, feasible, created_at FROM experiments "
-            "WHERE agent_id = ? ORDER BY created_at ASC",
+            """SELECT e.id, e.score, e.feasible, e.beats_own_best, e.notes,
+                      e.created_at, h.title, h.description, h.strategy_tag
+               FROM experiments e
+               LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
+               WHERE e.agent_id = ? ORDER BY e.created_at ASC""",
             (agent_id,),
         )
         rows = await cursor.fetchall()
@@ -1258,6 +1286,11 @@ async def get_agent_experiments(agent_id: str):
                 "id": r["id"],
                 "score": r["score"],
                 "feasible": bool(r["feasible"]),
+                "beats_own_best": bool(r["beats_own_best"]) if r["beats_own_best"] is not None else False,
+                "notes": r["notes"],
+                "title": r["title"],
+                "description": r["description"],
+                "strategy_tag": r["strategy_tag"],
                 "created_at": r["created_at"],
             }
             for r in rows
@@ -1372,6 +1405,10 @@ async def get_swarm_config():
         stagnation_limit = int(config.get("stagnation_limit", "10"))
     except Exception:
         stagnation_limit = 10
+    try:
+        hypothesis_recall_threshold = int(config.get("hypothesis_recall_threshold", "3"))
+    except Exception:
+        hypothesis_recall_threshold = 3
     return {
         "challenge": config.get("challenge", "vehicle_routing"),
         "tracks": tracks,
@@ -1381,6 +1418,7 @@ async def get_swarm_config():
         "owner_name": config.get("owner_name", ""),
         "stagnation_threshold": stagnation_threshold,
         "stagnation_limit": stagnation_limit,
+        "hypothesis_recall_threshold": hypothesis_recall_threshold,
     }
 
 
@@ -1401,6 +1439,7 @@ async def update_swarm_config(req: SwarmConfigUpdate):
         "owner_name": req.owner_name,
         "stagnation_threshold": str(req.stagnation_threshold),
         "stagnation_limit": str(req.stagnation_limit),
+        "hypothesis_recall_threshold": str(req.hypothesis_recall_threshold),
         "initial_algorithm_code": req.initial_algorithm_code,
     }
     async with db.connect() as conn:

@@ -133,8 +133,6 @@ CHALLENGES = {
 
 DEFAULT_TIMEOUT = 30
 DEFAULT_INSTANCES_PER_TRACK = 20
-DEFAULT_FEED_PER_AGENT = 5
-FEED_PER_AGENT_MAX = 20
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -182,19 +180,19 @@ def prompt_int(label: str, default: int, minimum: int = 0) -> int:
         return v
 
 
-def _swap(text: str, placeholder: str, prior: str | None, new: str) -> str:
-    """Replace the placeholder, the previously-templated URL, AND any other
-    Railway / raw-IP URL we find in `text` with `new`.
+def _swap(text: str, placeholder: str, prior: str | None, new: str, is_url: bool = False) -> str:
+    """Replace the placeholder and the previously-templated value with `new`.
 
-    The regex pass catches stale baked URLs that don't match `prior` — e.g.
-    a clone where the templated files were committed pointing at one swarm
-    but `swarm.config.json` was last written by setup against a different
-    one. Without it, `_swap` silently leaves the wrong URL in place."""
+    When `is_url` is True, also sweep Railway / raw-IP URLs — this catches
+    stale baked URLs that don't match `prior`. The regex pass is skipped
+    for non-URL substitutions (challenge name, algorithm path) so it can't
+    clobber just-substituted server URLs."""
     text = text.replace(placeholder, new)
     if prior and prior != placeholder and prior != new:
         text = text.replace(prior, new)
-    text = _RAILWAY_URL_RE.sub(new, text)
-    text = _RAW_IP_URL_RE.sub(new, text)
+    if is_url:
+        text = _RAILWAY_URL_RE.sub(new, text)
+        text = _RAW_IP_URL_RE.sub(new, text)
     return text
 
 
@@ -218,7 +216,7 @@ def template_files(
             print(f"  skipping {path} (missing)")
             continue
         text = path.read_text()
-        new = _swap(text, PLACEHOLDER_URL, prior_url, server_url)
+        new = _swap(text, PLACEHOLDER_URL, prior_url, server_url, is_url=True)
         if challenge:
             new = _swap(new, PLACEHOLDER_CHALLENGE, prior_challenge, challenge)
         if algorithm_path:
@@ -257,6 +255,7 @@ def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
         "owner_name": cfg.get("owner_name", ""),
         "stagnation_threshold": cfg.get("stagnation_threshold", 2),
         "stagnation_limit": cfg.get("stagnation_limit", 10),
+        "hypothesis_recall_threshold": cfg.get("hypothesis_recall_threshold", 3),
         "initial_algorithm_code": cfg.get("initial_algorithm_code", ""),
     }
     req = urllib.request.Request(
@@ -629,12 +628,11 @@ def run_create() -> int:
         "Stagnation limit (iterations without improvement before trajectory reset, 0=disabled)",
         10, minimum=0,
     )
-    feed_per_agent = prompt_int(
-        "Ideas-in-flight feed: how many recent hypotheses to see per other "
-        f"active agent each iteration (0=disabled, max {FEED_PER_AGENT_MAX})",
-        DEFAULT_FEED_PER_AGENT, minimum=0,
+    hypothesis_recall_threshold = prompt_int(
+        "Hypothesis recall threshold (iterations without improvement before "
+        "showing prior failed hypotheses for the current program)",
+        3, minimum=1,
     )
-    feed_per_agent = min(feed_per_agent, FEED_PER_AGENT_MAX)
 
     tk_path = init_personal_tacit_knowledge(stagnation_threshold)
     gather_tacit_knowledge(tk_path, stagnation_threshold)
@@ -692,7 +690,7 @@ def run_create() -> int:
         "timeout": timeout,
         "stagnation_threshold": stagnation_threshold,
         "stagnation_limit": stagnation_limit,
-        "feed_per_agent": feed_per_agent,
+        "hypothesis_recall_threshold": hypothesis_recall_threshold,
         "scoring_direction": challenge_meta["scoring_direction"],
         "algorithm_path": f"src/{challenge}/algorithm/mod.rs",
         "initial_algorithm_code": initial_algorithm_code,
@@ -778,14 +776,6 @@ def run_join(server_url: str) -> int:
     if challenge:
         write_challenge_md(challenge)
 
-    feed_per_agent = prompt_int(
-        "Ideas-in-flight feed: how many recent hypotheses to see per other "
-        f"active agent each iteration (0=disabled, max {FEED_PER_AGENT_MAX})",
-        (prior or {}).get("feed_per_agent", DEFAULT_FEED_PER_AGENT),
-        minimum=0,
-    )
-    feed_per_agent = min(feed_per_agent, FEED_PER_AGENT_MAX)
-
     # Stash a minimal record so a future re-run can swap the URL/challenge
     # without leaving stale strings in the templated files.
     write_swarm_config(
@@ -794,7 +784,6 @@ def run_join(server_url: str) -> int:
             "role": "contributor",
             "challenge": challenge or (prior or {}).get("challenge"),
             "algorithm_path": algorithm_path or (prior or {}).get("algorithm_path"),
-            "feed_per_agent": feed_per_agent,
         }
     )
 

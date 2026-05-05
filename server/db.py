@@ -130,6 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_hyp_fingerprint ON hypotheses(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_agent_bests_score ON agent_bests(feasible, score);
 CREATE INDEX IF NOT EXISTS idx_msg_created ON messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_hyp_agent_target ON hypotheses(agent_id, target_best_experiment_id);
+CREATE INDEX IF NOT EXISTS idx_hyp_program_id ON hypotheses(program_id);
 """
 
 DEFAULT_CONFIG = {
@@ -148,6 +149,7 @@ DEFAULT_CONFIG = {
     "swarm_name": "",
     "owner_name": "",
     "initial_algorithm_code": "",
+    "hypothesis_recall_threshold": "3",
 }
 
 
@@ -180,6 +182,9 @@ async def init_db() -> None:
             "ALTER TABLE agents ADD COLUMN num_trajectories INTEGER DEFAULT 0",
             "ALTER TABLE agents ADD COLUMN tacit_knowledge_count INTEGER DEFAULT 0",
             "ALTER TABLE agents ADD COLUMN inspiration_count INTEGER DEFAULT 0",
+            "ALTER TABLE agents ADD COLUMN current_program_id TEXT",
+            "ALTER TABLE hypotheses ADD COLUMN program_id TEXT",
+            "ALTER TABLE inactive_algorithms ADD COLUMN program_id TEXT",
         ):
             try:
                 await db.execute(stmt)
@@ -469,8 +474,8 @@ async def count_inactive(conn: aiosqlite.Connection) -> int:
 
 async def pick_random_inactive(conn: aiosqlite.Connection) -> dict | None:
     cursor = await conn.execute(
-        "SELECT id, agent_id, algorithm_code, score FROM inactive_algorithms "
-        "ORDER BY RANDOM() LIMIT 1"
+        "SELECT id, agent_id, algorithm_code, score, trajectory_id, program_id "
+        "FROM inactive_algorithms ORDER BY RANDOM() LIMIT 1"
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
