@@ -18,7 +18,7 @@ from pathlib import Path
 # rerunning setup. The startswith("$") check catches the un-substituted
 # placeholder so a contributor who forgot to run setup.py join gets a
 # loud failure instead of a silent post to nowhere.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://tig-swarm-demo-production.up.railway.app"
+SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app"
 if SERVER.startswith("$"):
     sys.exit(
         "publish.py: server URL not configured. Run "
@@ -38,7 +38,7 @@ def _resolve_algo_path() -> Path:
                 return ROOT / algo
         except Exception:
             pass
-    return ROOT / "src" / "vehicle_routing" / "algorithm" / "mod.rs"
+    return ROOT / "src" / "job_scheduling" / "algorithm" / "mod.rs"
 
 
 def main():

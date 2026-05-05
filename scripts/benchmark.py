@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
-Reads swarm-wide config from `https://tig-swarm-demo-production.up.railway.app/api/swarm_config` (or from
+Reads swarm-wide config from `https://t1-production-0047.up.railway.app/api/swarm_config` (or from
 `./swarm.config.json` as a fallback for offline use) to pick the challenge,
 the per-track instance counts, and the per-instance solver timeout. Builds
 the right cargo binary, generates instances on first run (cached under
@@ -15,11 +15,11 @@ in the integer range [-QUALITY_PRECISION × 10, +QUALITY_PRECISION × 10]
 (QUALITY_PRECISION = 1,000,000). The baseline is the upstream baseline
 algorithm for that challenge:
 
-    - satisfiability: binary (1M if all clauses satisfied, else 0).
-    - vehicle_routing: Solomon nearest-neighbor (`solomon::run`).
-    - knapsack: greedy by value-density (`compute_greedy_baseline`).
+    - job_scheduling: binary (1M if all clauses satisfied, else 0).
+    - job_scheduling: Solomon nearest-neighbor (`solomon::run`).
+    - job_scheduling: greedy by value-density (`compute_greedy_baseline`).
     - job_scheduling: SOTA dispatching rules (`compute_sota_baseline`).
-    - energy_arbitrage: max(greedy, conservative) (`compute_baseline`).
+    - job_scheduling: max(greedy, conservative) (`compute_baseline`).
 
 Higher quality is always better. Aggregation is two-step:
 
@@ -87,7 +87,7 @@ GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 
 # Wizard-baked URL with env-var override; mirrors scripts/publish.py so the
 # two stay in lockstep when the wizard re-runs.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://tig-swarm-demo-production.up.railway.app"
+SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app"
 if SERVER.startswith("$"):
     SERVER = ""  # offline mode — read from swarm.config.json instead
 
@@ -113,7 +113,7 @@ def load_swarm_config() -> dict:
     if cfg_path.exists():
         local = json.loads(cfg_path.read_text())
         return {
-            "challenge": local.get("challenge", "vehicle_routing"),
+            "challenge": local.get("challenge", "job_scheduling"),
             "tracks": local.get("tracks", {}),
             "timeout": local.get("timeout", 30),
             "scoring_direction": local.get("scoring_direction", "min"),
@@ -239,18 +239,9 @@ def run_instance(
             "score": score,
             "feasible": True,
         }
-        if challenge == "vehicle_routing":
-            from_vrp = _vrp_extras(str(instance_path), sol_path)
-            result.update(from_vrp)
-        elif challenge == "job_scheduling":
-            gantt = _jsp_extras(str(instance_path), sol_path)
-            result.update(gantt)
-        elif challenge == "knapsack":
-            knapsack = _knapsack_extras(str(instance_path), sol_path)
-            result.update(knapsack)
-        elif challenge == "energy_arbitrage":
-            energy = _energy_extras(str(instance_path), sol_path)
-            result.update(energy)
+        extras = _PER_INSTANCE_EXTRAS.get(challenge)
+        if extras is not None:
+            result.update(extras(str(instance_path), sol_path))
         return result
     finally:
         if os.path.exists(sol_path):
@@ -424,8 +415,8 @@ def _jsp_extras(inst_path: str, sol_path: str) -> dict:
 # ── Knapsack-specific extras (interaction matrix viz_data) ─────────
 
 
-def _knapsack_parse_solution(sol_path: str) -> list[int] | None:
-    """Decode a knapsack solution file (base64 → gzip → bincode)."""
+def _job_scheduling_parse_solution(sol_path: str) -> list[int] | None:
+    """Decode a job_scheduling solution file (base64 → gzip → bincode)."""
     import base64
     import gzip
     import struct
@@ -456,7 +447,7 @@ def _knapsack_parse_solution(sol_path: str) -> list[int] | None:
         return None
 
 
-def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
+def _job_scheduling_extras(inst_path: str, sol_path: str) -> dict:
     """Build interaction-matrix viz payload from instance + solution files.
 
     The matrix sent to the dashboard is K×K where K = len(selected items),
@@ -464,15 +455,15 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
     """
     MAX_VIZ_ITEMS = 200
 
-    items = _knapsack_parse_solution(sol_path)
+    items = _job_scheduling_parse_solution(sol_path)
     if items is None:
-        return {"knapsack_data": None}
+        return {"job_scheduling_data": None}
 
     try:
         with open(inst_path) as f:
             challenge = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return {"knapsack_data": None}
+        return {"job_scheduling_data": None}
 
     n = challenge["num_items"]
     interaction_values = challenge["interaction_values"]
@@ -495,7 +486,7 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
                 sub_matrix[ri][rj] = interaction_values[i][j]
 
     return {
-        "knapsack_data": {
+        "job_scheduling_data": {
             "num_selected": len(sorted_items),
             "num_items": n,
             "viz_items": viz_items,
@@ -511,7 +502,7 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
 
 
 def _energy_parse_solution(sol_path: str) -> list[list[float]] | None:
-    """Decode an energy_arbitrage solution file (base64 → gzip → bincode).
+    """Decode an job_scheduling solution file (base64 → gzip → bincode).
 
     The schedule is Vec<Vec<f64>>: outer vec = timesteps, inner = batteries.
     """
@@ -597,6 +588,148 @@ def _energy_extras(inst_path: str, sol_path: str) -> dict:
             "avg_da_price": avg_da,
         }
     }
+
+
+# ── Satisfiability extras (variable assignment + clause histogram) ─
+
+
+def _sat_parse_solution(sol_path: str) -> list[bool] | None:
+    """Decode a job_scheduling solution file (base64 → gzip → bincode).
+
+    Bincode encoding of `Vec<bool>` is a little-endian u64 length followed
+    by one byte per element (0x00 or 0x01).
+    """
+    import base64
+    import gzip
+    import struct
+
+    try:
+        with open(sol_path) as f:
+            b64_str = json.load(f)
+        if not isinstance(b64_str, str):
+            return None
+        compressed = base64.b64decode(b64_str)
+        data = gzip.decompress(compressed)
+    except Exception:
+        return None
+
+    if len(data) < 8:
+        return None
+    try:
+        n = struct.unpack_from("<Q", data, 0)[0]
+    except struct.error:
+        return None
+    if 8 + n > len(data):
+        return None
+    return [bool(data[8 + i]) for i in range(n)]
+
+
+def _sat_extras(inst_path: str, sol_path: str) -> dict:
+    """Build the SAT viz payload from instance + solution.
+
+    Two complementary views are sent:
+      - assignment_bits: a "0"/"1" string of the variable assignment,
+        sub-sampled to <= MAX_VIZ_VARS so the payload stays tractable
+        even at n_vars=100k.
+      - clause_bins: 50 stacked-bar bins along the clause index axis,
+        each bin a 4-tuple (clauses with 0/1/2/3 satisfying literals).
+    """
+    MAX_VIZ_VARS = 10000
+    NUM_BINS = 50
+
+    vars_arr = _sat_parse_solution(sol_path)
+    if vars_arr is None:
+        return {"sat_data": None}
+
+    try:
+        with open(inst_path) as f:
+            challenge = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"sat_data": None}
+
+    n_vars = challenge.get("num_variables")
+    clauses = challenge.get("clauses")
+    if not isinstance(n_vars, int) or not isinstance(clauses, list):
+        return {"sat_data": None}
+    if len(vars_arr) != n_vars:
+        return {"sat_data": None}
+
+    m_clauses = len(clauses)
+    bin_size = max(1, m_clauses // NUM_BINS)
+    clause_bins = [[0, 0, 0, 0] for _ in range(NUM_BINS)]
+    num_satisfied = 0
+    for ci, clause in enumerate(clauses):
+        bin_idx = min(ci // bin_size, NUM_BINS - 1)
+        sat_count = 0
+        for lit in clause:
+            v_idx = abs(lit) - 1  # literals are 1-indexed
+            if v_idx < 0 or v_idx >= n_vars:
+                continue
+            val = vars_arr[v_idx]
+            if (lit > 0 and val) or (lit < 0 and not val):
+                sat_count += 1
+        clause_bins[bin_idx][min(sat_count, 3)] += 1
+        if sat_count > 0:
+            num_satisfied += 1
+
+    if n_vars <= MAX_VIZ_VARS:
+        viz_assignment = vars_arr
+        viz_stride = 1
+    else:
+        viz_stride = max(1, n_vars // MAX_VIZ_VARS)
+        viz_assignment = vars_arr[::viz_stride][:MAX_VIZ_VARS]
+    assignment_bits = "".join("1" if b else "0" for b in viz_assignment)
+
+    return {
+        "sat_data": {
+            "num_variables": n_vars,
+            "num_clauses": m_clauses,
+            "num_satisfied": num_satisfied,
+            "viz_count": len(viz_assignment),
+            "viz_stride": viz_stride,
+            "assignment_bits": assignment_bits,
+            "clause_bins": clause_bins,
+        }
+    }
+
+
+# ── Per-challenge dispatch tables ─────────────────────────────────
+#
+# Tables instead of an if/elif chain so that adding a challenge means a
+# single line per table — and so a tooling pass that rewrites string
+# literals in equality comparisons (which broke an earlier copy of this
+# file) leaves them alone.
+
+# Challenge-name keys are written as adjacent string literals (Python
+# concatenates them at parse time) so that `setup.py sync` — which does a
+# blanket `text.replace(prior_challenge, new_challenge)` over this file —
+# can't accidentally rewrite a dispatch key when the user switches the
+# active challenge. Dict keys still equal the contiguous strings at
+# runtime, so `_PER_INSTANCE_EXTRAS.get(challenge)` works unchanged.
+_PER_INSTANCE_EXTRAS = {
+    "vehicle" "_routing":  _vrp_extras,
+    "job" "_scheduling":   _jsp_extras,
+    # `_job_scheduling_extras` is historical mis-naming — it actually
+    # builds the knapsack interaction-matrix payload (see comment above
+    # its definition). Same for the `job_scheduling_data` key below.
+    "knap" "sack":         _job_scheduling_extras,
+    "energy" "_arbitrage": _energy_extras,
+    "satisfia" "bility":   _sat_extras,
+}
+
+# Each entry is (per_result_field, route_alias_or_None). The aggregate
+# block reads `r[per_result_field]` from each per-instance result and
+# stores `{instance: payload}` as the run's `viz_data`. The second tuple
+# element, when non-None, also stamps that payload into the legacy
+# `route_data` field (only VRP, for backwards compatibility with the
+# original dashboard route panel).
+_AGG_EXTRAS = {
+    "vehicle" "_routing":  ("route_data", "route_data"),
+    "job" "_scheduling":   ("gantt_data", None),
+    "knap" "sack":         ("job_scheduling_data", None),
+    "energy" "_arbitrage": ("energy_data", None),
+    "satisfia" "bility":   ("sat_data", None),
+}
 
 
 # ── Aggregation & main ────────────────────────────────────────────
@@ -699,48 +832,31 @@ def main() -> int:
         "errors": [f"{r['instance']}: {r['error']}" for r in results if "error" in r] or None,
     }
 
-    # VRP-specific legacy fields for the existing dashboard route panel.
-    if challenge == "vehicle_routing":
-        all_routes = {
-            r["instance"]: r["route_data"]
-            for r in results
-            if r.get("route_data")
-        }
-        out["num_vehicles"] = sum(r.get("num_vehicles", 0) for r in results if r.get("feasible"))
-        out["total_distance"] = sum(r["score"] for r in results if r.get("feasible"))
-        out["route_data"] = all_routes or None
-        out["viz_data"] = all_routes or None  # generic alias for non-VRP dashboards
-    elif challenge == "job_scheduling":
-        all_gantt = {
-            r["instance"]: r["gantt_data"]
-            for r in results
-            if r.get("gantt_data")
-        }
-        out["viz_data"] = all_gantt or None
-        out["num_vehicles"] = 0
-        out["total_distance"] = out["score"]
-    elif challenge == "knapsack":
-        all_knapsack = {
-            r["instance"]: r["knapsack_data"]
-            for r in results
-            if r.get("knapsack_data")
-        }
-        out["viz_data"] = all_knapsack or None
-        out["num_vehicles"] = 0
-        out["total_distance"] = out["score"]
-    elif challenge == "energy_arbitrage":
-        all_energy = {
-            r["instance"]: r["energy_data"]
-            for r in results
-            if r.get("energy_data")
-        }
-        out["viz_data"] = all_energy or None
-        out["num_vehicles"] = 0
-        out["total_distance"] = out["score"]
-    else:
+    # Per-challenge viz_data aggregation. Driven by `_AGG_EXTRAS` so a
+    # tooling pass that rewrites quoted challenge names in `==` chains
+    # can't disable a branch unintentionally.
+    agg_spec = _AGG_EXTRAS.get(challenge)
+    out["num_vehicles"] = 0
+    out["total_distance"] = out["score"]
+    if agg_spec is None:
         out["viz_data"] = None
-        out["num_vehicles"] = 0
-        out["total_distance"] = out["score"]
+    else:
+        per_field, route_alias = agg_spec
+        viz = {
+            r["instance"]: r[per_field]
+            for r in results
+            if r.get(per_field)
+        } or None
+        out["viz_data"] = viz
+        if route_alias is not None:
+            # VRP-specific legacy fields for the existing dashboard route panel.
+            out["route_data"] = viz
+            out["num_vehicles"] = sum(
+                r.get("num_vehicles", 0) for r in results if r.get("feasible")
+            )
+            out["total_distance"] = sum(
+                r["score"] for r in results if r.get("feasible")
+            )
 
     print(json.dumps(out, indent=2))
     return 0

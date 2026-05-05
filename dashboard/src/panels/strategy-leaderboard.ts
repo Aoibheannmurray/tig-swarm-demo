@@ -1,5 +1,6 @@
 import type { Panel, WSMessage } from "../types";
 import { getAgentColor } from "../lib/colors";
+import { getViewedChallenge } from "../lib/viewedChallenge";
 
 interface TopEntry {
   experiment_id: string;
@@ -77,6 +78,10 @@ export class StrategyLeaderboardPanel implements Panel {
 
     if (msg.type !== "experiment_published") return;
     if (!msg.feasible) return;
+    // Drop events for any other challenge — main-ideas.ts also filters but
+    // double-check here so the panel can never accumulate cross-challenge state.
+    const evCh = (msg as any).challenge;
+    if (evCh && evCh !== getViewedChallenge()) return;
     if (this.entries.has(msg.experiment_id)) return; // already recorded
 
     const worst = this.worstScore();
@@ -96,7 +101,13 @@ export class StrategyLeaderboardPanel implements Panel {
 
   private async loadInitial() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/top_scores?limit=${MAX_ROWS}`);
+      // Filter by viewed challenge so the strategy leaderboard reflects
+      // only the selected challenge's iterations — not the swarm's
+      // active_challenge fallback.
+      const ch = encodeURIComponent(getViewedChallenge());
+      const res = await fetch(
+        `${this.apiUrl}/api/top_scores?limit=${MAX_ROWS}&challenge=${ch}`,
+      );
       if (!res.ok) return;
       const data: { entries: TopEntry[] } = await res.json();
       for (const e of data.entries) {
@@ -109,6 +120,12 @@ export class StrategyLeaderboardPanel implements Panel {
     } catch {
       // noop — WS events will backfill
     }
+  }
+
+  setChallenge(_c: string): void {
+    this.entries.clear();
+    this.render();
+    void this.loadInitial();
   }
 
   private worstScore(): number {

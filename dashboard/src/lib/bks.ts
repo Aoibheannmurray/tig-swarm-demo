@@ -5,9 +5,9 @@
 // normalised against an internal greedy/baseline (so the gap-vs-BKS
 // concept is less meaningful), and we simply report 0 as the baseline.
 //
-// NOTE: when this swarm is configured for a non-VRP challenge, the routes
-// panel is hidden (see panels/routes.ts) — these constants only show up in
-// the VRP-specific UI.
+// NOTE: when this swarm is configured for a non-VRP challenge, the
+// SolutionPanel route view is hidden (see panels/solution.ts) — these
+// constants only show up in the VRP-specific UI.
 
 import { getSwarmConfig } from "./swarmConfig";
 

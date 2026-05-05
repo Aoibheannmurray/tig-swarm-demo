@@ -433,7 +433,7 @@ html, body {
 
 .routes-panel svg {
   display: block;
-  /* width/height set imperatively by routes.ts so the SVG is the largest
+  /* width/height set imperatively by solution.ts so the SVG is the largest
      square that fits inside .routes-svg-wrap, eliminating viewBox letterbox */
 }
 

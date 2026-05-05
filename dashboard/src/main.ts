@@ -20,10 +20,11 @@ import {
 
 import { ChallengeSelectorPanel } from "./panels/challenge-selector";
 import { StatsPanel } from "./panels/stats";
-import { RoutesPanel } from "./panels/routes";
+import { SolutionPanel } from "./panels/solution";
 import { GanttPanel } from "./panels/gantt";
 import { KnapsackPanel } from "./panels/knapsack";
 import { EnergyPanel } from "./panels/energy";
+import { SatPanel } from "./panels/sat";
 import { ChartPanel } from "./panels/chart";
 import { DiversityPanel } from "./panels/diversity";
 import { FeedPanel } from "./panels/feed";
@@ -82,7 +83,8 @@ function constructDisplayPanel() {
   if (challenge === "job_scheduling") displayPanel = new GanttPanel();
   else if (challenge === "knapsack") displayPanel = new KnapsackPanel();
   else if (challenge === "energy_arbitrage") displayPanel = new EnergyPanel();
-  else displayPanel = new RoutesPanel(); // VRP + SAT placeholder
+  else if (challenge === "satisfiability") displayPanel = new SatPanel();
+  else displayPanel = new SolutionPanel(); // VRP (and any future challenge before it gets a dedicated panel)
   displayPanel.init(container);
   panels.push(displayPanel);
 }
@@ -251,7 +253,9 @@ async function loadInitialState(apiUrl: string, challenge: string) {
         description: hyp.description || "",
         strategy_tag: hyp.strategy_tag,
         parent_hypothesis_id: hyp.parent_hypothesis_id || null,
-        timestamp: new Date().toISOString(),
+        // Use the original `created_at` from the server so timestamps don't
+        // get refreshed to "just now" on every challenge switch.
+        timestamp: hyp.created_at || new Date().toISOString(),
       } as any);
     }
 

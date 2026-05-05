@@ -605,11 +605,10 @@ async def compute_leaderboard(
     inactive_cutoff: str | None = None,
     direction: str = "min",
 ) -> list[dict]:
-    # Per-challenge leaderboard. Counters are read from agent_challenge_state
-    # (per-(agent, challenge) state) joined to agents (for agent name and
-    # global last_heartbeat). best_score comes from agent_bests filtered by
-    # challenge. Agents with no row for this challenge yet still appear with
-    # zero counters, so the dashboard shows them as "joined but not started".
+    # Per-challenge leaderboard. Only includes agents that have actually
+    # touched this challenge (have an agent_challenge_state row for it),
+    # so a not-yet-started challenge returns an empty list rather than
+    # listing every swarm member with NULL counters.
     order = _direction_order(direction)
     # CORRECTNESS INVARIANT: `active` is sourced from acs.last_active_at,
     # NOT from a.last_heartbeat. An agent currently working on VRP is alive
@@ -620,20 +619,20 @@ async def compute_leaderboard(
         SELECT
             a.id   as agent_id,
             a.name as agent_name,
-            COALESCE(acs.experiments_completed, 0) as runs,
-            COALESCE(acs.improvements, 0) as improvements,
-            COALESCE(acs.runs_since_improvement, 0) as runs_since_improvement,
+            acs.experiments_completed as runs,
+            acs.improvements as improvements,
+            acs.runs_since_improvement as runs_since_improvement,
             acs.last_active_at as last_active_at,
             acs.best_ever_score as best_ever_score,
-            COALESCE(acs.num_trajectories, 0) as num_trajectories,
-            COALESCE(acs.tacit_knowledge_count, 0) as tacit_knowledge_count,
-            COALESCE(acs.inspiration_count, 0) as inspiration_count,
+            acs.num_trajectories as num_trajectories,
+            acs.tacit_knowledge_count as tacit_knowledge_count,
+            acs.inspiration_count as inspiration_count,
             ab.score as current_score
-        FROM agents a
-        LEFT JOIN agent_challenge_state acs
-            ON acs.agent_id = a.id AND acs.challenge = ?
+        FROM agent_challenge_state acs
+        JOIN agents a ON a.id = acs.agent_id
         LEFT JOIN agent_bests ab
             ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
+        WHERE acs.challenge = ?
         ORDER BY current_score IS NULL, current_score {order}, a.name ASC
         """,
         (challenge, challenge),

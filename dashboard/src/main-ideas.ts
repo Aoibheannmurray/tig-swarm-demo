@@ -98,7 +98,9 @@ async function loadInitialState(apiUrl: string) {
         description: h.description || "",
         strategy_tag: h.strategy_tag,
         parent_hypothesis_id: h.parent_hypothesis_id || null,
-        timestamp: new Date().toISOString(),
+        // Use the original `created_at` from the server so timestamps don't
+        // get refreshed to "just now" on every challenge switch.
+        timestamp: h.created_at || new Date().toISOString(),
       });
     }
 

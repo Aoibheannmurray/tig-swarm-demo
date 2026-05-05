@@ -115,7 +115,14 @@ export class ChartPanel implements Panel {
   // is_new_best check), but the chart is a best-so-far trajectory, so only
   // strictly-improving points belong on it.
   seedHistory(entries: { score: number; agent_name: string; agent_id?: string; created_at: string }[]) {
-    if (!entries.length) return;
+    if (!entries.length) {
+      // Empty replay — clear any prior data and let redraw show the
+      // "No iterations yet" placeholder for the viewed challenge.
+      this.globalData = [];
+      this.globalStartTime = 0;
+      if (this.currentTab().type === "global") this.redraw();
+      return;
+    }
     const first = new Date(entries[0].created_at).getTime();
     this.globalStartTime = first;
     const filtered: DataPoint[] = [];
@@ -366,11 +373,27 @@ export class ChartPanel implements Panel {
 
   private redrawGlobal() {
     this.g.selectAll("*").remove();
-    if (this.globalData.length < 1) return;
 
     const m = this.margin;
     const w = this.width - m.left - m.right;
     const h = this.height - m.top - m.bottom;
+
+    if (this.globalData.length < 1) {
+      // Empty-state placeholder so an unstarted challenge doesn't look
+      // like a broken chart.
+      this.g.append("g")
+        .attr("transform", `translate(${m.left},${m.top})`)
+        .append("text")
+        .attr("class", "chart-empty")
+        .attr("x", w / 2)
+        .attr("y", h / 2)
+        .attr("text-anchor", "middle")
+        .attr("fill", "#3d4a5c")
+        .attr("font-size", "12px")
+        .attr("font-family", "var(--mono)")
+        .text("No iterations yet — this challenge hasn't started");
+      return;
+    }
 
     const latestData = d3.max(this.globalData, (d) => d.time)!;
     const xPad = Math.max(latestData * 0.15, 5000);
@@ -513,9 +536,11 @@ export class ChartPanel implements Panel {
     const color = getAgentColor(agentId);
     const exps = progress.experiments;
 
-    // X: from registration (0) to last attempt (frozen — no live trailing).
-    const latestTime = exps[exps.length - 1].time;
-    const xDomainEnd = Math.max(latestTime, 1000);
+    // X: iteration index (0..N-1), NOT wall-clock time. A late-joining
+    // agent on a wall-clock axis ends up clustered at the right edge with
+    // very few horizontal pixels; iteration index lets every agent's line
+    // span the full chart width regardless of when they registered.
+    const xDomainEnd = Math.max(exps.length - 1, 1);
     const xScale = d3.scaleLinear()
       .domain([0, xDomainEnd])
       .range([0, w]);
@@ -555,13 +580,13 @@ export class ChartPanel implements Panel {
     });
 
     // Step plot: each attempt's score is held until the next attempt.
-    // The final attempt terminates at its own time (frozen x-axis).
+    // X is the iteration index, so each step is exactly one unit wide.
     for (let i = 0; i < exps.length; i++) {
       const d = exps[i];
-      const x0 = xScale(d.time);
+      const x0 = xScale(i);
       const y0 = yScale(d.score);
       const next = exps[i + 1];
-      const xEnd = next ? xScale(next.time) : x0;
+      const xEnd = next ? xScale(i + 1) : x0;
 
       if (xEnd > x0) {
         chartG.append("line")
@@ -602,17 +627,18 @@ export class ChartPanel implements Panel {
         .text(tick.toFixed(0));
     });
 
-    const xTicks = xScale.ticks(6);
-    xTicks.forEach((tick) => {
+    // Iteration-index axis: integer ticks, no time formatting.
+    const xTickStep = Math.max(1, Math.ceil(xDomainEnd / 6));
+    for (let t = 0; t <= xDomainEnd; t += xTickStep) {
       chartG.append("text")
-        .attr("x", xScale(tick))
+        .attr("x", xScale(t))
         .attr("y", h + 16)
         .attr("fill", "#3d4a5c")
         .attr("font-size", "9px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "middle")
-        .text(formatElapsed(tick));
-    });
+        .text(`#${t}`);
+    }
   }
 
   private getGlobalYDomain(): [number, number] | null {

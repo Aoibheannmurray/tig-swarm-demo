@@ -2,6 +2,7 @@ import * as d3 from "d3";
 import type { Panel, WSMessage, RouteData, AllRouteData, RoutePoint } from "../types";
 import { getAgentColor, getRouteColor } from "../lib/colors";
 import { getSwarmConfig } from "../lib/swarmConfig";
+import { getViewedChallenge } from "../lib/viewedChallenge";
 
 // Drawing sizes as fractions of the viewBox side length. Everything else in
 // this file should reference these constants — never hardcode pixel/unit
@@ -50,7 +51,7 @@ interface HistoryEntry {
   created_at: string;
 }
 
-export class RoutesPanel implements Panel {
+export class SolutionPanel implements Panel {
   private svg!: any;
   private routeGroup!: any;
   private customerGroup!: any;
@@ -97,11 +98,11 @@ export class RoutesPanel implements Panel {
   }
 
   init(container: HTMLElement) {
-    // The routes visualization is VRP-only — depot, customer-position
-    // tour drawing, BKS comparison all assume VRPTW geometry. For other
-    // active challenges, render a placeholder. (Phase 4 follow-up: wire
-    // per-challenge SAT / Knapsack / JSP / Energy panels into this slot.)
-    // main.ts awaits loadSwarmConfig() before constructing this panel.
+    // SolutionPanel is the VRP route renderer (depot, customer-position
+    // tour drawing, BKS comparison all assume VRPTW geometry). Each other
+    // challenge has its own dedicated panel wired in main.ts; this `if`
+    // guard remains as a safety net for any future challenge added before
+    // its panel exists.
     const activeChallenge = getSwarmConfig().challenge;
     if (activeChallenge !== "vehicle_routing") {
       container.innerHTML = `
@@ -221,7 +222,12 @@ export class RoutesPanel implements Panel {
   // entries are deduped by experiment_id and merged in chronological order.
   private async fetchHistory() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/replay`);
+      // Filter by the user's currently-viewed challenge so VRP shows VRP
+      // history regardless of the swarm's active_challenge. Without the
+      // filter, the server resolves to active_challenge and returns rows
+      // for the wrong challenge — which for VRP looks like "lost history".
+      const ch = encodeURIComponent(getViewedChallenge());
+      const res = await fetch(`${this.apiUrl}/api/replay?challenge=${ch}`);
       if (!res.ok) return;
       const rows: any[] = await res.json();
       const fetched: HistoryEntry[] = rows

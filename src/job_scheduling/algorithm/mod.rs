@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-const DEFAULT_EFFORT: usize = 6;
+const DEFAULT_EFFORT: usize = 10;
 const WORK_MIN_WEIGHT: f64 = 0.3;
 
 fn average_processing_time(operation: &HashMap<usize, u32>) -> f64 {
@@ -499,8 +499,292 @@ fn solve_challenge_with_params(
         }
     }
 
+    // Machine-swap and machine-reassign local search alternated until
+    // neither produces improvement. Each pass strictly reduces makespan.
+    loop {
+        let mut any = false;
+        if let Some(improved) = improve_via_machine_swap(
+            challenge,
+            &job_products,
+            &job_ops_len,
+            &best_result,
+        ) {
+            if improved.makespan < best_result.makespan {
+                best_result = improved;
+                save_best(&best_result)?;
+                any = true;
+            }
+        }
+        if let Some(improved) = improve_via_machine_reassign(
+            challenge,
+            &job_products,
+            &job_ops_len,
+            &best_result,
+        ) {
+            if improved.makespan < best_result.makespan {
+                best_result = improved;
+                save_best(&best_result)?;
+                any = true;
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+
     save_solution(&Solution {
         job_schedule: best_result.job_schedule,
     })?;
     Ok(())
+}
+
+// ── Machine-swap local search ──────────────────────────────────────
+// From an existing schedule, try swapping each consecutive pair of
+// operations on the same machine and re-simulate. Returns the best
+// improved result (or None if simulation fails / no improvement).
+fn improve_via_machine_swap(
+    challenge: &Challenge,
+    job_products: &[usize],
+    job_ops_len: &[usize],
+    seed_result: &ScheduleResult,
+) -> Option<ScheduleResult> {
+    let num_machines = challenge.num_machines;
+
+    // Build machine_order: per-machine list of (job, op_idx) sorted by start.
+    let mut machine_order: Vec<Vec<(usize, usize)>> = (0..num_machines)
+        .map(|m| {
+            let mut v: Vec<(u32, usize, usize)> = seed_result
+                .job_schedule
+                .iter()
+                .enumerate()
+                .flat_map(|(j, ops)| {
+                    ops.iter()
+                        .enumerate()
+                        .filter(move |(_, &(mm, _))| mm == m)
+                        .map(move |(op_idx, &(_, start))| (start, j, op_idx))
+                })
+                .collect();
+            v.sort_unstable();
+            v.into_iter().map(|(_, j, o)| (j, o)).collect()
+        })
+        .collect();
+
+    let mut best_makespan = seed_result.makespan;
+    let mut best_schedule: Vec<Vec<(usize, u32)>> = seed_result.job_schedule.clone();
+
+    let mut local_improved = true;
+    let mut iter_count = 0usize;
+    while local_improved && iter_count < 200 {
+        local_improved = false;
+        iter_count += 1;
+        for m in 0..num_machines {
+            if machine_order[m].len() < 2 {
+                continue;
+            }
+            let mut i = 0;
+            while i + 1 < machine_order[m].len() {
+                machine_order[m].swap(i, i + 1);
+                if let Some((sched, ms)) = simulate_from_order(
+                    challenge,
+                    job_products,
+                    job_ops_len,
+                    &machine_order,
+                ) {
+                    if ms < best_makespan {
+                        best_makespan = ms;
+                        best_schedule = sched;
+                        local_improved = true;
+                        // Keep the swap; advance past it.
+                        i += 1;
+                        continue;
+                    } else {
+                        machine_order[m].swap(i, i + 1); // revert
+                    }
+                } else {
+                    machine_order[m].swap(i, i + 1); // revert
+                }
+                i += 1;
+            }
+        }
+    }
+
+    if best_makespan < seed_result.makespan {
+        Some(ScheduleResult {
+            job_schedule: best_schedule,
+            makespan: best_makespan,
+        })
+    } else {
+        None
+    }
+}
+
+// ── Machine-reassign local search ──────────────────────────────────
+// For each scheduled op, try moving it to each other eligible machine
+// (appended at end of that machine's queue) and re-simulate. Accept the
+// best improving reassignment per op, iterate until no improvement.
+fn improve_via_machine_reassign(
+    challenge: &Challenge,
+    job_products: &[usize],
+    job_ops_len: &[usize],
+    seed_result: &ScheduleResult,
+) -> Option<ScheduleResult> {
+    let num_machines = challenge.num_machines;
+
+    // machine_order[m] = ordered (job, op_idx) on machine m.
+    let mut machine_order: Vec<Vec<(usize, usize)>> = (0..num_machines)
+        .map(|m| {
+            let mut v: Vec<(u32, usize, usize)> = seed_result
+                .job_schedule
+                .iter()
+                .enumerate()
+                .flat_map(|(j, ops)| {
+                    ops.iter()
+                        .enumerate()
+                        .filter(move |(_, &(mm, _))| mm == m)
+                        .map(move |(op_idx, &(_, start))| (start, j, op_idx))
+                })
+                .collect();
+            v.sort_unstable();
+            v.into_iter().map(|(_, j, o)| (j, o)).collect()
+        })
+        .collect();
+
+    let mut best_makespan = seed_result.makespan;
+    let mut best_schedule: Vec<Vec<(usize, u32)>> = seed_result.job_schedule.clone();
+
+    let mut improved_any = true;
+    let mut iter_count = 0usize;
+    while improved_any && iter_count < 50 {
+        improved_any = false;
+        iter_count += 1;
+
+        // Iterate over current ops per machine.  Snapshot first so the
+        // moving target doesn't trip us up.
+        let snapshot: Vec<Vec<(usize, usize)>> = machine_order.clone();
+        for m in 0..num_machines {
+            for &(j, op_idx) in &snapshot[m] {
+                let product = job_products[j];
+                let op_times = &challenge.product_processing_times[product][op_idx];
+                if op_times.len() < 2 {
+                    continue;
+                }
+                // Try moving this op to each other eligible machine.
+                let cur_pos = machine_order[m].iter().position(|&(jj, oo)| jj == j && oo == op_idx);
+                let cur_pos = match cur_pos {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let mut best_target: Option<(usize, u32)> = None;
+                for (&m2, _) in op_times.iter() {
+                    if m2 == m {
+                        continue;
+                    }
+                    // Remove from m, append at end of m2.
+                    machine_order[m].remove(cur_pos);
+                    machine_order[m2].push((j, op_idx));
+                    if let Some((_, ms)) = simulate_from_order(
+                        challenge,
+                        job_products,
+                        job_ops_len,
+                        &machine_order,
+                    ) {
+                        if ms < best_makespan
+                            && best_target.map_or(true, |(_, prev)| ms < prev)
+                        {
+                            best_target = Some((m2, ms));
+                        }
+                    }
+                    // Revert: pop the appended op, re-insert at cur_pos in m.
+                    machine_order[m2].pop();
+                    machine_order[m].insert(cur_pos, (j, op_idx));
+                }
+                if let Some((m2, ms)) = best_target {
+                    machine_order[m].remove(cur_pos);
+                    machine_order[m2].push((j, op_idx));
+                    if let Some((sched, ms2)) = simulate_from_order(
+                        challenge,
+                        job_products,
+                        job_ops_len,
+                        &machine_order,
+                    ) {
+                        if ms2 < best_makespan {
+                            best_makespan = ms2;
+                            best_schedule = sched;
+                            improved_any = true;
+                        } else {
+                            machine_order[m2].pop();
+                            machine_order[m].insert(cur_pos, (j, op_idx));
+                        }
+                        let _ = ms;
+                    } else {
+                        machine_order[m2].pop();
+                        machine_order[m].insert(cur_pos, (j, op_idx));
+                    }
+                }
+            }
+        }
+    }
+
+    if best_makespan < seed_result.makespan {
+        Some(ScheduleResult {
+            job_schedule: best_schedule,
+            makespan: best_makespan,
+        })
+    } else {
+        None
+    }
+}
+
+// Re-simulate the schedule given a fixed (op → machine) assignment and a
+// fixed per-machine sequence. Returns (per-job (machine, start) list,
+// makespan), or None if the ordering is deadlocked or infeasible.
+fn simulate_from_order(
+    challenge: &Challenge,
+    job_products: &[usize],
+    job_ops_len: &[usize],
+    machine_order: &[Vec<(usize, usize)>],
+) -> Option<(Vec<Vec<(usize, u32)>>, u32)> {
+    let num_jobs = challenge.num_jobs;
+    let num_machines = challenge.num_machines;
+
+    let mut job_op_idx = vec![0usize; num_jobs];
+    let mut machine_idx = vec![0usize; num_machines];
+    let mut job_ready = vec![0u32; num_jobs];
+    let mut machine_ready = vec![0u32; num_machines];
+    let mut schedule: Vec<Vec<(usize, u32)>> = job_ops_len
+        .iter()
+        .map(|&l| Vec::with_capacity(l))
+        .collect();
+    let mut remaining: usize = job_ops_len.iter().sum();
+
+    while remaining > 0 {
+        let mut progress = false;
+        for m in 0..num_machines {
+            if machine_idx[m] >= machine_order[m].len() {
+                continue;
+            }
+            let (j, op_idx) = machine_order[m][machine_idx[m]];
+            if job_op_idx[j] != op_idx {
+                continue;
+            }
+            let product = job_products[j];
+            let op_times = &challenge.product_processing_times[product][op_idx];
+            let &proc_time = op_times.get(&m)?;
+            let start = job_ready[j].max(machine_ready[m]);
+            let end = start + proc_time;
+            schedule[j].push((m, start));
+            job_ready[j] = end;
+            machine_ready[m] = end;
+            job_op_idx[j] += 1;
+            machine_idx[m] += 1;
+            remaining -= 1;
+            progress = true;
+        }
+        if !progress {
+            return None;
+        }
+    }
+
+    let makespan = job_ready.iter().copied().max().unwrap_or(0);
+    Some((schedule, makespan))
 }

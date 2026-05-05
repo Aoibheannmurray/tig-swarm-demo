@@ -2,247 +2,330 @@ use super::*;
 use anyhow::Result;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use serde_json::{Map, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+enum Move {
+    Swap(usize, usize), // (selected_pos, unselected_pos)
+    Add(usize),         // unselected_pos
+    Drop(usize),        // selected_pos
+}
 
 pub fn solve_challenge(
     challenge: &Challenge,
     save_solution: &dyn Fn(&Solution) -> Result<()>,
     _hyperparameters: &Option<Map<String, Value>>,
 ) -> Result<()> {
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(4500);
+
     let n = challenge.num_items;
-    let deadline = Instant::now() + std::time::Duration::from_secs(28);
+    if n == 0 {
+        save_solution(&Solution { items: vec![] })?;
+        return Ok(());
+    }
+
+    let max_w = challenge.max_weight;
+    let weights = &challenge.weights;
+    let values = &challenge.values;
+    let inter = &challenge.interaction_values;
+
+    // Sparse adjacency: nbrs[i] = list of (j, inter[i][j]) for j with
+    // non-zero interaction. The dense matrix is kept for O(1) lookups in
+    // the swap eval; nbrs is for fast O(deg) gain updates instead of O(n).
+    let mut nbrs: Vec<Vec<(u32, i32)>> = vec![Vec::new(); n];
+    for i in 0..n {
+        let row = &inter[i];
+        let mut row_n: Vec<(u32, i32)> = Vec::new();
+        for j in 0..n {
+            if i != j {
+                let v = row[j];
+                if v != 0 {
+                    row_n.push((j as u32, v));
+                }
+            }
+        }
+        nbrs[i] = row_n;
+    }
+
     let mut rng = SmallRng::from_seed(challenge.seed);
 
-    let mut selected: Vec<usize> = Vec::with_capacity(n);
-    let mut is_selected = vec![false; n];
-    let mut total_weight: u32 = 0;
-
-    let mut item_ratios: Vec<(usize, f64)> = (0..n)
+    // Step 1: value-density greedy initial solution.
+    let mut ratio: Vec<(usize, f64)> = (0..n)
         .map(|i| {
-            let total: i32 = challenge.values[i] as i32
-                + challenge.interaction_values[i].iter().sum::<i32>();
-            (i, total as f64 / challenge.weights[i] as f64)
+            let inter_sum: i64 = nbrs[i].iter().map(|&(_, v)| v as i64).sum();
+            let total: i64 = values[i] as i64 + inter_sum;
+            (i, total as f64 / weights[i] as f64)
         })
         .collect();
-    item_ratios.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    ratio.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    for &(item, _) in &item_ratios {
-        if total_weight + challenge.weights[item] <= challenge.max_weight {
-            selected.push(item);
-            is_selected[item] = true;
-            total_weight += challenge.weights[item];
+    let mut is_sel = vec![false; n];
+    let mut selected: Vec<usize> = Vec::with_capacity(n);
+    let mut unselected: Vec<usize> = Vec::with_capacity(n);
+    let mut total_weight: u32 = 0;
+    for &(it, _) in &ratio {
+        if total_weight + weights[it] <= max_w {
+            total_weight += weights[it];
+            is_sel[it] = true;
+            selected.push(it);
+        } else {
+            unselected.push(it);
         }
     }
 
-    let mut unselected: Vec<usize> = (0..n).filter(|i| !is_selected[*i]).collect();
-
-    let mut interaction_sum = vec![0i32; n];
-    for x in 0..n {
-        interaction_sum[x] = challenge.values[x] as i32;
-        for &s in &selected {
-            interaction_sum[x] += challenge.interaction_values[x][s];
+    // gain[x] = values[x] + sum_{y in selected} inter[x][y]
+    // For x in selected, gain[x] equals x's marginal contribution to the
+    // objective (since inter[x][x] = 0). The objective itself satisfies
+    //   obj = (sum_{x in S} gain[x] + sum_{x in S} values[x]) / 2
+    // because sum_{x in S} gain[x] = sum v + 2 * pair_sum.
+    let mut gain: Vec<i64> = (0..n).map(|i| values[i] as i64).collect();
+    for &y in &selected {
+        for &(x, v) in &nbrs[y] {
+            gain[x as usize] += v as i64;
         }
     }
 
-    fn compute_obj(challenge: &Challenge, selected: &[usize]) -> i64 {
-        let mut val: i64 = 0;
-        for &i in selected {
-            val += challenge.values[i] as i64;
-        }
-        for a in 0..selected.len() {
-            for b in (a + 1)..selected.len() {
-                val += challenge.interaction_values[selected[a]][selected[b]] as i64;
-            }
-        }
-        val
-    }
+    let mut current_obj: i64 = {
+        let sum_gain: i64 = selected.iter().map(|&x| gain[x]).sum();
+        let sum_v: i64 = selected.iter().map(|&x| values[x] as i64).sum();
+        (sum_gain + sum_v) / 2
+    };
 
-    fn recompute_interaction_sums(
-        challenge: &Challenge,
-        selected: &[usize],
-        interaction_sum: &mut [i32],
-    ) {
-        let n = interaction_sum.len();
-        for x in 0..n {
-            interaction_sum[x] = challenge.values[x] as i32;
-            for &s in selected {
-                interaction_sum[x] += challenge.interaction_values[x][s];
-            }
-        }
-    }
-
-    let mut best_obj = compute_obj(challenge, &selected);
-    save_solution(&Solution { items: selected.clone() })?;
-
+    let mut best_obj = current_obj;
     let mut best_selected = selected.clone();
-    let mut best_is_selected = is_selected.clone();
+    let mut best_is_selected = is_sel.clone();
     let mut best_weight = total_weight;
+    save_solution(&Solution { items: best_selected.clone() })?;
 
-    let tabu_tenure = 7u32;
+    // Tabu search with aspiration + ILS perturbation.
+    let mut tabu = vec![0u32; n];
+    let tabu_tenure: u32 = 7;
+    let max_stall: u32 = 100;
 
-    loop {
+    'outer: loop {
         if Instant::now() >= deadline {
             break;
         }
 
-        let mut tabu_list = vec![0u32; n];
-        let mut stall = 0;
+        // Reset tabu at the start of each ILS pass.
+        for t in tabu.iter_mut() {
+            *t = 0;
+        }
+        let mut stall: u32 = 0;
 
-        while stall < 200 && Instant::now() < deadline {
-            let mut min_sel_val = i32::MAX;
-            for &s in &selected {
-                min_sel_val = min_sel_val.min(interaction_sum[s]);
+        // Inner: local search.
+        while stall < max_stall {
+            if Instant::now() >= deadline {
+                break 'outer;
             }
 
-            let mut best_diff = 0i32;
-            let mut best_swap: Option<(usize, usize)> = None;
+            // Sort unselected by gain desc and selected by gain asc so that
+            // the swap loops can early-terminate via the non-negative-interaction
+            // upper bound.  Interactions are jaccard*1000 in [0, 1000], so:
+            //   delta <= g_a - gain[d]  (since inter[a][d] >= 0)
+            //   delta <= g_a - min_sel_gain  (over all feasible d)
+            // Once g_a falls below the cutoff, no later candidate can improve.
+            unselected.sort_unstable_by(|&i, &j| gain[j].cmp(&gain[i]));
+            selected.sort_unstable_by(|&i, &j| gain[i].cmp(&gain[j]));
 
-            // 1-for-1 swap
-            for ui in 0..unselected.len() {
-                let ni = unselected[ui];
-                if tabu_list[ni] > 0 {
-                    continue;
-                }
-                let nv = interaction_sum[ni];
-                if nv < best_diff + min_sel_val {
-                    continue;
-                }
-                let min_w = challenge.weights[ni] as i32
-                    - (challenge.max_weight as i32 - total_weight as i32);
+            let min_sel_gain = if selected.is_empty() { 0 } else { gain[selected[0]] };
 
-                for si in 0..selected.len() {
-                    let ri = selected[si];
-                    if tabu_list[ri] > 0 {
-                        continue;
-                    }
-                    if min_w > 0 && (challenge.weights[ri] as i32) < min_w {
-                        continue;
-                    }
-                    let rv = interaction_sum[ri];
-                    let diff = nv - rv - challenge.interaction_values[ni][ri];
-                    if diff > best_diff {
-                        best_diff = diff;
-                        best_swap = Some((ui, si));
-                    }
-                }
-            }
+            // Best-improvement neighborhood: 1-1 swap, add-only, drop-only.
+            let mut best_delta: i64 = 0;
+            let mut best_move: Option<Move> = None;
 
-            // Add-only move: if there's slack capacity, try adding without removing
-            let slack = challenge.max_weight - total_weight;
-            let mut best_add: Option<usize> = None;
-            let mut best_add_val = best_diff;
-            for ui in 0..unselected.len() {
-                let ni = unselected[ui];
-                if tabu_list[ni] > 0 {
-                    continue;
-                }
-                if challenge.weights[ni] > slack {
-                    continue;
-                }
-                let val = interaction_sum[ni];
-                if val > best_add_val {
-                    best_add_val = val;
-                    best_add = Some(ui);
-                }
-            }
-
-            // Drop-only move: try removing an item if it has negative marginal value
-            let mut best_drop: Option<usize> = None;
-            let mut best_drop_val = best_diff;
-            for si in 0..selected.len() {
-                let ri = selected[si];
-                if tabu_list[ri] > 0 {
-                    continue;
-                }
-                let marginal = interaction_sum[ri];
-                let neg = -marginal;
-                if neg > best_drop_val {
-                    best_drop_val = neg;
-                    best_drop = Some(si);
-                }
-            }
-
-            // Pick best move
-            enum Move {
-                Swap(usize, usize),
-                Add(usize),
-                Drop(usize),
-                None,
-            }
-            let chosen = if let Some(ui) = best_add {
-                if best_add_val >= best_diff && best_add_val >= best_drop_val {
-                    Move::Add(ui)
-                } else if best_drop_val > best_diff {
-                    if let Some(si) = best_drop { Move::Drop(si) } else { Move::None }
-                } else if let Some((ui, si)) = best_swap {
-                    Move::Swap(ui, si)
-                } else {
-                    Move::None
-                }
-            } else if best_drop_val > best_diff {
-                if let Some(si) = best_drop { Move::Drop(si) } else { Move::None }
-            } else if let Some((ui, si)) = best_swap {
-                Move::Swap(ui, si)
-            } else {
-                Move::None
-            };
-
-            match chosen {
-                Move::Swap(ui, si) => {
-                    let ni = unselected[ui];
-                    let ri = selected[si];
-                    is_selected[ni] = true;
-                    is_selected[ri] = false;
-                    total_weight = total_weight + challenge.weights[ni] - challenge.weights[ri];
-                    selected.swap_remove(si);
-                    unselected.swap_remove(ui);
-                    selected.push(ni);
-                    unselected.push(ri);
-                    for x in 0..n {
-                        interaction_sum[x] += challenge.interaction_values[x][ni]
-                            - challenge.interaction_values[x][ri];
-                    }
-                    tabu_list[ni] = tabu_tenure;
-                    tabu_list[ri] = tabu_tenure;
-                }
-                Move::Add(ui) => {
-                    let ni = unselected[ui];
-                    is_selected[ni] = true;
-                    total_weight += challenge.weights[ni];
-                    selected.push(ni);
-                    unselected.swap_remove(ui);
-                    for x in 0..n {
-                        interaction_sum[x] += challenge.interaction_values[x][ni];
-                    }
-                    tabu_list[ni] = tabu_tenure;
-                }
-                Move::Drop(si) => {
-                    let ri = selected[si];
-                    is_selected[ri] = false;
-                    total_weight -= challenge.weights[ri];
-                    selected.swap_remove(si);
-                    unselected.push(ri);
-                    for x in 0..n {
-                        interaction_sum[x] -= challenge.interaction_values[x][ri];
-                    }
-                    tabu_list[ri] = tabu_tenure;
-                }
-                Move::None => {
+            // 1-1 swap (early-terminating).
+            for ai in 0..unselected.len() {
+                let a = unselected[ai];
+                let g_a = gain[a];
+                if g_a - min_sel_gain <= best_delta {
                     break;
                 }
+                let a_tabu = tabu[a] > 0;
+                let need_extra = weights[a] as i64 + total_weight as i64 - max_w as i64;
+                for di in 0..selected.len() {
+                    let d = selected[di];
+                    let g_d = gain[d];
+                    if g_a - g_d <= best_delta {
+                        // selected sorted asc by gain — all later d are worse.
+                        break;
+                    }
+                    if need_extra > 0 && (weights[d] as i64) < need_extra {
+                        continue;
+                    }
+                    let delta = g_a - inter[a][d] as i64 - g_d;
+                    if delta <= best_delta {
+                        continue;
+                    }
+                    let is_tabu = a_tabu || tabu[d] > 0;
+                    if is_tabu && current_obj + delta <= best_obj {
+                        continue;
+                    }
+                    best_delta = delta;
+                    best_move = Some(Move::Swap(di, ai));
+                }
             }
 
-            for t in tabu_list.iter_mut() {
+            // Add-only (uses any spare capacity).
+            if total_weight < max_w {
+                let slack = max_w - total_weight;
+                for ai in 0..unselected.len() {
+                    let a = unselected[ai];
+                    if weights[a] > slack {
+                        continue;
+                    }
+                    let g_a = gain[a];
+                    if g_a <= best_delta {
+                        continue;
+                    }
+                    if tabu[a] > 0 && current_obj + g_a <= best_obj {
+                        continue;
+                    }
+                    best_delta = g_a;
+                    best_move = Some(Move::Add(ai));
+                }
+            }
+
+            // Drop-only (only useful if some item has negative marginal contribution).
+            for di in 0..selected.len() {
+                let d = selected[di];
+                let delta = -gain[d];
+                if delta <= best_delta {
+                    continue;
+                }
+                if tabu[d] > 0 && current_obj + delta <= best_obj {
+                    continue;
+                }
+                best_delta = delta;
+                best_move = Some(Move::Drop(di));
+            }
+
+            // No improving move? Take the best non-tabu *worsening* move
+            // among the top-K candidates from the already-sorted lists
+            // (highest-gain unselected paired with lowest-gain selected).
+            // Considers Swap, Add, and Drop — Add/Drop give extra escape
+            // routes when capacity slack or low-gain selected items exist.
+            // The tabu list prevents immediate reversal.
+            if best_move.is_none() {
+                let k_u = unselected.len().min(64);
+                let k_s = selected.len().min(64);
+                let mut bd_w: i64 = i64::MIN;
+                let mut bm_w: Option<Move> = None;
+                // Swap.
+                for ai in 0..k_u {
+                    let a = unselected[ai];
+                    if tabu[a] > 0 {
+                        continue;
+                    }
+                    let g_a = gain[a];
+                    let need_extra = weights[a] as i64 + total_weight as i64 - max_w as i64;
+                    for di in 0..k_s {
+                        let d = selected[di];
+                        if tabu[d] > 0 {
+                            continue;
+                        }
+                        if need_extra > 0 && (weights[d] as i64) < need_extra {
+                            continue;
+                        }
+                        let delta = g_a - inter[a][d] as i64 - gain[d];
+                        if delta > bd_w {
+                            bd_w = delta;
+                            bm_w = Some(Move::Swap(di, ai));
+                        }
+                    }
+                }
+                // Add (worsening — only if slack capacity).
+                if total_weight < max_w {
+                    let slack = max_w - total_weight;
+                    for ai in 0..k_u {
+                        let a = unselected[ai];
+                        if tabu[a] > 0 || weights[a] > slack {
+                            continue;
+                        }
+                        let delta = gain[a];
+                        if delta > bd_w {
+                            bd_w = delta;
+                            bm_w = Some(Move::Add(ai));
+                        }
+                    }
+                }
+                // Drop.
+                for di in 0..k_s {
+                    let d = selected[di];
+                    if tabu[d] > 0 {
+                        continue;
+                    }
+                    let delta = -gain[d];
+                    if delta > bd_w {
+                        bd_w = delta;
+                        bm_w = Some(Move::Drop(di));
+                    }
+                }
+                if let Some(mv) = bm_w {
+                    best_delta = bd_w;
+                    best_move = Some(mv);
+                }
+            }
+
+            match best_move {
+                Some(Move::Swap(di, ai)) => {
+                    let d = selected[di];
+                    let a = unselected[ai];
+                    selected.swap_remove(di);
+                    unselected.swap_remove(ai);
+                    selected.push(a);
+                    unselected.push(d);
+                    is_sel[d] = false;
+                    is_sel[a] = true;
+                    total_weight = total_weight + weights[a] - weights[d];
+                    current_obj += best_delta;
+                    for &(x, v) in &nbrs[a] {
+                        gain[x as usize] += v as i64;
+                    }
+                    for &(x, v) in &nbrs[d] {
+                        gain[x as usize] -= v as i64;
+                    }
+                    tabu[d] = tabu_tenure;
+                    tabu[a] = tabu_tenure;
+                }
+                Some(Move::Add(ai)) => {
+                    let a = unselected[ai];
+                    unselected.swap_remove(ai);
+                    selected.push(a);
+                    is_sel[a] = true;
+                    total_weight += weights[a];
+                    current_obj += best_delta;
+                    for &(x, v) in &nbrs[a] {
+                        gain[x as usize] += v as i64;
+                    }
+                    tabu[a] = tabu_tenure;
+                }
+                Some(Move::Drop(di)) => {
+                    let d = selected[di];
+                    selected.swap_remove(di);
+                    unselected.push(d);
+                    is_sel[d] = false;
+                    total_weight -= weights[d];
+                    current_obj += best_delta;
+                    for &(x, v) in &nbrs[d] {
+                        gain[x as usize] -= v as i64;
+                    }
+                    tabu[d] = tabu_tenure;
+                }
+                None => break,
+            }
+
+            // Decrement tabu counters.
+            for t in tabu.iter_mut() {
                 *t = t.saturating_sub(1);
             }
 
-            let obj = compute_obj(challenge, &selected);
-            if obj > best_obj {
-                best_obj = obj;
+            if current_obj > best_obj {
+                best_obj = current_obj;
                 best_selected = selected.clone();
-                best_is_selected = is_selected.clone();
+                best_is_selected = is_sel.clone();
                 best_weight = total_weight;
-                save_solution(&Solution { items: selected.clone() })?;
+                save_solution(&Solution { items: best_selected.clone() })?;
                 stall = 0;
             } else {
                 stall += 1;
@@ -253,49 +336,58 @@ pub fn solve_challenge(
             break;
         }
 
-        // Perturbation: kick random items, re-fill greedily
-        let kick_count = (best_selected.len() / 5).max(3).min(best_selected.len());
+        // Perturbation: restart from best, kick random items, refill greedily.
         selected = best_selected.clone();
-        is_selected = best_is_selected.clone();
+        is_sel = best_is_selected.clone();
         total_weight = best_weight;
-        unselected = (0..n).filter(|i| !is_selected[*i]).collect();
-        recompute_interaction_sums(challenge, &selected, &mut interaction_sum);
+        unselected = (0..n).filter(|i| !is_sel[*i]).collect();
+        for x in 0..n {
+            gain[x] = values[x] as i64;
+        }
+        for &y in &selected {
+            for &(x, v) in &nbrs[y] {
+                gain[x as usize] += v as i64;
+            }
+        }
+        current_obj = best_obj;
 
-        for _ in 0..kick_count {
+        let kick = ((selected.len() / 5).max(3)).min(selected.len());
+        for _ in 0..kick {
             if selected.is_empty() {
                 break;
             }
             let idx = rng.gen_range(0..selected.len());
-            let item = selected.swap_remove(idx);
-            is_selected[item] = false;
-            total_weight -= challenge.weights[item];
-            unselected.push(item);
-            for x in 0..n {
-                interaction_sum[x] -= challenge.interaction_values[x][item];
+            let d = selected.swap_remove(idx);
+            is_sel[d] = false;
+            total_weight -= weights[d];
+            unselected.push(d);
+            current_obj -= gain[d];
+            for &(x, v) in &nbrs[d] {
+                gain[x as usize] -= v as i64;
             }
         }
 
-        let mut candidates: Vec<(usize, f64)> = unselected
+        // Greedy refill on current gain[].
+        let mut cands: Vec<(usize, f64)> = unselected
             .iter()
-            .map(|&i| (i, interaction_sum[i] as f64 / challenge.weights[i] as f64))
+            .map(|&i| (i, gain[i] as f64 / weights[i] as f64))
             .collect();
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-        for (item, _) in candidates {
-            if is_selected[item] {
+        cands.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (item, _) in cands {
+            if is_sel[item] {
                 continue;
             }
-            if total_weight + challenge.weights[item] <= challenge.max_weight {
+            if total_weight + weights[item] <= max_w {
                 selected.push(item);
-                is_selected[item] = true;
-                total_weight += challenge.weights[item];
-                for x in 0..n {
-                    interaction_sum[x] += challenge.interaction_values[x][item];
+                is_sel[item] = true;
+                total_weight += weights[item];
+                current_obj += gain[item];
+                for &(x, v) in &nbrs[item] {
+                    gain[x as usize] += v as i64;
                 }
             }
         }
-
-        unselected = (0..n).filter(|i| !is_selected[*i]).collect();
+        unselected = (0..n).filter(|i| !is_sel[*i]).collect();
     }
 
     Ok(())

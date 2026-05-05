@@ -51,7 +51,7 @@ fn parse_hp(h: &Option<Map<String, Value>>) -> Hyperparameters {
     out
 }
 
-const LOOKAHEAD_STEPS: usize = 48;
+const LOOKAHEAD_STEPS: usize = 72;
 const END_WINDOW: usize = 24;
 const END_FACTOR: f64 = 0.0;
 
@@ -219,15 +219,24 @@ fn policy_with_hp(challenge: &Challenge, state: &State, hp: &Hyperparameters) ->
         let current = state.rt_prices[node];
         let diff = current - reference;
 
+        // SOC-aware threshold modulation: at high SOC, discharge threshold
+        // shrinks (act more eagerly to discharge); at low SOC, charge
+        // threshold shrinks. Linear interpolation around mid-SOC.
+        let soc_range = (battery.soc_max_mwh - battery.soc_min_mwh).max(1e-6);
+        let soc_norm = ((state.socs[i] - battery.soc_min_mwh) / soc_range).clamp(0.0, 1.0);
+        let dt_factor = (1.5 - soc_norm).max(0.3);
+        let ct_factor = (0.5 + soc_norm).max(0.3);
+
         let (u_min, u_max) = state.action_bounds[i];
-        let dt = discharge_th.max(0.5);
+        let dt = (discharge_th * dt_factor).max(0.5);
+        let ct = (charge_th * ct_factor).max(0.5);
         if diff > dt {
             let span = (slope * dt).max(1e-6);
             let intensity = ((diff - dt) / span).clamp(0.0, 1.0);
             action[i] = intensity * u_max;
-        } else if !suppress_charge && diff < -charge_th {
-            let span = (slope * charge_th).max(1e-6);
-            let intensity = ((-diff - charge_th) / span).clamp(0.0, 1.0);
+        } else if !suppress_charge && diff < -ct {
+            let span = (slope * ct).max(1e-6);
+            let intensity = ((-diff - ct) / span).clamp(0.0, 1.0);
             action[i] = intensity * u_min;
         }
     }

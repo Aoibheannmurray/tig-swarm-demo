@@ -646,7 +646,8 @@ async def get_state(
 
         cursor = await conn.execute(
             """SELECT h.id, h.title, h.strategy_tag, h.description,
-                      a.name as agent_name, h.agent_id, h.parent_hypothesis_id
+                      a.name as agent_name, h.agent_id, h.parent_hypothesis_id,
+                      h.created_at
                FROM hypotheses h JOIN agents a ON a.id = h.agent_id
                WHERE h.challenge = ?
                ORDER BY h.created_at DESC LIMIT 30""",
@@ -709,7 +710,8 @@ async def get_state(
             {"id": h["id"], "title": h["title"], "strategy_tag": h["strategy_tag"],
              "agent_name": h["agent_name"], "description": h["description"],
              "parent_hypothesis_id": h.get("parent_hypothesis_id"),
-             "agent_id": h.get("agent_id", "")}
+             "agent_id": h.get("agent_id", ""),
+             "created_at": h.get("created_at")}
             for h in recent_hypotheses
         ],
         "leaderboard": leaderboard,

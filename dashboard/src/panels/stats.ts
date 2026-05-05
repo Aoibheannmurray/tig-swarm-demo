@@ -21,7 +21,7 @@ export class StatsPanel implements Panel {
         </div>
         <div class="stats-chips">
           <div class="stat-chip" id="stat-agents">
-            <span class="stat-label">AGENTS</span>
+            <span class="stat-label">ACTIVE</span>
             <span class="stat-value" id="stat-agents-val">0</span>
           </div>
           <div class="stat-chip" id="stat-experiments">
@@ -45,12 +45,33 @@ export class StatsPanel implements Panel {
       this.experimentsEl.textContent = "0";
       this.heroEl.textContent = "";
       this.heroEl.style.opacity = "0";
+      this.heroEl.classList.remove("is-not-started");
       return;
     }
 
     if (msg.type === "stats_update") {
-      counterTween(this.agentsEl, msg.total_agents ?? msg.active_agents);
+      // ACTIVE = agents currently working on the viewed challenge (not the
+      // global swarm size). main.ts slices the per_challenge map so
+      // `msg.active_agents` is per-challenge after the filter.
+      counterTween(this.agentsEl, msg.active_agents);
       counterTween(this.experimentsEl, msg.total_experiments);
+
+      // "Not started" hero overlay when the viewed challenge has no data.
+      // Cleared as soon as anything lands.
+      const notStarted =
+        (msg.total_experiments ?? 0) === 0 &&
+        (msg.best_score === null || msg.best_score === undefined);
+      if (notStarted) {
+        this.heroEl.textContent = "Not started";
+        this.heroEl.classList.add("is-not-started");
+        this.heroEl.style.opacity = "1";
+      } else if (this.heroEl.classList.contains("is-not-started")) {
+        // First non-empty update — clear the placeholder so live hero
+        // names from new_global_best events can render.
+        this.heroEl.classList.remove("is-not-started");
+        this.heroEl.textContent = "";
+        this.heroEl.style.opacity = "0";
+      }
     }
 
     if (msg.type === "agent_joined") {
@@ -62,6 +83,7 @@ export class StatsPanel implements Panel {
     }
 
     if (msg.type === "new_global_best") {
+      this.heroEl.classList.remove("is-not-started");
       this.heroEl.textContent = msg.agent_name;
       this.heroEl.style.opacity = "1";
       setTimeout(() => {
