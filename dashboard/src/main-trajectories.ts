@@ -1,6 +1,9 @@
 import "./style.css";
 import { initParticles } from "./lib/particles";
 import { TrajectoriesPanel } from "./panels/trajectories";
+import { ChallengeSelectorPanel } from "./panels/challenge-selector";
+import { loadSwarmConfig } from "./lib/swarmConfig";
+import { onViewedChallengeChange } from "./lib/viewedChallenge";
 
 const params = new URLSearchParams(window.location.search);
 const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -18,8 +21,20 @@ function getApiUrl(): string {
 const canvas = document.getElementById("particleCanvas") as HTMLCanvasElement;
 initParticles(canvas);
 
+const selectorMount = document.getElementById("panel-challenge-selector");
+const challengeSelector = new ChallengeSelectorPanel();
+if (selectorMount) challengeSelector.init(selectorMount);
+
+void loadSwarmConfig(getApiUrl());
+
 const panel = new TrajectoriesPanel();
 panel.init(document.getElementById("panel-trajectories")!, getApiUrl());
+
+onViewedChallengeChange(() => {
+  // Trajectories panel hits its own REST endpoint — re-init to pick up
+  // the new ?challenge= filter on its next fetch.
+  panel.init(document.getElementById("panel-trajectories")!, getApiUrl());
+});
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "1") window.location.href = "/";

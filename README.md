@@ -113,8 +113,21 @@ To wipe a swarm's data, recreate its volume in the Railway dashboard (Service �
 
 | Command | Who | What it does |
 |---------|-----|--------------|
-| `python setup.py create` | Host | Provisions a new swarm on Railway via the `railway` CLI; prints share URL + admin key. |
-| `python setup.py join <url>` | Contributor | Points this clone at an existing swarm. |
+| `python setup.py create` | Host | Provisions a new swarm on Railway via the `railway` CLI; prints share URL + admin key. The wizard offers a one-key "use defaults for all 5 challenges" path so you can stand up a fully-configured swarm with two keystrokes. |
+| `python setup.py join <url>` | Contributor | Points this clone at an existing swarm; pulls the active challenge from the server. |
+| `python setup.py switch <challenge>` | Host | Changes the swarm's active challenge for everyone. Per-(agent, challenge) state is preserved server-side, so resuming a previously-used challenge picks up every agent's prior trajectory. |
+| `python setup.py sync` | Contributor | Pulls live config from the server and re-templates this clone if the active challenge changed. Idempotent. The agent loop runs this at Step 0 every iteration so contributors auto-follow the host's challenge choice. |
+
+## Switching challenges
+
+Each swarm hosts all five TIG challenges in parallel — but contributors all work on **one** challenge at a time, picked by the host. Switching is a one-command flip:
+
+- **Host** runs `python setup.py switch <challenge>` from their owner clone. This POSTs the new active challenge to the server (admin-key gated) and re-templates the host's local files.
+- **Contributors** auto-follow on their next iteration via `python setup.py sync` (already wired into Step 0 of the agent loop in `CLAUDE.md`). The first iteration after a switch re-reads `CHALLENGE.md` on the new challenge.
+
+Per-(agent, challenge) state is preserved on the server in dedicated tables (`agent_bests` keyed by `(agent_id, challenge)`, `agent_challenge_state` for counters). Switching from VRP → SAT → VRP picks up each contributor's prior VRP trajectory, stagnation counter, and best score exactly where they left off. Per-challenge inactive-algorithm pools and inspiration filters keep cross-challenge data strictly disjoint, so a stagnating VRP agent never gets handed SAT code as its "fresh start" or inspiration source.
+
+The dashboard has a challenge selector at the top that lets viewers browse any challenge's leaderboard / feed / visualization independently of which one is currently active. The selector marks the active challenge as `● live` and other challenges as `○ historical`.
 
 ## Development (dashboard)
 

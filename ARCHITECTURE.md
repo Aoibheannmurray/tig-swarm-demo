@@ -30,7 +30,24 @@ A group of autonomous Claude Code agents each try to improve a Rust solver for t
 
 Every swarm is its own independent deployment with its own SQLite database — no central multi-tenant server. A host runs the setup wizard to stand up a new swarm; contributors join by URL. Multiple swarms run side-by-side without overlap, even when launched by the same host. (See `README.md` for the concrete host / join commands.)
 
-The `config` table in SQLite stores swarm-wide settings: `challenge`, `tracks` (instance counts per track), `timeout`, `scoring_direction`, `swarm_name`, and `owner_name` (the host's display name; the field name is a historical leftover). These are set at host time and read by every agent via `GET /api/swarm_config`.
+The singleton `config` table holds global swarm settings: `active_challenge` (the swarm-wide challenge contributors auto-follow), `swarm_name`, `owner_name`, `stagnation_threshold`, `stagnation_limit`, `hypothesis_recall_threshold`, and `admin_key`. Per-challenge sub-config (tracks, timeout, scoring_direction, initial_algorithm_code) lives in a separate `challenge_configs` table — one row per challenge, all five populated in parallel.
+
+## Multi-Challenge State
+
+Each swarm hosts all five challenges side by side. Contributors all work on **one** challenge at a time — whichever the host has set as `active_challenge` — but per-(agent, challenge) state is preserved across switches, so when the host flips back to a previously-used challenge every agent's prior trajectory resumes.
+
+State isolation is enforced at the schema level:
+
+- **`agent_bests`** has a composite primary key `(agent_id, challenge)` — physically per-challenge, no singleton ambiguity.
+- **`agent_challenge_state`** is a join table holding per-(agent, challenge) counters: `runs_since_improvement`, `improvements`, `current_trajectory_id`, `current_program_id`, `best_ever_score`, etc. Replaces the per-challenge counter columns previously on the `agents` table.
+- **`experiments`, `hypotheses`, `inactive_algorithms`, `trajectories`, `best_history`, `messages`** all carry a `challenge` column; every read filters by it.
+
+Two correctness invariants underpin the design:
+
+1. **The inactive-algorithm pool is per-challenge.** `pick_random_inactive(conn, challenge)` only returns algorithms tagged with the requested challenge — so a stagnating agent's "fresh start" can't be handed code from a different challenge that wouldn't compile against its `Challenge` / `Solution` types.
+2. **Inspiration is filtered by per-challenge active agents.** The "active peers" set comes from `agent_challenge_state(*, challenge).last_active_at`, NOT from the global `agents.last_heartbeat`. An agent who's been on VRP for days but switched to SAT five minutes ago does NOT supply VRP inspiration to other VRP-resident agents.
+
+The owner switches the active challenge via admin-key-gated `POST /api/swarm_config { active_challenge }`. The server broadcasts `swarm_config_updated` over the WebSocket so live dashboards re-fetch; contributors pick up the new challenge on their next iteration via `python setup.py sync`. Only the owner can change the active challenge — contributors get a clear error from `setup.py switch` and rely on `sync` instead.
 
 ## Supported Challenges
 

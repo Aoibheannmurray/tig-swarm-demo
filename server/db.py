@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS hypotheses (
 );
 
 CREATE TABLE IF NOT EXISTS agent_bests (
-    agent_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    challenge TEXT NOT NULL DEFAULT 'vehicle_routing',
     experiment_id TEXT NOT NULL,
     algorithm_code TEXT NOT NULL,
     score REAL NOT NULL,
@@ -49,6 +50,8 @@ CREATE TABLE IF NOT EXISTS agent_bests (
     total_distance REAL DEFAULT 0.0,
     route_data TEXT,
     updated_at TEXT NOT NULL,
+    trajectory_id TEXT,
+    PRIMARY KEY (agent_id, challenge),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -117,7 +120,51 @@ CREATE TABLE IF NOT EXISTS trajectories (
     deactivated_at TEXT,
     edits_since_improvement INTEGER DEFAULT 0
 );
+
+-- Per-(agent, challenge) state. Replaces the per-challenge counter columns
+-- on the `agents` table. One row per (agent_id, challenge) — created lazily
+-- the first time an agent works on a given challenge. When the swarm host
+-- switches the active challenge, agents resume from their existing row for
+-- the new challenge (or get a fresh row if it's their first time).
+CREATE TABLE IF NOT EXISTS agent_challenge_state (
+    agent_id TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    current_trajectory_id TEXT,
+    current_program_id TEXT,
+    runs_since_improvement INTEGER DEFAULT 0,
+    improvements INTEGER DEFAULT 0,
+    experiments_completed INTEGER DEFAULT 0,
+    best_ever_score REAL,
+    num_trajectories INTEGER DEFAULT 0,
+    tacit_knowledge_count INTEGER DEFAULT 0,
+    inspiration_count INTEGER DEFAULT 0,
+    last_active_at TEXT,
+    PRIMARY KEY (agent_id, challenge),
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+
+-- Per-challenge configuration. The owner can have all five rows populated
+-- in parallel; `config.active_challenge` selects which one is currently
+-- being worked on by the swarm. Switching the active challenge does NOT
+-- touch this table.
+CREATE TABLE IF NOT EXISTS challenge_configs (
+    challenge TEXT PRIMARY KEY,
+    tracks TEXT NOT NULL DEFAULT '{}',
+    timeout INTEGER NOT NULL DEFAULT 5,
+    scoring_direction TEXT NOT NULL DEFAULT 'max',
+    initial_algorithm_code TEXT NOT NULL DEFAULT ''
+);
 """
+
+# Names of the five supported challenges. Used during backfill to seed
+# challenge_configs rows even for challenges the legacy swarm never used.
+KNOWN_CHALLENGES = (
+    "satisfiability",
+    "vehicle_routing",
+    "knapsack",
+    "job_scheduling",
+    "energy_arbitrage",
+)
 
 # Indexes are split out from the main schema so they can be applied after
 # ALTER TABLE migrations in init_db, which keeps both fresh and upgraded
@@ -131,20 +178,34 @@ CREATE INDEX IF NOT EXISTS idx_agent_bests_score ON agent_bests(feasible, score)
 CREATE INDEX IF NOT EXISTS idx_msg_created ON messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_hyp_agent_target ON hypotheses(agent_id, target_best_experiment_id);
 CREATE INDEX IF NOT EXISTS idx_hyp_program_id ON hypotheses(program_id);
+CREATE INDEX IF NOT EXISTS idx_agent_bests_challenge ON agent_bests(challenge, feasible, score);
+CREATE INDEX IF NOT EXISTS idx_experiments_challenge ON experiments(challenge, agent_id);
+CREATE INDEX IF NOT EXISTS idx_hyp_challenge_agent ON hypotheses(challenge, agent_id, target_best_experiment_id);
+CREATE INDEX IF NOT EXISTS idx_inactive_challenge ON inactive_algorithms(challenge);
+CREATE INDEX IF NOT EXISTS idx_trajectories_challenge ON trajectories(challenge);
+CREATE INDEX IF NOT EXISTS idx_best_history_challenge ON best_history(challenge, created_at);
+CREATE INDEX IF NOT EXISTS idx_msg_challenge_created ON messages(challenge, created_at);
+CREATE INDEX IF NOT EXISTS idx_acs_challenge ON agent_challenge_state(challenge);
+CREATE INDEX IF NOT EXISTS idx_acs_active ON agent_challenge_state(challenge, last_active_at);
 """
 
 DEFAULT_CONFIG = {
-    # Swarm-wide configuration written by the setup wizard via
-    # POST /api/swarm_config and read by every clone via GET /api/swarm_config.
-    # The defaults below are pre-wizard placeholders — `python setup.py create`
-    # overwrites every key. `tracks` is the dict shape that mirrors
-    # datasets/<challenge>/test.json (instance counts per track key).
-    # `initial_algorithm_code` is the source of `initial_algorithm.rs` from
-    # the host's clone, broadcast as the starting code on every fresh
-    # trajectory; empty until the wizard's first POST.
+    # Global swarm config in the singleton key/value table. Per-challenge
+    # config (tracks, timeout, scoring_direction, initial_algorithm_code)
+    # lives in `challenge_configs`, not here.
+    #
+    # `active_challenge` is the swarm-wide challenge the owner has chosen;
+    # contributors auto-follow it via `python setup.py sync`. Only the
+    # owner (admin_key holder) can change it via POST /api/swarm_config.
+    #
+    # The legacy keys (`challenge`, `tracks`, `timeout`, `scoring_direction`,
+    # `initial_algorithm_code`) are kept for back-compat during the rollout
+    # window; init_db backfills them into challenge_configs on first boot
+    # of an upgraded server.
+    "active_challenge": "vehicle_routing",
     "challenge": "vehicle_routing",
     "tracks": "{}",
-    "timeout": "30",
+    "timeout": "5",
     "scoring_direction": "max",
     "swarm_name": "",
     "owner_name": "",
@@ -185,12 +246,130 @@ async def init_db() -> None:
             "ALTER TABLE agents ADD COLUMN current_program_id TEXT",
             "ALTER TABLE hypotheses ADD COLUMN program_id TEXT",
             "ALTER TABLE inactive_algorithms ADD COLUMN program_id TEXT",
+            # Multi-challenge migration: every per-agent state table gains a
+            # `challenge` column. Existing rows get backfilled below to the
+            # legacy single-challenge value. Idempotent on re-boot.
+            "ALTER TABLE agent_bests ADD COLUMN challenge TEXT",
+            "ALTER TABLE experiments ADD COLUMN challenge TEXT",
+            "ALTER TABLE hypotheses ADD COLUMN challenge TEXT",
+            "ALTER TABLE inactive_algorithms ADD COLUMN challenge TEXT",
+            "ALTER TABLE trajectories ADD COLUMN challenge TEXT",
+            "ALTER TABLE best_history ADD COLUMN challenge TEXT",
+            "ALTER TABLE messages ADD COLUMN challenge TEXT",
         ):
             try:
                 await db.execute(stmt)
                 await db.commit()
             except Exception:
                 pass
+
+        # Multi-challenge backfill — run once, idempotent.
+        # Pull the legacy active challenge so every existing row becomes
+        # owned by it. Default to vehicle_routing on a brand-new DB.
+        cur = await db.execute("SELECT value FROM config WHERE key='challenge'")
+        legacy_row = await cur.fetchone()
+        legacy_challenge = legacy_row[0] if legacy_row else "vehicle_routing"
+
+        # Seed `active_challenge` from the legacy `challenge` row if missing.
+        await db.execute(
+            "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
+            ("active_challenge", legacy_challenge),
+        )
+
+        for tbl in (
+            "agent_bests", "experiments", "hypotheses",
+            "inactive_algorithms", "trajectories",
+            "best_history", "messages",
+        ):
+            await db.execute(
+                f"UPDATE {tbl} SET challenge = ? WHERE challenge IS NULL",
+                (legacy_challenge,),
+            )
+
+        # Backfill agent_challenge_state from the per-challenge counter
+        # columns currently on the `agents` table. After this, those columns
+        # are no longer the source of truth — agent_challenge_state is.
+        await db.execute(
+            """INSERT OR IGNORE INTO agent_challenge_state
+                 (agent_id, challenge, current_trajectory_id, current_program_id,
+                  runs_since_improvement, improvements, experiments_completed,
+                  best_ever_score, num_trajectories,
+                  tacit_knowledge_count, inspiration_count, last_active_at)
+               SELECT id, ?, current_trajectory_id, current_program_id,
+                      runs_since_improvement, improvements, experiments_completed,
+                      best_ever_score, num_trajectories,
+                      tacit_knowledge_count, inspiration_count, last_heartbeat
+               FROM agents""",
+            (legacy_challenge,),
+        )
+
+        # Seed challenge_configs from the legacy flat config keys.
+        async def _legacy(key: str, default: str = "") -> str:
+            cur = await db.execute("SELECT value FROM config WHERE key=?", (key,))
+            row = await cur.fetchone()
+            return row[0] if row else default
+
+        legacy_tracks = await _legacy("tracks", "{}")
+        legacy_timeout = await _legacy("timeout", "5")
+        legacy_dir = await _legacy("scoring_direction", "max")
+        legacy_init = await _legacy("initial_algorithm_code", "")
+
+        await db.execute(
+            """INSERT OR IGNORE INTO challenge_configs
+                 (challenge, tracks, timeout, scoring_direction, initial_algorithm_code)
+               VALUES (?, ?, ?, ?, ?)""",
+            (legacy_challenge, legacy_tracks, int(legacy_timeout) if legacy_timeout.isdigit() else 5,
+             legacy_dir, legacy_init),
+        )
+        for ch in KNOWN_CHALLENGES:
+            if ch == legacy_challenge:
+                continue
+            await db.execute(
+                "INSERT OR IGNORE INTO challenge_configs (challenge) VALUES (?)",
+                (ch,),
+            )
+
+        # `agent_bests` PK rebuild: must move from agent_id-only to (agent_id,
+        # challenge). SQLite can't ALTER a PK, so we detect-and-rebuild once.
+        cur = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_bests'")
+        ab_row = await cur.fetchone()
+        ab_sql = (ab_row[0] if ab_row else "") or ""
+        if "PRIMARY KEY (agent_id, challenge)" not in ab_sql:
+            # Existing rows must have a non-null challenge before we rebuild.
+            await db.execute(
+                "UPDATE agent_bests SET challenge = ? WHERE challenge IS NULL",
+                (legacy_challenge,),
+            )
+            await db.execute("ALTER TABLE agent_bests RENAME TO agent_bests_old")
+            await db.execute(
+                """CREATE TABLE agent_bests (
+                    agent_id TEXT NOT NULL,
+                    challenge TEXT NOT NULL,
+                    experiment_id TEXT NOT NULL,
+                    algorithm_code TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    feasible INTEGER NOT NULL DEFAULT 1,
+                    num_vehicles INTEGER DEFAULT 0,
+                    total_distance REAL DEFAULT 0.0,
+                    route_data TEXT,
+                    updated_at TEXT NOT NULL,
+                    trajectory_id TEXT,
+                    PRIMARY KEY (agent_id, challenge),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )"""
+            )
+            await db.execute(
+                """INSERT INTO agent_bests
+                     (agent_id, challenge, experiment_id, algorithm_code, score,
+                      feasible, num_vehicles, total_distance, route_data,
+                      updated_at, trajectory_id)
+                   SELECT agent_id, challenge, experiment_id, algorithm_code, score,
+                          feasible, num_vehicles, total_distance, route_data,
+                          updated_at, trajectory_id
+                   FROM agent_bests_old"""
+            )
+            await db.execute("DROP TABLE agent_bests_old")
+            await db.commit()
         # The current model has no "active" hypotheses: every attempt is
         # recorded as succeeded/failed once evaluated. Legacy statuses are
         # normalized to failed so old rows don't appear in a third state.
@@ -212,23 +391,28 @@ async def init_db() -> None:
         )
         row = await cursor.fetchone()
         backfill_order = "DESC" if (row and row[0] == "max") else "ASC"
+        # Multi-challenge: backfill is per-(agent, challenge). On a fresh
+        # multi-challenge DB this is a no-op (no experiments yet). On an
+        # upgraded DB, every existing experiment row already has its
+        # `challenge` set by the migration block above, so we partition by
+        # (agent_id, challenge) and pick the best per partition.
         await db.execute(
             f"""INSERT INTO agent_bests
-               (agent_id, experiment_id, algorithm_code, score, feasible,
+               (agent_id, challenge, experiment_id, algorithm_code, score, feasible,
                 num_vehicles, total_distance, route_data, updated_at)
-               SELECT agent_id, id, algorithm_code, score, 1,
+               SELECT agent_id, challenge, id, algorithm_code, score, 1,
                       num_vehicles, total_distance, route_data, created_at
                FROM (
                    SELECT e.*,
                           ROW_NUMBER() OVER (
-                              PARTITION BY e.agent_id
+                              PARTITION BY e.agent_id, e.challenge
                               ORDER BY e.score {backfill_order}, e.created_at ASC
                           ) AS rn
                    FROM experiments e
-                   WHERE e.feasible = 1
+                   WHERE e.feasible = 1 AND e.challenge IS NOT NULL
                )
                WHERE rn = 1
-               ON CONFLICT(agent_id) DO NOTHING"""
+               ON CONFLICT(agent_id, challenge) DO NOTHING"""
         )
         await db.commit()
         for key, value in DEFAULT_CONFIG.items():
@@ -287,31 +471,32 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
 
 
 async def get_global_best(
-    conn: aiosqlite.Connection, direction: str = "min"
+    conn: aiosqlite.Connection, challenge: str, direction: str = "min"
 ) -> dict | None:
     # Global best is the best-scoring `agent_bests` row — i.e. whichever
-    # agent's branch currently holds the leading feasible score. `id` is
-    # aliased to experiment_id so callers that expect the old experiments
-    # shape (best["id"] meaning the experiment row) keep working.
+    # agent's branch currently holds the leading feasible score for the
+    # given challenge. `id` is aliased to experiment_id so callers that
+    # expect the old experiments shape keep working.
     order = _direction_order(direction)
     cursor = await conn.execute(
-        f"SELECT agent_id, experiment_id as id, experiment_id, algorithm_code, "
+        f"SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
         f"       score, feasible, num_vehicles, total_distance, route_data, updated_at "
-        f"FROM agent_bests WHERE feasible = 1 "
-        f"ORDER BY score {order} LIMIT 1"
+        f"FROM agent_bests WHERE feasible = 1 AND challenge = ? "
+        f"ORDER BY score {order} LIMIT 1",
+        (challenge,),
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
 
 
 async def get_agent_best(
-    conn: aiosqlite.Connection, agent_id: str
+    conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> dict | None:
     cursor = await conn.execute(
-        "SELECT agent_id, experiment_id as id, experiment_id, algorithm_code, "
+        "SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
         "       score, feasible, num_vehicles, total_distance, route_data, updated_at "
-        "FROM agent_bests WHERE agent_id = ?",
-        (agent_id,),
+        "FROM agent_bests WHERE agent_id = ? AND challenge = ?",
+        (agent_id, challenge),
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
@@ -320,6 +505,7 @@ async def get_agent_best(
 async def upsert_agent_best(
     conn: aiosqlite.Connection,
     agent_id: str,
+    challenge: str,
     experiment_id: str,
     algorithm_code: str,
     score: float,
@@ -332,10 +518,10 @@ async def upsert_agent_best(
 ) -> None:
     await conn.execute(
         """INSERT INTO agent_bests
-           (agent_id, experiment_id, algorithm_code, score, feasible,
+           (agent_id, challenge, experiment_id, algorithm_code, score, feasible,
             num_vehicles, total_distance, route_data, updated_at, trajectory_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(agent_id) DO UPDATE SET
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
              score = excluded.score,
@@ -345,7 +531,7 @@ async def upsert_agent_best(
              route_data = excluded.route_data,
              updated_at = excluded.updated_at,
              trajectory_id = excluded.trajectory_id""",
-        (agent_id, experiment_id, algorithm_code, score,
+        (agent_id, challenge, experiment_id, algorithm_code, score,
          1 if feasible else 0, num_vehicles, total_distance,
          route_data, updated_at, trajectory_id),
     )
@@ -353,29 +539,41 @@ async def upsert_agent_best(
 
 async def list_agent_bests(
     conn: aiosqlite.Connection,
+    challenge: str,
     exclude_agent_ids: list[str] | None = None,
     direction: str = "min",
+    active_only: bool = False,
+    inactive_cutoff: str | None = None,
 ) -> list[dict]:
-    # All feasible agent-bests, optionally excluding specific agent ids.
-    # Returned shape matches `get_global_best` so callers can treat the
-    # rows interchangeably.
+    # Feasible agent-bests for the given challenge, optionally excluding
+    # specific agent ids. When active_only=True, only includes agents whose
+    # agent_challenge_state(agent_id, challenge).last_active_at is recent —
+    # this is the inspiration filter (don't pull inspiration from agents
+    # not currently working on this challenge).
     exclude = exclude_agent_ids or []
     order = _direction_order(direction)
+    where = ["ab.feasible = 1", "ab.challenge = ?"]
+    params: list = [challenge]
     if exclude:
         placeholders = ",".join("?" for _ in exclude)
-        query = (
-            "SELECT agent_id, experiment_id as id, experiment_id, algorithm_code, "
-            "       score, feasible, num_vehicles, total_distance, route_data, updated_at "
-            f"FROM agent_bests WHERE feasible = 1 AND agent_id NOT IN ({placeholders}) "
-            f"ORDER BY score {order}"
+        where.append(f"ab.agent_id NOT IN ({placeholders})")
+        params.extend(exclude)
+    join_clause = ""
+    if active_only and inactive_cutoff is not None:
+        join_clause = (
+            " JOIN agent_challenge_state acs "
+            " ON acs.agent_id = ab.agent_id AND acs.challenge = ab.challenge "
         )
-        cursor = await conn.execute(query, exclude)
-    else:
-        cursor = await conn.execute(
-            f"SELECT agent_id, experiment_id as id, experiment_id, algorithm_code, "
-            f"       score, feasible, num_vehicles, total_distance, route_data, updated_at "
-            f"FROM agent_bests WHERE feasible = 1 ORDER BY score {order}"
-        )
+        where.append("acs.last_active_at >= ?")
+        params.append(inactive_cutoff)
+    query = (
+        "SELECT ab.agent_id, ab.challenge, ab.experiment_id as id, ab.experiment_id, "
+        "       ab.algorithm_code, ab.score, ab.feasible, ab.num_vehicles, "
+        "       ab.total_distance, ab.route_data, ab.updated_at "
+        f"FROM agent_bests ab{join_clause} WHERE " + " AND ".join(where) +
+        f" ORDER BY ab.score {order}"
+    )
+    cursor = await conn.execute(query, params)
     return [dict(row) for row in await cursor.fetchall()]
 
 
@@ -403,32 +601,42 @@ async def get_all_agent_names(conn: aiosqlite.Connection) -> set[str]:
 
 async def compute_leaderboard(
     conn: aiosqlite.Connection,
+    challenge: str,
     inactive_cutoff: str | None = None,
     direction: str = "min",
 ) -> list[dict]:
-    # All counters are stored directly on the agents table and updated
-    # atomically by POST /api/iterations.  best_score comes from agent_bests.
-    # `direction` flips the ORDER BY so max-direction challenges (knapsack,
-    # SAT, energy) put higher scores at the top.
+    # Per-challenge leaderboard. Counters are read from agent_challenge_state
+    # (per-(agent, challenge) state) joined to agents (for agent name and
+    # global last_heartbeat). best_score comes from agent_bests filtered by
+    # challenge. Agents with no row for this challenge yet still appear with
+    # zero counters, so the dashboard shows them as "joined but not started".
     order = _direction_order(direction)
+    # CORRECTNESS INVARIANT: `active` is sourced from acs.last_active_at,
+    # NOT from a.last_heartbeat. An agent currently working on VRP is alive
+    # but is NOT "active on SAT" — its row in agent_challenge_state(*, sat)
+    # may be missing or stale, and that's exactly what we want.
     cursor = await conn.execute(
         f"""
         SELECT
             a.id   as agent_id,
             a.name as agent_name,
-            a.experiments_completed as runs,
-            a.improvements as improvements,
-            a.runs_since_improvement as runs_since_improvement,
-            a.last_heartbeat as last_heartbeat,
-            a.best_ever_score as best_ever_score,
-            a.num_trajectories as num_trajectories,
-            a.tacit_knowledge_count as tacit_knowledge_count,
-            a.inspiration_count as inspiration_count,
+            COALESCE(acs.experiments_completed, 0) as runs,
+            COALESCE(acs.improvements, 0) as improvements,
+            COALESCE(acs.runs_since_improvement, 0) as runs_since_improvement,
+            acs.last_active_at as last_active_at,
+            acs.best_ever_score as best_ever_score,
+            COALESCE(acs.num_trajectories, 0) as num_trajectories,
+            COALESCE(acs.tacit_knowledge_count, 0) as tacit_knowledge_count,
+            COALESCE(acs.inspiration_count, 0) as inspiration_count,
             ab.score as current_score
         FROM agents a
-        LEFT JOIN agent_bests ab ON ab.agent_id = a.id AND ab.feasible = 1
+        LEFT JOIN agent_challenge_state acs
+            ON acs.agent_id = a.id AND acs.challenge = ?
+        LEFT JOIN agent_bests ab
+            ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
         ORDER BY current_score IS NULL, current_score {order}, a.name ASC
-        """
+        """,
+        (challenge, challenge),
     )
     rows = await cursor.fetchall()
     return [
@@ -444,38 +652,229 @@ async def compute_leaderboard(
             "num_trajectories": row["num_trajectories"] or 0,
             "tacit_knowledge_count": row["tacit_knowledge_count"] or 0,
             "inspiration_count": row["inspiration_count"] or 0,
-            "active": row["last_heartbeat"] >= inactive_cutoff if inactive_cutoff and row["last_heartbeat"] else False,
+            "active": row["last_active_at"] >= inactive_cutoff if inactive_cutoff and row["last_active_at"] else False,
         }
         for i, row in enumerate(rows)
     ]
 
 
+# ── agent_challenge_state helpers ──
+
+
+async def get_agent_challenge_state(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str
+) -> dict | None:
+    cursor = await conn.execute(
+        "SELECT * FROM agent_challenge_state WHERE agent_id = ? AND challenge = ?",
+        (agent_id, challenge),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def ensure_agent_challenge_state(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str, last_active_at: str
+) -> None:
+    """Lazily insert a per-(agent, challenge) state row if missing, and
+    bump last_active_at on every call. Called at the top of /api/state."""
+    await conn.execute(
+        """INSERT INTO agent_challenge_state
+             (agent_id, challenge, last_active_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(agent_id, challenge) DO UPDATE SET
+             last_active_at = excluded.last_active_at""",
+        (agent_id, challenge, last_active_at),
+    )
+
+
+async def update_agent_challenge_state(
+    conn: aiosqlite.Connection,
+    agent_id: str,
+    challenge: str,
+    *,
+    set_fields: dict,
+) -> None:
+    """Apply a SET-style update to the (agent_id, challenge) row.
+    Caller passes a dict of column → value pairs; only those keys are
+    written. Use this for atomic counter bumps and trajectory swaps."""
+    if not set_fields:
+        return
+    cols = list(set_fields.keys())
+    set_sql = ", ".join(f"{c} = ?" for c in cols)
+    params = list(set_fields.values()) + [agent_id, challenge]
+    await conn.execute(
+        f"UPDATE agent_challenge_state SET {set_sql} "
+        "WHERE agent_id = ? AND challenge = ?",
+        params,
+    )
+
+
+async def increment_agent_challenge_counters(
+    conn: aiosqlite.Connection,
+    agent_id: str,
+    challenge: str,
+    *,
+    runs: int = 0,
+    improvements: int = 0,
+    runs_since_improvement_reset: bool = False,
+    runs_since_improvement_inc: int = 0,
+    num_trajectories_inc: int = 0,
+    tacit_knowledge_inc: int = 0,
+    inspiration_inc: int = 0,
+    best_ever_score: float | None = None,
+    direction: str = "max",
+) -> None:
+    """Bump the counters on agent_challenge_state. Mirrors the legacy
+    per-agents counter bumps, but scoped to (agent, challenge)."""
+    rsi_clause = (
+        "runs_since_improvement = 0"
+        if runs_since_improvement_reset
+        else f"runs_since_improvement = runs_since_improvement + {int(runs_since_improvement_inc)}"
+    )
+    best_clause = ""
+    if best_ever_score is not None:
+        cmp_op = ">" if direction == "max" else "<"
+        best_clause = (
+            f", best_ever_score = CASE "
+            f"  WHEN best_ever_score IS NULL THEN ? "
+            f"  WHEN ? {cmp_op} best_ever_score THEN ? "
+            f"  ELSE best_ever_score END"
+        )
+    sql = f"""UPDATE agent_challenge_state SET
+                experiments_completed = experiments_completed + ?,
+                improvements = improvements + ?,
+                {rsi_clause},
+                num_trajectories = num_trajectories + ?,
+                tacit_knowledge_count = tacit_knowledge_count + ?,
+                inspiration_count = inspiration_count + ?
+                {best_clause}
+              WHERE agent_id = ? AND challenge = ?"""
+    params: list = [runs, improvements, num_trajectories_inc,
+                    tacit_knowledge_inc, inspiration_inc]
+    if best_ever_score is not None:
+        params.extend([best_ever_score, best_ever_score, best_ever_score])
+    params.extend([agent_id, challenge])
+    await conn.execute(sql, params)
+
+
+# ── challenge_configs helpers ──
+
+
+async def get_challenge_config(
+    conn: aiosqlite.Connection, challenge: str
+) -> dict | None:
+    cursor = await conn.execute(
+        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code "
+        "FROM challenge_configs WHERE challenge = ?",
+        (challenge,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def list_challenge_configs(conn: aiosqlite.Connection) -> list[dict]:
+    cursor = await conn.execute(
+        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code "
+        "FROM challenge_configs ORDER BY challenge"
+    )
+    return [dict(row) for row in await cursor.fetchall()]
+
+
+async def upsert_challenge_config(
+    conn: aiosqlite.Connection,
+    challenge: str,
+    *,
+    tracks: str | None = None,
+    timeout: int | None = None,
+    scoring_direction: str | None = None,
+    initial_algorithm_code: str | None = None,
+) -> None:
+    """Partial upsert — only writes the fields the caller passes. Lets
+    `POST /api/swarm_config` accept one challenge's sub-config at a time."""
+    # Ensure row exists.
+    await conn.execute(
+        "INSERT OR IGNORE INTO challenge_configs (challenge) VALUES (?)",
+        (challenge,),
+    )
+    sets = []
+    params: list = []
+    if tracks is not None:
+        sets.append("tracks = ?")
+        params.append(tracks)
+    if timeout is not None:
+        sets.append("timeout = ?")
+        params.append(int(timeout))
+    if scoring_direction is not None:
+        sets.append("scoring_direction = ?")
+        params.append(scoring_direction)
+    if initial_algorithm_code is not None:
+        sets.append("initial_algorithm_code = ?")
+        params.append(initial_algorithm_code)
+    if not sets:
+        return
+    params.append(challenge)
+    await conn.execute(
+        f"UPDATE challenge_configs SET {', '.join(sets)} WHERE challenge = ?",
+        params,
+    )
+
+
+# ── active_challenge helpers ──
+
+
+async def get_active_challenge(conn: aiosqlite.Connection) -> str:
+    """The swarm-wide challenge contributors auto-follow. Owner-set."""
+    cursor = await conn.execute(
+        "SELECT value FROM config WHERE key = 'active_challenge'"
+    )
+    row = await cursor.fetchone()
+    return row["value"] if row else "vehicle_routing"
+
+
+async def set_active_challenge(conn: aiosqlite.Connection, challenge: str) -> None:
+    await conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        ("active_challenge", challenge),
+    )
+
+
 async def deposit_inactive(
     conn: aiosqlite.Connection,
     agent_id: str,
+    challenge: str,
     algorithm_code: str,
     score: float | None,
     deposited_at: str,
+    trajectory_id: str | None = None,
+    program_id: str | None = None,
 ) -> int:
     cursor = await conn.execute(
-        "INSERT INTO inactive_algorithms (agent_id, algorithm_code, score, deposited_at) "
-        "VALUES (?, ?, ?, ?)",
-        (agent_id, algorithm_code, score, deposited_at),
+        "INSERT INTO inactive_algorithms "
+        "  (agent_id, challenge, algorithm_code, score, deposited_at, trajectory_id, program_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, challenge, algorithm_code, score, deposited_at, trajectory_id, program_id),
     )
     return cursor.lastrowid
 
 
-async def count_inactive(conn: aiosqlite.Connection) -> int:
+async def count_inactive(conn: aiosqlite.Connection, challenge: str) -> int:
     row = await (await conn.execute(
-        "SELECT COUNT(*) as c FROM inactive_algorithms"
+        "SELECT COUNT(*) as c FROM inactive_algorithms WHERE challenge = ?",
+        (challenge,),
     )).fetchone()
     return row["c"]
 
 
-async def pick_random_inactive(conn: aiosqlite.Connection) -> dict | None:
+async def pick_random_inactive(
+    conn: aiosqlite.Connection, challenge: str
+) -> dict | None:
+    # CORRECTNESS INVARIANT: must filter by challenge so a stagnating agent's
+    # "fresh start" cannot be handed code from a different challenge that
+    # won't compile against its types.
     cursor = await conn.execute(
-        "SELECT id, agent_id, algorithm_code, score, trajectory_id, program_id "
-        "FROM inactive_algorithms ORDER BY RANDOM() LIMIT 1"
+        "SELECT id, agent_id, challenge, algorithm_code, score, trajectory_id, program_id "
+        "FROM inactive_algorithms WHERE challenge = ? ORDER BY RANDOM() LIMIT 1",
+        (challenge,),
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
@@ -487,9 +886,12 @@ async def remove_inactive(conn: aiosqlite.Connection, inactive_id: int) -> None:
     )
 
 
-async def clear_agent_best(conn: aiosqlite.Connection, agent_id: str) -> None:
+async def clear_agent_best(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str
+) -> None:
     await conn.execute(
-        "DELETE FROM agent_bests WHERE agent_id = ?", (agent_id,)
+        "DELETE FROM agent_bests WHERE agent_id = ? AND challenge = ?",
+        (agent_id, challenge),
     )
 
 
@@ -499,14 +901,16 @@ async def clear_agent_best(conn: aiosqlite.Connection, agent_id: str) -> None:
 async def create_trajectory(
     conn: aiosqlite.Connection,
     trajectory_id: str,
+    challenge: str,
     started_at: str,
     current_score: float | None = None,
     num_agents: int = 1,
 ) -> None:
     await conn.execute(
-        "INSERT INTO trajectories (id, started_at, status, current_score, num_agents) "
-        "VALUES (?, ?, 'active', ?, ?)",
-        (trajectory_id, started_at, current_score, num_agents),
+        "INSERT INTO trajectories "
+        "  (id, challenge, started_at, status, current_score, num_agents) "
+        "VALUES (?, ?, ?, 'active', ?, ?)",
+        (trajectory_id, challenge, started_at, current_score, num_agents),
     )
 
 
@@ -565,24 +969,41 @@ async def increment_trajectory_agents(
     )
 
 
-async def list_trajectories(conn: aiosqlite.Connection) -> list[dict]:
-    cursor = await conn.execute(
-        "SELECT * FROM trajectories ORDER BY started_at DESC"
-    )
+async def list_trajectories(
+    conn: aiosqlite.Connection, challenge: str | None = None
+) -> list[dict]:
+    if challenge is None:
+        cursor = await conn.execute(
+            "SELECT * FROM trajectories ORDER BY started_at DESC"
+        )
+    else:
+        cursor = await conn.execute(
+            "SELECT * FROM trajectories WHERE challenge = ? ORDER BY started_at DESC",
+            (challenge,),
+        )
     return [dict(row) for row in await cursor.fetchall()]
 
 
 async def get_trajectory_score_history(
     conn: aiosqlite.Connection,
     trajectory_id: str,
+    challenge: str | None = None,
     direction: str = "max",
 ) -> list[dict]:
-    cursor = await conn.execute(
-        "SELECT score, created_at FROM experiments "
-        "WHERE trajectory_id = ? AND feasible = 1 "
-        "ORDER BY created_at",
-        (trajectory_id,),
-    )
+    if challenge is None:
+        cursor = await conn.execute(
+            "SELECT score, created_at FROM experiments "
+            "WHERE trajectory_id = ? AND feasible = 1 "
+            "ORDER BY created_at",
+            (trajectory_id,),
+        )
+    else:
+        cursor = await conn.execute(
+            "SELECT score, created_at FROM experiments "
+            "WHERE trajectory_id = ? AND challenge = ? AND feasible = 1 "
+            "ORDER BY created_at",
+            (trajectory_id, challenge),
+        )
     rows = await cursor.fetchall()
     steps: list[dict] = []
     best: float | None = None

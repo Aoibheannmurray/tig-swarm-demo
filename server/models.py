@@ -47,6 +47,9 @@ class HypothesisCreate(BaseModel):
         "other",
     ]
     parent_hypothesis_id: Optional[str] = None
+    # Optional during the rollout window; server fills in the swarm's active
+    # challenge if missing. After the transition this becomes required.
+    challenge: Optional["ChallengeName"] = None
 
 
 class ExperimentCreate(BaseModel):
@@ -60,6 +63,7 @@ class ExperimentCreate(BaseModel):
     runtime_seconds: float = 0.0
     notes: str = ""
     route_data: Optional[dict] = None
+    challenge: Optional["ChallengeName"] = None
 
 
 class IterationCreate(BaseModel):
@@ -83,6 +87,7 @@ class IterationCreate(BaseModel):
     total_distance: float = 0.0
     notes: str = ""
     route_data: Optional[dict] = None
+    challenge: Optional["ChallengeName"] = None
 
 
 class AdminAuth(BaseModel):
@@ -110,21 +115,44 @@ ChallengeName = Literal[
 ]
 
 
-class SwarmConfigUpdate(AdminAuth):
-    challenge: ChallengeName
-    tracks: dict
-    timeout: int
-    scoring_direction: Literal["min", "max"]
-    swarm_name: str = ""
-    owner_name: str = ""
-    stagnation_threshold: int = 2
-    stagnation_limit: int = 10
-    hypothesis_recall_threshold: int = 3
-    # Source of `initial_algorithm.rs` from the host's clone; broadcast as
-    # the starting code for every fresh trajectory (first iteration + the
-    # "fresh start" slot of trajectory resets). Empty string is fine and
-    # means "agents start from nothing."
+class ChallengeSubConfig(BaseModel):
+    """Per-challenge configuration. The owner can populate all five in
+    parallel via the wizard; switching the active challenge is independent."""
+    tracks: dict = {}
+    timeout: int = 5
+    scoring_direction: Literal["min", "max"] = "max"
     initial_algorithm_code: str = ""
+
+
+class SwarmConfigUpdate(AdminAuth):
+    """Owner-only swarm config update. Two shapes are accepted during the
+    rollout window:
+
+      1. New shape (preferred): set `active_challenge` to flip the swarm's
+         active challenge, and/or `challenges` to update per-challenge
+         sub-configs (partial updates supported — only the keys passed
+         get written).
+      2. Legacy flat shape: `challenge` + `tracks` + `timeout` +
+         `scoring_direction` + `initial_algorithm_code` writes a single
+         challenge's sub-config and bumps `active_challenge` to it.
+
+    All fields are optional; the server merges what's provided.
+    """
+    # New per-challenge model.
+    active_challenge: Optional[ChallengeName] = None
+    challenges: Optional[dict[ChallengeName, ChallengeSubConfig]] = None
+    # Legacy flat fields (kept for back-compat).
+    challenge: Optional[ChallengeName] = None
+    tracks: Optional[dict] = None
+    timeout: Optional[int] = None
+    scoring_direction: Optional[Literal["min", "max"]] = None
+    initial_algorithm_code: Optional[str] = None
+    # Global keys.
+    swarm_name: Optional[str] = None
+    owner_name: Optional[str] = None
+    stagnation_threshold: Optional[int] = None
+    stagnation_limit: Optional[int] = None
+    hypothesis_recall_threshold: Optional[int] = None
 
 
 class MessageCreate(BaseModel):
@@ -132,6 +160,7 @@ class MessageCreate(BaseModel):
     agent_name: str
     content: str
     msg_type: Literal["agent", "milestone"] = "agent"
+    challenge: Optional[ChallengeName] = None
 
 
 # ── Response models ──

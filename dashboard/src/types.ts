@@ -164,4 +164,13 @@ export interface ResetMsg {
 export interface Panel {
   init(container: HTMLElement): void;
   handleMessage(msg: WSMessage): void;
+  // Optional: called when the user picks a different challenge in the
+  // selector. Panels that show challenge-scoped data (leaderboard, feed,
+  // chart, diversity, stats, display) should re-fetch their REST data with
+  // `?challenge=…` and replay; non-challenge-scoped panels can ignore.
+  setChallenge?(c: string): void;
+  // Optional: called when the panel is being torn down (e.g. the display
+  // panel is reconstructed because the user picked a different challenge
+  // type). Panels can override to clean up timers, listeners, etc.
+  dispose?(): void;
 }

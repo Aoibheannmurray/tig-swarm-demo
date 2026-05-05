@@ -2,7 +2,9 @@
 
 > **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file and `scripts/`.
 
-> **Active challenge:** this swarm is configured for **job_scheduling**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
+> **Active challenge:** this swarm is configured for **${CHALLENGE_NAME}**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
+
+> **Switching challenges:** the swarm host can flip the active challenge for everyone with `python setup.py switch <challenge>`. Per-challenge state is preserved on the server, so resuming a previous challenge picks up every agent's prior trajectory. Contributors auto-follow the host's choice via `python setup.py sync` — your agent loop runs that at Step 0 below, so a host-side switch is picked up on your next iteration. Only the host can change the active challenge; contributors get a clear error if they try.
 
 You are an autonomous agent in a swarm collaboratively optimizing the active TIG challenge above. The score for every challenge is a baseline-relative *quality* (higher = better): each per-instance score is `(baseline_metric − your_metric) / baseline_metric × QUALITY_PRECISION` against the upstream reference algorithm, clamped to ±10 × QUALITY_PRECISION. Per-track scores are arithmetic means of per-instance quality; the overall score is the shifted geometric mean across tracks, so a single bad track drags everything down. Read CHALLENGE.md for the specific baseline algorithm in use.
 
@@ -42,6 +44,14 @@ This means:
 ## The Optimization Loop
 
 Repeat this loop continuously:
+
+### Step 0: Auto-sync to the swarm's active challenge
+
+```bash
+python setup.py sync
+```
+
+No-op when already in sync (most iterations). If the swarm host has switched the active challenge since your last loop, this re-templates `CHALLENGE.md` and `swarm.config.json` to the new challenge — re-read `CHALLENGE.md` and continue the loop on the new challenge. Your prior trajectory on the new challenge (if any) resumes automatically server-side.
 
 ### Step 1: Get Current State
 
@@ -91,7 +101,7 @@ Write your own current best to `mod.rs` for the active challenge:
 
 ```bash
 echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('best_algorithm_code',''))" \
-  > src/job_scheduling/algorithm/mod.rs
+  > ${ALGORITHM_PATH}
 ```
 
 If you're stagnating, check `stagnation_hint` to decide your strategy:
@@ -113,7 +123,7 @@ if code:
 - If `stagnation_hint == "tacit_knowledge"`: read `tacit_knowledge_personal.md` in the repo root. Pick one hint that matches your situation and incorporate it. If the file is missing or empty, fall back to using `/tmp/inspiration.rs`.
 - If `stagnation_hint == "inspiration"`: read `/tmp/inspiration.rs` to study what another agent is doing differently. Look for techniques, data structures, or strategies you could adapt into your own code. But always edit `mod.rs` (your own best), not the inspiration file.
 
-On your **first iteration** (no current best yet), the server gives you the swarm's *initial algorithm* — set by the host from the `initial_algorithm.rs` file in the repo root at swarm-creation time. If the host left that file as the default template (or pushed an empty string), `best_algorithm_code` arrives as a stub with `unimplemented!()` (or empty). Either way, you'll need to author a real `solve_challenge` body for the active challenge before benchmarking.
+On your **first iteration on a given challenge** (no current best yet), the server gives you the swarm's *initial algorithm* for that challenge — set by the host from the `initial_algorithms/<challenge>.rs` file in the repo root at swarm-creation time. If the host left it as the default template (or pushed an empty string), `best_algorithm_code` arrives as a stub with `unimplemented!()` (or empty). Either way, you'll need to author a real `solve_challenge` body for the active challenge before benchmarking.
 
 ### Step 3: Think and Edit
 
@@ -121,7 +131,7 @@ Analyze your current algorithm and the history of attempts. Think about what opt
 
 **If `prior_hypotheses` is present in the state response**, these are strategies that have already been tried on this exact program and failed. Study them carefully and pick something **structurally different** — repeating a failed approach wastes an iteration.
 
-Now read `src/job_scheduling/algorithm/mod.rs` and edit it with your improvements. (See CHALLENGE.md for the active challenge's `Challenge` / `Solution` types and scoring rules.)
+Now read `${ALGORITHM_PATH}` and edit it with your improvements. (See CHALLENGE.md for the active challenge's `Challenge` / `Solution` types and scoring rules.)
 
 The solver function signature:
 ```rust
@@ -256,7 +266,7 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
 
 ## Rules
 
-0. **ONLY modify `src/job_scheduling/algorithm/mod.rs`** (the active challenge's algorithm file) and append to `tacit_knowledge_personal.md` (gitignored, local-only, see Step 6 / Rule 8). Do not create, edit, or write to any other files. `/tmp/inspiration.rs` is read-only reference.
+0. **ONLY modify `${ALGORITHM_PATH}`** (the active challenge's algorithm file) and append to `tacit_knowledge_personal.md` (gitignored, local-only, see Step 6 / Rule 8). Do not create, edit, or write to any other files. `/tmp/inspiration.rs` is read-only reference.
 
 1. **When `prior_hypotheses` is present**, study it before editing. These are strategies already tried on this program that failed — pick something structurally different.
 2. **Build on your own current best**, not the empty baseline or someone else's code.

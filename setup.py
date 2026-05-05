@@ -131,8 +131,8 @@ CHALLENGES = {
     },
 }
 
-DEFAULT_TIMEOUT = 30
-DEFAULT_INSTANCES_PER_TRACK = 20
+DEFAULT_TIMEOUT = 5
+DEFAULT_INSTANCES_PER_TRACK = 2
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -243,20 +243,23 @@ def read_prior_swarm_config() -> dict | None:
 
 
 def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
-    """POST swarm config to a running server. Best-effort: if the server
-    isn't running yet, skip gracefully and tell the user how to do it later."""
+    """POST multi-challenge swarm config to a running server. Best-effort:
+    if the server isn't running yet, skip gracefully and tell the user how
+    to do it later.
+
+    `cfg["challenges"]` is a dict of {challenge: {tracks, timeout,
+    scoring_direction, initial_algorithm_code}}; `cfg["active_challenge"]`
+    selects which one contributors auto-follow.
+    """
     payload = {
         "admin_key": admin_key,
-        "challenge": cfg["challenge"],
-        "tracks": cfg["tracks"],
-        "timeout": cfg["timeout"],
-        "scoring_direction": cfg["scoring_direction"],
+        "active_challenge": cfg["active_challenge"],
+        "challenges": cfg["challenges"],
         "swarm_name": cfg.get("swarm_name", ""),
         "owner_name": cfg.get("owner_name", ""),
         "stagnation_threshold": cfg.get("stagnation_threshold", 2),
         "stagnation_limit": cfg.get("stagnation_limit", 10),
         "hypothesis_recall_threshold": cfg.get("hypothesis_recall_threshold", 3),
-        "initial_algorithm_code": cfg.get("initial_algorithm_code", ""),
     }
     req = urllib.request.Request(
         f"{server_url.rstrip('/')}/api/swarm_config",
@@ -273,6 +276,80 @@ def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
             f"  could not reach {server_url} ({e}). Start the server and re-run "
             f"this setup, or POST swarm.config.json yourself once it's up."
         )
+
+
+def read_initial_algorithms() -> dict[str, str]:
+    """Read all five per-challenge initial algorithm files. Missing files
+    map to empty strings — agents start from a stub and must author the
+    body themselves."""
+    out: dict[str, str] = {}
+    for ch in CHALLENGES:
+        p = ROOT / "initial_algorithms" / f"{ch}.rs"
+        if p.is_file():
+            out[ch] = p.read_text()
+        else:
+            out[ch] = ""
+    return out
+
+
+def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
+    """Pull a challenge's tracks/timeout/scoring_direction from the live
+    server. Used by switch / sync / join to mirror the active challenge's
+    sub-config to top-level swarm.config.json keys so benchmark.py's
+    offline fallback keeps working."""
+    try:
+        with urllib.request.urlopen(
+            f"{server_url.rstrip('/')}/api/swarm_config", timeout=4,
+        ) as r:
+            data = json.load(r)
+    except Exception:
+        return None
+    available = (data.get("available_challenges") or {})
+    sub = available.get(challenge)
+    if sub:
+        return sub
+    # Legacy fallback — server still returning flat shape.
+    if data.get("challenge") == challenge:
+        return {
+            "tracks": data.get("tracks") or {},
+            "timeout": data.get("timeout") or 5,
+            "scoring_direction": data.get("scoring_direction") or "max",
+        }
+    return None
+
+
+def collect_per_challenge_configs(
+    initial_algorithms: dict[str, str],
+    *,
+    use_defaults: bool,
+) -> dict[str, dict]:
+    """Build the `challenges` payload for POST /api/swarm_config, either by
+    accepting defaults across all five (use_defaults=True, no prompts) or by
+    asking the host for tracks/timeout per challenge (5 small blocks)."""
+    challenges: dict[str, dict] = {}
+    for ch, meta in CHALLENGES.items():
+        tracks: dict = {"seed": "test"}
+        if use_defaults:
+            for key in meta["track_keys"]:
+                tracks[key] = DEFAULT_INSTANCES_PER_TRACK
+            timeout = DEFAULT_TIMEOUT
+        else:
+            print(f"\n── {ch} ──")
+            for key in meta["track_keys"]:
+                tracks[key] = prompt_int(
+                    f"  instances for {key}", DEFAULT_INSTANCES_PER_TRACK, minimum=0
+                )
+            timeout = prompt_int(
+                f"  per-instance timeout for {ch} (seconds)",
+                DEFAULT_TIMEOUT, minimum=1,
+            )
+        challenges[ch] = {
+            "tracks": tracks,
+            "timeout": timeout,
+            "scoring_direction": meta["scoring_direction"],
+            "initial_algorithm_code": initial_algorithms.get(ch, ""),
+        }
+    return challenges
 
 
 def open_in_editor(path: Path) -> None:
@@ -601,38 +678,53 @@ def run_create() -> int:
         default="my-tig-swarm",
     )
 
-    challenge = prompt_choice(
-        "Which TIG challenge will this swarm optimize?",
+    print(
+        "\nThis swarm hosts ALL FIVE TIG challenges in parallel. The host\n"
+        "picks ONE active challenge that contributors automatically work on;\n"
+        "you can flip between challenges later via `python setup.py switch`\n"
+        "and per-challenge state is preserved on the server (so resuming a\n"
+        "previous challenge picks up every agent's prior trajectory).\n"
+    )
+
+    use_defaults_ans = prompt(
+        f"Use defaults for all 5 challenges? "
+        f"({DEFAULT_INSTANCES_PER_TRACK} instances per track, "
+        f"{DEFAULT_TIMEOUT}s timeout per instance, empty initial algorithm) [Y/n]",
+        default="Y",
+    )
+    use_defaults = use_defaults_ans.strip().lower() not in ("n", "no")
+
+    initial_algorithms = read_initial_algorithms()
+    challenges_cfg = collect_per_challenge_configs(initial_algorithms, use_defaults=use_defaults)
+
+    active_challenge = prompt_choice(
+        "\nWhich challenge should this swarm START with as the active challenge?",
         list(CHALLENGES.keys()),
         default="vehicle_routing",
     )
-    challenge_meta = CHALLENGES[challenge]
-    print(f"  -> {challenge}, scoring direction = {challenge_meta['scoring_direction']}")
+    challenge_meta = CHALLENGES[active_challenge]
+    print(f"  -> active = {active_challenge} (contributors auto-follow this)")
 
-    print(
-        f"\n{challenge} has 5 tracks. For each, choose how many instances to\n"
-        f"benchmark per iteration. Lower numbers run faster but give noisier\n"
-        f"scores. Default is {DEFAULT_INSTANCES_PER_TRACK}."
-    )
-    tracks: dict = {"seed": "test"}
-    for key in challenge_meta["track_keys"]:
-        tracks[key] = prompt_int(f"  instances for {key}", DEFAULT_INSTANCES_PER_TRACK, minimum=0)
-
-    timeout = prompt_int("\nPer-instance solver timeout (seconds)", DEFAULT_TIMEOUT, minimum=1)
-
-    stagnation_threshold = prompt_int(
-        "Stagnation threshold (iterations without improvement before hints/inspiration)",
-        2, minimum=1,
-    )
-    stagnation_limit = prompt_int(
-        "Stagnation limit (iterations without improvement before trajectory reset, 0=disabled)",
-        10, minimum=0,
-    )
-    hypothesis_recall_threshold = prompt_int(
-        "Hypothesis recall threshold (iterations without improvement before "
-        "showing prior failed hypotheses for the current program)",
-        3, minimum=1,
-    )
+    if use_defaults:
+        # Sensible defaults for the global stagnation knobs; the host can
+        # tweak via curl /api/swarm_config later if they want.
+        stagnation_threshold = 2
+        stagnation_limit = 10
+        hypothesis_recall_threshold = 3
+    else:
+        stagnation_threshold = prompt_int(
+            "Stagnation threshold (iterations without improvement before hints/inspiration)",
+            2, minimum=1,
+        )
+        stagnation_limit = prompt_int(
+            "Stagnation limit (iterations without improvement before trajectory reset, 0=disabled)",
+            10, minimum=0,
+        )
+        hypothesis_recall_threshold = prompt_int(
+            "Hypothesis recall threshold (iterations without improvement before "
+            "showing prior failed hypotheses for the current program)",
+            3, minimum=1,
+        )
 
     tk_path = init_personal_tacit_knowledge(stagnation_threshold)
     gather_tacit_knowledge(tk_path, stagnation_threshold)
@@ -672,28 +764,33 @@ def run_create() -> int:
             f"  `python setup.py join {server_url}` once it's up to finish wiring."
         )
 
-    initial_algorithm_path = ROOT / "initial_algorithm.rs"
-    if initial_algorithm_path.is_file():
-        initial_algorithm_code = initial_algorithm_path.read_text()
-        print(f"  read initial algorithm from {initial_algorithm_path.relative_to(ROOT)} ({len(initial_algorithm_code)} chars)")
-    else:
-        initial_algorithm_code = ""
-        print(f"  warning: {initial_algorithm_path.relative_to(ROOT)} missing — broadcasting empty initial algorithm")
+    # Sanity log: how many of the 5 stub algorithms have content.
+    n_with_code = sum(1 for v in initial_algorithms.values() if v.strip())
+    print(f"  read initial algorithms from initial_algorithms/ "
+          f"({n_with_code}/5 have content; the rest broadcast empty)")
 
+    # Top-level `tracks` and `timeout` mirror the active challenge's
+    # sub-config so `scripts/benchmark.py`'s offline fallback (which reads
+    # swarm.config.json when the server is unreachable) keeps working.
+    active_sub = challenges_cfg[active_challenge]
     cfg = {
         "swarm_name": swarm_name,
         "owner_name": os.environ.get("USER", "owner"),
         "server_url": server_url,
         "admin_key": admin_key,
-        "challenge": challenge,
-        "tracks": tracks,
-        "timeout": timeout,
+        "role": "owner",
+        "active_challenge": active_challenge,
+        # Active challenge mirrored as `challenge` for back-compat with
+        # tooling that still reads the flat key.
+        "challenge": active_challenge,
+        "challenges": challenges_cfg,
         "stagnation_threshold": stagnation_threshold,
         "stagnation_limit": stagnation_limit,
         "hypothesis_recall_threshold": hypothesis_recall_threshold,
         "scoring_direction": challenge_meta["scoring_direction"],
-        "algorithm_path": f"src/{challenge}/algorithm/mod.rs",
-        "initial_algorithm_code": initial_algorithm_code,
+        "tracks": active_sub["tracks"],
+        "timeout": active_sub["timeout"],
+        "algorithm_path": f"src/{active_challenge}/algorithm/mod.rs",
     }
 
     print("  pushing swarm config to the server…")
@@ -703,16 +800,20 @@ def run_create() -> int:
     print("\nWriting local files…")
     template_files(
         server_url,
-        challenge=challenge,
+        challenge=active_challenge,
         algorithm_path=cfg["algorithm_path"],
         prior=prior,
     )
-    write_challenge_md(challenge)
+    write_challenge_md(active_challenge)
     write_swarm_config(cfg)
-    test_json_dir = ROOT / "datasets" / challenge
-    test_json_dir.mkdir(parents=True, exist_ok=True)
-    (test_json_dir / "test.json").write_text(json.dumps(tracks, indent=2) + "\n")
-    print(f"  wrote {(test_json_dir / 'test.json').relative_to(ROOT)}")
+    # Drop a per-challenge test.json so local benchmarks (which read this
+    # file as a fallback when the server is unreachable) match what the
+    # server has stored for each challenge.
+    for ch, sub in challenges_cfg.items():
+        test_json_dir = ROOT / "datasets" / ch
+        test_json_dir.mkdir(parents=True, exist_ok=True)
+        (test_json_dir / "test.json").write_text(json.dumps(sub["tracks"], indent=2) + "\n")
+        print(f"  wrote {(test_json_dir / 'test.json').relative_to(ROOT)}")
 
     repo_url = "<this-repo-url>"
     try:
@@ -734,7 +835,8 @@ def run_create() -> int:
     print("SWARM IS LIVE")
     print("=" * 48)
     print(f"\n  Dashboard:  {server_url}/")
-    print(f"  Challenge:  {challenge}")
+    print(f"  Active challenge:  {active_challenge}")
+    print(f"  All 5 challenges configured and ready (switch via `setup.py switch <name>`).")
     print("\n  Share this with anyone who wants to join:\n")
     print(f"    git clone {repo_url}")
     print(f"    cd {repo_dir_hint}")
@@ -746,20 +848,155 @@ def run_create() -> int:
     return 0
 
 
+# ── Switch / sync subcommands ─────────────────────────────────────────
+
+
+def run_switch(challenge: str) -> int:
+    """Owner-only: change the swarm's active challenge.
+
+    POSTs the new active_challenge to /api/swarm_config (admin-key gated),
+    re-templates the owner's local files so they can also work on the new
+    challenge, and updates swarm.config.json. Contributors auto-follow on
+    their next iteration via `setup.py sync` (Step 0 of the agent loop)."""
+    if challenge not in CHALLENGES:
+        print(f"unknown challenge: {challenge}")
+        print(f"choose from: {', '.join(CHALLENGES)}")
+        return 1
+    prior = read_prior_swarm_config()
+    if not prior:
+        print("no swarm.config.json found — run `python setup.py create` (host) "
+              "or `python setup.py join <URL>` (contributor) first.")
+        return 1
+    if prior.get("role") != "owner":
+        print("Only the swarm owner can change the active challenge.")
+        print(f"Ask the swarm owner to run `python setup.py switch {challenge}`.")
+        print("Your local clone will auto-follow the owner's choice when "
+              "you next run `python setup.py sync`.")
+        return 2
+    server_url = prior.get("server_url")
+    admin_key = prior.get("admin_key")
+    if not server_url or not admin_key:
+        print("missing server_url or admin_key in swarm.config.json — "
+              "re-run `setup.py create`.")
+        return 1
+
+    # 1. POST the new active_challenge to the server.
+    payload = {"admin_key": admin_key, "active_challenge": challenge}
+    req = urllib.request.Request(
+        f"{server_url.rstrip('/')}/api/swarm_config",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            json.load(resp)
+        print(f"  active_challenge → {challenge} on {server_url}")
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
+        print(f"  could not reach {server_url} ({e}); aborting switch.")
+        return 1
+
+    # 2. Re-template the owner's local clone so they can also work on the new challenge.
+    new_algo_path = f"src/{challenge}/algorithm/mod.rs"
+    template_files(
+        server_url, challenge=challenge,
+        algorithm_path=new_algo_path, prior=prior,
+    )
+    write_challenge_md(challenge)
+    cfg = dict(prior)
+    cfg["active_challenge"] = challenge
+    cfg["challenge"] = challenge
+    cfg["algorithm_path"] = new_algo_path
+    # Mirror the new challenge's sub-config to top-level so benchmark.py's
+    # offline fallback uses the right tracks/timeout.
+    sub = fetch_challenge_sub_config(server_url, challenge)
+    if sub:
+        cfg["tracks"] = sub.get("tracks", {})
+        cfg["timeout"] = sub.get("timeout", 5)
+        cfg["scoring_direction"] = sub.get("scoring_direction", "max")
+    write_swarm_config(cfg)
+
+    print(f"\nActive challenge → {challenge} (broadcast to all contributors).")
+    if prior.get("active_challenge") and prior["active_challenge"] != challenge:
+        print(f"  Prior trajectories on {prior['active_challenge']} are preserved")
+        print(f"  server-side and resume on switch-back.")
+    print("  All contributors auto-follow on their next iteration.")
+    print("\nTell your running Claude Code agent:")
+    print("  'Re-read CLAUDE.md and continue the loop on the new challenge.'")
+    return 0
+
+
+def run_sync() -> int:
+    """Contributor (or owner): pull live config from the server and re-template
+    the local clone if the active_challenge has changed since last sync.
+
+    Idempotent — no-op when in sync. Called by the agent loop at Step 0 so
+    the contributor's local files auto-follow the owner's challenge choice."""
+    prior = read_prior_swarm_config()
+    if not prior:
+        print("no swarm.config.json found — run `python setup.py join <URL>` first.")
+        return 1
+    server_url = prior.get("server_url")
+    if not server_url:
+        print("missing server_url in swarm.config.json — re-run setup.")
+        return 1
+    try:
+        with urllib.request.urlopen(
+            f"{server_url.rstrip('/')}/api/swarm_config", timeout=4
+        ) as r:
+            live = json.load(r)
+    except Exception as e:
+        print(f"  could not reach {server_url} ({e}); skipping sync.")
+        return 0
+
+    new_challenge = live.get("active_challenge") or live.get("challenge")
+    if not new_challenge:
+        print("server returned no active_challenge; nothing to sync.")
+        return 0
+    local_challenge = prior.get("active_challenge") or prior.get("challenge")
+    if new_challenge == local_challenge:
+        print(f"already in sync (active_challenge = {new_challenge}).")
+        return 0
+
+    new_algo_path = f"src/{new_challenge}/algorithm/mod.rs"
+    template_files(
+        server_url, challenge=new_challenge,
+        algorithm_path=new_algo_path, prior=prior,
+    )
+    write_challenge_md(new_challenge)
+    cfg = dict(prior)
+    cfg["active_challenge"] = new_challenge
+    cfg["challenge"] = new_challenge
+    cfg["algorithm_path"] = new_algo_path
+    # Mirror the new challenge's sub-config to top-level so benchmark.py's
+    # offline fallback uses the right tracks/timeout.
+    sub = fetch_challenge_sub_config(server_url, new_challenge)
+    if sub:
+        cfg["tracks"] = sub.get("tracks", {})
+        cfg["timeout"] = sub.get("timeout", 5)
+        cfg["scoring_direction"] = sub.get("scoring_direction", "max")
+    write_swarm_config(cfg)
+    print(f"\nSynced to {new_challenge} (was {local_challenge}).")
+    print("  Your prior trajectory on this challenge (if any) will resume server-side.")
+    print("  Tell your running Claude Code agent: 're-read CLAUDE.md'.")
+    return 0
+
+
 def run_join(server_url: str) -> int:
     print(f"TIG Swarm — joining {server_url}")
     print("=" * 48)
 
     prior = read_prior_swarm_config()
     # Pull live swarm config from the owner's server so we know which
-    # challenge / algorithm path to template into the local files.
+    # active challenge / algorithm path to template into the local files.
     challenge = None
     algorithm_path = None
     stagnation_threshold = 2
     try:
         with urllib.request.urlopen(f"{server_url.rstrip('/')}/api/swarm_config", timeout=4) as r:
             swarm = json.load(r)
-        challenge = swarm.get("challenge")
+        # New shape: prefer `active_challenge`. Fall back to legacy `challenge`.
+        challenge = swarm.get("active_challenge") or swarm.get("challenge")
         stagnation_threshold = swarm.get("stagnation_threshold", 2)
         if challenge:
             algorithm_path = f"src/{challenge}/algorithm/mod.rs"
@@ -777,15 +1014,25 @@ def run_join(server_url: str) -> int:
         write_challenge_md(challenge)
 
     # Stash a minimal record so a future re-run can swap the URL/challenge
-    # without leaving stale strings in the templated files.
-    write_swarm_config(
-        {
-            "server_url": server_url,
-            "role": "contributor",
-            "challenge": challenge or (prior or {}).get("challenge"),
-            "algorithm_path": algorithm_path or (prior or {}).get("algorithm_path"),
-        }
-    )
+    # without leaving stale strings in the templated files. `active_challenge`
+    # is the field `setup.py sync` checks on every agent iteration to detect
+    # owner-driven challenge switches.
+    cfg_out = {
+        "server_url": server_url,
+        "role": "contributor",
+        "active_challenge": challenge or (prior or {}).get("active_challenge"),
+        "challenge": challenge or (prior or {}).get("challenge"),
+        "algorithm_path": algorithm_path or (prior or {}).get("algorithm_path"),
+    }
+    # Mirror the active challenge's sub-config to top-level so benchmark.py's
+    # offline fallback finds the right tracks/timeout.
+    if challenge:
+        sub = fetch_challenge_sub_config(server_url, challenge)
+        if sub:
+            cfg_out["tracks"] = sub.get("tracks", {})
+            cfg_out["timeout"] = sub.get("timeout", 5)
+            cfg_out["scoring_direction"] = sub.get("scoring_direction", "max")
+    write_swarm_config(cfg_out)
 
     tk_path = init_personal_tacit_knowledge(stagnation_threshold)
     gather_tacit_knowledge(tk_path, stagnation_threshold)
@@ -794,6 +1041,9 @@ def run_join(server_url: str) -> int:
         "\nDone. Open Claude Code in this directory and have it read\n"
         "CLAUDE.md to start contributing. Edit tacit_knowledge_personal.md\n"
         "any time with private hints — they only ever live on your machine.\n"
+        "\nWhen the swarm owner switches the active challenge, your agent\n"
+        "loop's Step 0 (`python setup.py sync`) will pick up the change\n"
+        "automatically on the next iteration.\n"
     )
     return 0
 
@@ -810,12 +1060,31 @@ def main() -> int:
     )
     join = sub.add_parser("join", help="Contributor: point this clone at a swarm URL.")
     join.add_argument("server_url", help="The swarm owner's server URL.")
+    switch = sub.add_parser(
+        "switch",
+        help=("Owner: change the swarm's active challenge "
+              "(broadcast to all contributors)."),
+    )
+    switch.add_argument(
+        "challenge", choices=list(CHALLENGES.keys()),
+        help="The challenge to switch the swarm to.",
+    )
+    sub.add_parser(
+        "sync",
+        help=("Contributor: pull live config from the server and re-template "
+              "this clone if the active challenge changed (idempotent; "
+              "called by the agent loop at Step 0)."),
+    )
     args = parser.parse_args()
 
     if args.mode == "create":
         return run_create()
     if args.mode == "join":
         return run_join(args.server_url)
+    if args.mode == "switch":
+        return run_switch(args.challenge)
+    if args.mode == "sync":
+        return run_sync()
     parser.print_help()
     return 1
 

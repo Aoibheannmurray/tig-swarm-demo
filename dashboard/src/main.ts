@@ -11,10 +11,14 @@ import { initWelcome, toggleWelcome } from "./lib/welcome";
 import { startReplay } from "./lib/replay";
 import {
   loadSwarmConfig,
-  getSwarmConfig,
   handleWsEvent as handleSwarmConfigEvent,
 } from "./lib/swarmConfig";
+import {
+  getViewedChallenge,
+  onViewedChallengeChange,
+} from "./lib/viewedChallenge";
 
+import { ChallengeSelectorPanel } from "./panels/challenge-selector";
 import { StatsPanel } from "./panels/stats";
 import { RoutesPanel } from "./panels/routes";
 import { GanttPanel } from "./panels/gantt";
@@ -37,7 +41,6 @@ const wsUrl = params.get("ws") || `${wsProtocol}//${window.location.host}/ws/das
 function getApiUrl(): string {
   const explicit = params.get("api");
   if (explicit) return explicit;
-  // Convert ws(s)://host/ws/dashboard -> http(s)://host
   return wsUrl
     .replace("ws://", "http://")
     .replace("wss://", "https://")
@@ -50,12 +53,15 @@ initParticles(canvas);
 
 // ── Initialize panels ──
 // Panels are constructed inside `bootstrap()` after loadSwarmConfig() so
-// that init() sees the active challenge on first paint (matters for the
-// routes panel, which renders a placeholder for non-VRP challenges).
+// that init() sees the active challenge on first paint. The display panel
+// (the per-challenge visualization) is rebuilt when the user picks a
+// different challenge in the selector; everything else stays mounted and
+// re-fetches its data via setChallenge().
 const panels: Panel[] = [];
 let chartPanel: ChartPanel;
+let displayPanel: Panel | undefined;
 
-function initPanel(PanelClass: new () => Panel, containerId: string) {
+function initPanel<T extends Panel>(PanelClass: new () => T, containerId: string): T {
   const panel = new PanelClass();
   const container = document.getElementById(containerId)!;
   panel.init(container);
@@ -63,28 +69,58 @@ function initPanel(PanelClass: new () => Panel, containerId: string) {
   return panel;
 }
 
-function constructPanels() {
-  initPanel(StatsPanel, "panel-stats");
-  const challenge = getSwarmConfig().challenge;
-  if (challenge === "job_scheduling") {
-    initPanel(GanttPanel, "panel-display");
-  } else if (challenge === "knapsack") {
-    initPanel(KnapsackPanel, "panel-display");
-  } else if (challenge === "energy_arbitrage") {
-    initPanel(EnergyPanel, "panel-display");
-  } else {
-    initPanel(RoutesPanel, "panel-display");
+function constructDisplayPanel() {
+  const container = document.getElementById("panel-display");
+  if (!container) return;
+  if (displayPanel) {
+    displayPanel.dispose?.();
+    panels.splice(panels.indexOf(displayPanel), 1);
+    displayPanel = undefined;
+    container.innerHTML = "";
   }
-  chartPanel = initPanel(ChartPanel, "panel-chart") as ChartPanel;
+  const challenge = getViewedChallenge();
+  if (challenge === "job_scheduling") displayPanel = new GanttPanel();
+  else if (challenge === "knapsack") displayPanel = new KnapsackPanel();
+  else if (challenge === "energy_arbitrage") displayPanel = new EnergyPanel();
+  else displayPanel = new RoutesPanel(); // VRP + SAT placeholder
+  displayPanel.init(container);
+  panels.push(displayPanel);
+}
+
+function constructPanels() {
+  initPanel(ChallengeSelectorPanel, "panel-challenge-selector");
+  initPanel(StatsPanel, "panel-stats");
+  constructDisplayPanel();
+  chartPanel = initPanel(ChartPanel, "panel-chart");
   initPanel(DiversityPanel, "panel-diversity");
   initPanel(FeedPanel, "panel-feed");
   initPanel(LeaderboardPanel, "panel-leaderboard");
 }
 
 // ── Message dispatch ──
-let soundEnabled = false; // disabled during initial state hydration
+let soundEnabled = false;
+
+// Events that carry per-challenge data; drop them when their `challenge`
+// doesn't match the user's viewed challenge so panels render consistent state.
+const CHALLENGE_SCOPED: Record<string, true> = {
+  experiment_published: true,
+  hypothesis_proposed: true,
+  new_global_best: true,
+  leaderboard_update: true,
+  chat_message: true,
+  trajectory_reset: true,
+  hypothesis_status_changed: true,
+};
 
 function handleMessage(msg: WSMessage) {
+  // Drop challenge-scoped events that don't belong to the viewed challenge.
+  // `agent_joined`, `swarm_config_updated`, `admin_broadcast`, and the
+  // global slice of `stats_update` don't get filtered.
+  const m = msg as any;
+  if (CHALLENGE_SCOPED[m.type] && m.challenge && m.challenge !== getViewedChallenge()) {
+    return;
+  }
+
   if (soundEnabled) {
     if (msg.type === "agent_joined") soundAgentJoined();
     if (msg.type === "hypothesis_proposed") soundHypothesisProposed(msg.strategy_tag);
@@ -97,24 +133,34 @@ function handleMessage(msg: WSMessage) {
     viewportFlash("rgba(0, 229, 255, 0.03)", 150);
   }
 
-  // Refetch swarm config when the owner switches the active challenge.
-  // The fetch is fire-and-forget; panels will see the new config on their
-  // next render via getSwarmConfig().
+  // For stats_update we want the per-challenge slice for the viewed challenge.
+  if (msg.type === "stats_update" && (msg as any).per_challenge) {
+    const sliced = (msg as any).per_challenge[getViewedChallenge()] ?? {};
+    msg = {
+      ...msg,
+      active_agents: sliced.active_agents ?? msg.active_agents,
+      total_experiments: sliced.total_experiments ?? msg.total_experiments,
+      hypotheses_count: sliced.hypotheses_count ?? msg.hypotheses_count,
+      best_score: sliced.best_score ?? msg.best_score,
+      baseline_score: sliced.baseline_score ?? msg.baseline_score,
+      num_instances: sliced.num_instances ?? msg.num_instances,
+      improvement_pct: sliced.improvement_pct ?? msg.improvement_pct,
+    } as any;
+  }
+
+  // Refetch swarm config when the host switches the active challenge.
   handleSwarmConfigEvent(getApiUrl(), msg);
 
   panels.forEach((panel) => panel.handleMessage(msg));
 }
 
 // ── Fetch initial state from REST API ──
-async function loadInitialState(apiUrl: string) {
+async function loadInitialState(apiUrl: string, challenge: string) {
   try {
-    // /api/state gives current snapshot; /api/replay gives the full
-    // best-so-far trajectory. We need both: the snapshot drives stats /
-    // leaderboard / feed, and the trajectory seeds the chart and lets us
-    // compute the incremental delta for the routes panel.
+    const q = `?challenge=${encodeURIComponent(challenge)}`;
     const [stateRes, replayRes] = await Promise.all([
-      fetch(`${apiUrl}/api/state`),
-      fetch(`${apiUrl}/api/replay`),
+      fetch(`${apiUrl}/api/state${q}`),
+      fetch(`${apiUrl}/api/replay${q}`),
     ]);
     if (!stateRes.ok) return;
     const state = await stateRes.json();
@@ -128,11 +174,8 @@ async function loadInitialState(apiUrl: string) {
     const hypothesisCount =
       state.hypotheses_count ?? (state.recent_hypotheses?.length || 0);
 
-    // Seed the chart with the entire trajectory, not just recent_experiments.
     chartPanel.seedHistory(replay);
 
-    // Incremental % improvement of the current best vs the prior best.
-    // Null only when there has been exactly one (or zero) global bests.
     const incrementalPct =
       replay.length >= 2
         ? ((replay[replay.length - 2].score - replay[replay.length - 1].score) /
@@ -140,7 +183,6 @@ async function loadInitialState(apiUrl: string) {
           100
         : null;
 
-    // Emit stats
     handleMessage({
       type: "stats_update",
       active_agents: state.active_agents,
@@ -152,9 +194,8 @@ async function loadInitialState(apiUrl: string) {
       num_instances: state.num_instances || 1,
       improvement_pct: state.improvement_pct || 0,
       timestamp: new Date().toISOString(),
-    });
+    } as any);
 
-    // Emit route data if available
     if (state.best_route_data && state.best_score != null) {
       handleMessage({
         type: "new_global_best",
@@ -163,25 +204,21 @@ async function loadInitialState(apiUrl: string) {
         agent_id: replay[replay.length - 1]?.agent_id || "",
         score: state.best_score,
         improvement_pct: state.improvement_pct || 0,
-        // Derived from /api/replay above. Null only when the current best
-        // is the very first global best of the run.
         incremental_improvement_pct: incrementalPct,
         num_instances: state.num_instances || 1,
         route_data: state.best_route_data,
         timestamp: new Date().toISOString(),
-      });
+      } as any);
     }
 
-    // Emit leaderboard
     if (state.leaderboard?.length) {
       handleMessage({
         type: "leaderboard_update",
         entries: state.leaderboard,
         timestamp: new Date().toISOString(),
-      });
+      } as any);
     }
 
-    // Replay recent experiments as feed items (most recent last so they stack correctly)
     const recent = (state.recent_experiments || []).slice().reverse();
     for (const exp of recent) {
       handleMessage({
@@ -200,10 +237,9 @@ async function loadInitialState(apiUrl: string) {
         hypothesis_id: null,
         notes: exp.notes || "",
         timestamp: exp.created_at || new Date().toISOString(),
-      });
+      } as any);
     }
 
-    // Replay hypothesis history (every attempt against the agent's current best).
     const allHyps = state.recent_hypotheses || [];
     for (const hyp of allHyps) {
       handleMessage({
@@ -216,19 +252,30 @@ async function loadInitialState(apiUrl: string) {
         strategy_tag: hyp.strategy_tag,
         parent_hypothesis_id: hyp.parent_hypothesis_id || null,
         timestamp: new Date().toISOString(),
-      });
+      } as any);
     }
 
     soundEnabled = true;
-    console.log("[Dashboard] Loaded initial state:", {
-      agents: state.total_agents ?? state.active_agents,
-      experiments: state.recent_experiments?.length,
-      bestScore: state.best_score,
-    });
+    console.log("[Dashboard] Loaded initial state for challenge:", challenge);
   } catch (e) {
     console.warn("[Dashboard] Failed to load initial state:", e);
   }
 }
+
+// React to user picking a different challenge in the selector. Reconstruct
+// the display panel (its component class differs per challenge), clear
+// challenge-scoped state on every other panel via the existing `reset`
+// handler, then re-hydrate from REST with `?challenge=`.
+onViewedChallengeChange((c) => {
+  constructDisplayPanel();
+  // Use the `reset` event the panels already handle to clear their
+  // challenge-scoped state (chart history, leaderboard rows, feed items).
+  panels.forEach((p) => {
+    p.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
+    p.setChallenge?.(c);
+  });
+  void loadInitialState(getApiUrl(), c);
+});
 
 // ── Welcome overlay ──
 initWelcome();
@@ -261,12 +308,9 @@ if (isMock) {
   const apiUrl = getApiUrl();
   console.log(`[Dashboard] Connecting to ${wsUrl}, API: ${apiUrl}`);
 
-  // Load the swarm-wide config first, then construct panels (which read
-  // the config in their init()), then hydrate from /api/state. Falls
-  // back to VRP/min defaults if the config fetch fails.
   void loadSwarmConfig(apiUrl).then(() => {
     constructPanels();
-    void loadInitialState(apiUrl);
+    void loadInitialState(apiUrl, getViewedChallenge());
   });
 
   const ws = new SwarmWebSocket(wsUrl);

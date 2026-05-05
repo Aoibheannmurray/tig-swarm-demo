@@ -23,20 +23,23 @@ import db
 
 logger = logging.getLogger("swarm")
 
-# Initial algorithm broadcast to every agent on a fresh trajectory:
-# their first iteration, and again whenever a trajectory reset draws the
-# "fresh start" slot from the inactive-algorithms pool. Set by the host
-# at create time (the wizard reads `initial_algorithm.rs` from the repo
-# root and POSTs it to /api/swarm_config); empty until the first
-# successful POST, in which case agents start from a blank slate.
 
+# ── Config resolution ──
+#
+# The server hosts every TIG challenge in parallel. Per-challenge config
+# (tracks, timeout, scoring_direction, initial_algorithm_code) lives in the
+# `challenge_configs` table; the singleton `config.active_challenge` row
+# selects which one contributors auto-follow. Helpers below resolve a
+# request's challenge and look up the right per-challenge config.
+#
+# `resolve_challenge` accepts an explicit value (typically from a request
+# query param or body field) and falls back to the swarm's active challenge
+# when none is provided — preserving back-compat with old clients during
+# the rollout window.
 
-def load_initial_algorithm(config: dict) -> str:
-    return config.get("initial_algorithm_code", "") or ""
-
-
-# Cached config — refreshed on admin config update
+# Cached configs — refreshed on admin config update.
 _config_cache: dict | None = None
+_challenge_config_cache: dict[str, dict] | None = None
 
 
 async def get_config_cached() -> dict:
@@ -47,17 +50,77 @@ async def get_config_cached() -> dict:
     return _config_cache
 
 
-async def get_direction() -> str:
+async def get_active_challenge() -> str:
     cfg = await get_config_cached()
-    d = cfg.get("scoring_direction", "min")
+    return cfg.get("active_challenge") or cfg.get("challenge") or "vehicle_routing"
+
+
+async def resolve_challenge(challenge: str | None) -> str:
+    """Pick the challenge a request applies to. Explicit value wins; otherwise
+    fall back to the swarm's active challenge."""
+    if challenge:
+        return challenge
+    return await get_active_challenge()
+
+
+async def get_challenge_config_cached(challenge: str) -> dict:
+    """Return per-challenge config (tracks, timeout, scoring_direction,
+    initial_algorithm_code) with a small in-process cache. Cache is dropped
+    whenever the global _config_cache is invalidated."""
+    global _challenge_config_cache
+    if _challenge_config_cache is None:
+        _challenge_config_cache = {}
+    if challenge in _challenge_config_cache:
+        return _challenge_config_cache[challenge]
+    async with db.connect() as conn:
+        row = await db.get_challenge_config(conn, challenge)
+    cfg = row or {
+        "challenge": challenge,
+        "tracks": "{}",
+        "timeout": 5,
+        "scoring_direction": "max",
+        "initial_algorithm_code": "",
+    }
+    _challenge_config_cache[challenge] = cfg
+    return cfg
+
+
+def _invalidate_caches() -> None:
+    global _config_cache, _challenge_config_cache
+    _config_cache = None
+    _challenge_config_cache = None
+
+
+async def load_initial_algorithm(challenge: str) -> str:
+    """Initial algorithm broadcast to every agent on a fresh trajectory for
+    the given challenge: their first iteration on it, and again whenever a
+    trajectory reset draws the "fresh start" slot from the per-challenge
+    inactive pool."""
+    cfg = await get_challenge_config_cached(challenge)
+    return (cfg.get("initial_algorithm_code") or "")
+
+
+async def get_direction(challenge: str | None = None) -> str:
+    if challenge is None:
+        challenge = await get_active_challenge()
+    cfg = await get_challenge_config_cached(challenge)
+    d = cfg.get("scoring_direction", "max")
     return "max" if d == "max" else "min"
 
 
-def get_num_instances(config: dict, route_data=None) -> int:
-    # Authoritative count: the actual keys in the current best experiment's
-    # route_data (one entry per benchmark instance). The swarm config's
-    # `tracks` dict is the fallback for the pre-first-experiment moment —
-    # sum the per-track instance counts (excluding the "seed" key).
+def _per_challenge_tracks(cfg: dict) -> dict:
+    raw = cfg.get("tracks") or "{}"
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return {}
+
+
+def get_num_instances_for(cfg: dict, route_data=None) -> int:
+    """Authoritative count: the actual keys in the current best experiment's
+    route_data (one entry per benchmark instance). The per-challenge `tracks`
+    dict is the fallback for the pre-first-experiment moment — sum the
+    per-track instance counts (excluding the "seed" key)."""
     if route_data:
         try:
             rd = json.loads(route_data) if isinstance(route_data, str) else route_data
@@ -66,7 +129,7 @@ def get_num_instances(config: dict, route_data=None) -> int:
         except Exception:
             pass
     try:
-        tracks = json.loads(config.get("tracks", "{}"))
+        tracks = _per_challenge_tracks(cfg)
         total = sum(
             int(v) for k, v in tracks.items()
             if k != "seed" and isinstance(v, (int, float))
@@ -76,14 +139,17 @@ def get_num_instances(config: dict, route_data=None) -> int:
         return 1
 
 
-async def get_baseline_score(conn) -> float | None:
+async def get_baseline_score(conn, challenge: str) -> float | None:
     """The baseline is the score of the very first feasible experiment
-    published to the DB.  Scores are already per-instance averages (computed
-    by benchmark.py), so no extra normalisation is needed.  Returns None when
-    nothing feasible has landed yet."""
+    published to the DB for this challenge. Scores are already per-instance
+    averages (computed by benchmark.py), so no extra normalisation is
+    needed. Returns None when nothing feasible has landed yet on this
+    challenge."""
     cursor = await conn.execute(
         "SELECT score FROM experiments "
-        "WHERE feasible = 1 ORDER BY created_at ASC LIMIT 1"
+        "WHERE feasible = 1 AND challenge = ? "
+        "ORDER BY created_at ASC LIMIT 1",
+        (challenge,),
     )
     row = await cursor.fetchone()
     if not row:
@@ -173,40 +239,75 @@ async def periodic_stats():
     while True:
         await asyncio.sleep(10)
         try:
-            config = await get_config_cached()
-            direction = await get_direction()
+            cutoff_ts = inactive_cutoff()
+            active_challenge = await get_active_challenge()
             async with db.connect() as conn:
-                best = await db.get_global_best(conn, direction=direction)
-                baseline = await get_baseline_score(conn)
-                cutoff_ts = inactive_cutoff()
-                active = await db.get_agent_count(
-                    conn, active_only=True, inactive_cutoff=cutoff_ts
-                )
                 total_agents = await db.get_agent_count(conn, active_only=False)
-                total_exp = (await (await conn.execute("SELECT COUNT(*) as c FROM experiments")).fetchone())["c"]
-                total_hyp = (await (await conn.execute("SELECT COUNT(*) as c FROM hypotheses")).fetchone())["c"]
-                total_traj = (await (await conn.execute("SELECT COUNT(*) as c FROM trajectories")).fetchone())["c"]
+                # Per-challenge slices.
+                per_challenge: dict[str, dict] = {}
+                for ch in db.KNOWN_CHALLENGES:
+                    direction = await get_direction(ch)
+                    cfg = await get_challenge_config_cached(ch)
+                    best = await db.get_global_best(conn, ch, direction=direction)
+                    baseline = await get_baseline_score(conn, ch)
+                    # Active agents on this challenge = agents whose
+                    # agent_challenge_state(*, ch).last_active_at is recent.
+                    cur = await conn.execute(
+                        "SELECT COUNT(*) as c FROM agent_challenge_state "
+                        "WHERE challenge = ? AND last_active_at >= ?",
+                        (ch, cutoff_ts),
+                    )
+                    active_ch = (await cur.fetchone())["c"]
+                    cur = await conn.execute(
+                        "SELECT COUNT(*) as c FROM experiments WHERE challenge = ?",
+                        (ch,),
+                    )
+                    total_exp = (await cur.fetchone())["c"]
+                    cur = await conn.execute(
+                        "SELECT COUNT(*) as c FROM hypotheses WHERE challenge = ?",
+                        (ch,),
+                    )
+                    total_hyp = (await cur.fetchone())["c"]
+                    cur = await conn.execute(
+                        "SELECT COUNT(*) as c FROM trajectories WHERE challenge = ?",
+                        (ch,),
+                    )
+                    total_traj = (await cur.fetchone())["c"]
+                    best_route_data = best["route_data"] if best else None
+                    num_instances = get_num_instances_for(cfg, best_route_data)
+                    best_score = best["score"] if best else None
+                    imp = (
+                        improvement_pct(baseline, best_score, direction)
+                        if baseline is not None and best_score is not None
+                        else 0
+                    )
+                    per_challenge[ch] = {
+                        "active_agents": active_ch,
+                        "best_score": best_score,
+                        "baseline_score": baseline,
+                        "num_instances": num_instances,
+                        "improvement_pct": imp,
+                        "total_experiments": total_exp,
+                        "hypotheses_count": total_hyp,
+                        "total_trajectories": total_traj,
+                    }
 
-            best_route_data = best["route_data"] if best else None
-            num_instances = get_num_instances(config, best_route_data)
-            best_score = best["score"] if best else None
-            imp = (
-                improvement_pct(baseline, best_score, direction)
-                if baseline is not None and best_score is not None
-                else 0
-            )
-
+            # Backward-compat: also include flat fields for the active
+            # challenge so older dashboards keep rendering during rollout.
+            flat = per_challenge.get(active_challenge, {})
             await manager.broadcast({
                 "type": "stats_update",
-                "active_agents": active,
+                "active_challenge": active_challenge,
+                "per_challenge": per_challenge,
                 "total_agents": total_agents,
-                "total_experiments": total_exp,
-                "hypotheses_count": total_hyp,
-                "total_trajectories": total_traj,
-                "best_score": best_score,
-                "baseline_score": baseline,
-                "num_instances": num_instances,
-                "improvement_pct": imp,
+                "active_agents": flat.get("active_agents", 0),
+                "total_experiments": flat.get("total_experiments", 0),
+                "hypotheses_count": flat.get("hypotheses_count", 0),
+                "total_trajectories": flat.get("total_trajectories", 0),
+                "best_score": flat.get("best_score"),
+                "baseline_score": flat.get("baseline_score"),
+                "num_instances": flat.get("num_instances", 0),
+                "improvement_pct": flat.get("improvement_pct", 0),
                 "timestamp": now(),
             })
         except Exception:
@@ -236,17 +337,26 @@ async def register_agent(req: RegisterRequest):
         "timestamp": timestamp,
     })
 
-    # Tell the agent which challenge it's joining and how often to heartbeat.
-    # Per-track instance counts and timeout live in /api/swarm_config — agents
-    # already poll that endpoint at startup, so we don't duplicate the data
-    # here.
+    active_challenge = (
+        config.get("active_challenge")
+        or config.get("challenge")
+        or "vehicle_routing"
+    )
+
+    # `active_challenge` is the swarm-wide challenge the contributor should
+    # auto-follow (set by the owner via `setup.py switch`). `challenge` is
+    # kept as an alias for back-compat with older clients that read
+    # `config.challenge`. Per-track counts / timeout live in
+    # /api/swarm_config — the agent polls that on every iteration.
     return AgentResponse(
         agent_id=agent_id,
         agent_name=agent_name,
         registered_at=timestamp,
         config={
             "heartbeat_interval_seconds": 30,
-            "challenge": config.get("challenge", "vehicle_routing"),
+            "active_challenge": active_challenge,
+            "challenge": active_challenge,
+            "available_challenges": list(db.KNOWN_CHALLENGES),
         },
     )
 
@@ -268,102 +378,103 @@ async def heartbeat(agent_id: str, req: HeartbeatRequest):
 INACTIVE_MINUTES = 20
 
 
-def _pick_inspiration(
-    all_bests: list[dict],
-    agent_id: str,
-    active_agent_ids: set[str],
-) -> dict | None:
-    """Pick a random active peer's best for inspiration (excluding self)."""
-    pool = [
-        b for b in all_bests
-        if b["agent_id"] != agent_id and b["agent_id"] in active_agent_ids
-    ]
-    if not pool:
-        return None
-    return random.choice(pool)
-
-
 @app.get("/api/state")
-async def get_state(agent_id: str | None = None):
-    """Return current swarm state.
+async def get_state(
+    agent_id: str | None = None,
+    challenge: str | None = None,
+):
+    """Return current swarm state for the given challenge.
 
     When `agent_id` is supplied, the agent receives its own current best
-    code (or the challenge seed on first run). When stagnating past the
-    `hypothesis_recall_threshold`, prior failed hypotheses for the current
-    program are included with a directive to try something different.
-    When stagnating past `stagnation_threshold`, a stagnation_hint field
-    (50/50 "tacit_knowledge" or "inspiration") and inspiration_code are
-    included.
+    code for the requested challenge (or the per-challenge initial seed on
+    first run). When stagnating past the `hypothesis_recall_threshold`,
+    prior failed hypotheses for the current program are included with a
+    directive to try something different. When stagnating past
+    `stagnation_threshold`, a stagnation_hint field (50/50 "tacit_knowledge"
+    or "inspiration") and inspiration_code are included — both filtered by
+    the same challenge so per-challenge state stays disjoint.
 
-    When `agent_id` is omitted, returns a global dashboard view.
+    When `agent_id` is omitted, returns a global dashboard view (filtered
+    by the requested or active challenge).
+
+    `challenge` defaults to the swarm's `active_challenge` for back-compat
+    with old clients that don't pass it.
     """
     config = await get_config_cached()
-    direction = await get_direction()
+    challenge = await resolve_challenge(challenge)
+    direction = await get_direction(challenge)
+    challenge_cfg = await get_challenge_config_cached(challenge)
 
     async with db.connect() as conn:
-        global_best = await db.get_global_best(conn, direction=direction)
-        baseline = await get_baseline_score(conn)
+        global_best = await db.get_global_best(conn, challenge, direction=direction)
+        baseline = await get_baseline_score(conn, challenge)
         cutoff_ts = inactive_cutoff()
-        active = await db.get_agent_count(
-            conn, active_only=True, inactive_cutoff=cutoff_ts
+        # active = agents recently active on THIS challenge
+        cur = await conn.execute(
+            "SELECT COUNT(*) as c FROM agent_challenge_state "
+            "WHERE challenge = ? AND last_active_at >= ?",
+            (challenge, cutoff_ts),
         )
+        active = (await cur.fetchone())["c"]
         total_agents = await db.get_agent_count(conn, active_only=False)
-        total_exp = (await (await conn.execute(
-            "SELECT COUNT(*) as c FROM experiments"
-        )).fetchone())["c"]
-        total_hyp = (await (await conn.execute(
-            "SELECT COUNT(*) as c FROM hypotheses"
-        )).fetchone())["c"]
-        total_traj = (await (await conn.execute(
-            "SELECT COUNT(*) as c FROM trajectories"
-        )).fetchone())["c"]
+        cur = await conn.execute(
+            "SELECT COUNT(*) as c FROM experiments WHERE challenge = ?",
+            (challenge,),
+        )
+        total_exp = (await cur.fetchone())["c"]
+        cur = await conn.execute(
+            "SELECT COUNT(*) as c FROM hypotheses WHERE challenge = ?",
+            (challenge,),
+        )
+        total_hyp = (await cur.fetchone())["c"]
+        cur = await conn.execute(
+            "SELECT COUNT(*) as c FROM trajectories WHERE challenge = ?",
+            (challenge,),
+        )
+        total_traj = (await cur.fetchone())["c"]
 
         # ── Agent-specific view ──
         if agent_id is not None:
+            ts_now = now()
+            # Touch BOTH the global heartbeat AND the per-challenge
+            # last_active_at so leaderboards and inspiration filters see
+            # this agent as "currently working on `challenge`".
             await conn.execute(
                 "UPDATE agents SET last_heartbeat = ? WHERE id = ?",
-                (now(), agent_id),
+                (ts_now, agent_id),
             )
+            await db.ensure_agent_challenge_state(conn, agent_id, challenge, ts_now)
             await conn.commit()
 
-            my_best = await db.get_agent_best(conn, agent_id)
-            cursor = await conn.execute(
-                "SELECT experiments_completed, runs_since_improvement, "
-                "improvements FROM agents WHERE id = ?",
-                (agent_id,),
-            )
-            agent_row = await cursor.fetchone()
-            runs_since = agent_row["runs_since_improvement"] if agent_row else 0
+            my_best = await db.get_agent_best(conn, agent_id, challenge)
+            acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
+            runs_since = acs["runs_since_improvement"] if acs else 0
 
             # ── Trajectory reset on stagnation_limit ──
             trajectory_reset = None
             stagnation_limit = int(config.get("stagnation_limit", "10"))
             if stagnation_limit > 0 and runs_since >= stagnation_limit and my_best is not None:
                 timestamp = now()
-                # Deactivate the current trajectory
-                cur_traj_id = None
-                cur_traj_row = await conn.execute(
-                    "SELECT current_trajectory_id, current_program_id FROM agents WHERE id = ?",
-                    (agent_id,),
-                )
-                cur_traj = await cur_traj_row.fetchone()
-                old_program_id = cur_traj["current_program_id"] if cur_traj else None
-                if cur_traj and cur_traj["current_trajectory_id"]:
-                    cur_traj_id = cur_traj["current_trajectory_id"]
+                # Deactivate the current trajectory.
+                cur_traj_id = acs["current_trajectory_id"] if acs else None
+                old_program_id = acs["current_program_id"] if acs else None
+                if cur_traj_id:
                     await db.deactivate_trajectory(conn, cur_traj_id, timestamp)
 
-                # Pick from the inactive pool BEFORE depositing, so the
-                # agent can't re-adopt its own just-deposited code.
-                n_inactive = await db.count_inactive(conn)
+                # Pick from the per-challenge inactive pool BEFORE depositing,
+                # so the agent can't re-adopt its own just-deposited code.
+                # CORRECTNESS INVARIANT: pick must be filtered by challenge —
+                # otherwise a stagnating VRP agent could be handed SAT code.
+                n_inactive = await db.count_inactive(conn, challenge)
                 new_traj_id = None
                 new_program_id = None
                 # Uniform pick: 1/(n_inactive+1) for fresh, rest for each inactive
                 if n_inactive == 0 or random.randint(0, n_inactive) == 0:
-                    new_code = load_initial_algorithm(config)
+                    new_code = await load_initial_algorithm(challenge)
                     new_program_id = new_id()
                     trajectory_reset = {"type": "fresh_start"}
                 else:
-                    picked = await db.pick_random_inactive(conn)
+                    picked = await db.pick_random_inactive(conn, challenge)
                     if picked:
                         new_code = picked["algorithm_code"]
                         new_program_id = picked.get("program_id") or new_id()
@@ -377,29 +488,25 @@ async def get_state(agent_id: str | None = None):
                             await db.reactivate_trajectory(conn, new_traj_id)
                             await db.increment_trajectory_agents(conn, new_traj_id)
                     else:
-                        new_code = load_initial_algorithm(config)
+                        new_code = await load_initial_algorithm(challenge)
                         new_program_id = new_id()
                         trajectory_reset = {"type": "fresh_start"}
 
-                # Now deposit the stagnated code into the inactive pool.
+                # Now deposit the stagnated code into the per-challenge pool.
                 await db.deposit_inactive(
-                    conn, agent_id, my_best["algorithm_code"],
-                    my_best["score"], timestamp,
-                )
-                # Tag the deposited inactive with trajectory and program_id
-                # so adopters inherit the hypothesis history.
-                await conn.execute(
-                    "UPDATE inactive_algorithms SET trajectory_id = ?, program_id = ? "
-                    "WHERE agent_id = ? AND deposited_at = ?",
-                    (cur_traj_id, old_program_id, agent_id, timestamp),
+                    conn, agent_id, challenge,
+                    my_best["algorithm_code"], my_best["score"], timestamp,
+                    trajectory_id=cur_traj_id, program_id=old_program_id,
                 )
 
-                await db.clear_agent_best(conn, agent_id)
-                await conn.execute(
-                    "UPDATE agents SET runs_since_improvement = 0, "
-                    "best_score = NULL, current_trajectory_id = ?, "
-                    "current_program_id = ? WHERE id = ?",
-                    (new_traj_id, new_program_id, agent_id),
+                await db.clear_agent_best(conn, agent_id, challenge)
+                await db.update_agent_challenge_state(
+                    conn, agent_id, challenge,
+                    set_fields={
+                        "runs_since_improvement": 0,
+                        "current_trajectory_id": new_traj_id,
+                        "current_program_id": new_program_id,
+                    },
                 )
                 await conn.commit()
                 my_best = None
@@ -410,31 +517,29 @@ async def get_state(agent_id: str | None = None):
                 agent_name = await get_agent_name(conn, agent_id)
                 await manager.broadcast({
                     "type": "trajectory_reset",
+                    "challenge": challenge,
                     "agent_name": agent_name,
                     "agent_id": agent_id,
                     "reset_type": trajectory_reset["type"],
                     "timestamp": timestamp,
                 })
+                # Re-read acs so subsequent reads see the reset state.
+                acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
             else:
                 my_best_code = (
                     my_best["algorithm_code"] if my_best
-                    else load_initial_algorithm(config)
+                    else await load_initial_algorithm(challenge)
                 )
                 my_best_score = my_best["score"] if my_best else None
                 my_best_experiment_id = my_best["experiment_id"] if my_best else None
 
-            # ── Program ID management ──
-            prog_cursor = await conn.execute(
-                "SELECT current_program_id FROM agents WHERE id = ?",
-                (agent_id,),
-            )
-            prog_row = await prog_cursor.fetchone()
-            current_program_id = prog_row["current_program_id"] if prog_row else None
+            # ── Program ID management (per-(agent, challenge)) ──
+            current_program_id = (acs or {}).get("current_program_id") if acs else None
             if not current_program_id:
                 current_program_id = new_id()
-                await conn.execute(
-                    "UPDATE agents SET current_program_id = ? WHERE id = ?",
-                    (current_program_id, agent_id),
+                await db.update_agent_challenge_state(
+                    conn, agent_id, challenge,
+                    set_fields={"current_program_id": current_program_id},
                 )
                 await conn.commit()
 
@@ -447,9 +552,9 @@ async def get_state(agent_id: str | None = None):
                     """SELECT h.title, h.strategy_tag, h.description, e.score
                        FROM hypotheses h
                        LEFT JOIN experiments e ON e.hypothesis_id = h.id
-                       WHERE h.program_id = ? AND h.status = 'failed'
+                       WHERE h.program_id = ? AND h.challenge = ? AND h.status = 'failed'
                        ORDER BY h.created_at DESC LIMIT 20""",
-                    (current_program_id,),
+                    (current_program_id, challenge),
                 )
                 prior_hypotheses = [dict(row) for row in await cursor.fetchall()]
                 if prior_hypotheses:
@@ -459,7 +564,11 @@ async def get_state(agent_id: str | None = None):
                         "different from these approaches."
                     )
 
-            # Inspiration on stagnation (only when not trajectory-resetting)
+            # Inspiration on stagnation (only when not trajectory-resetting).
+            # CORRECTNESS INVARIANT: only pull inspiration from agents
+            # currently active on THIS challenge — not from agents whose
+            # global heartbeat is recent but whose last_active_at on this
+            # challenge is stale.
             inspiration_code = None
             inspiration_agent_name = None
             stagnation_hint = None
@@ -467,42 +576,47 @@ async def get_state(agent_id: str | None = None):
             if trajectory_reset is None and runs_since >= n_stagnation:
                 stagnation_hint = random.choice(["tacit_knowledge", "inspiration"])
                 if stagnation_hint == "tacit_knowledge":
-                    await conn.execute(
-                        "UPDATE agents SET tacit_knowledge_count = tacit_knowledge_count + 1 WHERE id = ?",
-                        (agent_id,),
+                    await db.increment_agent_challenge_counters(
+                        conn, agent_id, challenge,
+                        tacit_knowledge_inc=1,
+                        runs_since_improvement_inc=0,
                     )
                 else:
-                    await conn.execute(
-                        "UPDATE agents SET inspiration_count = inspiration_count + 1 WHERE id = ?",
-                        (agent_id,),
+                    await db.increment_agent_challenge_counters(
+                        conn, agent_id, challenge,
+                        inspiration_inc=1,
+                        runs_since_improvement_inc=0,
                     )
                 await conn.commit()
-                all_bests = await db.list_agent_bests(conn, direction=direction)
-                cutoff_ts = inactive_cutoff()
-                cursor = await conn.execute(
-                    "SELECT id FROM agents WHERE last_heartbeat >= ?",
-                    (cutoff_ts,),
+                all_bests = await db.list_agent_bests(
+                    conn, challenge,
+                    exclude_agent_ids=[agent_id],
+                    direction=direction,
+                    active_only=True,
+                    inactive_cutoff=cutoff_ts,
                 )
-                active_ids = {row["id"] for row in await cursor.fetchall()}
-                chosen = _pick_inspiration(all_bests, agent_id, active_ids)
-                if chosen:
+                if all_bests:
+                    chosen = random.choice(all_bests)
                     inspiration_code = chosen["algorithm_code"]
                     inspiration_agent_name = await get_agent_name(
                         conn, chosen["agent_id"]
                     )
 
             best_route_data = my_best["route_data"] if my_best else None
-            num_instances = get_num_instances(config, best_route_data)
-            leaderboard = await db.compute_leaderboard(conn, inactive_cutoff(), direction=direction)
+            num_instances = get_num_instances_for(challenge_cfg, best_route_data)
+            leaderboard = await db.compute_leaderboard(
+                conn, challenge, inactive_cutoff(), direction=direction,
+            )
             global_best_score = global_best["score"] if global_best else None
 
             return {
+                "challenge": challenge,
                 "best_score": global_best_score,
                 "best_algorithm_code": my_best_code,
                 "best_experiment_id": my_best_experiment_id,
                 "my_best_score": my_best_score,
-                "my_runs": agent_row["experiments_completed"] if agent_row else 0,
-                "my_improvements": agent_row["improvements"] if agent_row else 0,
+                "my_runs": (acs or {}).get("experiments_completed") if acs else 0,
+                "my_improvements": (acs or {}).get("improvements") if acs else 0,
                 "my_runs_since_improvement": runs_since,
                 "num_instances": num_instances,
                 "active_agents": active,
@@ -519,27 +633,33 @@ async def get_state(agent_id: str | None = None):
             }
 
         # ── Dashboard view (no agent_id) ──
-        cursor = await conn.execute("""
-            SELECT e.*, a.name as agent_name,
-                   EXISTS(SELECT 1 FROM best_history bh
-                          WHERE bh.experiment_id = e.id) as is_new_best
-            FROM experiments e JOIN agents a ON a.id = e.agent_id
-            ORDER BY e.created_at DESC LIMIT 20
-        """)
+        cursor = await conn.execute(
+            """SELECT e.*, a.name as agent_name,
+                       EXISTS(SELECT 1 FROM best_history bh
+                              WHERE bh.experiment_id = e.id) as is_new_best
+                FROM experiments e JOIN agents a ON a.id = e.agent_id
+                WHERE e.challenge = ?
+                ORDER BY e.created_at DESC LIMIT 20""",
+            (challenge,),
+        )
         recent_experiments = [dict(row) for row in await cursor.fetchall()]
 
         cursor = await conn.execute(
             """SELECT h.id, h.title, h.strategy_tag, h.description,
                       a.name as agent_name, h.agent_id, h.parent_hypothesis_id
                FROM hypotheses h JOIN agents a ON a.id = h.agent_id
-               ORDER BY h.created_at DESC LIMIT 30"""
+               WHERE h.challenge = ?
+               ORDER BY h.created_at DESC LIMIT 30""",
+            (challenge,),
         )
         recent_hypotheses = [dict(row) for row in await cursor.fetchall()]
 
         served = global_best
         best_route_data = served["route_data"] if served else None
-        num_instances = get_num_instances(config, best_route_data)
-        leaderboard = await db.compute_leaderboard(conn, inactive_cutoff(), direction=direction)
+        num_instances = get_num_instances_for(challenge_cfg, best_route_data)
+        leaderboard = await db.compute_leaderboard(
+            conn, challenge, inactive_cutoff(), direction=direction,
+        )
 
     global_best_score = global_best["score"] if global_best else None
     overall_imp = (
@@ -549,12 +669,13 @@ async def get_state(agent_id: str | None = None):
     )
 
     return {
+        "challenge": challenge,
         "baseline_score": baseline,
         "best_score": global_best_score,
         "improvement_pct": overall_imp,
         "best_algorithm_code": (
             served["algorithm_code"] if served
-            else load_initial_algorithm(config)
+            else await load_initial_algorithm(challenge)
         ),
         "best_experiment_id": served["id"] if served else None,
         "best_route_data": json.loads(served["route_data"]) if served and served["route_data"] else None,
@@ -599,8 +720,9 @@ async def get_state(agent_id: str | None = None):
 
 @app.post("/api/iterations", response_model=IterationResponse)
 async def create_iteration(req: IterationCreate):
-    config = await get_config_cached()
-    direction = await get_direction()
+    challenge = await resolve_challenge(req.challenge)
+    direction = await get_direction(challenge)
+    challenge_cfg = await get_challenge_config_cached(challenge)
     exp_id = new_id()
     hyp_id = new_id()
     timestamp = now()
@@ -610,9 +732,11 @@ async def create_iteration(req: IterationCreate):
     async with db.connect() as conn:
         await conn.execute("BEGIN IMMEDIATE")
 
-        prev_best = await db.get_global_best(conn, direction=direction)
-        prev_agent_best = await db.get_agent_best(conn, req.agent_id)
-        baseline = await get_baseline_score(conn)
+        await db.ensure_agent_challenge_state(conn, req.agent_id, challenge, timestamp)
+
+        prev_best = await db.get_global_best(conn, challenge, direction=direction)
+        prev_agent_best = await db.get_agent_best(conn, req.agent_id, challenge)
+        baseline = await get_baseline_score(conn, challenge)
 
         is_new_best = prev_best is None or db.is_better(direction, req.score, prev_best["score"])
         beats_own_best = (
@@ -625,26 +749,22 @@ async def create_iteration(req: IterationCreate):
         )
         hyp_status = "succeeded" if beats_own_best else "failed"
 
-        # ── Program ID: tag hypothesis with current program ──
-        prog_cursor = await conn.execute(
-            "SELECT current_program_id FROM agents WHERE id = ?",
-            (req.agent_id,),
-        )
-        prog_row = await prog_cursor.fetchone()
-        current_program_id = prog_row["current_program_id"] if prog_row else None
+        # ── Program ID: tag hypothesis with current program (per-(agent, challenge)) ──
+        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
+        current_program_id = (acs or {}).get("current_program_id")
         if not current_program_id:
             current_program_id = new_id()
-            await conn.execute(
-                "UPDATE agents SET current_program_id = ? WHERE id = ?",
-                (current_program_id, req.agent_id),
+            await db.update_agent_challenge_state(
+                conn, req.agent_id, challenge,
+                set_fields={"current_program_id": current_program_id},
             )
 
         await conn.execute(
             """INSERT INTO hypotheses
-               (id, agent_id, title, description, strategy_tag, status,
+               (id, agent_id, challenge, title, description, strategy_tag, status,
                 fingerprint, target_best_experiment_id, program_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (hyp_id, req.agent_id, req.title, req.description,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (hyp_id, req.agent_id, challenge, req.title, req.description,
              req.strategy_tag, hyp_status, fp, target_best_experiment_id,
              current_program_id, timestamp),
         )
@@ -660,33 +780,30 @@ async def create_iteration(req: IterationCreate):
                 improvement_pct(prev_agent_best["score"], req.score, direction), 6
             )
 
-        # ── Trajectory tracking ──
-        traj_cursor = await conn.execute(
-            "SELECT current_trajectory_id FROM agents WHERE id = ?",
-            (req.agent_id,),
-        )
-        traj_row = await traj_cursor.fetchone()
-        trajectory_id = traj_row["current_trajectory_id"] if traj_row else None
+        # ── Trajectory tracking (per-(agent, challenge)) ──
+        trajectory_id = (acs or {}).get("current_trajectory_id")
         if not trajectory_id:
             trajectory_id = new_id()
             await db.create_trajectory(
-                conn, trajectory_id, timestamp,
+                conn, trajectory_id, challenge, timestamp,
                 current_score=req.score if beats_own_best else None,
             )
-            await conn.execute(
-                "UPDATE agents SET current_trajectory_id = ?, "
-                "num_trajectories = num_trajectories + 1 WHERE id = ?",
-                (trajectory_id, req.agent_id),
+            await db.update_agent_challenge_state(
+                conn, req.agent_id, challenge,
+                set_fields={"current_trajectory_id": trajectory_id},
+            )
+            await db.increment_agent_challenge_counters(
+                conn, req.agent_id, challenge, num_trajectories_inc=1,
             )
 
         await conn.execute(
             """INSERT INTO experiments
-               (id, agent_id, hypothesis_id, algorithm_code, score, feasible,
+               (id, agent_id, challenge, hypothesis_id, algorithm_code, score, feasible,
                 num_vehicles, total_distance, notes, route_data,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
                 trajectory_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (exp_id, req.agent_id, hyp_id, req.algorithm_code, req.score,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
              req.notes, route_data_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
@@ -701,35 +818,31 @@ async def create_iteration(req: IterationCreate):
 
         if beats_own_best:
             new_program_id = new_id()
-            await conn.execute(
-                f"""UPDATE agents SET
-                    experiments_completed = experiments_completed + 1,
-                    runs_since_improvement = 0,
-                    improvements = improvements + 1,
-                    best_score = ?,
-                    current_program_id = ?,
-                    best_ever_score = CASE
-                        WHEN best_ever_score IS NULL THEN ?
-                        WHEN ? {('>' if direction == 'max' else '<')} best_ever_score THEN ?
-                        ELSE best_ever_score
-                    END
-                   WHERE id = ?""",
-                (req.score, new_program_id, req.score, req.score, req.score, req.agent_id),
+            await db.increment_agent_challenge_counters(
+                conn, req.agent_id, challenge,
+                runs=1,
+                improvements=1,
+                runs_since_improvement_reset=True,
+                best_ever_score=req.score,
+                direction=direction,
+            )
+            await db.update_agent_challenge_state(
+                conn, req.agent_id, challenge,
+                set_fields={"current_program_id": new_program_id},
             )
             await db.upsert_agent_best(
-                conn, agent_id=req.agent_id, experiment_id=exp_id,
+                conn, agent_id=req.agent_id, challenge=challenge,
+                experiment_id=exp_id,
                 algorithm_code=req.algorithm_code, score=req.score,
                 feasible=req.feasible, num_vehicles=req.num_vehicles,
                 total_distance=req.total_distance, route_data=route_data_json,
                 updated_at=timestamp, trajectory_id=trajectory_id,
             )
         else:
-            await conn.execute(
-                """UPDATE agents SET
-                    experiments_completed = experiments_completed + 1,
-                    runs_since_improvement = runs_since_improvement + 1
-                   WHERE id = ?""",
-                (req.agent_id,),
+            await db.increment_agent_challenge_counters(
+                conn, req.agent_id, challenge,
+                runs=1,
+                runs_since_improvement_inc=1,
             )
 
         agent_name = await get_agent_name(conn, req.agent_id)
@@ -738,20 +851,23 @@ async def create_iteration(req: IterationCreate):
         if is_new_best:
             await conn.execute(
                 """INSERT INTO best_history
-                   (experiment_id, agent_id, agent_name, score, route_data, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (exp_id, req.agent_id, agent_name, req.score, route_data_json, timestamp),
+                   (experiment_id, agent_id, challenge, agent_name, score, route_data, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (exp_id, req.agent_id, challenge, agent_name, req.score, route_data_json, timestamp),
             )
 
         await conn.commit()
 
-        cursor = await conn.execute(
-            "SELECT experiments_completed, runs_since_improvement, "
-            "improvements FROM agents WHERE id = ?",
-            (req.agent_id,),
+        # Pull updated counters from the per-challenge row.
+        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
+        agent_info = {
+            "experiments_completed": acs["experiments_completed"] if acs else 0,
+            "improvements": acs["improvements"] if acs else 0,
+            "runs_since_improvement": acs["runs_since_improvement"] if acs else 0,
+        }
+        leaderboard = await db.compute_leaderboard(
+            conn, challenge, inactive_cutoff(), direction=direction,
         )
-        agent_info = dict(await cursor.fetchone())
-        leaderboard = await db.compute_leaderboard(conn, inactive_cutoff(), direction=direction)
         rank = next(
             (e["rank"] for e in leaderboard if e["agent_id"] == req.agent_id),
             0,
@@ -760,11 +876,12 @@ async def create_iteration(req: IterationCreate):
     effective_route_data = req.route_data or (
         prev_best["route_data"] if prev_best else None
     )
-    num_instances = get_num_instances(config, effective_route_data)
+    num_instances = get_num_instances_for(challenge_cfg, effective_route_data)
     imp = improvement_pct(baseline, req.score, direction) if baseline is not None else 0.0
 
     await manager.broadcast({
         "type": "experiment_published",
+        "challenge": challenge,
         "experiment_id": exp_id,
         "agent_name": agent_name,
         "agent_id": req.agent_id,
@@ -786,6 +903,7 @@ async def create_iteration(req: IterationCreate):
     if is_new_best:
         await manager.broadcast({
             "type": "new_global_best",
+            "challenge": challenge,
             "experiment_id": exp_id,
             "agent_name": agent_name,
             "agent_id": req.agent_id,
@@ -799,6 +917,7 @@ async def create_iteration(req: IterationCreate):
 
     await manager.broadcast({
         "type": "leaderboard_update",
+        "challenge": challenge,
         "entries": leaderboard,
         "timestamp": timestamp,
     })
@@ -819,8 +938,9 @@ async def create_iteration(req: IterationCreate):
 
 @app.post("/api/hypotheses")
 async def create_hypothesis(req: HypothesisCreate):
+    challenge = await resolve_challenge(req.challenge)
     async with db.connect() as conn:
-        my_best = await db.get_agent_best(conn, req.agent_id)
+        my_best = await db.get_agent_best(conn, req.agent_id, challenge)
         target_best_experiment_id = (
             my_best["experiment_id"] if my_best else None
         )
@@ -837,11 +957,11 @@ async def create_hypothesis(req: HypothesisCreate):
 
         await conn.execute(
             """INSERT INTO hypotheses
-               (id, agent_id, title, description, strategy_tag, status, fingerprint,
+               (id, agent_id, challenge, title, description, strategy_tag, status, fingerprint,
                 parent_hypothesis_id, created_at,
                 target_best_experiment_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (hyp_id, req.agent_id, req.title, req.description, req.strategy_tag,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (hyp_id, req.agent_id, challenge, req.title, req.description, req.strategy_tag,
              status, fp, req.parent_hypothesis_id, timestamp,
              target_best_experiment_id),
         )
@@ -851,6 +971,7 @@ async def create_hypothesis(req: HypothesisCreate):
 
     await manager.broadcast({
         "type": "hypothesis_proposed",
+        "challenge": challenge,
         "hypothesis_id": hyp_id,
         "agent_name": agent_name,
         "agent_id": req.agent_id,
@@ -865,10 +986,18 @@ async def create_hypothesis(req: HypothesisCreate):
 
 
 @app.get("/api/hypotheses")
-async def list_hypotheses(status: str | None = None, strategy_tag: str | None = None):
+async def list_hypotheses(
+    status: str | None = None,
+    strategy_tag: str | None = None,
+    challenge: str | None = None,
+):
+    challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
-        query = "SELECT h.*, a.name as agent_name FROM hypotheses h JOIN agents a ON a.id = h.agent_id WHERE 1=1"
-        params = []
+        query = (
+            "SELECT h.*, a.name as agent_name FROM hypotheses h "
+            "JOIN agents a ON a.id = h.agent_id WHERE h.challenge = ?"
+        )
+        params: list = [challenge]
         if status:
             query += " AND h.status = ?"
             params.append(status)
@@ -884,8 +1013,9 @@ async def list_hypotheses(status: str | None = None, strategy_tag: str | None = 
 
 @app.post("/api/experiments", response_model=ExperimentResponse)
 async def create_experiment(req: ExperimentCreate):
-    config = await get_config_cached()
-    direction = await get_direction()
+    challenge = await resolve_challenge(req.challenge)
+    direction = await get_direction(challenge)
+    challenge_cfg = await get_challenge_config_cached(challenge)
 
     exp_id = new_id()
     timestamp = now()
@@ -899,13 +1029,15 @@ async def create_experiment(req: ExperimentCreate):
         # into best_history — producing non-monotonic rows in /api/replay.
         await conn.execute("BEGIN IMMEDIATE")
 
+        await db.ensure_agent_challenge_state(conn, req.agent_id, challenge, timestamp)
+
         # Capture the previous global best, the publishing agent's prior
         # own-best, and the baseline BEFORE inserting. Otherwise a read
         # after the insert would return the row we just wrote — breaking
         # is_new_best, beats_own_best, and baseline detection.
-        prev_best = await db.get_global_best(conn, direction=direction)
-        prev_agent_best = await db.get_agent_best(conn, req.agent_id)
-        baseline = await get_baseline_score(conn)
+        prev_best = await db.get_global_best(conn, challenge, direction=direction)
+        prev_agent_best = await db.get_agent_best(conn, req.agent_id, challenge)
+        baseline = await get_baseline_score(conn, challenge)
 
         is_new_best = prev_best is None or db.is_better(direction, req.score, prev_best["score"])
         beats_own_best = (
@@ -924,33 +1056,31 @@ async def create_experiment(req: ExperimentCreate):
                 improvement_pct(prev_agent_best["score"], req.score, direction), 6
             )
 
-        # ── Trajectory tracking ──
-        traj_cursor = await conn.execute(
-            "SELECT current_trajectory_id FROM agents WHERE id = ?",
-            (req.agent_id,),
-        )
-        traj_row = await traj_cursor.fetchone()
-        trajectory_id = traj_row["current_trajectory_id"] if traj_row else None
+        # ── Trajectory tracking (per-(agent, challenge)) ──
+        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
+        trajectory_id = (acs or {}).get("current_trajectory_id")
         if not trajectory_id:
             trajectory_id = new_id()
             await db.create_trajectory(
-                conn, trajectory_id, timestamp,
+                conn, trajectory_id, challenge, timestamp,
                 current_score=req.score if beats_own_best else None,
             )
-            await conn.execute(
-                "UPDATE agents SET current_trajectory_id = ?, "
-                "num_trajectories = num_trajectories + 1 WHERE id = ?",
-                (trajectory_id, req.agent_id),
+            await db.update_agent_challenge_state(
+                conn, req.agent_id, challenge,
+                set_fields={"current_trajectory_id": trajectory_id},
+            )
+            await db.increment_agent_challenge_counters(
+                conn, req.agent_id, challenge, num_trajectories_inc=1,
             )
 
         await conn.execute(
             """INSERT INTO experiments
-               (id, agent_id, hypothesis_id, algorithm_code, score, feasible,
+               (id, agent_id, challenge, hypothesis_id, algorithm_code, score, feasible,
                 num_vehicles, total_distance, runtime_seconds, notes, route_data,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
                 trajectory_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (exp_id, req.agent_id, req.hypothesis_id, req.algorithm_code, req.score,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (exp_id, req.agent_id, challenge, req.hypothesis_id, req.algorithm_code, req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
              req.runtime_seconds, req.notes, route_data_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
@@ -965,24 +1095,22 @@ async def create_experiment(req: ExperimentCreate):
 
         if beats_own_best:
             new_program_id = new_id()
-            await conn.execute(
-                f"""UPDATE agents SET
-                    experiments_completed = experiments_completed + 1,
-                    runs_since_improvement = 0,
-                    improvements = improvements + 1,
-                    best_score = ?,
-                    current_program_id = ?,
-                    best_ever_score = CASE
-                        WHEN best_ever_score IS NULL THEN ?
-                        WHEN ? {('>' if direction == 'max' else '<')} best_ever_score THEN ?
-                        ELSE best_ever_score
-                    END
-                   WHERE id = ?""",
-                (req.score, new_program_id, req.score, req.score, req.score, req.agent_id),
+            await db.increment_agent_challenge_counters(
+                conn, req.agent_id, challenge,
+                runs=1,
+                improvements=1,
+                runs_since_improvement_reset=True,
+                best_ever_score=req.score,
+                direction=direction,
+            )
+            await db.update_agent_challenge_state(
+                conn, req.agent_id, challenge,
+                set_fields={"current_program_id": new_program_id},
             )
             await db.upsert_agent_best(
                 conn,
                 agent_id=req.agent_id,
+                challenge=challenge,
                 experiment_id=exp_id,
                 algorithm_code=req.algorithm_code,
                 score=req.score,
@@ -994,12 +1122,10 @@ async def create_experiment(req: ExperimentCreate):
                 trajectory_id=trajectory_id,
             )
         else:
-            await conn.execute(
-                """UPDATE agents SET
-                    experiments_completed = experiments_completed + 1,
-                    runs_since_improvement = runs_since_improvement + 1
-                   WHERE id = ?""",
-                (req.agent_id,),
+            await db.increment_agent_challenge_counters(
+                conn, req.agent_id, challenge,
+                runs=1,
+                runs_since_improvement_inc=1,
             )
 
         agent_name = await get_agent_name(conn, req.agent_id)
@@ -1007,14 +1133,14 @@ async def create_experiment(req: ExperimentCreate):
 
         if is_new_best:
             await conn.execute(
-                "INSERT INTO best_history (experiment_id, agent_id, agent_name, score, route_data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (exp_id, req.agent_id, agent_name, req.score, route_data_json, timestamp),
+                "INSERT INTO best_history (experiment_id, agent_id, challenge, agent_name, score, route_data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (exp_id, req.agent_id, challenge, agent_name, req.score, route_data_json, timestamp),
             )
 
         # Prefer this experiment's own route_data; if it wasn't provided,
         # fall back to the previous global best's.
         effective_route_data = req.route_data or (prev_best["route_data"] if prev_best else None)
-        num_instances = get_num_instances(config, effective_route_data)
+        num_instances = get_num_instances_for(challenge_cfg, effective_route_data)
 
         hyp_status = None
         if req.hypothesis_id:
@@ -1029,7 +1155,9 @@ async def create_experiment(req: ExperimentCreate):
             )
 
         await conn.commit()
-        leaderboard = await db.compute_leaderboard(conn, inactive_cutoff(), direction=direction)
+        leaderboard = await db.compute_leaderboard(
+            conn, challenge, inactive_cutoff(), direction=direction,
+        )
         rank = next((e["rank"] for e in leaderboard if e["agent_id"] == req.agent_id), 0)
 
     imp = improvement_pct(baseline, req.score, direction) if baseline is not None else 0.0
@@ -1037,6 +1165,7 @@ async def create_experiment(req: ExperimentCreate):
     if hyp_status and req.hypothesis_id:
         await manager.broadcast({
             "type": "hypothesis_status_changed",
+            "challenge": challenge,
             "hypothesis_id": req.hypothesis_id,
             "new_status": hyp_status,
             "agent_name": agent_name,
@@ -1060,6 +1189,7 @@ async def create_experiment(req: ExperimentCreate):
 
     await manager.broadcast({
         "type": "experiment_published",
+        "challenge": challenge,
         "experiment_id": exp_id,
         "agent_name": agent_name,
         "agent_id": req.agent_id,
@@ -1081,6 +1211,7 @@ async def create_experiment(req: ExperimentCreate):
     if is_new_best:
         await manager.broadcast({
             "type": "new_global_best",
+            "challenge": challenge,
             "experiment_id": exp_id,
             "agent_name": agent_name,
             "agent_id": req.agent_id,
@@ -1094,6 +1225,7 @@ async def create_experiment(req: ExperimentCreate):
 
     await manager.broadcast({
         "type": "leaderboard_update",
+        "challenge": challenge,
         "entries": leaderboard,
         "timestamp": timestamp,
     })
@@ -1110,28 +1242,33 @@ async def create_experiment(req: ExperimentCreate):
 # ── Leaderboard ──
 
 @app.get("/api/leaderboard")
-async def get_leaderboard():
-    direction = await get_direction()
+async def get_leaderboard(challenge: str | None = None):
+    challenge = await resolve_challenge(challenge)
+    direction = await get_direction(challenge)
     async with db.connect() as conn:
-        leaderboard = await db.compute_leaderboard(conn, inactive_cutoff(), direction=direction)
-    return {"updated_at": now(), "entries": leaderboard}
+        leaderboard = await db.compute_leaderboard(
+            conn, challenge, inactive_cutoff(), direction=direction,
+        )
+    return {"challenge": challenge, "updated_at": now(), "entries": leaderboard}
 
 
 # ── Messages (chat feed) ──
 
 @app.post("/api/messages")
 async def create_message(req: MessageCreate):
+    challenge = await resolve_challenge(req.challenge)
     msg_id = new_id()
     timestamp = now()
     async with db.connect() as conn:
         await conn.execute(
-            "INSERT INTO messages (id, agent_id, agent_name, content, msg_type, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (msg_id, req.agent_id, req.agent_name, req.content, req.msg_type, timestamp),
+            "INSERT INTO messages (id, agent_id, challenge, agent_name, content, msg_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (msg_id, req.agent_id, challenge, req.agent_name, req.content, req.msg_type, timestamp),
         )
         await conn.commit()
 
     await manager.broadcast({
         "type": "chat_message",
+        "challenge": challenge,
         "message_id": msg_id,
         "agent_name": req.agent_name,
         "agent_id": req.agent_id,
@@ -1140,14 +1277,17 @@ async def create_message(req: MessageCreate):
         "timestamp": timestamp,
     })
 
-    return {"message_id": msg_id, "timestamp": timestamp}
+    return {"message_id": msg_id, "timestamp": timestamp, "challenge": challenge}
 
 
 @app.get("/api/messages")
-async def list_messages(limit: int = 50):
+async def list_messages(limit: int = 50, challenge: str | None = None):
+    challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         cursor = await conn.execute(
-            "SELECT * FROM messages ORDER BY created_at DESC LIMIT ?", (limit,)
+            "SELECT * FROM messages WHERE challenge = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (challenge, limit),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
     return rows
@@ -1157,16 +1297,18 @@ async def list_messages(limit: int = 50):
 # ── Diversity ──
 
 @app.get("/api/diversity")
-async def get_diversity():
-    direction = await get_direction()
+async def get_diversity(challenge: str | None = None):
+    challenge = await resolve_challenge(challenge)
+    direction = await get_direction(challenge)
     order = db._direction_order(direction)
     async with db.connect() as conn:
         cursor = await conn.execute(
             f"""SELECT ab.agent_id, a.name as agent_name, ab.algorithm_code
                FROM agent_bests ab
                JOIN agents a ON a.id = ab.agent_id
-               WHERE ab.feasible = 1
-               ORDER BY ab.score {order}"""
+               WHERE ab.feasible = 1 AND ab.challenge = ?
+               ORDER BY ab.score {order}""",
+            (challenge,),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
 
@@ -1206,10 +1348,12 @@ async def get_diversity():
 # ── Replay ──
 
 @app.get("/api/replay")
-async def get_replay():
+async def get_replay(challenge: str | None = None):
+    challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         cursor = await conn.execute(
-            "SELECT * FROM best_history ORDER BY created_at ASC"
+            "SELECT * FROM best_history WHERE challenge = ? ORDER BY created_at ASC",
+            (challenge,),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
     return [
@@ -1226,13 +1370,11 @@ async def get_replay():
 
 
 @app.get("/api/top_scores")
-async def get_top_scores(limit: int = 20):
-    # Top-N feasible iterations across the whole swarm, joined to the
-    # proposing hypothesis for its strategy tag + title. Same agent can
-    # appear multiple times — each row is one iteration, not a per-agent
-    # roll-up. title / strategy_tag come back null when the experiment has
-    # no associated hypothesis (legacy/seed rows).
-    direction = await get_direction()
+async def get_top_scores(limit: int = 20, challenge: str | None = None):
+    # Top-N feasible iterations for the given challenge, joined to the
+    # proposing hypothesis for its strategy tag + title.
+    challenge = await resolve_challenge(challenge)
+    direction = await get_direction(challenge)
     order = db._direction_order(direction)
     limit = max(1, min(limit, 100))
     async with db.connect() as conn:
@@ -1243,20 +1385,22 @@ async def get_top_scores(limit: int = 20):
                FROM experiments e
                LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
                LEFT JOIN agents a ON a.id = e.agent_id
-               WHERE e.feasible = 1
+               WHERE e.feasible = 1 AND e.challenge = ?
                ORDER BY e.score {order}
                LIMIT ?""",
-            (limit,),
+            (challenge, limit),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
-    return {"entries": rows, "limit": limit}
+    return {"challenge": challenge, "entries": rows, "limit": limit}
 
 
 @app.get("/api/agent_experiments")
-async def get_agent_experiments(agent_id: str):
-    # Per-agent full attempt history for the personal progress chart.
-    # Returns every experiment (improvement or not, feasible or not) so the
-    # dashboard can render a step plot of the agent's whole journey.
+async def get_agent_experiments(agent_id: str, challenge: str | None = None):
+    # Per-agent full attempt history for the personal progress chart, scoped
+    # to the requested challenge (defaults to active). Returns every experiment
+    # (improvement or not, feasible or not) so the dashboard can render a
+    # step plot of the agent's whole journey on this challenge.
+    challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         ag = await conn.execute(
             "SELECT id, name, registered_at FROM agents WHERE id = ?",
@@ -1265,20 +1409,22 @@ async def get_agent_experiments(agent_id: str):
         agent_row = await ag.fetchone()
         if agent_row is None:
             return {"agent_id": agent_id, "agent_name": None,
-                    "registered_at": None, "experiments": []}
+                    "registered_at": None, "challenge": challenge, "experiments": []}
 
         cursor = await conn.execute(
             """SELECT e.id, e.score, e.feasible, e.beats_own_best, e.notes,
                       e.created_at, h.title, h.description, h.strategy_tag
                FROM experiments e
                LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
-               WHERE e.agent_id = ? ORDER BY e.created_at ASC""",
-            (agent_id,),
+               WHERE e.agent_id = ? AND e.challenge = ?
+               ORDER BY e.created_at ASC""",
+            (agent_id, challenge),
         )
         rows = await cursor.fetchall()
 
     return {
         "agent_id": agent_id,
+        "challenge": challenge,
         "agent_name": agent_row["name"],
         "registered_at": agent_row["registered_at"],
         "experiments": [
@@ -1301,14 +1447,15 @@ async def get_agent_experiments(agent_id: str):
 # ── Trajectories ──
 
 @app.get("/api/trajectories")
-async def get_trajectories():
-    direction = await get_direction()
+async def get_trajectories(challenge: str | None = None):
+    challenge = await resolve_challenge(challenge)
+    direction = await get_direction(challenge)
     async with db.connect() as conn:
-        trajectories = await db.list_trajectories(conn)
+        trajectories = await db.list_trajectories(conn, challenge=challenge)
         result = []
         for t in trajectories:
             history = await db.get_trajectory_score_history(
-                conn, t["id"], direction
+                conn, t["id"], challenge=challenge, direction=direction,
             )
             result.append({
                 "id": t["id"],
@@ -1326,6 +1473,7 @@ async def get_trajectories():
         active = sum(1 for t in result if t["status"] == "active")
         inactive = sum(1 for t in result if t["status"] == "inactive")
     return {
+        "challenge": challenge,
         "total": len(result),
         "active": active,
         "inactive": inactive,
@@ -1384,19 +1532,22 @@ async def admin_config(req: AdminAuth, key: str = "", value: str = ""):
 async def get_swarm_config():
     """Return the swarm-wide settings every clone needs to run.
 
-    The wizard writes these via POST /api/swarm_config; clones poll this
-    endpoint on startup so all agents in a swarm optimize the same
-    challenge with the same instance set and timeout.
+    Multi-challenge model: the swarm hosts all five challenges in parallel.
+    `active_challenge` is the swarm-wide challenge contributors auto-follow
+    (set by the owner via POST /api/swarm_config). `available_challenges` is
+    the per-challenge sub-config map (tracks, timeout, scoring_direction,
+    initial_algorithm_code).
+
+    For back-compat with old clients that still expect a flat shape, the
+    active challenge's sub-config is also flattened to the top level
+    (`challenge`, `tracks`, `timeout`, `scoring_direction`).
     """
     config = await get_config_cached()
-    try:
-        tracks = json.loads(config.get("tracks", "{}"))
-    except Exception:
-        tracks = {}
-    try:
-        timeout = int(config.get("timeout", "30"))
-    except Exception:
-        timeout = 30
+    active_challenge = (
+        config.get("active_challenge")
+        or config.get("challenge")
+        or "vehicle_routing"
+    )
     try:
         stagnation_threshold = int(config.get("stagnation_threshold", "2"))
     except Exception:
@@ -1409,11 +1560,35 @@ async def get_swarm_config():
         hypothesis_recall_threshold = int(config.get("hypothesis_recall_threshold", "3"))
     except Exception:
         hypothesis_recall_threshold = 3
+
+    # Per-challenge sub-configs.
+    available: dict[str, dict] = {}
+    async with db.connect() as conn:
+        rows = await db.list_challenge_configs(conn)
+    for row in rows:
+        try:
+            tracks = json.loads(row.get("tracks") or "{}")
+        except Exception:
+            tracks = {}
+        available[row["challenge"]] = {
+            "tracks": tracks,
+            "timeout": row.get("timeout") or 5,
+            "scoring_direction": row.get("scoring_direction") or "max",
+            # Flag-only: don't ship the algorithm body in this response (it
+            # can be large and is fetched separately from /api/initial_algorithm).
+            "has_initial_algorithm": bool(row.get("initial_algorithm_code")),
+        }
+
+    active_cfg = available.get(active_challenge, {})
     return {
-        "challenge": config.get("challenge", "vehicle_routing"),
-        "tracks": tracks,
-        "timeout": timeout,
-        "scoring_direction": config.get("scoring_direction", "min"),
+        "active_challenge": active_challenge,
+        "available_challenges": available,
+        # Flat back-compat fields — populated from the active challenge.
+        "challenge": active_challenge,
+        "tracks": active_cfg.get("tracks", {}),
+        "timeout": active_cfg.get("timeout", 5),
+        "scoring_direction": active_cfg.get("scoring_direction", "max"),
+        # Global keys.
         "swarm_name": config.get("swarm_name", ""),
         "owner_name": config.get("owner_name", ""),
         "stagnation_threshold": stagnation_threshold,
@@ -1422,44 +1597,108 @@ async def get_swarm_config():
     }
 
 
+@app.get("/api/initial_algorithm")
+async def get_initial_algorithm(challenge: str | None = None):
+    """Return the per-challenge initial algorithm code. Used by agents on
+    their first iteration and by the wizard for round-trip verification."""
+    challenge = await resolve_challenge(challenge)
+    cfg = await get_challenge_config_cached(challenge)
+    return {
+        "challenge": challenge,
+        "algorithm_code": cfg.get("initial_algorithm_code", "") or "",
+    }
+
+
 @app.post("/api/swarm_config")
 async def update_swarm_config(req: SwarmConfigUpdate):
-    """Owner-only endpoint to set swarm-wide configuration.
+    """Owner-only endpoint to update swarm-wide configuration. Two shapes
+    are accepted (see `SwarmConfigUpdate` in models.py for details):
+
+      1. New shape: pass `active_challenge` to flip the swarm's active
+         challenge, and/or `challenges` to merge per-challenge sub-configs
+         (partial updates supported — only the keys passed get written).
+      2. Legacy flat shape: `challenge` + `tracks` + `timeout` +
+         `scoring_direction` + `initial_algorithm_code` writes a single
+         challenge's sub-config and bumps `active_challenge` to it.
 
     Gated by admin_key — same secret used for /api/admin/broadcast.
     """
-    global _config_cache
     await verify_admin(req)
-    updates = {
-        "challenge": req.challenge,
-        "tracks": json.dumps(req.tracks),
-        "timeout": str(req.timeout),
-        "scoring_direction": req.scoring_direction,
-        "swarm_name": req.swarm_name,
-        "owner_name": req.owner_name,
-        "stagnation_threshold": str(req.stagnation_threshold),
-        "stagnation_limit": str(req.stagnation_limit),
-        "hypothesis_recall_threshold": str(req.hypothesis_recall_threshold),
-        "initial_algorithm_code": req.initial_algorithm_code,
-    }
+
+    # Resolve which challenge(s) to update.
+    target_challenge = req.active_challenge or req.challenge
+    challenges_payload: dict[str, dict] = {}
+    if req.challenges:
+        for ch, sub in req.challenges.items():
+            d = sub.dict() if hasattr(sub, "dict") else sub
+            challenges_payload[ch] = d
+    # Legacy flat shape → single per-challenge update.
+    if req.challenge or req.tracks is not None or req.timeout is not None \
+            or req.scoring_direction is not None or req.initial_algorithm_code is not None:
+        ch = req.challenge or target_challenge or await get_active_challenge()
+        legacy_sub = {}
+        if req.tracks is not None:
+            legacy_sub["tracks"] = req.tracks
+        if req.timeout is not None:
+            legacy_sub["timeout"] = req.timeout
+        if req.scoring_direction is not None:
+            legacy_sub["scoring_direction"] = req.scoring_direction
+        if req.initial_algorithm_code is not None:
+            legacy_sub["initial_algorithm_code"] = req.initial_algorithm_code
+        if legacy_sub:
+            existing = challenges_payload.setdefault(ch, {})
+            existing.update(legacy_sub)
+
+    # Apply.
     async with db.connect() as conn:
-        for key, value in updates.items():
-            await conn.execute(
-                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-                (key, value),
+        for ch, sub in challenges_payload.items():
+            await db.upsert_challenge_config(
+                conn, ch,
+                tracks=json.dumps(sub["tracks"]) if sub.get("tracks") is not None else None,
+                timeout=sub.get("timeout"),
+                scoring_direction=sub.get("scoring_direction"),
+                initial_algorithm_code=sub.get("initial_algorithm_code"),
             )
+        # active_challenge update (if requested).
+        if req.active_challenge:
+            await db.set_active_challenge(conn, req.active_challenge)
+        elif req.challenge and not req.active_challenge:
+            # Legacy back-compat: flat-shape write with a `challenge` field
+            # also bumps the active challenge to it.
+            await db.set_active_challenge(conn, req.challenge)
+        # Global keys.
+        for key, value in (
+            ("swarm_name", req.swarm_name),
+            ("owner_name", req.owner_name),
+            ("stagnation_threshold", str(req.stagnation_threshold) if req.stagnation_threshold is not None else None),
+            ("stagnation_limit", str(req.stagnation_limit) if req.stagnation_limit is not None else None),
+            ("hypothesis_recall_threshold", str(req.hypothesis_recall_threshold) if req.hypothesis_recall_threshold is not None else None),
+        ):
+            if value is not None:
+                await conn.execute(
+                    "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
         await conn.commit()
-    _config_cache = None
+
+    _invalidate_caches()
+
+    # Re-read for the response and the broadcast payload.
+    config_after = await get_swarm_config()
+
     # Tell connected dashboards to refetch swarm_config so labels and the
     # active visualization swap to the new challenge without a page reload.
     await manager.broadcast({
         "type": "swarm_config_updated",
-        "challenge": req.challenge,
-        "scoring_direction": req.scoring_direction,
-        "swarm_name": req.swarm_name,
+        "active_challenge": config_after["active_challenge"],
+        "available_challenges": config_after["available_challenges"],
+        # Back-compat flat fields.
+        "challenge": config_after["active_challenge"],
+        "scoring_direction": config_after["scoring_direction"],
+        "swarm_name": config_after["swarm_name"],
         "timestamp": now(),
     })
-    return {"updated": True, **updates, "tracks": req.tracks, "timeout": req.timeout}
+    return {"updated": True, **config_after}
 
 
 # ── WebSocket ──

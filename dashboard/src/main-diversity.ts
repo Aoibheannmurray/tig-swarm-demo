@@ -3,6 +3,9 @@ import { initParticles } from "./lib/particles";
 import { SwarmWebSocket } from "./lib/websocket";
 import { MockDataGenerator } from "./mock";
 import { DiversityPanel } from "./panels/diversity";
+import { ChallengeSelectorPanel } from "./panels/challenge-selector";
+import { loadSwarmConfig, handleWsEvent as handleSwarmConfigEvent } from "./lib/swarmConfig";
+import { onViewedChallengeChange } from "./lib/viewedChallenge";
 import type { WSMessage } from "./types";
 
 // ── Config ──
@@ -16,12 +19,34 @@ const canvas = document.getElementById("particleCanvas") as HTMLCanvasElement;
 initParticles(canvas);
 
 // ── Initialize single panel ──
+const selectorMount = document.getElementById("panel-challenge-selector");
+const challengeSelector = new ChallengeSelectorPanel();
+if (selectorMount) challengeSelector.init(selectorMount);
+
 const panel = new DiversityPanel();
 panel.init(document.getElementById("panel-diversity")!);
 
+function getApiUrl(): string {
+  const explicit = params.get("api");
+  if (explicit) return explicit;
+  return wsUrl
+    .replace("ws://", "http://")
+    .replace("wss://", "https://")
+    .replace("/ws/dashboard", "");
+}
+
 function handleMessage(msg: WSMessage) {
+  handleSwarmConfigEvent(getApiUrl(), msg);
+  challengeSelector.handleMessage(msg);
   panel.handleMessage(msg);
 }
+
+onViewedChallengeChange(() => {
+  panel.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
+  // The DiversityPanel re-fetches /api/diversity on its own when the
+  // challenge changes via the swarm_config_updated WS event flow; no
+  // explicit setChallenge call needed here.
+});
 
 // ── Keyboard navigation ──
 document.addEventListener("keydown", (e) => {
@@ -38,6 +63,7 @@ if (isMock) {
   mock.start();
 } else {
   console.log(`[Diversity] Connecting to ${wsUrl}`);
+  void loadSwarmConfig(getApiUrl());
   const ws = new SwarmWebSocket(wsUrl);
   ws.onMessage(handleMessage);
   ws.connect();
