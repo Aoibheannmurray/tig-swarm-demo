@@ -8,6 +8,7 @@ endpoint (Together, Groq, DeepSeek, Ollama, etc.).
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -51,20 +52,30 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> str:
     return data["content"][0]["text"]
 
 
+def _is_o_series(model: str) -> bool:
+    return bool(re.match(r"^o\d", model, re.IGNORECASE))
+
+
 def call_openai(
     system: str, prompt: str, model: str, api_key: str,
     api_base: str | None = None,
 ) -> str:
     base = (api_base or "https://api.openai.com").rstrip("/")
+    o_series = _is_o_series(model)
+    token_param = "max_completion_tokens" if o_series else "max_tokens"
+    messages = (
+        [{"role": "developer", "content": system},
+         {"role": "user", "content": prompt}]
+        if o_series else
+        [{"role": "system", "content": system},
+         {"role": "user", "content": prompt}]
+    )
     data = _post_json(
         f"{base}/v1/chat/completions",
         {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": _MAX_TOKENS,
+            "messages": messages,
+            token_param: _MAX_TOKENS,
         },
         {
             "Content-Type": "application/json",
