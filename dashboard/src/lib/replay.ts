@@ -55,7 +55,7 @@ export async function startReplay(
     stepEl.textContent = `${i + 1} / ${history.length}`;
     scoreEl.textContent = `Score: ${formatScore(entry.score)}`;
 
-    if (entry.route_data) {
+    if (entry.solution_data) {
       const prevScore = i > 0 ? history[i - 1].score : null;
       const incremental =
         prevScore != null && prevScore > 0
@@ -70,7 +70,7 @@ export async function startReplay(
         improvement_pct: firstScore > 0 ? ((firstScore - entry.score) / firstScore) * 100 : 0,
         incremental_improvement_pct: incremental,
         num_instances: numInstances,
-        route_data: entry.route_data,
+        solution_data: entry.solution_data,
         timestamp: entry.created_at,
       });
     }

@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS agent_bests (
     feasible INTEGER NOT NULL DEFAULT 1,
     num_vehicles INTEGER DEFAULT 0,
     total_distance REAL DEFAULT 0.0,
-    route_data TEXT,
+    solution_data TEXT,
     updated_at TEXT NOT NULL,
     trajectory_id TEXT,
     PRIMARY KEY (agent_id, challenge),
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     total_distance REAL DEFAULT 0.0,
     runtime_seconds REAL DEFAULT 0.0,
     notes TEXT DEFAULT '',
-    route_data TEXT,
+    solution_data TEXT,
     delta_vs_best_pct REAL,
     delta_vs_own_best_pct REAL,
     beats_own_best INTEGER DEFAULT 0,
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS best_history (
     agent_id TEXT,
     agent_name TEXT NOT NULL,
     score REAL NOT NULL,
-    route_data TEXT,
+    solution_data TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -226,6 +226,21 @@ async def init_db() -> None:
             await db.commit()
         except Exception:
             pass
+        # Rename route_data → solution_data on every table that holds the
+        # per-iteration visualization payload. RENAME COLUMN fails when the
+        # column has already been renamed (or the table was created fresh
+        # under the new name), which is expected on every subsequent boot.
+        for stmt in (
+            "ALTER TABLE experiments RENAME COLUMN route_data TO solution_data",
+            "ALTER TABLE agent_bests RENAME COLUMN route_data TO solution_data",
+            "ALTER TABLE best_history RENAME COLUMN route_data TO solution_data",
+        ):
+            try:
+                await db.execute(stmt)
+                await db.commit()
+            except Exception:
+                pass
+
         for stmt in (
             "ALTER TABLE agents ADD COLUMN runs_since_improvement INTEGER DEFAULT 0",
             "ALTER TABLE agents ADD COLUMN improvements INTEGER DEFAULT 0",
@@ -355,7 +370,7 @@ async def init_db() -> None:
                     feasible INTEGER NOT NULL DEFAULT 1,
                     num_vehicles INTEGER DEFAULT 0,
                     total_distance REAL DEFAULT 0.0,
-                    route_data TEXT,
+                    solution_data TEXT,
                     updated_at TEXT NOT NULL,
                     trajectory_id TEXT,
                     PRIMARY KEY (agent_id, challenge),
@@ -365,10 +380,10 @@ async def init_db() -> None:
             await db.execute(
                 """INSERT INTO agent_bests
                      (agent_id, challenge, experiment_id, algorithm_code, score,
-                      feasible, num_vehicles, total_distance, route_data,
+                      feasible, num_vehicles, total_distance, solution_data,
                       updated_at, trajectory_id)
                    SELECT agent_id, challenge, experiment_id, algorithm_code, score,
-                          feasible, num_vehicles, total_distance, route_data,
+                          feasible, num_vehicles, total_distance, solution_data,
                           updated_at, trajectory_id
                    FROM agent_bests_old"""
             )
@@ -403,9 +418,9 @@ async def init_db() -> None:
         await db.execute(
             f"""INSERT INTO agent_bests
                (agent_id, challenge, experiment_id, algorithm_code, score, feasible,
-                num_vehicles, total_distance, route_data, updated_at)
+                num_vehicles, total_distance, solution_data, updated_at)
                SELECT agent_id, challenge, id, algorithm_code, score, 1,
-                      num_vehicles, total_distance, route_data, created_at
+                      num_vehicles, total_distance, solution_data, created_at
                FROM (
                    SELECT e.*,
                           ROW_NUMBER() OVER (
@@ -484,7 +499,7 @@ async def get_global_best(
     order = _direction_order(direction)
     cursor = await conn.execute(
         f"SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
-        f"       score, feasible, num_vehicles, total_distance, route_data, track_scores, updated_at "
+        f"       score, feasible, num_vehicles, total_distance, solution_data, track_scores, updated_at "
         f"FROM agent_bests WHERE feasible = 1 AND challenge = ? "
         f"ORDER BY score {order} LIMIT 1",
         (challenge,),
@@ -498,7 +513,7 @@ async def get_agent_best(
 ) -> dict | None:
     cursor = await conn.execute(
         "SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
-        "       score, feasible, num_vehicles, total_distance, route_data, track_scores, updated_at "
+        "       score, feasible, num_vehicles, total_distance, solution_data, track_scores, updated_at "
         "FROM agent_bests WHERE agent_id = ? AND challenge = ?",
         (agent_id, challenge),
     )
@@ -516,7 +531,7 @@ async def upsert_agent_best(
     feasible: bool,
     num_vehicles: int,
     total_distance: float,
-    route_data: str | None,
+    solution_data: str | None,
     updated_at: str,
     trajectory_id: str | None = None,
     track_scores: str | None = None,
@@ -524,7 +539,7 @@ async def upsert_agent_best(
     await conn.execute(
         """INSERT INTO agent_bests
            (agent_id, challenge, experiment_id, algorithm_code, score, feasible,
-            num_vehicles, total_distance, route_data, track_scores, updated_at, trajectory_id)
+            num_vehicles, total_distance, solution_data, track_scores, updated_at, trajectory_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
@@ -533,13 +548,13 @@ async def upsert_agent_best(
              feasible = excluded.feasible,
              num_vehicles = excluded.num_vehicles,
              total_distance = excluded.total_distance,
-             route_data = excluded.route_data,
+             solution_data = excluded.solution_data,
              track_scores = excluded.track_scores,
              updated_at = excluded.updated_at,
              trajectory_id = excluded.trajectory_id""",
         (agent_id, challenge, experiment_id, algorithm_code, score,
          1 if feasible else 0, num_vehicles, total_distance,
-         route_data, track_scores, updated_at, trajectory_id),
+         solution_data, track_scores, updated_at, trajectory_id),
     )
 
 
@@ -575,7 +590,7 @@ async def list_agent_bests(
     query = (
         "SELECT ab.agent_id, ab.challenge, ab.experiment_id as id, ab.experiment_id, "
         "       ab.algorithm_code, ab.score, ab.feasible, ab.num_vehicles, "
-        "       ab.total_distance, ab.route_data, ab.updated_at "
+        "       ab.total_distance, ab.solution_data, ab.updated_at "
         f"FROM agent_bests ab{join_clause} WHERE " + " AND ".join(where) +
         f" ORDER BY ab.score {order}"
     )

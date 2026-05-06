@@ -20,7 +20,7 @@ interface HistoryEntry {
   agent_name: string;
   agent_id?: string;
   score: number;
-  route_data: AllSatData;
+  solution_data: AllSatData;
   created_at: string;
 }
 
@@ -166,13 +166,13 @@ export class SatPanel implements Panel {
       if (!res.ok) return;
       const rows: any[] = await res.json();
       const fetched: HistoryEntry[] = rows
-        .filter((r) => r && r.route_data)
+        .filter((r) => r && r.solution_data)
         .map((r) => ({
           experiment_id: r.experiment_id,
           agent_name: r.agent_name,
           agent_id: r.agent_id,
           score: r.score,
-          route_data: r.route_data as AllSatData,
+          solution_data: r.solution_data as AllSatData,
           created_at: r.created_at,
         }));
       const existingIds = new Set(this.historyEntries.map((e) => e.experiment_id));
@@ -205,7 +205,7 @@ export class SatPanel implements Panel {
     if (!entry) return;
 
     this.rawScore = entry.score;
-    this.allInstances = entry.route_data;
+    this.allInstances = entry.solution_data;
 
     this.agentNameEl.textContent = entry.agent_name;
     this.agentNameEl.style.color = entry.agent_id ? getAgentColor(entry.agent_id) : "";
@@ -293,13 +293,13 @@ export class SatPanel implements Panel {
       }
     }
 
-    if (msg.type === "new_global_best" && msg.route_data) {
+    if (msg.type === "new_global_best" && msg.solution_data) {
       const entry: HistoryEntry = {
         experiment_id: msg.experiment_id,
         agent_name: msg.agent_name,
         agent_id: msg.agent_id,
         score: msg.score,
-        route_data: msg.route_data as unknown as AllSatData,
+        solution_data: msg.solution_data as unknown as AllSatData,
         created_at: msg.timestamp,
       };
       const existingIdx = this.historyEntries.findIndex(

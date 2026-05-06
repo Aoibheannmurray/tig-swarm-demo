@@ -27,9 +27,9 @@ if SERVER.startswith("$"):
 # Strip trailing slashes — Railway's proxy turns POSTs to URLs with stacked
 # slashes (e.g. `…railway.app///api/iterations`) into a redirect that drops
 # the body / converts to GET, which surfaces as "Connection reset by peer"
-# on large route_data payloads and HTTP 405 on small ones. The trailing
+# on large solution_data payloads and HTTP 405 on small ones. The trailing
 # slash sneaks in through the wizard's URL substitution; normalise here so
-# route_data actually lands on the server.
+# solution_data actually lands on the server.
 SERVER = SERVER.rstrip("/")
 ROOT = Path(__file__).parent.parent
 
@@ -80,7 +80,7 @@ def main():
         "num_vehicles": bench.get("num_vehicles", 0),
         "total_distance": bench.get("total_distance", bench["score"]),
         "notes": notes,
-        "route_data": bench.get("viz_data") or bench.get("route_data"),
+        "solution_data": bench.get("viz_data"),
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
     }

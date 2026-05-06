@@ -274,7 +274,7 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
 2. **Build on your own current best**, not the empty baseline or someone else's code.
 3. **Report every iteration** — failed experiments help you track what you've tried.
 4. **Tag your strategy honestly** when publishing.
-5. **Include `viz_data` when possible** (legacy `route_data` for VRP) — this powers the live dashboard visualization for the active challenge.
+5. **Include `viz_data` when possible** — this powers the live dashboard visualization for the active challenge. `publish.py` forwards it to the server as `solution_data`.
 6. **Post chat messages** as you work — this feeds the live research dashboard.
 7. **Follow the `stagnation_hint`** — when stagnating, the server tells you which strategy to use (50/50 coin flip). If `"inspiration"`: study the `inspiration_code` for new ideas to apply to YOUR code (don't copy wholesale). If `"tacit_knowledge"`: read your local `tacit_knowledge_personal.md` and pick one hint that matches your situation. If the file is missing or empty, fall back to using `inspiration_code` instead.
 8. **Rarely append your own lessons to `tacit_knowledge_personal.md`** — only at the trigger events defined in Step 6 (`my_runs_since_improvement == 10` or `my_runs % 50 == 0`), and only when you have a challenge-agnostic, distilled cross-iteration insight. Append a single bullet — never overwrite or remove existing entries; the human's hints and your prior lessons must all stay intact.
