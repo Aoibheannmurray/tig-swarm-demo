@@ -90,6 +90,12 @@ GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app//"
 if SERVER.startswith("$"):
     SERVER = ""  # offline mode — read from swarm.config.json instead
+# Strip trailing slashes — Railway's proxy turns POSTs to URLs with stacked
+# slashes (e.g. `…railway.app///api/iterations`) into a 301 that drops the
+# body / converts to GET, which surfaces as "Connection reset by peer" on
+# large payloads and HTTP 405 on small ones. Belt-and-braces against the
+# wizard or env var supplying a slashed URL.
+SERVER = SERVER.rstrip("/")
 
 
 # ── Config loading ──────────────────────────────────────────────────

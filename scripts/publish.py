@@ -24,6 +24,13 @@ if SERVER.startswith("$"):
         "publish.py: server URL not configured. Run "
         "`python setup.py join <swarm-url>` (or set TIG_SWARM_SERVER)."
     )
+# Strip trailing slashes — Railway's proxy turns POSTs to URLs with stacked
+# slashes (e.g. `…railway.app///api/iterations`) into a redirect that drops
+# the body / converts to GET, which surfaces as "Connection reset by peer"
+# on large route_data payloads and HTTP 405 on small ones. The trailing
+# slash sneaks in through the wizard's URL substitution; normalise here so
+# route_data actually lands on the server.
+SERVER = SERVER.rstrip("/")
 ROOT = Path(__file__).parent.parent
 
 
