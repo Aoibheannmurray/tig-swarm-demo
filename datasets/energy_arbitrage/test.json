@@ -1,8 +1,8 @@
 {
-    "seed": "test",
-    "s=BASELINE": 3,
-    "s=CONGESTED": 3,
-    "s=MULTIDAY": 3,
-    "s=DENSE": 2,
-    "s=CAPSTONE": 2
+  "seed": "test",
+  "s=BASELINE": 2,
+  "s=CONGESTED": 2,
+  "s=MULTIDAY": 2,
+  "s=DENSE": 2,
+  "s=CAPSTONE": 2
 }
