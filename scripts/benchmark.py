@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
-Reads swarm-wide config from `https://t1-production-0047.up.railway.app/api/swarm_config` (or from
+Reads swarm-wide config from `https://t1-production-0047.up.railway.app///api/swarm_config` (or from
 `./swarm.config.json` as a fallback for offline use) to pick the challenge,
 the per-track instance counts, and the per-instance solver timeout. Builds
 the right cargo binary, generates instances on first run (cached under
@@ -87,7 +87,7 @@ GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 
 # Wizard-baked URL with env-var override; mirrors scripts/publish.py so the
 # two stay in lockstep when the wizard re-runs.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app"
+SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app//"
 if SERVER.startswith("$"):
     SERVER = ""  # offline mode — read from swarm.config.json instead
 

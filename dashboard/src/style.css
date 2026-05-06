@@ -222,25 +222,38 @@ html, body {
   gap: 24px;
 }
 
-/* Per-track breakdown of the swarm's global best, rendered as inline chips
- * in the stats bar. Hidden until the first global best lands. */
+/* Per-track breakdown of the swarm's global best, rendered as a popover
+ * above the SCORE in the solution panel. Hidden until the user clicks
+ * the score (toggles `.routes-score--expanded` on the parent). */
 .track-breakdown {
   display: none;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
-  padding: 0 14px 0 0;
-  border-right: 1px solid var(--border-subtle);
-  margin-right: 4px;
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  min-width: 200px;
+  max-width: 320px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  z-index: 10;
 }
-.track-breakdown.is-visible {
+.routes-score--expanded .track-breakdown {
   display: flex;
 }
 .track-breakdown-label {
+  width: 100%;
+  text-align: right;
   font-size: 9px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--text-dim);
-  margin-right: 4px;
+  margin-bottom: 2px;
 }
 .track-chip {
   display: inline-flex;
