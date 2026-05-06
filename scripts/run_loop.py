@@ -204,9 +204,12 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
 The code must compile as valid Rust.
 
-The algorithm contains marker comments `// --- BEGIN EDITABLE REGION --- //` and \
-`// --- END EDITABLE REGION --- //`. Only modify code between these markers. \
-Return the complete file with the markers and all code outside them unchanged.
+Rules:
+- Do NOT change the `solve_challenge` function signature.
+- `use super::*;` must remain as the first import.
+- You may add, remove, or change any `use` statements, helper functions, \
+structs, or code within `solve_challenge`.
+- Return the complete file.
 
 No explanation, no markdown fences — just the complete Rust source file."""
 
@@ -266,27 +269,14 @@ def parse_code(text: str) -> str:
     return text.strip()
 
 
-EDIT_MARKER_START = "// --- BEGIN EDITABLE REGION --- //"
-EDIT_MARKER_END = "// --- END EDITABLE REGION --- //"
+def validate_code(original: str, modified: str) -> str | None:
+    """Basic sanity check on LLM-generated code.
 
-
-def validate_fixed_regions(original: str, modified: str) -> str | None:
-    """Check that code outside the editable markers is unchanged.
-
-    Returns None if valid, or an error description if the fixed regions
-    were modified or markers are missing."""
-    if EDIT_MARKER_START not in modified or EDIT_MARKER_END not in modified:
-        return "Editable region markers are missing from the output."
-
-    orig_before = original.split(EDIT_MARKER_START, 1)[0]
-    mod_before = modified.split(EDIT_MARKER_START, 1)[0]
-    orig_after = original.split(EDIT_MARKER_END, 1)[-1]
-    mod_after = modified.split(EDIT_MARKER_END, 1)[-1]
-
-    if orig_before.strip() != mod_before.strip():
-        return "Code before the BEGIN EDITABLE REGION marker was modified."
-    if orig_after.strip() != mod_after.strip():
-        return "Code after the END EDITABLE REGION marker was modified."
+    Returns None if valid, or an error description."""
+    if "use super::*;" not in modified:
+        return "`use super::*;` is missing — it must remain as the first import."
+    if "fn solve_challenge(" not in modified:
+        return "`fn solve_challenge(` not found — the function signature must not change."
     return None
 
 
@@ -473,7 +463,7 @@ def main() -> int:
         title = hypothesis.get("title", "?")
         print(f"  Hypothesis: [{tag}] {title}")
 
-        # ── Step 3b: LLM code (with retry on marker violation) ─
+        # ── Step 3b: LLM code (with retry on validation failure) ─
         original_code = best_code
         code = None
         max_code_attempts = 3
@@ -486,7 +476,7 @@ def main() -> int:
                 user_prompt = (
                     build_code_user_prompt(state, hypothesis)
                     + f"\n\nYour previous response was rejected: {violation}\n"
-                    "Return the complete file with ONLY the editable region changed."
+                    "Fix the issue and return the complete Rust source file."
                 )
             try:
                 code_response = call_llm(
@@ -507,10 +497,9 @@ def main() -> int:
                 print("  Empty code response — skipping iteration")
                 break
 
-            if original_code:
-                violation = validate_fixed_regions(original_code, parsed)
-                if violation:
-                    continue
+            violation = validate_code(original_code, parsed)
+            if violation:
+                continue
             code = parsed
             break
 

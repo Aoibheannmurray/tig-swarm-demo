@@ -1,5 +1,4 @@
 use super::*;
-// --- BEGIN EDITABLE REGION --- //
 use anyhow::Result;
 use serde_json::{Map, Value};
 use std::time::{Duration, Instant};
@@ -607,4 +606,3 @@ fn route_feasible(
     }
     true
 }
-// --- END EDITABLE REGION --- //

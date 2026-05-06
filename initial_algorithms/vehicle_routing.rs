@@ -14,7 +14,6 @@
 // See CHALLENGE.md for the type shapes, scoring rules, and tips.
 
 use super::*;
-// --- BEGIN EDITABLE REGION --- //
 use anyhow::Result;
 use serde_json::{Map, Value};
 
@@ -25,4 +24,3 @@ pub fn solve_challenge(
 ) -> Result<()> {
     unimplemented!("initial vehicle_routing algorithm not yet implemented for this swarm");
 }
-// --- END EDITABLE REGION --- //

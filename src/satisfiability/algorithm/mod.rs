@@ -1,5 +1,4 @@
 use super::*;
-// --- BEGIN EDITABLE REGION --- //
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -531,4 +530,3 @@ pub fn solve_challenge(
 
     Ok(())
 }
-// --- END EDITABLE REGION --- //

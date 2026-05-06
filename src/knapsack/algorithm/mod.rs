@@ -1,5 +1,4 @@
 use super::*;
-// --- BEGIN EDITABLE REGION --- //
 use anyhow::Result;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use serde_json::{Map, Value};
@@ -313,4 +312,3 @@ fn compute_total_value(challenge: &Challenge, selected: &[usize]) -> u32 {
         total.min(u32::MAX as i64) as u32
     }
 }
-// --- END EDITABLE REGION --- //
