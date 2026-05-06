@@ -175,30 +175,32 @@ function handleMessage(msg: WSMessage) {
 async function loadInitialState(apiUrl: string, challenge: string) {
   try {
     const q = `?challenge=${encodeURIComponent(challenge)}`;
-    const [stateRes, replayRes] = await Promise.all([
-      fetch(`${apiUrl}/api/state${q}`),
-      fetch(`${apiUrl}/api/replay${q}`),
-    ]);
+    // Two independent fetches:
+    //  - /api/state is small (≤ 350 KB) and unblocks the visualization +
+    //    stats panels via a synthesized new_global_best.
+    //  - /api/replay is large (up to ~1 MB on heavily-worked challenges)
+    //    and only feeds the chart's score-history line. We use
+    //    `compact=1` to omit each row's solution_data field — the chart
+    //    only needs score/agent/timestamp.
+    // Run them in parallel but DO NOT block dispatch on the replay; the
+    // chart hydrates after state without making the user wait.
+    const stateRes = await fetch(`${apiUrl}/api/state${q}`);
     if (!stateRes.ok) return;
     const state = await stateRes.json();
-    const replay: Array<{
+    const hypothesisCount =
+      state.hypotheses_count ?? (state.recent_hypotheses?.length || 0);
+
+    // Kick off the replay fetch in parallel; we'll seed the chart when
+    // it lands. Other panels don't depend on it.
+    const replayPromise: Promise<Array<{
       experiment_id: string;
       agent_name: string;
       agent_id?: string;
       score: number;
       created_at: string;
-    }> = replayRes.ok ? await replayRes.json() : [];
-    const hypothesisCount =
-      state.hypotheses_count ?? (state.recent_hypotheses?.length || 0);
-
-    chartPanel.seedHistory(replay);
-
-    const incrementalPct =
-      replay.length >= 2
-        ? ((replay[replay.length - 2].score - replay[replay.length - 1].score) /
-            replay[replay.length - 2].score) *
-          100
-        : null;
+    }>> = fetch(`${apiUrl}/api/replay${q}&compact=1`)
+      .then((r) => (r.ok ? r.json() : []))
+      .catch(() => []);
 
     handleMessage({
       type: "stats_update",
@@ -221,14 +223,17 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       state.best_score != null &&
       (state.best_solution_data || state.best_track_scores)
     ) {
+      // Use what we know from /api/state for agent name/id; the replay
+      // result (if it lands) doesn't change this.
+      const recentBest = (state.recent_experiments || []).find((e: any) => e.is_new_best);
       handleMessage({
         type: "new_global_best",
         experiment_id: state.best_experiment_id || "",
-        agent_name: replay[replay.length - 1]?.agent_name || "swarm",
-        agent_id: replay[replay.length - 1]?.agent_id || "",
+        agent_name: recentBest?.agent_name || "swarm",
+        agent_id: recentBest?.agent_id || "",
         score: state.best_score,
         improvement_pct: state.improvement_pct || 0,
-        incremental_improvement_pct: incrementalPct,
+        incremental_improvement_pct: null,
         num_instances: state.num_instances || 1,
         solution_data: state.best_solution_data,
         track_scores: state.best_track_scores ?? null,
@@ -308,6 +313,12 @@ async function loadInitialState(apiUrl: string, challenge: string) {
 
     soundEnabled = true;
     console.log("[Dashboard] Loaded initial state for challenge:", challenge);
+
+    // Seed the chart's score-history line when the (compact) replay
+    // lands. Doesn't block visualization or stats panels above.
+    replayPromise.then((replay) => {
+      if (replay && replay.length) chartPanel.seedHistory(replay);
+    });
   } catch (e) {
     console.warn("[Dashboard] Failed to load initial state:", e);
   }

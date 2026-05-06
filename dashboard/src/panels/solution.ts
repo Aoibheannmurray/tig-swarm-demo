@@ -67,6 +67,7 @@ export class SolutionPanel implements Panel {
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
   private emptyStateEl!: HTMLElement;
+  private historyLoaded = false;
 
   private allInstances: AllRouteData = {};
   private currentIndex = 0;
@@ -246,10 +247,13 @@ export class SolutionPanel implements Panel {
         this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
       }
+      this.historyLoaded = true;
       this.updateHistoryLabel();
       this.updateEmptyState();
     } catch {
       // network/transport errors are non-fatal — panel works without history
+      this.historyLoaded = true;
+      this.updateEmptyState();
     }
   }
 
@@ -323,8 +327,12 @@ export class SolutionPanel implements Panel {
 
   private updateEmptyState() {
     if (!this.emptyStateEl) return;
-    const hasData = this.historyEntries.length > 0;
-    this.emptyStateEl.style.display = hasData ? "none" : "flex";
+    // Hide while we're still fetching the initial replay so the
+    // user doesn't see "Challenge not started yet" flash for a few
+    // seconds during the in-flight load. Only show the overlay
+    // once we've definitively confirmed the channel has no data.
+    const showEmpty = this.historyLoaded && this.historyEntries.length === 0;
+    this.emptyStateEl.style.display = showEmpty ? "flex" : "none";
   }
 
   // Compute a square viewBox that tightly bounds *all* instances' data with a
@@ -426,6 +434,7 @@ export class SolutionPanel implements Panel {
     }
 
     if (msg.type === "new_global_best" && msg.solution_data) {
+      this.historyLoaded = true;
       if (msg.num_instances) this.numInstances = msg.num_instances;
 
       const entry: HistoryEntry = {

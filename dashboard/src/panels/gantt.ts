@@ -59,6 +59,7 @@ export class GanttPanel implements Panel {
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
   private emptyStateEl!: HTMLElement;
+  private historyLoaded = false;
 
   private allInstances: AllGanttData = {};
   private currentIndex = 0;
@@ -179,7 +180,7 @@ export class GanttPanel implements Panel {
 
   private async fetchHistory() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/replay`);
+      const res = await fetch(`${this.apiUrl}/api/replay?challenge=job_scheduling`);
       if (!res.ok) return;
       const rows: any[] = await res.json();
       const fetched: HistoryEntry[] = rows
@@ -203,10 +204,13 @@ export class GanttPanel implements Panel {
         this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
       }
+      this.historyLoaded = true;
       this.updateHistoryLabel();
       this.updateEmptyState();
     } catch {
       // non-fatal
+      this.historyLoaded = true;
+      this.updateEmptyState();
     }
   }
 
@@ -269,7 +273,12 @@ export class GanttPanel implements Panel {
 
   private updateEmptyState() {
     if (!this.emptyStateEl) return;
-    this.emptyStateEl.style.display = this.historyEntries.length > 0 ? "none" : "flex";
+    // Hide while we're still fetching the initial replay so the
+    // user doesn't see "Challenge not started yet" flash for a few
+    // seconds during the in-flight load. Only show the overlay
+    // once we've definitively confirmed the channel has no data.
+    const showEmpty = this.historyLoaded && this.historyEntries.length === 0;
+    this.emptyStateEl.style.display = showEmpty ? "flex" : "none";
   }
 
   private navigate(delta: number) {
@@ -323,6 +332,7 @@ export class GanttPanel implements Panel {
     }
 
     if (msg.type === "new_global_best" && msg.solution_data) {
+      this.historyLoaded = true;
       if (msg.num_instances) this.numInstances = msg.num_instances;
 
       const entry: HistoryEntry = {
