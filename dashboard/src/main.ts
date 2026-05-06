@@ -112,6 +112,11 @@ const CHALLENGE_SCOPED: Record<string, true> = {
   chat_message: true,
   trajectory_reset: true,
   hypothesis_status_changed: true,
+  // /api/admin/reset_challenge broadcasts `{type:"reset", challenge:"…"}`.
+  // Without this entry, a reset on knapsack would clear panels viewing
+  // job_scheduling. The filter below drops any scoped event whose
+  // `challenge` field doesn't match the viewed challenge.
+  reset: true,
 };
 
 function handleMessage(msg: WSMessage) {
@@ -154,6 +159,14 @@ function handleMessage(msg: WSMessage) {
   handleSwarmConfigEvent(getApiUrl(), msg);
 
   panels.forEach((panel) => panel.handleMessage(msg));
+
+  // Per-challenge admin reset: panels have already cleared their state
+  // above. Re-hydrate from /api/state + /api/replay so counters and
+  // baselines are correct without requiring a full page reload. Without
+  // this, panels sit blank until the next live event arrives.
+  if (msg.type === "reset" && (msg as any).challenge === getViewedChallenge()) {
+    void loadInitialState(getApiUrl(), getViewedChallenge());
+  }
 }
 
 // ── Fetch initial state from REST API ──

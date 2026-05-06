@@ -12,7 +12,8 @@ from pathlib import Path
 
 from models import (
     RegisterRequest, HeartbeatRequest, HypothesisCreate, ExperimentCreate,
-    IterationCreate, AdminBroadcast, AdminAuth, MessageCreate,
+    IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
+    MessageCreate,
     SwarmConfigUpdate,
     AgentResponse, HypothesisResponse,
     ExperimentResponse, IterationResponse, new_id, improvement_pct,
@@ -1528,6 +1529,44 @@ async def admin_broadcast(req: AdminBroadcast):
 #         await conn.commit()
 #     await manager.broadcast({"type": "reset", "timestamp": now()})
 #     return {"reset": True}
+
+
+@app.post("/api/admin/reset_challenge")
+async def admin_reset_challenge(req: AdminResetChallenge):
+    """Per-challenge leaderboard reset. Drops `agent_bests` + `best_history`
+    for the named challenge so the next feasible publish becomes the new
+    global best. Preserves `experiments`, `hypotheses`, and `trajectories`
+    so the swarm's research history isn't erased.
+
+    Use case: a wire-format change (e.g. the route_data → solution_data
+    rename + trailing-slash fix) leaves all prior best_history rows with
+    NULL solution_data, so the dashboard's gantt / route panels render
+    blank. Resetting the leaderboard lets fresh publishes — which now
+    carry solution_data correctly — repopulate the visualisation.
+    """
+    await verify_admin(req)
+    challenge = req.challenge
+    async with db.connect() as conn:
+        cur = await conn.execute(
+            "DELETE FROM best_history WHERE challenge = ?", (challenge,),
+        )
+        best_history_deleted = cur.rowcount
+        cur = await conn.execute(
+            "DELETE FROM agent_bests WHERE challenge = ?", (challenge,),
+        )
+        agent_bests_deleted = cur.rowcount
+        await conn.commit()
+    await manager.broadcast({
+        "type": "reset",
+        "challenge": challenge,
+        "timestamp": now(),
+    })
+    return {
+        "reset": True,
+        "challenge": challenge,
+        "best_history_deleted": best_history_deleted,
+        "agent_bests_deleted": agent_bests_deleted,
+    }
 
 
 @app.post("/api/admin/config")
