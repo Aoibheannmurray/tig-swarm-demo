@@ -1,5 +1,6 @@
 import type { Panel, WSMessage } from "../types";
 import { getAgentColor } from "../lib/colors";
+import { formatScore } from "../lib/format";
 import { getViewedChallenge } from "../lib/viewedChallenge";
 
 interface TopEntry {
@@ -170,7 +171,7 @@ export class StrategyLeaderboardPanel implements Panel {
 
       row.innerHTML = `
         <span class="sl-rank">${i + 1}</span>
-        <span class="sl-score">${entry.score.toFixed(1)}</span>
+        <span class="sl-score">${formatScore(entry.score)}</span>
         <span class="sl-tag-col">
           <span class="sl-tag" style="color:${tagColor};border-color:${tagColor}">${this.escape(tag)}</span>
         </span>

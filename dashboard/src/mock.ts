@@ -205,7 +205,7 @@ export class MockDataGenerator {
               ? Number((((prevBestForBroadcast - score) / prevBestForBroadcast) * 100).toFixed(2))
               : null,
           num_instances: 8,
-          route_data: generateMockRoutes(),
+          solution_data: generateMockRoutes(),
           timestamp: this.now(),
         });
       }

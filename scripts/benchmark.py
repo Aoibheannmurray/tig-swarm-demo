@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
-Reads swarm-wide config from `https://t1-production-0047.up.railway.app/api/swarm_config` (or from
+Reads swarm-wide config from `https://t1-production-0047.up.railway.app///api/swarm_config` (or from
 `./swarm.config.json` as a fallback for offline use) to pick the challenge,
 the per-track instance counts, and the per-instance solver timeout. Builds
 the right cargo binary, generates instances on first run (cached under
@@ -45,10 +45,9 @@ Output JSON shape:
       "instances_infeasible": 0,
       "track_scores": {"track_key": <mean quality>, ...},
       "viz_data": { ... per-challenge or null ... },
-      # VRP-only legacy fields, present only when the challenge is VRP:
+      # VRP-only roll-ups, only meaningful when the challenge is VRP:
       "num_vehicles": 96,
       "total_distance": 12345.6,
-      "route_data": { ... }
     }
 """
 
@@ -87,9 +86,15 @@ GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 
 # Wizard-baked URL with env-var override; mirrors scripts/publish.py so the
 # two stay in lockstep when the wizard re-runs.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app"
+SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app//"
 if SERVER.startswith("$"):
     SERVER = ""  # offline mode — read from swarm.config.json instead
+# Strip trailing slashes — Railway's proxy turns POSTs to URLs with stacked
+# slashes (e.g. `…railway.app///api/iterations`) into a 301 that drops the
+# body / converts to GET, which surfaces as "Connection reset by peer" on
+# large payloads and HTTP 405 on small ones. Belt-and-braces against the
+# wizard or env var supplying a slashed URL.
+SERVER = SERVER.rstrip("/")
 
 
 # ── Config loading ──────────────────────────────────────────────────
@@ -717,18 +722,18 @@ _PER_INSTANCE_EXTRAS = {
     "satisfia" "bility":   _sat_extras,
 }
 
-# Each entry is (per_result_field, route_alias_or_None). The aggregate
-# block reads `r[per_result_field]` from each per-instance result and
-# stores `{instance: payload}` as the run's `viz_data`. The second tuple
-# element, when non-None, also stamps that payload into the legacy
-# `route_data` field (only VRP, for backwards compatibility with the
-# original dashboard route panel).
+# Maps each challenge to the per-instance result field that holds its
+# visualisation payload. The aggregate block reads `r[per_result_field]`
+# from each per-instance result and stores `{instance: payload}` as the
+# run's `viz_data`, which publish.py forwards to the server as
+# `solution_data` (the universal wire field — no longer aliased to
+# `route_data`, which only made sense for VRP).
 _AGG_EXTRAS = {
-    "vehicle" "_routing":  ("route_data", "route_data"),
-    "job" "_scheduling":   ("gantt_data", None),
-    "knap" "sack":         ("job_scheduling_data", None),
-    "energy" "_arbitrage": ("energy_data", None),
-    "satisfia" "bility":   ("sat_data", None),
+    "vehicle" "_routing":  "route_data",
+    "job" "_scheduling":   "gantt_data",
+    "knap" "sack":         "job_scheduling_data",
+    "energy" "_arbitrage": "energy_data",
+    "satisfia" "bility":   "sat_data",
 }
 
 
@@ -835,22 +840,22 @@ def main() -> int:
     # Per-challenge viz_data aggregation. Driven by `_AGG_EXTRAS` so a
     # tooling pass that rewrites quoted challenge names in `==` chains
     # can't disable a branch unintentionally.
-    agg_spec = _AGG_EXTRAS.get(challenge)
+    per_field = _AGG_EXTRAS.get(challenge)
     out["num_vehicles"] = 0
     out["total_distance"] = out["score"]
-    if agg_spec is None:
+    if per_field is None:
         out["viz_data"] = None
     else:
-        per_field, route_alias = agg_spec
         viz = {
             r["instance"]: r[per_field]
             for r in results
             if r.get(per_field)
         } or None
         out["viz_data"] = viz
-        if route_alias is not None:
-            # VRP-specific legacy fields for the existing dashboard route panel.
-            out["route_data"] = viz
+        # VRP-only roll-ups for the routes panel's headline numbers. Other
+        # challenges leave num_vehicles=0 / total_distance=score (the
+        # defaults set above).
+        if challenge == "vehicle" "_routing":
             out["num_vehicles"] = sum(
                 r.get("num_vehicles", 0) for r in results if r.get("feasible")
             )

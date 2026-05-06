@@ -331,7 +331,7 @@ def publish_results(
         "num_vehicles": bench.get("num_vehicles", 0),
         "total_distance": bench.get("total_distance", bench["score"]),
         "notes": mutation.get("notes", ""),
-        "route_data": bench.get("viz_data") or bench.get("route_data"),
+        "solution_data": bench.get("viz_data"),
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
     }

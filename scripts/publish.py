@@ -18,12 +18,19 @@ from pathlib import Path
 # rerunning setup. The startswith("$") check catches the un-substituted
 # placeholder so a contributor who forgot to run setup.py join gets a
 # loud failure instead of a silent post to nowhere.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app"
+SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app//"
 if SERVER.startswith("$"):
     sys.exit(
         "publish.py: server URL not configured. Run "
         "`python setup.py join <swarm-url>` (or set TIG_SWARM_SERVER)."
     )
+# Strip trailing slashes — Railway's proxy turns POSTs to URLs with stacked
+# slashes (e.g. `…railway.app///api/iterations`) into a redirect that drops
+# the body / converts to GET, which surfaces as "Connection reset by peer"
+# on large solution_data payloads and HTTP 405 on small ones. The trailing
+# slash sneaks in through the wizard's URL substitution; normalise here so
+# solution_data actually lands on the server.
+SERVER = SERVER.rstrip("/")
 ROOT = Path(__file__).parent.parent
 
 
@@ -73,14 +80,29 @@ def main():
         "num_vehicles": bench.get("num_vehicles", 0),
         "total_distance": bench.get("total_distance", bench["score"]),
         "notes": notes,
-        "route_data": bench.get("viz_data") or bench.get("route_data"),
+        "solution_data": bench.get("viz_data"),
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
     }
 
+    # Pre-POST: surface what we're sending so a silent drop is visible at
+    # publish time (the proxy / size class of bug we hit earlier was
+    # invisible until the dashboard didn't render).
+    sd = payload["solution_data"]
+    body = json.dumps(payload).encode()
+    if sd is None:
+        print("[publish] solution_data: none", file=sys.stderr)
+    else:
+        n_inst = len(sd) if isinstance(sd, dict) else 0
+        print(
+            f"[publish] solution_data: {n_inst} instance(s), "
+            f"payload {len(body) / 1024:.1f} KB",
+            file=sys.stderr,
+        )
+
     req = urllib.request.Request(
         f"{SERVER}/api/iterations",
-        data=json.dumps(payload).encode(),
+        data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -92,8 +114,32 @@ def main():
     except urllib.error.URLError as e:
         sys.exit(f"publish.py: failed to reach server at {SERVER}: {e}")
     except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        sys.exit(f"publish.py: server returned {e.code}: {body}")
+        body_text = e.read().decode(errors="replace")
+        sys.exit(f"publish.py: server returned {e.code}: {body_text}")
+
+    # Post-POST: when this iteration is the new global best AND we sent
+    # solution_data, verify the server actually persisted it. A NULL
+    # `best_solution_data` here means the body was dropped somewhere
+    # between us and the DB (Railway proxy, body limit, schema
+    # mismatch) — exactly the failure mode that previously stayed
+    # invisible until the dashboard came up empty.
+    if sd is not None and result.get("is_new_best"):
+        try:
+            ch = bench.get("challenge") or ""
+            url = f"{SERVER}/api/state?challenge={ch}" if ch else f"{SERVER}/api/state"
+            with urllib.request.urlopen(url, timeout=10) as r:
+                state = json.load(r)
+            if state.get("best_solution_data") is None:
+                print(
+                    "[publish] WARNING: solution_data sent and this is a new "
+                    "global best, but server's best_solution_data is NULL — "
+                    "likely proxy/body-size dropped the field.",
+                    file=sys.stderr,
+                )
+            else:
+                print("[publish] verified: solution_data persisted server-side.", file=sys.stderr)
+        except Exception as e:
+            print(f"[publish] verification GET failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

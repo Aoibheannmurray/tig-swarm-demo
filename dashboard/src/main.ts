@@ -198,7 +198,14 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       timestamp: new Date().toISOString(),
     } as any);
 
-    if (state.best_route_data && state.best_score != null) {
+    // Synthesize a new_global_best so panels (display visualization, stats
+    // hero, track breakdown) hydrate from /api/state on first paint. Fire
+    // when EITHER solution_data OR track_scores are present — track_scores
+    // alone is enough to render the breakdown chips.
+    if (
+      state.best_score != null &&
+      (state.best_solution_data || state.best_track_scores)
+    ) {
       handleMessage({
         type: "new_global_best",
         experiment_id: state.best_experiment_id || "",
@@ -208,7 +215,8 @@ async function loadInitialState(apiUrl: string, challenge: string) {
         improvement_pct: state.improvement_pct || 0,
         incremental_improvement_pct: incrementalPct,
         num_instances: state.num_instances || 1,
-        route_data: state.best_route_data,
+        solution_data: state.best_solution_data,
+        track_scores: state.best_track_scores ?? null,
         timestamp: new Date().toISOString(),
       } as any);
     }

@@ -116,14 +116,14 @@ def _per_challenge_tracks(cfg: dict) -> dict:
         return {}
 
 
-def get_num_instances_for(cfg: dict, route_data=None) -> int:
+def get_num_instances_for(cfg: dict, solution_data=None) -> int:
     """Authoritative count: the actual keys in the current best experiment's
-    route_data (one entry per benchmark instance). The per-challenge `tracks`
+    solution_data (one entry per benchmark instance). The per-challenge `tracks`
     dict is the fallback for the pre-first-experiment moment — sum the
     per-track instance counts (excluding the "seed" key)."""
-    if route_data:
+    if solution_data:
         try:
-            rd = json.loads(route_data) if isinstance(route_data, str) else route_data
+            rd = json.loads(solution_data) if isinstance(solution_data, str) else solution_data
             if rd:
                 return len(rd)
         except Exception:
@@ -273,8 +273,8 @@ async def periodic_stats():
                         (ch,),
                     )
                     total_traj = (await cur.fetchone())["c"]
-                    best_route_data = best["route_data"] if best else None
-                    num_instances = get_num_instances_for(cfg, best_route_data)
+                    best_solution_data = best["solution_data"] if best else None
+                    num_instances = get_num_instances_for(cfg, best_solution_data)
                     best_score = best["score"] if best else None
                     imp = (
                         improvement_pct(baseline, best_score, direction)
@@ -602,8 +602,8 @@ async def get_state(
                         conn, chosen["agent_id"]
                     )
 
-            best_route_data = my_best["route_data"] if my_best else None
-            num_instances = get_num_instances_for(challenge_cfg, best_route_data)
+            best_solution_data = my_best["solution_data"] if my_best else None
+            num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
             leaderboard = await db.compute_leaderboard(
                 conn, challenge, inactive_cutoff(), direction=direction,
             )
@@ -656,8 +656,8 @@ async def get_state(
         recent_hypotheses = [dict(row) for row in await cursor.fetchall()]
 
         served = global_best
-        best_route_data = served["route_data"] if served else None
-        num_instances = get_num_instances_for(challenge_cfg, best_route_data)
+        best_solution_data = served["solution_data"] if served else None
+        num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
         leaderboard = await db.compute_leaderboard(
             conn, challenge, inactive_cutoff(), direction=direction,
         )
@@ -679,7 +679,12 @@ async def get_state(
             else await load_initial_algorithm(challenge)
         ),
         "best_experiment_id": served["id"] if served else None,
-        "best_route_data": json.loads(served["route_data"]) if served and served["route_data"] else None,
+        "best_solution_data": json.loads(served["solution_data"]) if served and served["solution_data"] else None,
+        "best_track_scores": (
+            json.loads(served["track_scores"])
+            if served and served.get("track_scores")
+            else None
+        ),
         "num_instances": num_instances,
         "active_agents": active,
         "total_agents": total_agents,
@@ -728,7 +733,8 @@ async def create_iteration(req: IterationCreate):
     exp_id = new_id()
     hyp_id = new_id()
     timestamp = now()
-    route_data_json = json.dumps(req.route_data) if req.route_data else None
+    solution_data_json = json.dumps(req.solution_data) if req.solution_data else None
+    track_scores_json = json.dumps(req.track_scores) if req.track_scores else None
     fp = fingerprint(req.title, req.strategy_tag)
 
     async with db.connect() as conn:
@@ -801,13 +807,13 @@ async def create_iteration(req: IterationCreate):
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, score, feasible,
-                num_vehicles, total_distance, notes, route_data,
+                num_vehicles, total_distance, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
                 trajectory_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
-             req.notes, route_data_json,
+             req.notes, solution_data_json, track_scores_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
              1 if beats_own_best else 0,
              trajectory_id, timestamp),
@@ -837,8 +843,9 @@ async def create_iteration(req: IterationCreate):
                 experiment_id=exp_id,
                 algorithm_code=req.algorithm_code, score=req.score,
                 feasible=req.feasible, num_vehicles=req.num_vehicles,
-                total_distance=req.total_distance, route_data=route_data_json,
+                total_distance=req.total_distance, solution_data=solution_data_json,
                 updated_at=timestamp, trajectory_id=trajectory_id,
+                track_scores=track_scores_json,
             )
         else:
             await db.increment_agent_challenge_counters(
@@ -853,9 +860,9 @@ async def create_iteration(req: IterationCreate):
         if is_new_best:
             await conn.execute(
                 """INSERT INTO best_history
-                   (experiment_id, agent_id, challenge, agent_name, score, route_data, created_at)
+                   (experiment_id, agent_id, challenge, agent_name, score, solution_data, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (exp_id, req.agent_id, challenge, agent_name, req.score, route_data_json, timestamp),
+                (exp_id, req.agent_id, challenge, agent_name, req.score, solution_data_json, timestamp),
             )
 
         await conn.commit()
@@ -875,10 +882,10 @@ async def create_iteration(req: IterationCreate):
             0,
         )
 
-    effective_route_data = req.route_data or (
-        prev_best["route_data"] if prev_best else None
+    effective_solution_data = req.solution_data or (
+        prev_best["solution_data"] if prev_best else None
     )
-    num_instances = get_num_instances_for(challenge_cfg, effective_route_data)
+    num_instances = get_num_instances_for(challenge_cfg, effective_solution_data)
     imp = improvement_pct(baseline, req.score, direction) if baseline is not None else 0.0
 
     await manager.broadcast({
@@ -899,6 +906,7 @@ async def create_iteration(req: IterationCreate):
         "strategy_tag": req.strategy_tag,
         "title": req.title,
         "notes": req.notes,
+        "track_scores": req.track_scores,
         "timestamp": timestamp,
     })
 
@@ -913,7 +921,8 @@ async def create_iteration(req: IterationCreate):
             "improvement_pct": imp,
             "incremental_improvement_pct": incremental_pct,
             "num_instances": num_instances,
-            "route_data": req.route_data,
+            "solution_data": req.solution_data,
+            "track_scores": req.track_scores,
             "timestamp": timestamp,
         })
 
@@ -1021,7 +1030,7 @@ async def create_experiment(req: ExperimentCreate):
 
     exp_id = new_id()
     timestamp = now()
-    route_data_json = json.dumps(req.route_data) if req.route_data else None
+    solution_data_json = json.dumps(req.solution_data) if req.solution_data else None
 
     async with db.connect() as conn:
         # Take the SQLite write lock up front (BEGIN IMMEDIATE) so the
@@ -1078,13 +1087,13 @@ async def create_experiment(req: ExperimentCreate):
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, score, feasible,
-                num_vehicles, total_distance, runtime_seconds, notes, route_data,
+                num_vehicles, total_distance, runtime_seconds, notes, solution_data,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
                 trajectory_id, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, req.hypothesis_id, req.algorithm_code, req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
-             req.runtime_seconds, req.notes, route_data_json,
+             req.runtime_seconds, req.notes, solution_data_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
              1 if beats_own_best else 0,
              trajectory_id, timestamp),
@@ -1119,7 +1128,7 @@ async def create_experiment(req: ExperimentCreate):
                 feasible=req.feasible,
                 num_vehicles=req.num_vehicles,
                 total_distance=req.total_distance,
-                route_data=route_data_json,
+                solution_data=solution_data_json,
                 updated_at=timestamp,
                 trajectory_id=trajectory_id,
             )
@@ -1135,14 +1144,14 @@ async def create_experiment(req: ExperimentCreate):
 
         if is_new_best:
             await conn.execute(
-                "INSERT INTO best_history (experiment_id, agent_id, challenge, agent_name, score, route_data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (exp_id, req.agent_id, challenge, agent_name, req.score, route_data_json, timestamp),
+                "INSERT INTO best_history (experiment_id, agent_id, challenge, agent_name, score, solution_data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (exp_id, req.agent_id, challenge, agent_name, req.score, solution_data_json, timestamp),
             )
 
-        # Prefer this experiment's own route_data; if it wasn't provided,
+        # Prefer this experiment's own solution_data; if it wasn't provided,
         # fall back to the previous global best's.
-        effective_route_data = req.route_data or (prev_best["route_data"] if prev_best else None)
-        num_instances = get_num_instances_for(challenge_cfg, effective_route_data)
+        effective_solution_data = req.solution_data or (prev_best["solution_data"] if prev_best else None)
+        num_instances = get_num_instances_for(challenge_cfg, effective_solution_data)
 
         hyp_status = None
         if req.hypothesis_id:
@@ -1221,7 +1230,7 @@ async def create_experiment(req: ExperimentCreate):
             "improvement_pct": imp,
             "incremental_improvement_pct": incremental_pct,
             "num_instances": num_instances,
-            "route_data": req.route_data,
+            "solution_data": req.solution_data,
             "timestamp": timestamp,
         })
 
@@ -1364,7 +1373,7 @@ async def get_replay(challenge: str | None = None):
             "agent_id": r.get("agent_id"),
             "agent_name": r["agent_name"],
             "score": r["score"],
-            "route_data": json.loads(r["route_data"]) if r["route_data"] else None,
+            "solution_data": json.loads(r["solution_data"]) if r["solution_data"] else None,
             "created_at": r["created_at"],
         }
         for r in rows

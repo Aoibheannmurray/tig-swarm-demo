@@ -1,5 +1,6 @@
 import * as d3 from "d3";
 import { getAgentColor } from "../lib/colors";
+import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
 import type { Panel, WSMessage } from "../types";
 
@@ -455,7 +456,12 @@ export class ChartPanel implements Panel {
       }
     }
 
-    this.globalData.filter((d) => d.isBreakthrough).forEach((d) => {
+    const breakthroughs = this.globalData
+      .map((d, i) => ({ d, i }))
+      .filter(({ d }) => d.isBreakthrough);
+    const lastIdx = this.globalData.length - 1;
+    let prevAgentKey: string | null = null;
+    breakthroughs.forEach(({ d, i }) => {
       const x = xScale(d.time);
       const y = yScale(d.score);
       const color = getAgentColor(d.agentId || d.agentName || "unknown");
@@ -474,7 +480,10 @@ export class ChartPanel implements Panel {
         .attr("fill", color)
         .attr("opacity", 0.9);
 
-      if (d.agentName) {
+      const agentKey = d.agentId || d.agentName || null;
+      const winnerChanged = agentKey !== null && agentKey !== prevAgentKey;
+      const isLastPoint = i === lastIdx;
+      if (d.agentName && (winnerChanged || isLastPoint)) {
         chartG.append("text")
           .attr("x", x + 6)
           .attr("y", y - 8)
@@ -484,6 +493,7 @@ export class ChartPanel implements Panel {
           .attr("opacity", 0.8)
           .text(d.agentName);
       }
+      prevAgentKey = agentKey;
     });
 
     yTicks.forEach((tick) => {
@@ -494,7 +504,7 @@ export class ChartPanel implements Panel {
         .attr("font-size", "9px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "end")
-        .text(tick.toFixed(0));
+        .text(formatScore(tick));
     });
 
     const xTicks = xScale.ticks(6);
@@ -624,7 +634,7 @@ export class ChartPanel implements Panel {
         .attr("font-size", "9px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "end")
-        .text(tick.toFixed(0));
+        .text(formatScore(tick));
     });
 
     // Iteration-index axis: integer ticks, no time formatting.

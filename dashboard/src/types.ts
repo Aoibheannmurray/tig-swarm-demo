@@ -14,7 +14,7 @@ export interface RouteData {
   routes: VehicleRoute[];
 }
 
-// route_data from server: dict keyed by instance name
+// solution_data from server: dict keyed by instance name
 export type AllRouteData = Record<string, RouteData>;
 
 export interface LeaderboardEntry {
@@ -99,6 +99,10 @@ export interface ExperimentPublished {
   strategy_tag?: string | null;
   title?: string | null;
   notes: string;
+  // Per-track mean quality — only set on iterations published with track
+  // scores. Map keys are track labels (e.g. "n_nodes=200"), values are
+  // mean quality on that track.
+  track_scores?: Record<string, number> | null;
   timestamp: string;
 }
 
@@ -112,7 +116,9 @@ export interface NewGlobalBest {
   // % improvement over the previous global best (null if first ever)
   incremental_improvement_pct: number | null;
   num_instances: number;
-  route_data: AllRouteData | null;
+  solution_data: AllRouteData | null;
+  // Per-track mean quality for the new global best (see ExperimentPublished).
+  track_scores?: Record<string, number> | null;
   timestamp: string;
 }
 
