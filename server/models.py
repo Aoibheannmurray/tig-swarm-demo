@@ -85,6 +85,15 @@ class AdminBroadcast(AdminAuth):
     priority: Literal["normal", "high"] = "normal"
 
 
+class AdminResetChallenge(AdminAuth):
+    """Owner-only request to clear the leaderboard for a single challenge:
+    drops `best_history` + `agent_bests` rows for that challenge so the next
+    feasible publish becomes the new global best. Preserves `experiments`,
+    `hypotheses`, and `agent_challenge_state` so prior research and per-agent
+    counters (run counts, trajectories, stagnation) remain intact."""
+    challenge: "ChallengeName"
+
+
 # Swarm-wide configuration set by the owner via the setup wizard.
 # challenge: which TIG challenge this swarm is optimizing.
 # tracks: object mirroring the per-challenge test.json — keys are track
