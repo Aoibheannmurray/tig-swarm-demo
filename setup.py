@@ -23,7 +23,7 @@ Files this script reads / writes:
   - CLAUDE.md, README.md, scripts/publish.py
     (templated: ${SERVER_URL} -> the chosen URL)
   - swarm.config.json (owner-only mirror of what's stored on the server)
-  - CHALLENGE.md (per-challenge docs, from challenge_templates/)
+  - CHALLENGE.md (per-challenge docs, from src/<challenge>/README.md)
   - tacit_knowledge_personal.md (per-contributor, gitignored)
   - datasets/<challenge>/test.json (rewritten with chosen track counts)
   - .railway/config.json (managed by the `railway` CLI; gitignored)
@@ -88,6 +88,10 @@ CHALLENGES = {
             "n_vars=100000,ratio=4150",
             "n_vars=100000,ratio=4200",
         ],
+        "strategy_tags": [
+            "construction", "local_search", "metaheuristic",
+            "decomposition", "hybrid", "data_structure", "other",
+        ],
     },
     "vehicle_routing": {
         "scoring_direction": "max",
@@ -97,6 +101,11 @@ CHALLENGES = {
             "n_nodes=800",
             "n_nodes=900",
             "n_nodes=1000",
+        ],
+        "strategy_tags": [
+            "construction", "local_search", "metaheuristic",
+            "constraint_relaxation", "decomposition", "hybrid",
+            "data_structure", "other",
         ],
     },
     "knapsack": {
@@ -108,6 +117,10 @@ CHALLENGES = {
             "n_items=5000,budget=10",
             "n_items=5000,budget=25",
         ],
+        "strategy_tags": [
+            "greedy", "dp", "branch_and_bound", "metaheuristic",
+            "decomposition", "hybrid", "data_structure", "other",
+        ],
     },
     "job_scheduling": {
         "scoring_direction": "max",
@@ -118,6 +131,11 @@ CHALLENGES = {
             "n=20,s=FJSP_MEDIUM",
             "n=20,s=FJSP_HIGH",
         ],
+        "strategy_tags": [
+            "greedy", "construction", "local_search", "metaheuristic",
+            "constraint_relaxation", "decomposition", "hybrid",
+            "data_structure", "other",
+        ],
     },
     "energy_arbitrage": {
         "scoring_direction": "max",
@@ -127,6 +145,10 @@ CHALLENGES = {
             "s=MULTIDAY",
             "s=DENSE",
             "s=CAPSTONE",
+        ],
+        "strategy_tags": [
+            "greedy", "dp", "local_search", "metaheuristic",
+            "decomposition", "hybrid", "data_structure", "other",
         ],
     },
 }
@@ -348,6 +370,7 @@ def collect_per_challenge_configs(
             "timeout": timeout,
             "scoring_direction": meta["scoring_direction"],
             "initial_algorithm_code": initial_algorithms.get(ch, ""),
+            "strategy_tags": meta.get("strategy_tags", []),
         }
     return challenges
 
@@ -362,10 +385,10 @@ def open_in_editor(path: Path) -> None:
 
 
 def write_challenge_md(challenge: str) -> None:
-    src = ROOT / "challenge_templates" / f"{challenge}.md"
+    src = ROOT / "src" / challenge / "README.md"
     dst = ROOT / "CHALLENGE.md"
     if not src.exists():
-        print(f"  warning: no challenge template at {src.relative_to(ROOT)}; skipping CHALLENGE.md")
+        print(f"  warning: no README at {src.relative_to(ROOT)}; skipping CHALLENGE.md")
         return
     dst.write_text(src.read_text())
     print(f"  wrote {dst.relative_to(ROOT)} (from {src.relative_to(ROOT)})")

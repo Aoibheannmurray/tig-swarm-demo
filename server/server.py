@@ -465,17 +465,29 @@ async def get_state(
                 # so the agent can't re-adopt its own just-deposited code.
                 # CORRECTNESS INVARIANT: pick must be filtered by challenge —
                 # otherwise a stagnating VRP agent could be handed SAT code.
-                n_inactive = await db.count_inactive(conn, challenge)
+                inactive_pool = await db.get_inactive_with_deactivations(conn, challenge)
                 new_traj_id = None
                 new_program_id = None
-                # Uniform pick: 1/(n_inactive+1) for fresh, rest for each inactive
-                if n_inactive == 0 or random.randint(0, n_inactive) == 0:
+
+                if not inactive_pool:
                     new_code = await load_initial_algorithm(challenge)
                     new_program_id = new_id()
                     trajectory_reset = {"type": "fresh_start"}
                 else:
-                    picked = await db.pick_random_inactive(conn, challenge)
-                    if picked:
+                    # Weighted sampling: p_fresh = max(0, 1 - kappa / mean(n_i))
+                    # where mean(n_i) is over ALL trajectories (active + inactive).
+                    # If not fresh, sample inactive trajectory j with weight 1/n_j.
+                    kappa = float(config.get("restart_kappa", "2"))
+                    mean_deact = await db.mean_trajectory_deactivations(conn, challenge)
+                    p_fresh = max(0.0, 1.0 - kappa / mean_deact) if mean_deact > 0 else 0.0
+
+                    if random.random() < p_fresh:
+                        new_code = await load_initial_algorithm(challenge)
+                        new_program_id = new_id()
+                        trajectory_reset = {"type": "fresh_start"}
+                    else:
+                        weights = [1.0 / max(row["num_deactivations"], 1) for row in inactive_pool]
+                        picked = random.choices(inactive_pool, weights=weights, k=1)[0]
                         new_code = picked["algorithm_code"]
                         new_program_id = picked.get("program_id") or new_id()
                         await db.remove_inactive(conn, picked["id"])
@@ -487,10 +499,6 @@ async def get_state(
                             new_traj_id = picked["trajectory_id"]
                             await db.reactivate_trajectory(conn, new_traj_id)
                             await db.increment_trajectory_agents(conn, new_traj_id)
-                    else:
-                        new_code = await load_initial_algorithm(challenge)
-                        new_program_id = new_id()
-                        trajectory_reset = {"type": "fresh_start"}
 
                 # Now deposit the stagnated code into the per-challenge pool.
                 await db.deposit_inactive(
@@ -1581,6 +1589,10 @@ async def get_swarm_config():
             tracks = json.loads(row.get("tracks") or "{}")
         except Exception:
             tracks = {}
+        try:
+            strategy_tags = json.loads(row.get("strategy_tags") or "[]")
+        except Exception:
+            strategy_tags = []
         available[row["challenge"]] = {
             "tracks": tracks,
             "timeout": row.get("timeout") or 5,
@@ -1588,6 +1600,7 @@ async def get_swarm_config():
             # Flag-only: don't ship the algorithm body in this response (it
             # can be large and is fetched separately from /api/initial_algorithm).
             "has_initial_algorithm": bool(row.get("initial_algorithm_code")),
+            "strategy_tags": strategy_tags,
         }
 
     active_cfg = available.get(active_challenge, {})
@@ -1669,6 +1682,7 @@ async def update_swarm_config(req: SwarmConfigUpdate):
                 timeout=sub.get("timeout"),
                 scoring_direction=sub.get("scoring_direction"),
                 initial_algorithm_code=sub.get("initial_algorithm_code"),
+                strategy_tags=json.dumps(sub["strategy_tags"]) if sub.get("strategy_tags") is not None else None,
             )
         # active_challenge update (if requested).
         if req.active_challenge:

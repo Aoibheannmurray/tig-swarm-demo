@@ -118,7 +118,8 @@ CREATE TABLE IF NOT EXISTS trajectories (
     momentum REAL DEFAULT 0.0,
     num_agents INTEGER DEFAULT 1,
     deactivated_at TEXT,
-    edits_since_improvement INTEGER DEFAULT 0
+    edits_since_improvement INTEGER DEFAULT 0,
+    num_deactivations INTEGER DEFAULT 0
 );
 
 -- Per-(agent, challenge) state. Replaces the per-challenge counter columns
@@ -152,7 +153,8 @@ CREATE TABLE IF NOT EXISTS challenge_configs (
     tracks TEXT NOT NULL DEFAULT '{}',
     timeout INTEGER NOT NULL DEFAULT 5,
     scoring_direction TEXT NOT NULL DEFAULT 'max',
-    initial_algorithm_code TEXT NOT NULL DEFAULT ''
+    initial_algorithm_code TEXT NOT NULL DEFAULT '',
+    strategy_tags TEXT NOT NULL DEFAULT '[]'
 );
 """
 
@@ -275,6 +277,8 @@ async def init_db() -> None:
             # text. NULL on rows that pre-date the migration.
             "ALTER TABLE experiments ADD COLUMN track_scores TEXT",
             "ALTER TABLE agent_bests ADD COLUMN track_scores TEXT",
+            "ALTER TABLE trajectories ADD COLUMN num_deactivations INTEGER DEFAULT 0",
+            "ALTER TABLE challenge_configs ADD COLUMN strategy_tags TEXT NOT NULL DEFAULT '[]'",
         ):
             try:
                 await db.execute(stmt)
@@ -808,6 +812,7 @@ async def upsert_challenge_config(
     timeout: int | None = None,
     scoring_direction: str | None = None,
     initial_algorithm_code: str | None = None,
+    strategy_tags: str | None = None,
 ) -> None:
     """Partial upsert — only writes the fields the caller passes. Lets
     `POST /api/swarm_config` accept one challenge's sub-config at a time."""
@@ -830,6 +835,9 @@ async def upsert_challenge_config(
     if initial_algorithm_code is not None:
         sets.append("initial_algorithm_code = ?")
         params.append(initial_algorithm_code)
+    if strategy_tags is not None:
+        sets.append("strategy_tags = ?")
+        params.append(strategy_tags)
     if not sets:
         return
     params.append(challenge)
@@ -906,6 +914,31 @@ async def remove_inactive(conn: aiosqlite.Connection, inactive_id: int) -> None:
     )
 
 
+async def mean_trajectory_deactivations(
+    conn: aiosqlite.Connection, challenge: str
+) -> float:
+    row = await (await conn.execute(
+        "SELECT AVG(num_deactivations) as avg_d FROM trajectories WHERE challenge = ?",
+        (challenge,),
+    )).fetchone()
+    return row["avg_d"] if row and row["avg_d"] is not None else 0.0
+
+
+async def get_inactive_with_deactivations(
+    conn: aiosqlite.Connection, challenge: str
+) -> list[dict]:
+    cursor = await conn.execute(
+        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.score, "
+        "  ia.trajectory_id, ia.program_id, "
+        "  COALESCE(t.num_deactivations, 1) as num_deactivations "
+        "FROM inactive_algorithms ia "
+        "LEFT JOIN trajectories t ON ia.trajectory_id = t.id "
+        "WHERE ia.challenge = ?",
+        (challenge,),
+    )
+    return [dict(row) for row in await cursor.fetchall()]
+
+
 async def clear_agent_best(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> None:
@@ -938,7 +971,8 @@ async def deactivate_trajectory(
     conn: aiosqlite.Connection, trajectory_id: str, deactivated_at: str
 ) -> None:
     await conn.execute(
-        "UPDATE trajectories SET status = 'inactive', deactivated_at = ? WHERE id = ?",
+        "UPDATE trajectories SET status = 'inactive', deactivated_at = ?, "
+        "num_deactivations = num_deactivations + 1 WHERE id = ?",
         (deactivated_at, trajectory_id),
     )
 

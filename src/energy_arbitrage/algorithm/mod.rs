@@ -1,4 +1,5 @@
 use super::*;
+// --- BEGIN EDITABLE REGION --- //
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
@@ -244,4 +245,4 @@ fn policy_with_hp(challenge: &Challenge, state: &State, hp: &Hyperparameters) ->
     enforce_feasible(challenge, state, action)
 }
 
-// Important! Do not include any tests in this file, it will result in your submission being rejected
+// --- END EDITABLE REGION --- //

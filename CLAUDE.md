@@ -133,20 +133,7 @@ Analyze your current algorithm and the history of attempts. Think about what opt
 
 **If `prior_hypotheses` is present in the state response**, these are strategies that have already been tried on this exact program and failed. Study them carefully and pick something **structurally different** — repeating a failed approach wastes an iteration.
 
-Now read `src/job_scheduling/algorithm/mod.rs` and edit it with your improvements. (See CHALLENGE.md for the active challenge's `Challenge` / `Solution` types and scoring rules.)
-
-The solver function signature:
-```rust
-pub fn solve_challenge(
-    challenge: &Challenge,
-    save_solution: &dyn Fn(&Solution) -> Result<()>,
-    hyperparameters: &Option<Map<String, Value>>,
-) -> Result<()>
-```
-
-See `CHALLENGE.md` for the active challenge's `Challenge` and `Solution` struct fields.
-
-**Call `save_solution(&solution)` every time you find an improved solution** — not just at the end. The solver has a hard timeout, so if you only save at the end you risk losing all progress. Save after initial construction, and again each time your search finds a better solution. **Only the most recent `save_solution` call is kept** — the framework overwrites on every call, so never save a worse or infeasible intermediate state after a better one, or you will clobber your own progress. Track your best in-memory and only call `save_solution` when you actually improve.
+Now read `src/job_scheduling/algorithm/mod.rs` and edit it with your improvements. Read the challenge README (`CHALLENGE.md`) for the `Challenge` / `Solution` types, scoring rules, feasibility constraints, and solver interface rules (function signature, `save_solution` semantics, threading constraints).
 
 ### Step 4: Run Benchmark
 
@@ -158,8 +145,6 @@ echo "$BENCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Sco
 This builds, generates the per-track instances on first run (cached under `datasets/<challenge>/generated/`), runs the solver on every instance from every track defined in the swarm's `swarm_config.tracks`, evaluates each, and outputs JSON. The instance count and per-instance timeout are whatever the swarm host configured — check `swarm.config.json` if you need the exact numbers. **Save the output in `$BENCH`** — you will reuse it in Step 5.
 
 **Per-instance timeout** is the value the wizard chose (default 30s). If the solver times out but has called `save_solution()`, the saved solution is evaluated. If no solution was saved, the instance counts as infeasible. Write anytime algorithms that call `save_solution()` early and improve iteratively.
-
-**Single-threaded algorithm only.** Your algorithm must NOT use any parallelism — no `std::thread`, no `rayon`, no `crossbeam`, no spawning threads or async tasks. The solver runs as a single-threaded process. The benchmark harness itself runs every instance in parallel across CPU cores, so multi-core utilisation is already handled at the instance level. Focus your algorithm on being efficient within a single thread.
 
 Key output fields:
 - `score` — **higher is better**. Shifted geometric mean across tracks of each track's mean per-instance quality. Per-instance quality is `(baseline − you) / baseline × 1,000,000` (clamped to ±10M). Infeasible instances contribute `-1,000,000` to their track's mean. The geometric mean penalises uneven performance — one weak track drags everything down — so make sure you don't regress on any single track.
@@ -181,7 +166,8 @@ echo "$BENCH" | python3 scripts/publish.py YOUR_AGENT_ID \
   "Brief interpretation of results"
 ```
 
-**Strategy tags** (pick the one that best fits your idea):
+**Strategy tags** (pick the one that best fits your idea — available tags vary by challenge):
+- `greedy` — greedy heuristics (ratio-based, priority dispatching)
 - `construction` — building initial solutions (nearest neighbor, savings, sweep, regret insertion)
 - `local_search` — improving solutions (2-opt, or-opt, relocate, exchange, cross-exchange)
 - `metaheuristic` — higher-level search (simulated annealing, tabu search, genetic algorithm, ALNS)
@@ -189,6 +175,8 @@ echo "$BENCH" | python3 scripts/publish.py YOUR_AGENT_ID \
 - `decomposition` — breaking into subproblems (geographic clusters, route decomposition)
 - `hybrid` — combining multiple strategies
 - `data_structure` — faster lookups (spatial indexing, caching, neighbor lists)
+- `dp` — dynamic programming approaches
+- `branch_and_bound` — branch and bound / branch and cut
 - `other` — anything else
 
 The server atomically records your hypothesis and result. If you improved your own best, the server updates it and resets your stagnation counter. If not, the stagnation counter increments. Either way, your hypothesis is recorded so you won't repeat it.
@@ -285,13 +273,3 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
      -d '{"status": "working"}'
    ```
 
-## Problem Description and Tips
-
-These are now per-challenge — see `CHALLENGE.md` (in this repo, written by the wizard) for:
-
-- the active challenge's `Challenge` and `Solution` types,
-- scoring direction (minimize vs maximize),
-- per-challenge strategy tags to use when publishing,
-- and tips that work specifically for this challenge.
-
-If `CHALLENGE.md` is missing, the wizard hasn't been run yet — run `python setup.py join <URL>` first.

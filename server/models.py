@@ -36,16 +36,7 @@ class HypothesisCreate(BaseModel):
     agent_id: str
     title: str
     description: str
-    strategy_tag: Literal[
-        "construction",
-        "local_search",
-        "metaheuristic",
-        "constraint_relaxation",
-        "decomposition",
-        "hybrid",
-        "data_structure",
-        "other",
-    ]
+    strategy_tag: str = "other"
     parent_hypothesis_id: Optional[str] = None
     # Optional during the rollout window; server fills in the swarm's active
     # challenge if missing. After the transition this becomes required.
@@ -70,16 +61,7 @@ class IterationCreate(BaseModel):
     agent_id: str
     title: str
     description: str = ""
-    strategy_tag: Literal[
-        "construction",
-        "local_search",
-        "metaheuristic",
-        "constraint_relaxation",
-        "decomposition",
-        "hybrid",
-        "data_structure",
-        "other",
-    ] = "other"
+    strategy_tag: str = "other"
     algorithm_code: str = ""
     score: float
     feasible: bool = True
@@ -126,6 +108,7 @@ class ChallengeSubConfig(BaseModel):
     timeout: int = 5
     scoring_direction: Literal["min", "max"] = "max"
     initial_algorithm_code: str = ""
+    strategy_tags: Optional[list[str]] = None
 
 
 class SwarmConfigUpdate(AdminAuth):
