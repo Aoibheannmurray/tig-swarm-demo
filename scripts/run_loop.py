@@ -21,6 +21,7 @@ GOOGLE_API_KEY (or pass --api-key directly).
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import subprocess
@@ -511,6 +512,22 @@ def main() -> int:
         if not code:
             continue
 
+        # ── Code similarity check ──────────────────────────────
+        if original_code:
+            sim = difflib.SequenceMatcher(None, original_code, code).ratio()
+            pct = sim * 100
+            if pct < 30:
+                label = "likely full rewrite"
+            elif pct < 60:
+                label = "major rewrite"
+            elif pct < 85:
+                label = "moderate edit"
+            else:
+                label = "incremental edit"
+            print(f"  Code similarity: {pct:.0f}% ({label})")
+        else:
+            print("  Code similarity: N/A (first algorithm)")
+
         write_algorithm(code, config)
 
         # ── Step 4: benchmark (with build-error retry) ─────────
@@ -554,6 +571,9 @@ def main() -> int:
             if fix_violation:
                 print(f"  Fix failed validation: {fix_violation}")
                 break
+            before_fix = read_algorithm(config)
+            fix_sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
+            print(f"  Fix similarity to broken code: {fix_sim * 100:.0f}%")
             write_algorithm(fixed, config)
 
         if bench is None:
