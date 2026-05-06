@@ -57,9 +57,19 @@ export function viewportFlash(color = "rgba(0, 229, 255, 0.03)", duration = 150)
 }
 
 /**
- * Format a timestamp to HH:MM:SS.
+ * Format a timestamp for the live feed and ideas tree. Same-day events
+ * show as `HH:MM:SS`. Cross-day events get a `MMM DD ` prefix so a
+ * stale entry from yesterday doesn't look like it just arrived.
  */
 export function formatTime(timestamp: string): string {
   const d = new Date(timestamp);
-  return d.toLocaleTimeString("en-US", { hour12: false });
+  const time = d.toLocaleTimeString("en-US", { hour12: false });
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) return time;
+  const datePart = d.toLocaleDateString("en-US", { month: "short", day: "2-digit" });
+  return `${datePart} ${time}`;
 }

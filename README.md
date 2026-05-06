@@ -4,7 +4,7 @@ Collaborative AI agents optimizing TIG challenges. Multiple agents independently
 
 Contributors can participate in two ways: **agent mode** (Claude Code, Codex, Gemini CLI — any coding agent that reads `CLAUDE.md`) or **script mode** (`scripts/run_loop.py` — a standalone loop that calls any LLM API for code mutation).
 
-Supports 5 challenges: **job_scheduling**, **vehicle routing**, **job_scheduling**, **job scheduling**, **energy arbitrage**.
+Supports 5 challenges: **energy_arbitrage**, **vehicle routing**, **energy_arbitrage**, **job scheduling**, **energy arbitrage**.
 
 The server is deployed to [Railway](https://railway.com). One swarm = one Railway service; the server, the SQLite database (on a Railway volume), and the dashboard all live in that one service.
 

@@ -83,28 +83,28 @@ export class GanttPanel implements Panel {
       <div class="panel-inner gantt-panel">
         <div class="panel-label">SCHEDULE</div>
         <div class="gantt-agent-name" id="gantt-agent-name"></div>
-        <div class="routes-history-nav" id="gantt-history-nav" style="display:none">
-          <button class="routes-nav-btn" id="gantt-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="routes-history-label" id="gantt-history-label"></span>
-          <button class="routes-nav-btn" id="gantt-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="routes-history-live" id="gantt-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        <div class="solution-history-nav" id="gantt-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="gantt-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="gantt-history-label"></span>
+          <button class="solution-nav-btn" id="gantt-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="gantt-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
         </div>
-        <div class="routes-nav" id="gantt-nav" style="display:none">
-          <button class="routes-nav-btn" id="gantt-prev">&lsaquo;</button>
-          <span class="routes-instance-label" id="gantt-instance-label"></span>
-          <button class="routes-nav-btn" id="gantt-next">&rsaquo;</button>
+        <div class="solution-nav" id="gantt-nav" style="display:none">
+          <button class="solution-nav-btn" id="gantt-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="gantt-instance-label"></span>
+          <button class="solution-nav-btn" id="gantt-next">&rsaquo;</button>
         </div>
         <div class="gantt-svg-wrap" id="gantt-svg-wrap">
           <svg id="gantt-svg"></svg>
         </div>
         <div class="gantt-makespan-box">
-          <div class="routes-sub-label">MAKESPAN</div>
-          <div class="routes-sub-value" id="gantt-makespan">---</div>
+          <div class="solution-sub-label">MAKESPAN</div>
+          <div class="solution-sub-value" id="gantt-makespan">---</div>
         </div>
-        <div class="routes-score">
-          <div class="routes-score-label">SCORE</div>
-          <div class="routes-score-value" id="gantt-score">---</div>
-          <div class="routes-score-delta" id="gantt-score-delta"></div>
+        <div class="solution-score">
+          <div class="solution-score-label">SCORE</div>
+          <div class="solution-score-value" id="gantt-score">---</div>
+          <div class="solution-score-delta" id="gantt-score-delta"></div>
         </div>
       </div>
     `;

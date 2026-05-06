@@ -69,32 +69,32 @@ export class KnapsackPanel implements Panel {
       <div class="panel-inner knapsack-panel">
         <div class="panel-label">INTERACTIONS</div>
         <div class="knapsack-agent-name" id="knapsack-agent-name"></div>
-        <div class="routes-history-nav" id="knapsack-history-nav" style="display:none">
-          <button class="routes-nav-btn" id="knapsack-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="routes-history-label" id="knapsack-history-label"></span>
-          <button class="routes-nav-btn" id="knapsack-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="routes-history-live" id="knapsack-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        <div class="solution-history-nav" id="knapsack-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="knapsack-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="knapsack-history-label"></span>
+          <button class="solution-nav-btn" id="knapsack-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="knapsack-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
         </div>
-        <div class="routes-nav" id="knapsack-nav" style="display:none">
-          <button class="routes-nav-btn" id="knapsack-prev">&lsaquo;</button>
-          <span class="routes-instance-label" id="knapsack-instance-label"></span>
-          <button class="routes-nav-btn" id="knapsack-next">&rsaquo;</button>
+        <div class="solution-nav" id="knapsack-nav" style="display:none">
+          <button class="solution-nav-btn" id="knapsack-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="knapsack-instance-label"></span>
+          <button class="solution-nav-btn" id="knapsack-next">&rsaquo;</button>
         </div>
         <div class="knapsack-svg-wrap" id="knapsack-svg-wrap">
           <svg id="knapsack-svg"></svg>
         </div>
         <div class="knapsack-value-box">
-          <div class="routes-sub-label">VALUE</div>
-          <div class="routes-sub-value" id="knapsack-value">---</div>
+          <div class="solution-sub-label">VALUE</div>
+          <div class="solution-sub-value" id="knapsack-value">---</div>
         </div>
         <div class="knapsack-items-box">
-          <div class="routes-sub-label">ITEMS</div>
-          <div class="routes-sub-value" id="knapsack-items">---</div>
+          <div class="solution-sub-label">ITEMS</div>
+          <div class="solution-sub-value" id="knapsack-items">---</div>
         </div>
-        <div class="routes-score">
-          <div class="routes-score-label">SCORE</div>
-          <div class="routes-score-value" id="knapsack-score">---</div>
-          <div class="routes-score-delta" id="knapsack-score-delta"></div>
+        <div class="solution-score">
+          <div class="solution-score-label">SCORE</div>
+          <div class="solution-score-value" id="knapsack-score">---</div>
+          <div class="solution-score-delta" id="knapsack-score-delta"></div>
         </div>
       </div>
     `;

@@ -73,32 +73,32 @@ export class SatPanel implements Panel {
       <div class="panel-inner knapsack-panel">
         <div class="panel-label">CLAUSES &amp; ASSIGNMENT</div>
         <div class="knapsack-agent-name" id="sat-agent-name"></div>
-        <div class="routes-history-nav" id="sat-history-nav" style="display:none">
-          <button class="routes-nav-btn" id="sat-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="routes-history-label" id="sat-history-label"></span>
-          <button class="routes-nav-btn" id="sat-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="routes-history-live" id="sat-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        <div class="solution-history-nav" id="sat-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="sat-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="sat-history-label"></span>
+          <button class="solution-nav-btn" id="sat-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="sat-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
         </div>
-        <div class="routes-nav" id="sat-nav" style="display:none">
-          <button class="routes-nav-btn" id="sat-prev">&lsaquo;</button>
-          <span class="routes-instance-label" id="sat-instance-label"></span>
-          <button class="routes-nav-btn" id="sat-next">&rsaquo;</button>
+        <div class="solution-nav" id="sat-nav" style="display:none">
+          <button class="solution-nav-btn" id="sat-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="sat-instance-label"></span>
+          <button class="solution-nav-btn" id="sat-next">&rsaquo;</button>
         </div>
         <div class="knapsack-svg-wrap" id="sat-svg-wrap">
           <svg id="sat-svg"></svg>
         </div>
         <div class="knapsack-value-box">
-          <div class="routes-sub-label">SATISFIED</div>
-          <div class="routes-sub-value" id="sat-sat">---</div>
+          <div class="solution-sub-label">SATISFIED</div>
+          <div class="solution-sub-value" id="sat-sat">---</div>
         </div>
         <div class="knapsack-items-box">
-          <div class="routes-sub-label">VARIABLES</div>
-          <div class="routes-sub-value" id="sat-vars">---</div>
+          <div class="solution-sub-label">VARIABLES</div>
+          <div class="solution-sub-value" id="sat-vars">---</div>
         </div>
-        <div class="routes-score">
-          <div class="routes-score-label">SCORE</div>
-          <div class="routes-score-value" id="sat-score">---</div>
-          <div class="routes-score-delta" id="sat-score-delta"></div>
+        <div class="solution-score">
+          <div class="solution-score-label">SCORE</div>
+          <div class="solution-score-value" id="sat-score">---</div>
+          <div class="solution-score-delta" id="sat-score-delta"></div>
         </div>
       </div>
     `;

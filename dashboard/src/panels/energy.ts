@@ -69,28 +69,28 @@ export class EnergyPanel implements Panel {
       <div class="panel-inner energy-panel">
         <div class="panel-label">ENERGY SCHEDULE</div>
         <div class="energy-agent-name" id="energy-agent-name"></div>
-        <div class="routes-history-nav" id="energy-history-nav" style="display:none">
-          <button class="routes-nav-btn" id="energy-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="routes-history-label" id="energy-history-label"></span>
-          <button class="routes-nav-btn" id="energy-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="routes-history-live" id="energy-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        <div class="solution-history-nav" id="energy-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="energy-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="energy-history-label"></span>
+          <button class="solution-nav-btn" id="energy-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="energy-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
         </div>
-        <div class="routes-nav" id="energy-nav" style="display:none">
-          <button class="routes-nav-btn" id="energy-prev">&lsaquo;</button>
-          <span class="routes-instance-label" id="energy-instance-label"></span>
-          <button class="routes-nav-btn" id="energy-next">&rsaquo;</button>
+        <div class="solution-nav" id="energy-nav" style="display:none">
+          <button class="solution-nav-btn" id="energy-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="energy-instance-label"></span>
+          <button class="solution-nav-btn" id="energy-next">&rsaquo;</button>
         </div>
         <div class="energy-svg-wrap" id="energy-svg-wrap">
           <svg id="energy-svg"></svg>
         </div>
         <div class="energy-batteries-box">
-          <div class="routes-sub-label">BATTERIES</div>
-          <div class="routes-sub-value" id="energy-batteries">---</div>
+          <div class="solution-sub-label">BATTERIES</div>
+          <div class="solution-sub-value" id="energy-batteries">---</div>
         </div>
-        <div class="routes-score">
-          <div class="routes-score-label">SCORE</div>
-          <div class="routes-score-value" id="energy-score">---</div>
-          <div class="routes-score-delta" id="energy-score-delta"></div>
+        <div class="solution-score">
+          <div class="solution-score-label">SCORE</div>
+          <div class="solution-score-value" id="energy-score">---</div>
+          <div class="solution-score-delta" id="energy-score-delta"></div>
         </div>
       </div>
     `;

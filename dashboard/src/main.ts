@@ -140,18 +140,20 @@ function handleMessage(msg: WSMessage) {
     viewportFlash("rgba(0, 229, 255, 0.03)", 150);
   }
 
-  // For stats_update we want the per-challenge slice for the viewed challenge.
+  // For stats_update we slice `per_challenge` down to the viewed
+  // challenge so panels see the right counters. `per_challenge` is the
+  // sole source of truth on the wire.
   if (msg.type === "stats_update" && (msg as any).per_challenge) {
     const sliced = (msg as any).per_challenge[getViewedChallenge()] ?? {};
     msg = {
       ...msg,
-      active_agents: sliced.active_agents ?? msg.active_agents,
-      total_experiments: sliced.total_experiments ?? msg.total_experiments,
-      hypotheses_count: sliced.hypotheses_count ?? msg.hypotheses_count,
-      best_score: sliced.best_score ?? msg.best_score,
-      baseline_score: sliced.baseline_score ?? msg.baseline_score,
-      num_instances: sliced.num_instances ?? msg.num_instances,
-      improvement_pct: sliced.improvement_pct ?? msg.improvement_pct,
+      active_agents: sliced.active_agents ?? 0,
+      total_experiments: sliced.total_experiments ?? 0,
+      hypotheses_count: sliced.hypotheses_count ?? 0,
+      best_score: sliced.best_score ?? null,
+      baseline_score: sliced.baseline_score ?? null,
+      num_instances: sliced.num_instances ?? 0,
+      improvement_pct: sliced.improvement_pct ?? 0,
     } as any;
   }
 
@@ -242,42 +244,66 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       } as any);
     }
 
-    const recent = (state.recent_experiments || []).slice().reverse();
-    for (const exp of recent) {
-      handleMessage({
-        type: "experiment_published",
-        experiment_id: exp.id || "",
-        agent_name: exp.agent_name,
-        agent_id: "",
-        score: exp.score,
-        feasible: exp.feasible !== false,
-        improvement_pct: exp.improvement_pct || 0,
-        delta_vs_best_pct: exp.delta_vs_best_pct ?? null,
-        delta_vs_own_best_pct: exp.delta_vs_own_best_pct ?? null,
-        beats_own_best: exp.beats_own_best === true,
-        num_instances: state.num_instances || 1,
-        is_new_best: exp.is_new_best === true,
-        hypothesis_id: null,
-        notes: exp.notes || "",
-        timestamp: exp.created_at || new Date().toISOString(),
-      } as any);
+    // Merge experiments + hypotheses into a single chronologically-sorted
+    // stream and dispatch oldest-first. feed.ts prepends each event, so
+    // the last-dispatched lands at the top — meaning the newest event
+    // (across both kinds) ends up at the top of the feed regardless of
+    // which list it came from. Sort uses full ISO timestamps including
+    // date, so cross-day events order correctly.
+    type FeedSeed = { kind: "experiment"; ts: string; data: any }
+                  | { kind: "hypothesis"; ts: string; data: any };
+    const seeds: FeedSeed[] = [];
+    for (const exp of (state.recent_experiments || [])) {
+      seeds.push({
+        kind: "experiment",
+        ts: exp.created_at || new Date().toISOString(),
+        data: exp,
+      });
     }
-
-    const allHyps = state.recent_hypotheses || [];
-    for (const hyp of allHyps) {
-      handleMessage({
-        type: "hypothesis_proposed",
-        hypothesis_id: hyp.id || "",
-        agent_name: hyp.agent_name,
-        agent_id: "",
-        title: hyp.title,
-        description: hyp.description || "",
-        strategy_tag: hyp.strategy_tag,
-        parent_hypothesis_id: hyp.parent_hypothesis_id || null,
-        // Use the original `created_at` from the server so timestamps don't
-        // get refreshed to "just now" on every challenge switch.
-        timestamp: hyp.created_at || new Date().toISOString(),
-      } as any);
+    for (const hyp of (state.recent_hypotheses || [])) {
+      seeds.push({
+        kind: "hypothesis",
+        ts: hyp.created_at || new Date().toISOString(),
+        data: hyp,
+      });
+    }
+    seeds.sort((a, b) => a.ts.localeCompare(b.ts));
+    for (const seed of seeds) {
+      if (seed.kind === "experiment") {
+        const exp = seed.data;
+        handleMessage({
+          type: "experiment_published",
+          experiment_id: exp.id || "",
+          agent_name: exp.agent_name,
+          agent_id: "",
+          score: exp.score,
+          feasible: exp.feasible !== false,
+          improvement_pct: exp.improvement_pct || 0,
+          delta_vs_best_pct: exp.delta_vs_best_pct ?? null,
+          delta_vs_own_best_pct: exp.delta_vs_own_best_pct ?? null,
+          beats_own_best: exp.beats_own_best === true,
+          num_instances: state.num_instances || 1,
+          is_new_best: exp.is_new_best === true,
+          hypothesis_id: null,
+          notes: exp.notes || "",
+          timestamp: seed.ts,
+        } as any);
+      } else {
+        const hyp = seed.data;
+        handleMessage({
+          type: "hypothesis_proposed",
+          hypothesis_id: hyp.id || "",
+          agent_name: hyp.agent_name,
+          agent_id: "",
+          title: hyp.title,
+          description: hyp.description || "",
+          strategy_tag: hyp.strategy_tag,
+          parent_hypothesis_id: hyp.parent_hypothesis_id || null,
+          // Original created_at preserves timestamps across challenge
+          // switches; otherwise everything would re-stamp to "just now".
+          timestamp: seed.ts,
+        } as any);
+      }
     }
 
     soundEnabled = true;

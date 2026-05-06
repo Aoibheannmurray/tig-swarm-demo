@@ -199,19 +199,9 @@ DEFAULT_CONFIG = {
     # `active_challenge` is the swarm-wide challenge the owner has chosen;
     # contributors auto-follow it via `python setup.py sync`. Only the
     # owner (admin_key holder) can change it via POST /api/swarm_config.
-    #
-    # The legacy keys (`challenge`, `tracks`, `timeout`, `scoring_direction`,
-    # `initial_algorithm_code`) are kept for back-compat during the rollout
-    # window; init_db backfills them into challenge_configs on first boot
-    # of an upgraded server.
     "active_challenge": "vehicle_routing",
-    "challenge": "vehicle_routing",
-    "tracks": "{}",
-    "timeout": "5",
-    "scoring_direction": "max",
     "swarm_name": "",
     "owner_name": "",
-    "initial_algorithm_code": "",
     "hypothesis_recall_threshold": "3",
 }
 
@@ -533,8 +523,8 @@ async def upsert_agent_best(
     algorithm_code: str,
     score: float,
     feasible: bool,
-    num_vehicles: int,
-    total_distance: float,
+    num_vehicles: int | None,
+    total_distance: float | None,
     solution_data: str | None,
     updated_at: str,
     trajectory_id: str | None = None,

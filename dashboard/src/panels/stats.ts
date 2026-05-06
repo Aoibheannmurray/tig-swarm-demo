@@ -1,6 +1,27 @@
 import type { Panel, WSMessage } from "../types";
 import { counterTween, pulseGlow } from "../lib/animate";
 import { formatScore } from "../lib/format";
+import { getViewedChallenge, onViewedChallengeChange } from "../lib/viewedChallenge";
+
+
+// Resolve API base URL the same way other panels do (chart.ts, gantt.ts).
+function resolveApiUrl(): string {
+  const params = new URLSearchParams(window.location.search);
+  const explicit = params.get("api");
+  if (explicit) return explicit;
+  const ws = params.get("ws") || "";
+  if (ws) {
+    return ws
+      .replace("ws://", "http://")
+      .replace("wss://", "https://")
+      .replace("/ws/dashboard", "");
+  }
+  return `${window.location.protocol}//${window.location.host}`;
+}
+
+function resolveViewedChallenge(): string {
+  return getViewedChallenge();
+}
 
 
 export class StatsPanel implements Panel {
@@ -8,10 +29,16 @@ export class StatsPanel implements Panel {
   private experimentsEl!: HTMLElement;
   private heroEl!: HTMLElement;
   // Latest track_scores for the global best of the viewed challenge. Rendered
-  // on demand into the solution panel's `.routes-score` block when the user
+  // on demand into the solution panel's `.solution-score` block when the user
   // clicks the score; nothing is shown in the stats bar itself.
   private trackScores: Record<string, number> | null = null;
-  private clickAttached = false;
+  // Track the actual DOM element we bound the click to — when the user
+  // switches challenges, main.ts rebuilds the display panel and replaces
+  // the `.solution-score-value` element. Comparing by reference catches
+  // that and lets us rebind to the new node.
+  private boundScoreEl: HTMLElement | null = null;
+  private apiUrl = "";
+  private viewedChallenge = "";
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -43,40 +70,96 @@ export class StatsPanel implements Panel {
     this.experimentsEl = document.getElementById("stat-experiments-val")!;
     this.heroEl = document.getElementById("stat-hero")!;
 
+    this.apiUrl = resolveApiUrl();
+    this.viewedChallenge = resolveViewedChallenge();
     this.attachScoreClick();
+
+    // The user can switch challenges from the dropdown. When they do,
+    // main.ts rebuilds the display panel — wiping the `.solution-score`
+    // DOM that our click handler was bound to. Reset `clickAttached` so
+    // attachScoreClick re-binds to the freshly-rendered score element on
+    // the new challenge's panel, and re-hydrate from /api/state since
+    // best_track_scores changes shape entirely (different track keys).
+    // main.ts's onViewedChallengeChange listener rebuilds the display
+    // panel and then broadcasts a `reset` event to every panel — which
+    // is where we re-bind the click handler and re-hydrate (see the
+    // reset branch in handleMessage). All we need to do here is keep
+    // `viewedChallenge` current so the hydrate URL uses the new value.
+    onViewedChallengeChange((ch) => {
+      this.viewedChallenge = ch;
+    });
   }
 
-  // Wire a click handler on the active solution panel's `.routes-score-value`
-  // so clicking the big number toggles the track-score breakdown. Solution
-  // panels initialise after stats, so retry briefly until the element exists.
+  // Wire a click handler on the active solution panel's `.solution-score-value`
+  // so clicking the big number toggles the track-score breakdown. The
+  // display panel is reconstructed when the user switches challenges,
+  // so we compare by element reference and rebind whenever the score
+  // node changes. Solution panels initialise after stats, so retry
+  // briefly until the element exists.
   private attachScoreClick(retries = 20) {
-    if (this.clickAttached) return;
-    const scoreParent = document.querySelector(".routes-score") as HTMLElement | null;
-    const scoreVal = scoreParent?.querySelector(".routes-score-value") as HTMLElement | null;
+    const scoreParent = document.querySelector(".solution-score") as HTMLElement | null;
+    const scoreVal = scoreParent?.querySelector(".solution-score-value") as HTMLElement | null;
     if (!scoreParent || !scoreVal) {
       if (retries > 0) setTimeout(() => this.attachScoreClick(retries - 1), 100);
       return;
     }
-    this.clickAttached = true;
+    if (this.boundScoreEl === scoreVal) {
+      // Same element we already wired up — no-op.
+      this.renderTrackBreakdown();
+      if (!this.trackScores) void this.hydrateFromState();
+      return;
+    }
+    this.boundScoreEl = scoreVal;
     scoreVal.style.cursor = "pointer";
     scoreVal.title = "Click to show per-track scores";
     scoreVal.addEventListener("click", () => {
-      scoreParent.classList.toggle("routes-score--expanded");
+      const expanding = !scoreParent.classList.contains("solution-score--expanded");
+      scoreParent.classList.toggle("solution-score--expanded");
+      // Resilience: if we're opening the popover and we have no track_scores
+      // (e.g. dashboard was opened mid-iteration and missed the new_global_best
+      // WS event), pull best_track_scores from /api/state so the popover
+      // populates instead of being an empty box.
+      if (expanding && (!this.trackScores || Object.keys(this.trackScores).length === 0)) {
+        void this.hydrateFromState();
+      }
     });
     this.renderTrackBreakdown();
+    // Best-effort hydrate at init so the first click already has data.
+    if (!this.trackScores) void this.hydrateFromState();
+  }
+
+  // Pull best_track_scores from /api/state for the viewed challenge. Used as
+  // a fallback when the WS new_global_best event is missed (dashboard opened
+  // after the publish, brief disconnect, or early-load race).
+  private async hydrateFromState() {
+    if (!this.apiUrl) return;
+    try {
+      const url = `${this.apiUrl}/api/state?challenge=${encodeURIComponent(this.viewedChallenge)}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const state = await res.json();
+      const ts = state?.best_track_scores;
+      if (ts && typeof ts === "object" && Object.keys(ts).length > 0) {
+        this.trackScores = ts as Record<string, number>;
+        this.renderTrackBreakdown();
+      }
+    } catch {
+      // Swallow — popover will just stay empty and a future new_global_best
+      // event will repopulate.
+    }
   }
 
   // Per-track breakdown of the swarm's best program. Only shown for the
   // global best — agents' individual track-by-track scores aren't surfaced.
-  // Injected into the solution panel's `.routes-score` block as a popover
+  // Injected into the solution panel's `.solution-score` block as a popover
   // that stays hidden until the user clicks the score.
   private renderTrackBreakdown() {
-    const scoreParent = document.querySelector(".routes-score") as HTMLElement | null;
+    const scoreParent = document.querySelector(".solution-score") as HTMLElement | null;
     if (!scoreParent) return;
     let host = scoreParent.querySelector(".track-breakdown") as HTMLElement | null;
     if (!this.trackScores || Object.keys(this.trackScores).length === 0) {
       if (host) host.innerHTML = "";
-      scoreParent.classList.remove("routes-score--expanded");
+      scoreParent.classList.remove("solution-score--expanded");
       return;
     }
     if (!host) {
@@ -108,6 +191,14 @@ export class StatsPanel implements Panel {
       this.heroEl.classList.remove("is-not-started");
       this.trackScores = null;
       this.renderTrackBreakdown();
+      // main.ts dispatches `reset` to every panel AFTER it has rebuilt
+      // the display panel via constructDisplayPanel(). At that point the
+      // .solution-score DOM is fresh, so we can rebind to the new node
+      // (boundScoreEl comparison inside attachScoreClick is a no-op when
+      // it's the same node as before — i.e. for admin resets that don't
+      // rebuild the display panel).
+      this.attachScoreClick();
+      void this.hydrateFromState();
       return;
     }
 

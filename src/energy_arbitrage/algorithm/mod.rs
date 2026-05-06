@@ -216,7 +216,18 @@ fn policy_with_hp(challenge: &Challenge, state: &State, hp: &Hyperparameters) ->
             action[i] = u_max;
             continue;
         }
-        let reference = median_of(&mut buf);
+        // Sort once and pick median + quartiles for an IQR-based volatility estimate.
+        buf.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = buf.len();
+        let reference = if n % 2 == 1 {
+            buf[n / 2]
+        } else {
+            0.5 * (buf[n / 2 - 1] + buf[n / 2])
+        };
+        let q_lo = buf[((0.25 * (n - 1) as f64).round() as usize).min(n - 1)];
+        let q_hi = buf[((0.75 * (n - 1) as f64).round() as usize).min(n - 1)];
+        let iqr = (q_hi - q_lo).max(0.5);
+
         let current = state.rt_prices[node];
         let diff = current - reference;
 
@@ -228,10 +239,29 @@ fn policy_with_hp(challenge: &Challenge, state: &State, hp: &Hyperparameters) ->
         let dt_factor = (1.5 - soc_norm).max(0.3);
         let ct_factor = (0.5 + soc_norm).max(0.3);
 
+        // IQR-adaptive thresholds: low-volatility scenarios get smaller triggers so
+        // we don't sit idle when the static threshold dwarfs the achievable spread.
+        // Clamp to the configured value as an upper bound for high-vol scenarios.
+        let dt_vol = (iqr * 0.40).min(discharge_th);
+        let ct_vol = (iqr * 0.40).min(charge_th);
+
         let (u_min, u_max) = state.action_bounds[i];
-        let dt = (discharge_th * dt_factor).max(0.5);
-        let ct = (charge_th * ct_factor).max(0.5);
-        if diff > dt {
+        let dt = (dt_vol * dt_factor).max(0.15);
+        let ct = (ct_vol * ct_factor).max(0.15);
+
+        // Peak detection: if RT is near the lookahead window's extremes, fire at
+        // full intensity regardless of the soft threshold — these are the rare
+        // moments where we definitely beat the alternative.
+        let max_da = buf[n - 1];
+        let min_da = buf[0];
+        let near_peak_high = diff > 0.0 && current >= 0.97 * max_da && current > reference;
+        let near_peak_low = diff < 0.0 && current <= 1.03 * min_da && current < reference;
+
+        if near_peak_high {
+            action[i] = u_max;
+        } else if near_peak_low && !suppress_charge {
+            action[i] = u_min;
+        } else if diff > dt {
             let span = (slope * dt).max(1e-6);
             let intensity = ((diff - dt) / span).clamp(0.0, 1.0);
             action[i] = intensity * u_max;

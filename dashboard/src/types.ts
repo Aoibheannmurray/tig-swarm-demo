@@ -94,8 +94,6 @@ export interface ExperimentPublished {
   num_instances: number;
   is_new_best: boolean;
   hypothesis_id: string | null;
-  // Present for iterations published via /api/iterations; null for legacy
-  // /api/experiments posts without a hypothesis_id.
   strategy_tag?: string | null;
   title?: string | null;
   notes: string;
