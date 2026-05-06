@@ -2,6 +2,7 @@ import * as d3 from "d3";
 import type { Panel, WSMessage } from "../types";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
+import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 
 interface SatData {
   num_variables: number;
@@ -48,6 +49,7 @@ export class SatPanel implements Panel {
   private historyNavEl!: HTMLElement;
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
+  private emptyStateEl!: HTMLElement;
 
   private allInstances: AllSatData = {};
   private currentIndex = 0;
@@ -73,32 +75,36 @@ export class SatPanel implements Panel {
       <div class="panel-inner knapsack-panel">
         <div class="panel-label">CLAUSES &amp; ASSIGNMENT</div>
         <div class="knapsack-agent-name" id="sat-agent-name"></div>
-        <div class="routes-history-nav" id="sat-history-nav" style="display:none">
-          <button class="routes-nav-btn" id="sat-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="routes-history-label" id="sat-history-label"></span>
-          <button class="routes-nav-btn" id="sat-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="routes-history-live" id="sat-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        <div class="solution-history-nav" id="sat-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="sat-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="sat-history-label"></span>
+          <button class="solution-nav-btn" id="sat-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="sat-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
         </div>
-        <div class="routes-nav" id="sat-nav" style="display:none">
-          <button class="routes-nav-btn" id="sat-prev">&lsaquo;</button>
-          <span class="routes-instance-label" id="sat-instance-label"></span>
-          <button class="routes-nav-btn" id="sat-next">&rsaquo;</button>
+        <div class="solution-nav" id="sat-nav" style="display:none">
+          <button class="solution-nav-btn" id="sat-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="sat-instance-label"></span>
+          <button class="solution-nav-btn" id="sat-next">&rsaquo;</button>
         </div>
-        <div class="knapsack-svg-wrap" id="sat-svg-wrap">
+        <div class="sat-svg-wrap" id="sat-svg-wrap">
           <svg id="sat-svg"></svg>
+          <div class="solution-empty-state" id="sat-empty-state">
+            <div class="solution-empty-state-title">Challenge not started yet</div>
+            <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
+          </div>
         </div>
         <div class="knapsack-value-box">
-          <div class="routes-sub-label">SATISFIED</div>
-          <div class="routes-sub-value" id="sat-sat">---</div>
+          <div class="solution-sub-label">SATISFIED</div>
+          <div class="solution-sub-value" id="sat-sat">---</div>
         </div>
         <div class="knapsack-items-box">
-          <div class="routes-sub-label">VARIABLES</div>
-          <div class="routes-sub-value" id="sat-vars">---</div>
+          <div class="solution-sub-label">VARIABLES</div>
+          <div class="solution-sub-value" id="sat-vars">---</div>
         </div>
-        <div class="routes-score">
-          <div class="routes-score-label">SCORE</div>
-          <div class="routes-score-value" id="sat-score">---</div>
-          <div class="routes-score-delta" id="sat-score-delta"></div>
+        <div class="solution-score">
+          <div class="solution-score-label">SCORE</div>
+          <div class="solution-score-value" id="sat-score">---</div>
+          <div class="solution-score-delta" id="sat-score-delta"></div>
         </div>
       </div>
     `;
@@ -113,12 +119,16 @@ export class SatPanel implements Panel {
     this.historyNavEl = document.getElementById("sat-history-nav")!;
     this.historyLabelEl = document.getElementById("sat-history-label")!;
     this.historyLiveBtnEl = document.getElementById("sat-hist-live")!;
+    this.emptyStateEl = document.getElementById("sat-empty-state")!;
 
     document.getElementById("sat-prev")!.addEventListener("click", () => this.navigate(-1));
     document.getElementById("sat-next")!.addEventListener("click", () => this.navigate(1));
     document.getElementById("sat-hist-prev")!.addEventListener("click", () => this.navigateHistory(-1));
     document.getElementById("sat-hist-next")!.addEventListener("click", () => this.navigateHistory(1));
     this.historyLiveBtnEl.addEventListener("click", () => {
+      // Non-active challenge → switch viewed to active. Active
+      // challenge → fall through to "jump to latest history".
+      if (liveSwitchToActive("satisfiability")) return;
       if (!this.historyEntries.length) return;
       this.historyIndex = this.historyEntries.length - 1;
       this.applyHistoryEntry();
@@ -187,6 +197,7 @@ export class SatPanel implements Panel {
         this.applyHistoryEntry();
       }
       this.updateHistoryLabel();
+      this.updateEmptyState();
     } catch {
       // non-fatal
     }
@@ -231,19 +242,27 @@ export class SatPanel implements Panel {
     }
 
     this.updateHistoryLabel();
+    this.updateEmptyState();
   }
 
   private updateHistoryLabel() {
     const total = this.historyEntries.length;
-    if (total <= 1) {
+    const atLatest = this.isAtLatest();
+    const showLive = shouldShowLiveButton("satisfiability", atLatest);
+    if (total <= 1 && !showLive) {
       this.historyNavEl.style.display = "none";
       return;
     }
     this.historyNavEl.style.display = "flex";
-    const atLatest = this.isAtLatest();
-    this.historyLiveBtnEl.style.display = atLatest ? "none" : "inline-block";
+    this.historyLiveBtnEl.style.display = showLive ? "inline-block" : "none";
     const suffix = atLatest ? " · LATEST" : "";
-    this.historyLabelEl.textContent = `BEST ${this.historyIndex + 1}/${total}${suffix}`;
+    this.historyLabelEl.textContent =
+      total > 0 ? `BEST ${this.historyIndex + 1}/${total}${suffix}` : "";
+  }
+
+  private updateEmptyState() {
+    if (!this.emptyStateEl) return;
+    this.emptyStateEl.style.display = this.historyEntries.length > 0 ? "none" : "flex";
   }
 
   private navigate(delta: number) {
@@ -272,6 +291,8 @@ export class SatPanel implements Panel {
       this.rawScore = null;
       this.historyEntries = [];
       this.historyIndex = -1;
+      this.updateHistoryLabel();
+      this.updateEmptyState();
       this.histG.selectAll("*").remove();
       this.gridG.selectAll("*").remove();
       this.scoreEl.textContent = "---";
@@ -317,6 +338,7 @@ export class SatPanel implements Panel {
           this.applyHistoryEntry();
         } else {
           this.updateHistoryLabel();
+          this.updateEmptyState();
         }
       }
     }

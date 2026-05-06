@@ -2,6 +2,7 @@ import * as d3 from "d3";
 import type { Panel, WSMessage } from "../types";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
+import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 
 interface EnergyData {
   num_steps: number;
@@ -44,6 +45,7 @@ export class EnergyPanel implements Panel {
   private historyNavEl!: HTMLElement;
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
+  private emptyStateEl!: HTMLElement;
 
   private allInstances: AllEnergyData = {};
   private currentIndex = 0;
@@ -69,28 +71,32 @@ export class EnergyPanel implements Panel {
       <div class="panel-inner energy-panel">
         <div class="panel-label">ENERGY SCHEDULE</div>
         <div class="energy-agent-name" id="energy-agent-name"></div>
-        <div class="routes-history-nav" id="energy-history-nav" style="display:none">
-          <button class="routes-nav-btn" id="energy-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="routes-history-label" id="energy-history-label"></span>
-          <button class="routes-nav-btn" id="energy-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="routes-history-live" id="energy-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        <div class="solution-history-nav" id="energy-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="energy-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="energy-history-label"></span>
+          <button class="solution-nav-btn" id="energy-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="energy-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
         </div>
-        <div class="routes-nav" id="energy-nav" style="display:none">
-          <button class="routes-nav-btn" id="energy-prev">&lsaquo;</button>
-          <span class="routes-instance-label" id="energy-instance-label"></span>
-          <button class="routes-nav-btn" id="energy-next">&rsaquo;</button>
+        <div class="solution-nav" id="energy-nav" style="display:none">
+          <button class="solution-nav-btn" id="energy-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="energy-instance-label"></span>
+          <button class="solution-nav-btn" id="energy-next">&rsaquo;</button>
         </div>
         <div class="energy-svg-wrap" id="energy-svg-wrap">
           <svg id="energy-svg"></svg>
+          <div class="solution-empty-state" id="energy-empty-state">
+            <div class="solution-empty-state-title">Challenge not started yet</div>
+            <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
+          </div>
         </div>
         <div class="energy-batteries-box">
-          <div class="routes-sub-label">BATTERIES</div>
-          <div class="routes-sub-value" id="energy-batteries">---</div>
+          <div class="solution-sub-label">BATTERIES</div>
+          <div class="solution-sub-value" id="energy-batteries">---</div>
         </div>
-        <div class="routes-score">
-          <div class="routes-score-label">SCORE</div>
-          <div class="routes-score-value" id="energy-score">---</div>
-          <div class="routes-score-delta" id="energy-score-delta"></div>
+        <div class="solution-score">
+          <div class="solution-score-label">SCORE</div>
+          <div class="solution-score-value" id="energy-score">---</div>
+          <div class="solution-score-delta" id="energy-score-delta"></div>
         </div>
       </div>
     `;
@@ -104,12 +110,16 @@ export class EnergyPanel implements Panel {
     this.historyNavEl = document.getElementById("energy-history-nav")!;
     this.historyLabelEl = document.getElementById("energy-history-label")!;
     this.historyLiveBtnEl = document.getElementById("energy-hist-live")!;
+    this.emptyStateEl = document.getElementById("energy-empty-state")!;
 
     document.getElementById("energy-prev")!.addEventListener("click", () => this.navigate(-1));
     document.getElementById("energy-next")!.addEventListener("click", () => this.navigate(1));
     document.getElementById("energy-hist-prev")!.addEventListener("click", () => this.navigateHistory(-1));
     document.getElementById("energy-hist-next")!.addEventListener("click", () => this.navigateHistory(1));
     this.historyLiveBtnEl.addEventListener("click", () => {
+      // Non-active challenge → switch viewed to active. Active
+      // challenge → fall through to "jump to latest history".
+      if (liveSwitchToActive("energy_arbitrage")) return;
       if (!this.historyEntries.length) return;
       this.historyIndex = this.historyEntries.length - 1;
       this.applyHistoryEntry();
@@ -182,6 +192,7 @@ export class EnergyPanel implements Panel {
         this.applyHistoryEntry();
       }
       this.updateHistoryLabel();
+      this.updateEmptyState();
     } catch {
       // non-fatal
     }
@@ -226,19 +237,27 @@ export class EnergyPanel implements Panel {
     }
 
     this.updateHistoryLabel();
+    this.updateEmptyState();
   }
 
   private updateHistoryLabel() {
     const total = this.historyEntries.length;
-    if (total <= 1) {
+    const atLatest = this.isAtLatest();
+    const showLive = shouldShowLiveButton("energy_arbitrage", atLatest);
+    if (total <= 1 && !showLive) {
       this.historyNavEl.style.display = "none";
       return;
     }
     this.historyNavEl.style.display = "flex";
-    const atLatest = this.isAtLatest();
-    this.historyLiveBtnEl.style.display = atLatest ? "none" : "inline-block";
+    this.historyLiveBtnEl.style.display = showLive ? "inline-block" : "none";
     const suffix = atLatest ? " · LATEST" : "";
-    this.historyLabelEl.textContent = `BEST ${this.historyIndex + 1}/${total}${suffix}`;
+    this.historyLabelEl.textContent =
+      total > 0 ? `BEST ${this.historyIndex + 1}/${total}${suffix}` : "";
+  }
+
+  private updateEmptyState() {
+    if (!this.emptyStateEl) return;
+    this.emptyStateEl.style.display = this.historyEntries.length > 0 ? "none" : "flex";
   }
 
   private navigate(delta: number) {
@@ -267,6 +286,8 @@ export class EnergyPanel implements Panel {
       this.rawScore = null;
       this.historyEntries = [];
       this.historyIndex = -1;
+      this.updateHistoryLabel();
+      this.updateEmptyState();
       this.chartG.selectAll("*").remove();
       this.xAxisG.selectAll("*").remove();
       this.yLeftAxisG.selectAll("*").remove();
@@ -314,6 +335,7 @@ export class EnergyPanel implements Panel {
           this.applyHistoryEntry();
         } else {
           this.updateHistoryLabel();
+          this.updateEmptyState();
         }
       }
     }

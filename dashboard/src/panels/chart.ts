@@ -324,14 +324,6 @@ export class ChartPanel implements Panel {
     const time = Math.max(0, msgTime - progress.registeredAt);
     const feasible = msg.feasible !== false;
 
-    // Legacy safety net when an event lacks experiment_id.
-    if (!experimentId) {
-      const duplicate = progress.experiments.some(
-        (e) => !e.experimentId && e.time === time && e.score === msg.score && e.feasible === feasible
-      );
-      if (duplicate) return false;
-    }
-
     progress.experiments.push({
       time,
       score: msg.score,

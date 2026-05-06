@@ -20,7 +20,7 @@ export const BKS_AVERAGE = VRP_BKS_AVERAGE;
 export const BKS_INSTANCE_COUNT = VRP_BKS_INSTANCE_COUNT;
 
 export function bksReference(): number | null {
-  return getSwarmConfig().challenge === "vehicle_routing" ? VRP_BKS_AVERAGE : null;
+  return getSwarmConfig().active_challenge === "vehicle_routing" ? VRP_BKS_AVERAGE : null;
 }
 
 export function bksGapPct(score: number): number {

@@ -11,12 +11,12 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from models import (
-    RegisterRequest, HeartbeatRequest, HypothesisCreate, ExperimentCreate,
+    RegisterRequest, HeartbeatRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
     MessageCreate,
     SwarmConfigUpdate,
-    AgentResponse, HypothesisResponse,
-    ExperimentResponse, IterationResponse, new_id, improvement_pct,
+    AgentResponse,
+    IterationResponse, new_id, improvement_pct,
 )
 from names import generate_agent_name, load_used_names
 from dedup import fingerprint
@@ -293,22 +293,13 @@ async def periodic_stats():
                         "total_trajectories": total_traj,
                     }
 
-            # Backward-compat: also include flat fields for the active
-            # challenge so older dashboards keep rendering during rollout.
-            flat = per_challenge.get(active_challenge, {})
+            # `per_challenge` is the source of truth; the dashboard slices
+            # it down to the viewed challenge before populating panels.
             await manager.broadcast({
                 "type": "stats_update",
                 "active_challenge": active_challenge,
                 "per_challenge": per_challenge,
                 "total_agents": total_agents,
-                "active_agents": flat.get("active_agents", 0),
-                "total_experiments": flat.get("total_experiments", 0),
-                "hypotheses_count": flat.get("hypotheses_count", 0),
-                "total_trajectories": flat.get("total_trajectories", 0),
-                "best_score": flat.get("best_score"),
-                "baseline_score": flat.get("baseline_score"),
-                "num_instances": flat.get("num_instances", 0),
-                "improvement_pct": flat.get("improvement_pct", 0),
                 "timestamp": now(),
             })
         except Exception:
@@ -954,311 +945,6 @@ async def create_iteration(req: IterationCreate):
     )
 
 
-# ── Hypothesis endpoints (legacy) ──
-
-@app.post("/api/hypotheses")
-async def create_hypothesis(req: HypothesisCreate):
-    challenge = await resolve_challenge(req.challenge)
-    async with db.connect() as conn:
-        my_best = await db.get_agent_best(conn, req.agent_id, challenge)
-        target_best_experiment_id = (
-            my_best["experiment_id"] if my_best else None
-        )
-
-        hyp_id = new_id()
-        fp = fingerprint(req.title, req.strategy_tag)
-        timestamp = now()
-        # Legacy endpoint compatibility:
-        # this route only creates a hypothesis row, while /api/experiments
-        # later determines its real outcome. There is no "active" status.
-        # Until evaluated, keep it as failed-by-default; /api/experiments
-        # will overwrite to succeeded when it improves the agent's own best.
-        status = "failed"
-
-        await conn.execute(
-            """INSERT INTO hypotheses
-               (id, agent_id, challenge, title, description, strategy_tag, status, fingerprint,
-                parent_hypothesis_id, created_at,
-                target_best_experiment_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (hyp_id, req.agent_id, challenge, req.title, req.description, req.strategy_tag,
-             status, fp, req.parent_hypothesis_id, timestamp,
-             target_best_experiment_id),
-        )
-        await conn.commit()
-
-        agent_name = await get_agent_name(conn, req.agent_id)
-
-    await manager.broadcast({
-        "type": "hypothesis_proposed",
-        "challenge": challenge,
-        "hypothesis_id": hyp_id,
-        "agent_name": agent_name,
-        "agent_id": req.agent_id,
-        "title": req.title,
-        "description": req.description,
-        "strategy_tag": req.strategy_tag,
-        "parent_hypothesis_id": req.parent_hypothesis_id,
-        "timestamp": timestamp,
-    })
-
-    return HypothesisResponse(hypothesis_id=hyp_id, status=status, fingerprint=fp)
-
-
-@app.get("/api/hypotheses")
-async def list_hypotheses(
-    status: str | None = None,
-    strategy_tag: str | None = None,
-    challenge: str | None = None,
-):
-    challenge = await resolve_challenge(challenge)
-    async with db.connect() as conn:
-        query = (
-            "SELECT h.*, a.name as agent_name FROM hypotheses h "
-            "JOIN agents a ON a.id = h.agent_id WHERE h.challenge = ?"
-        )
-        params: list = [challenge]
-        if status:
-            query += " AND h.status = ?"
-            params.append(status)
-        if strategy_tag:
-            query += " AND h.strategy_tag = ?"
-            params.append(strategy_tag)
-        query += " ORDER BY h.created_at DESC"
-        cursor = await conn.execute(query, params)
-        return [dict(row) for row in await cursor.fetchall()]
-
-
-# ── Experiment endpoints ──
-
-@app.post("/api/experiments", response_model=ExperimentResponse)
-async def create_experiment(req: ExperimentCreate):
-    challenge = await resolve_challenge(req.challenge)
-    direction = await get_direction(challenge)
-    challenge_cfg = await get_challenge_config_cached(challenge)
-
-    exp_id = new_id()
-    timestamp = now()
-    solution_data_json = json.dumps(req.solution_data) if req.solution_data else None
-
-    async with db.connect() as conn:
-        # Take the SQLite write lock up front (BEGIN IMMEDIATE) so the
-        # read→decide→write block below runs atomically with respect to
-        # concurrent publishes. Without this, two agents can both read the
-        # same prev_best, both conclude is_new_best=True, and both insert
-        # into best_history — producing non-monotonic rows in /api/replay.
-        await conn.execute("BEGIN IMMEDIATE")
-
-        await db.ensure_agent_challenge_state(conn, req.agent_id, challenge, timestamp)
-
-        # Capture the previous global best, the publishing agent's prior
-        # own-best, and the baseline BEFORE inserting. Otherwise a read
-        # after the insert would return the row we just wrote — breaking
-        # is_new_best, beats_own_best, and baseline detection.
-        prev_best = await db.get_global_best(conn, challenge, direction=direction)
-        prev_agent_best = await db.get_agent_best(conn, req.agent_id, challenge)
-        baseline = await get_baseline_score(conn, challenge)
-
-        is_new_best = prev_best is None or db.is_better(direction, req.score, prev_best["score"])
-        beats_own_best = (
-            prev_agent_best is None
-            or db.is_better(direction, req.score, prev_agent_best["score"])
-        )
-
-        delta_vs_best_pct: float | None = None
-        if prev_best is not None and prev_best["score"] != 0:
-            delta_vs_best_pct = round(
-                improvement_pct(prev_best["score"], req.score, direction), 6
-            )
-        delta_vs_own_best_pct: float | None = None
-        if prev_agent_best is not None and prev_agent_best["score"] != 0:
-            delta_vs_own_best_pct = round(
-                improvement_pct(prev_agent_best["score"], req.score, direction), 6
-            )
-
-        # ── Trajectory tracking (per-(agent, challenge)) ──
-        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
-        trajectory_id = (acs or {}).get("current_trajectory_id")
-        if not trajectory_id:
-            trajectory_id = new_id()
-            await db.create_trajectory(
-                conn, trajectory_id, challenge, timestamp,
-                current_score=req.score if beats_own_best else None,
-            )
-            await db.update_agent_challenge_state(
-                conn, req.agent_id, challenge,
-                set_fields={"current_trajectory_id": trajectory_id},
-            )
-            await db.increment_agent_challenge_counters(
-                conn, req.agent_id, challenge, num_trajectories_inc=1,
-            )
-
-        await conn.execute(
-            """INSERT INTO experiments
-               (id, agent_id, challenge, hypothesis_id, algorithm_code, score, feasible,
-                num_vehicles, total_distance, runtime_seconds, notes, solution_data,
-                delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
-                trajectory_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (exp_id, req.agent_id, challenge, req.hypothesis_id, req.algorithm_code, req.score,
-             1 if req.feasible else 0, req.num_vehicles, req.total_distance,
-             req.runtime_seconds, req.notes, solution_data_json,
-             delta_vs_best_pct, delta_vs_own_best_pct,
-             1 if beats_own_best else 0,
-             trajectory_id, timestamp),
-        )
-
-        await db.update_trajectory_after_edit(
-            conn, trajectory_id, beats_own_best,
-            new_score=req.score if beats_own_best else None,
-        )
-
-        if beats_own_best:
-            new_program_id = new_id()
-            await db.increment_agent_challenge_counters(
-                conn, req.agent_id, challenge,
-                runs=1,
-                improvements=1,
-                runs_since_improvement_reset=True,
-                best_ever_score=req.score,
-                direction=direction,
-            )
-            await db.update_agent_challenge_state(
-                conn, req.agent_id, challenge,
-                set_fields={"current_program_id": new_program_id},
-            )
-            await db.upsert_agent_best(
-                conn,
-                agent_id=req.agent_id,
-                challenge=challenge,
-                experiment_id=exp_id,
-                algorithm_code=req.algorithm_code,
-                score=req.score,
-                feasible=req.feasible,
-                num_vehicles=req.num_vehicles,
-                total_distance=req.total_distance,
-                solution_data=solution_data_json,
-                updated_at=timestamp,
-                trajectory_id=trajectory_id,
-            )
-        else:
-            await db.increment_agent_challenge_counters(
-                conn, req.agent_id, challenge,
-                runs=1,
-                runs_since_improvement_inc=1,
-            )
-
-        agent_name = await get_agent_name(conn, req.agent_id)
-        incremental_pct = delta_vs_best_pct if is_new_best else None
-
-        if is_new_best:
-            await conn.execute(
-                "INSERT INTO best_history (experiment_id, agent_id, challenge, agent_name, score, solution_data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (exp_id, req.agent_id, challenge, agent_name, req.score, solution_data_json, timestamp),
-            )
-
-        # Prefer this experiment's own solution_data; if it wasn't provided,
-        # fall back to the previous global best's.
-        effective_solution_data = req.solution_data or (prev_best["solution_data"] if prev_best else None)
-        num_instances = get_num_instances_for(challenge_cfg, effective_solution_data)
-
-        hyp_status = None
-        if req.hypothesis_id:
-            # Under the branch model: a hypothesis succeeds iff it improves
-            # the publishing agent's own branch. This replaces the old
-            # "beats baseline" rule, which became noisy once many branches
-            # existed at different score levels.
-            hyp_status = "succeeded" if beats_own_best else "failed"
-            await conn.execute(
-                "UPDATE hypotheses SET status = ? WHERE id = ?",
-                (hyp_status, req.hypothesis_id),
-            )
-
-        await conn.commit()
-        leaderboard = await db.compute_leaderboard(
-            conn, challenge, inactive_cutoff(), direction=direction,
-        )
-        rank = next((e["rank"] for e in leaderboard if e["agent_id"] == req.agent_id), 0)
-
-    imp = improvement_pct(baseline, req.score, direction) if baseline is not None else 0.0
-
-    if hyp_status and req.hypothesis_id:
-        await manager.broadcast({
-            "type": "hypothesis_status_changed",
-            "challenge": challenge,
-            "hypothesis_id": req.hypothesis_id,
-            "new_status": hyp_status,
-            "agent_name": agent_name,
-            "timestamp": timestamp,
-        })
-
-    # Strategy tag and title come from the hypothesis; null when the legacy
-    # flow was called without one (seed-era experiments).
-    strategy_tag = None
-    hyp_title = None
-    if req.hypothesis_id:
-        async with db.connect() as conn:
-            cursor = await conn.execute(
-                "SELECT strategy_tag, title FROM hypotheses WHERE id = ?",
-                (req.hypothesis_id,),
-            )
-            hyp_row = await cursor.fetchone()
-            if hyp_row:
-                strategy_tag = hyp_row["strategy_tag"]
-                hyp_title = hyp_row["title"]
-
-    await manager.broadcast({
-        "type": "experiment_published",
-        "challenge": challenge,
-        "experiment_id": exp_id,
-        "agent_name": agent_name,
-        "agent_id": req.agent_id,
-        "score": req.score,
-        "feasible": req.feasible,
-        "improvement_pct": imp,
-        "delta_vs_best_pct": delta_vs_best_pct,
-        "beats_own_best": beats_own_best,
-        "delta_vs_own_best_pct": delta_vs_own_best_pct,
-        "num_instances": num_instances,
-        "is_new_best": is_new_best,
-        "hypothesis_id": req.hypothesis_id,
-        "strategy_tag": strategy_tag,
-        "title": hyp_title,
-        "notes": req.notes,
-        "timestamp": timestamp,
-    })
-
-    if is_new_best:
-        await manager.broadcast({
-            "type": "new_global_best",
-            "challenge": challenge,
-            "experiment_id": exp_id,
-            "agent_name": agent_name,
-            "agent_id": req.agent_id,
-            "score": req.score,
-            "improvement_pct": imp,
-            "incremental_improvement_pct": incremental_pct,
-            "num_instances": num_instances,
-            "solution_data": req.solution_data,
-            "timestamp": timestamp,
-        })
-
-    await manager.broadcast({
-        "type": "leaderboard_update",
-        "challenge": challenge,
-        "entries": leaderboard,
-        "timestamp": timestamp,
-    })
-
-    return ExperimentResponse(
-        experiment_id=exp_id,
-        is_new_best=is_new_best,
-        rank=rank,
-        improvement_over_baseline_pct=imp,
-        hypothesis_status_updated_to=hyp_status,
-    )
-
-
 # ── Leaderboard ──
 
 @app.get("/api/leaderboard")
@@ -1515,22 +1201,6 @@ async def admin_broadcast(req: AdminBroadcast):
     return {"sent": True}
 
 
-# Reset endpoint disabled to protect experiment data.
-# @app.post("/api/admin/reset")
-# async def admin_reset(req: AdminAuth):
-#     await verify_admin(req)
-#     async with db.connect() as conn:
-#         await conn.execute("DELETE FROM experiments")
-#         await conn.execute("DELETE FROM hypotheses")
-#         await conn.execute("DELETE FROM agents")
-#         await conn.execute("DELETE FROM messages")
-#         await conn.execute("DELETE FROM agent_bests")
-#         await conn.execute("DELETE FROM best_history")
-#         await conn.commit()
-#     await manager.broadcast({"type": "reset", "timestamp": now()})
-#     return {"reset": True}
-
-
 @app.post("/api/admin/reset_challenge")
 async def admin_reset_challenge(req: AdminResetChallenge):
     """Per-challenge leaderboard reset. Drops `agent_bests` + `best_history`
@@ -1674,45 +1344,23 @@ async def get_initial_algorithm(challenge: str | None = None):
 
 @app.post("/api/swarm_config")
 async def update_swarm_config(req: SwarmConfigUpdate):
-    """Owner-only endpoint to update swarm-wide configuration. Two shapes
-    are accepted (see `SwarmConfigUpdate` in models.py for details):
+    """Owner-only endpoint to update swarm-wide configuration.
 
-      1. New shape: pass `active_challenge` to flip the swarm's active
-         challenge, and/or `challenges` to merge per-challenge sub-configs
-         (partial updates supported — only the keys passed get written).
-      2. Legacy flat shape: `challenge` + `tracks` + `timeout` +
-         `scoring_direction` + `initial_algorithm_code` writes a single
-         challenge's sub-config and bumps `active_challenge` to it.
+    Pass `active_challenge` to flip the swarm's active challenge, and/or
+    `challenges` to merge per-challenge sub-configs (partial updates
+    supported — only the keys passed get written). Global keys
+    (swarm_name, stagnation thresholds) update independently.
 
     Gated by admin_key — same secret used for /api/admin/broadcast.
     """
     await verify_admin(req)
 
-    # Resolve which challenge(s) to update.
-    target_challenge = req.active_challenge or req.challenge
     challenges_payload: dict[str, dict] = {}
     if req.challenges:
         for ch, sub in req.challenges.items():
             d = sub.dict() if hasattr(sub, "dict") else sub
             challenges_payload[ch] = d
-    # Legacy flat shape → single per-challenge update.
-    if req.challenge or req.tracks is not None or req.timeout is not None \
-            or req.scoring_direction is not None or req.initial_algorithm_code is not None:
-        ch = req.challenge or target_challenge or await get_active_challenge()
-        legacy_sub = {}
-        if req.tracks is not None:
-            legacy_sub["tracks"] = req.tracks
-        if req.timeout is not None:
-            legacy_sub["timeout"] = req.timeout
-        if req.scoring_direction is not None:
-            legacy_sub["scoring_direction"] = req.scoring_direction
-        if req.initial_algorithm_code is not None:
-            legacy_sub["initial_algorithm_code"] = req.initial_algorithm_code
-        if legacy_sub:
-            existing = challenges_payload.setdefault(ch, {})
-            existing.update(legacy_sub)
 
-    # Apply.
     async with db.connect() as conn:
         for ch, sub in challenges_payload.items():
             await db.upsert_challenge_config(
@@ -1723,14 +1371,8 @@ async def update_swarm_config(req: SwarmConfigUpdate):
                 initial_algorithm_code=sub.get("initial_algorithm_code"),
                 strategy_tags=json.dumps(sub["strategy_tags"]) if sub.get("strategy_tags") is not None else None,
             )
-        # active_challenge update (if requested).
         if req.active_challenge:
             await db.set_active_challenge(conn, req.active_challenge)
-        elif req.challenge and not req.active_challenge:
-            # Legacy back-compat: flat-shape write with a `challenge` field
-            # also bumps the active challenge to it.
-            await db.set_active_challenge(conn, req.challenge)
-        # Global keys.
         for key, value in (
             ("swarm_name", req.swarm_name),
             ("owner_name", req.owner_name),
@@ -1747,7 +1389,6 @@ async def update_swarm_config(req: SwarmConfigUpdate):
 
     _invalidate_caches()
 
-    # Re-read for the response and the broadcast payload.
     config_after = await get_swarm_config()
 
     # Tell connected dashboards to refetch swarm_config so labels and the
@@ -1756,8 +1397,6 @@ async def update_swarm_config(req: SwarmConfigUpdate):
         "type": "swarm_config_updated",
         "active_challenge": config_after["active_challenge"],
         "available_challenges": config_after["available_challenges"],
-        # Back-compat flat fields.
-        "challenge": config_after["active_challenge"],
         "scoring_direction": config_after["scoring_direction"],
         "swarm_name": config_after["swarm_name"],
         "timestamp": now(),

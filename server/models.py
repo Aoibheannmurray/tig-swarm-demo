@@ -32,31 +32,6 @@ class HeartbeatRequest(BaseModel):
     current_hypothesis_id: Optional[str] = None
 
 
-class HypothesisCreate(BaseModel):
-    agent_id: str
-    title: str
-    description: str
-    strategy_tag: str = "other"
-    parent_hypothesis_id: Optional[str] = None
-    # Optional during the rollout window; server fills in the swarm's active
-    # challenge if missing. After the transition this becomes required.
-    challenge: Optional["ChallengeName"] = None
-
-
-class ExperimentCreate(BaseModel):
-    agent_id: str
-    hypothesis_id: Optional[str] = None
-    algorithm_code: str = ""
-    score: float
-    feasible: bool = True
-    num_vehicles: int = 0
-    total_distance: float = 0.0
-    runtime_seconds: float = 0.0
-    notes: str = ""
-    solution_data: Optional[dict] = None
-    challenge: Optional["ChallengeName"] = None
-
-
 class IterationCreate(BaseModel):
     agent_id: str
     title: str
@@ -65,8 +40,6 @@ class IterationCreate(BaseModel):
     algorithm_code: str = ""
     score: float
     feasible: bool = True
-    num_vehicles: int = 0
-    total_distance: float = 0.0
     notes: str = ""
     solution_data: Optional[dict] = None
     # Per-track mean quality (e.g. {"n_nodes=200": 4.2e6, "n_nodes=600": 3.1e6}).
@@ -74,6 +47,10 @@ class IterationCreate(BaseModel):
     # before they're combined into the overall geometric mean.
     track_scores: Optional[dict] = None
     challenge: Optional["ChallengeName"] = None
+    # VRP-only: vehicles used and total tour distance. Stored as NULL for
+    # every other challenge — these have no meaning for SAT, knapsack, etc.
+    num_vehicles: Optional[int] = None
+    total_distance: Optional[float] = None
 
 
 class AdminAuth(BaseModel):
@@ -121,29 +98,15 @@ class ChallengeSubConfig(BaseModel):
 
 
 class SwarmConfigUpdate(AdminAuth):
-    """Owner-only swarm config update. Two shapes are accepted during the
-    rollout window:
+    """Owner-only swarm config update.
 
-      1. New shape (preferred): set `active_challenge` to flip the swarm's
-         active challenge, and/or `challenges` to update per-challenge
-         sub-configs (partial updates supported — only the keys passed
-         get written).
-      2. Legacy flat shape: `challenge` + `tracks` + `timeout` +
-         `scoring_direction` + `initial_algorithm_code` writes a single
-         challenge's sub-config and bumps `active_challenge` to it.
-
-    All fields are optional; the server merges what's provided.
+    Set `active_challenge` to flip the swarm's active challenge, and/or
+    `challenges` to update per-challenge sub-configs (partial updates
+    supported — only the keys passed get written). Global keys (swarm
+    name, stagnation thresholds) update independently.
     """
-    # New per-challenge model.
     active_challenge: Optional[ChallengeName] = None
     challenges: Optional[dict[ChallengeName, ChallengeSubConfig]] = None
-    # Legacy flat fields (kept for back-compat).
-    challenge: Optional[ChallengeName] = None
-    tracks: Optional[dict] = None
-    timeout: Optional[int] = None
-    scoring_direction: Optional[Literal["min", "max"]] = None
-    initial_algorithm_code: Optional[str] = None
-    # Global keys.
     swarm_name: Optional[str] = None
     owner_name: Optional[str] = None
     stagnation_threshold: Optional[int] = None
@@ -166,20 +129,6 @@ class AgentResponse(BaseModel):
     agent_name: str
     registered_at: str
     config: dict
-
-
-class HypothesisResponse(BaseModel):
-    hypothesis_id: str
-    status: str
-    fingerprint: str
-
-
-class ExperimentResponse(BaseModel):
-    experiment_id: str
-    is_new_best: bool
-    rank: int
-    improvement_over_baseline_pct: float
-    hypothesis_status_updated_to: Optional[str] = None
 
 
 class IterationResponse(BaseModel):

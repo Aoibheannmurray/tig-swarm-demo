@@ -316,13 +316,17 @@ def publish_results(
         "algorithm_code": code,
         "score": bench["score"],
         "feasible": bench["feasible"],
-        "num_vehicles": bench.get("num_vehicles", 0),
-        "total_distance": bench.get("total_distance", bench["score"]),
         "notes": mutation.get("notes", ""),
         "solution_data": bench.get("viz_data"),
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
     }
+    # VRP-only fields; forward only when benchmark.py actually populated
+    # them (i.e. challenge is vehicle_routing).
+    if bench.get("num_vehicles") is not None:
+        payload["num_vehicles"] = bench["num_vehicles"]
+    if bench.get("total_distance") is not None:
+        payload["total_distance"] = bench["total_distance"]
     return server_post(f"{server}/api/iterations", payload)
 
 

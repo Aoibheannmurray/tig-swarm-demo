@@ -32,11 +32,6 @@ export interface ChallengeSubConfig {
 export interface SwarmConfig {
   active_challenge: Challenge;
   available_challenges: Record<string, ChallengeSubConfig>;
-  // Back-compat flat fields — populated from the active challenge's sub-config.
-  challenge: Challenge;
-  scoring_direction: ScoringDirection;
-  tracks: Record<string, number | string>;
-  timeout: number;
   swarm_name: string;
   owner_name: string;
 }
@@ -57,10 +52,6 @@ const FALLBACK: SwarmConfig = {
     job_scheduling: { ...FALLBACK_CH },
     energy_arbitrage: { ...FALLBACK_CH },
   },
-  challenge: "vehicle_routing",
-  scoring_direction: "max",
-  tracks: {},
-  timeout: 5,
   swarm_name: "",
   owner_name: "",
 };
@@ -88,8 +79,7 @@ export function getChallengeConfig(c: Challenge): ChallengeSubConfig {
 // callers that don't yet thread the user's viewed-challenge through. New
 // dashboard code should pass the viewed challenge explicitly.
 export function getDirection(challenge?: Challenge): ScoringDirection {
-  if (challenge) return getChallengeConfig(challenge).scoring_direction;
-  return current.scoring_direction;
+  return getChallengeConfig(challenge ?? current.active_challenge).scoring_direction;
 }
 
 export function isMin(challenge?: Challenge): boolean {
@@ -122,7 +112,7 @@ export async function loadSwarmConfig(apiBase: string): Promise<SwarmConfig> {
     const r = await fetch(`${apiBase}/api/swarm_config`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    const active = (data.active_challenge ?? data.challenge ?? FALLBACK.active_challenge) as Challenge;
+    const active = (data.active_challenge ?? FALLBACK.active_challenge) as Challenge;
     const available: Record<string, ChallengeSubConfig> = {};
     const raw = (data.available_challenges ?? {}) as Record<string, any>;
     for (const [name, sub] of Object.entries(raw)) {
@@ -133,25 +123,9 @@ export async function loadSwarmConfig(apiBase: string): Promise<SwarmConfig> {
         has_initial_algorithm: !!sub?.has_initial_algorithm,
       };
     }
-    // If the server returned the legacy flat shape only, synthesise an
-    // available_challenges entry for the active challenge so dashboard
-    // helpers don't NPE.
-    if (Object.keys(available).length === 0) {
-      available[active] = {
-        tracks: data.tracks ?? {},
-        timeout: typeof data.timeout === "number" ? data.timeout : 5,
-        scoring_direction: data.scoring_direction === "min" ? "min" : "max",
-        has_initial_algorithm: false,
-      };
-    }
-    const activeSub = available[active] ?? FALLBACK_CH;
     current = {
       active_challenge: active,
       available_challenges: available,
-      challenge: active,
-      scoring_direction: activeSub.scoring_direction,
-      tracks: activeSub.tracks,
-      timeout: activeSub.timeout,
       swarm_name: data.swarm_name ?? "",
       owner_name: data.owner_name ?? "",
     };

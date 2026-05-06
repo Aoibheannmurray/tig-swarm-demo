@@ -18,7 +18,7 @@ from pathlib import Path
 # rerunning setup. The startswith("$") check catches the un-substituted
 # placeholder so a contributor who forgot to run setup.py join gets a
 # loud failure instead of a silent post to nowhere.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app//"
+SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app///"
 if SERVER.startswith("$"):
     sys.exit(
         "publish.py: server URL not configured. Run "
@@ -45,7 +45,7 @@ def _resolve_algo_path() -> Path:
                 return ROOT / algo
         except Exception:
             pass
-    return ROOT / "src" / "job_scheduling" / "algorithm" / "mod.rs"
+    return ROOT / "src" / "energy_arbitrage" / "algorithm" / "mod.rs"
 
 
 def main():
@@ -77,13 +77,18 @@ def main():
         "algorithm_code": code,
         "score": bench["score"],
         "feasible": bench["feasible"],
-        "num_vehicles": bench.get("num_vehicles", 0),
-        "total_distance": bench.get("total_distance", bench["score"]),
         "notes": notes,
         "solution_data": bench.get("viz_data"),
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
     }
+    # VRP-only fields. benchmark.py omits these for non-VRP challenges; we
+    # forward them only when present so SAT / knapsack / etc. payloads
+    # don't carry meaningless num_vehicles=0 / total_distance=score.
+    if bench.get("num_vehicles") is not None:
+        payload["num_vehicles"] = bench["num_vehicles"]
+    if bench.get("total_distance") is not None:
+        payload["total_distance"] = bench["total_distance"]
 
     # Pre-POST: surface what we're sending so a silent drop is visible at
     # publish time (the proxy / size class of bug we hit earlier was

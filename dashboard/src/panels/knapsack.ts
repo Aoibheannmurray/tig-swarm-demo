@@ -2,6 +2,7 @@ import * as d3 from "d3";
 import type { Panel, WSMessage } from "../types";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
+import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 
 interface KnapsackData {
   num_selected: number;
@@ -44,6 +45,7 @@ export class KnapsackPanel implements Panel {
   private historyNavEl!: HTMLElement;
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
+  private emptyStateEl!: HTMLElement;
 
   private allInstances: AllKnapsackData = {};
   private currentIndex = 0;
@@ -69,32 +71,36 @@ export class KnapsackPanel implements Panel {
       <div class="panel-inner knapsack-panel">
         <div class="panel-label">INTERACTIONS</div>
         <div class="knapsack-agent-name" id="knapsack-agent-name"></div>
-        <div class="routes-history-nav" id="knapsack-history-nav" style="display:none">
-          <button class="routes-nav-btn" id="knapsack-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="routes-history-label" id="knapsack-history-label"></span>
-          <button class="routes-nav-btn" id="knapsack-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="routes-history-live" id="knapsack-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        <div class="solution-history-nav" id="knapsack-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="knapsack-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="knapsack-history-label"></span>
+          <button class="solution-nav-btn" id="knapsack-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="knapsack-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
         </div>
-        <div class="routes-nav" id="knapsack-nav" style="display:none">
-          <button class="routes-nav-btn" id="knapsack-prev">&lsaquo;</button>
-          <span class="routes-instance-label" id="knapsack-instance-label"></span>
-          <button class="routes-nav-btn" id="knapsack-next">&rsaquo;</button>
+        <div class="solution-nav" id="knapsack-nav" style="display:none">
+          <button class="solution-nav-btn" id="knapsack-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="knapsack-instance-label"></span>
+          <button class="solution-nav-btn" id="knapsack-next">&rsaquo;</button>
         </div>
         <div class="knapsack-svg-wrap" id="knapsack-svg-wrap">
           <svg id="knapsack-svg"></svg>
+          <div class="solution-empty-state" id="knapsack-empty-state">
+            <div class="solution-empty-state-title">Challenge not started yet</div>
+            <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
+          </div>
         </div>
         <div class="knapsack-value-box">
-          <div class="routes-sub-label">VALUE</div>
-          <div class="routes-sub-value" id="knapsack-value">---</div>
+          <div class="solution-sub-label">VALUE</div>
+          <div class="solution-sub-value" id="knapsack-value">---</div>
         </div>
         <div class="knapsack-items-box">
-          <div class="routes-sub-label">ITEMS</div>
-          <div class="routes-sub-value" id="knapsack-items">---</div>
+          <div class="solution-sub-label">ITEMS</div>
+          <div class="solution-sub-value" id="knapsack-items">---</div>
         </div>
-        <div class="routes-score">
-          <div class="routes-score-label">SCORE</div>
-          <div class="routes-score-value" id="knapsack-score">---</div>
-          <div class="routes-score-delta" id="knapsack-score-delta"></div>
+        <div class="solution-score">
+          <div class="solution-score-label">SCORE</div>
+          <div class="solution-score-value" id="knapsack-score">---</div>
+          <div class="solution-score-delta" id="knapsack-score-delta"></div>
         </div>
       </div>
     `;
@@ -109,12 +115,16 @@ export class KnapsackPanel implements Panel {
     this.historyNavEl = document.getElementById("knapsack-history-nav")!;
     this.historyLabelEl = document.getElementById("knapsack-history-label")!;
     this.historyLiveBtnEl = document.getElementById("knapsack-hist-live")!;
+    this.emptyStateEl = document.getElementById("knapsack-empty-state")!;
 
     document.getElementById("knapsack-prev")!.addEventListener("click", () => this.navigate(-1));
     document.getElementById("knapsack-next")!.addEventListener("click", () => this.navigate(1));
     document.getElementById("knapsack-hist-prev")!.addEventListener("click", () => this.navigateHistory(-1));
     document.getElementById("knapsack-hist-next")!.addEventListener("click", () => this.navigateHistory(1));
     this.historyLiveBtnEl.addEventListener("click", () => {
+      // Non-active challenge → switch viewed to active. Active
+      // challenge → fall through to "jump to latest history".
+      if (liveSwitchToActive("knapsack")) return;
       if (!this.historyEntries.length) return;
       this.historyIndex = this.historyEntries.length - 1;
       this.applyHistoryEntry();
@@ -182,6 +192,7 @@ export class KnapsackPanel implements Panel {
         this.applyHistoryEntry();
       }
       this.updateHistoryLabel();
+      this.updateEmptyState();
     } catch {
       // non-fatal
     }
@@ -226,19 +237,27 @@ export class KnapsackPanel implements Panel {
     }
 
     this.updateHistoryLabel();
+    this.updateEmptyState();
   }
 
   private updateHistoryLabel() {
     const total = this.historyEntries.length;
-    if (total <= 1) {
+    const atLatest = this.isAtLatest();
+    const showLive = shouldShowLiveButton("knapsack", atLatest);
+    if (total <= 1 && !showLive) {
       this.historyNavEl.style.display = "none";
       return;
     }
     this.historyNavEl.style.display = "flex";
-    const atLatest = this.isAtLatest();
-    this.historyLiveBtnEl.style.display = atLatest ? "none" : "inline-block";
+    this.historyLiveBtnEl.style.display = showLive ? "inline-block" : "none";
     const suffix = atLatest ? " · LATEST" : "";
-    this.historyLabelEl.textContent = `BEST ${this.historyIndex + 1}/${total}${suffix}`;
+    this.historyLabelEl.textContent =
+      total > 0 ? `BEST ${this.historyIndex + 1}/${total}${suffix}` : "";
+  }
+
+  private updateEmptyState() {
+    if (!this.emptyStateEl) return;
+    this.emptyStateEl.style.display = this.historyEntries.length > 0 ? "none" : "flex";
   }
 
   private navigate(delta: number) {
@@ -267,6 +286,8 @@ export class KnapsackPanel implements Panel {
       this.rawScore = null;
       this.historyEntries = [];
       this.historyIndex = -1;
+      this.updateHistoryLabel();
+      this.updateEmptyState();
       this.chartG.selectAll("*").remove();
       this.scoreEl.textContent = "---";
       this.scoreDeltaEl.textContent = "";
@@ -312,6 +333,7 @@ export class KnapsackPanel implements Panel {
           this.applyHistoryEntry();
         } else {
           this.updateHistoryLabel();
+          this.updateEmptyState();
         }
       }
     }

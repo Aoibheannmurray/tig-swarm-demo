@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
-Reads swarm-wide config from `https://t1-production-0047.up.railway.app///api/swarm_config` (or from
+Reads swarm-wide config from `https://t1-production-0047.up.railway.app////api/swarm_config` (or from
 `./swarm.config.json` as a fallback for offline use) to pick the challenge,
 the per-track instance counts, and the per-instance solver timeout. Builds
 the right cargo binary, generates instances on first run (cached under
@@ -86,7 +86,7 @@ GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 
 # Wizard-baked URL with env-var override; mirrors scripts/publish.py so the
 # two stay in lockstep when the wizard re-runs.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app//"
+SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app///"
 if SERVER.startswith("$"):
     SERVER = ""  # offline mode — read from swarm.config.json instead
 # Strip trailing slashes — Railway's proxy turns POSTs to URLs with stacked
@@ -844,8 +844,6 @@ def main() -> int:
     # tooling pass that rewrites quoted challenge names in `==` chains
     # can't disable a branch unintentionally.
     per_field = _AGG_EXTRAS.get(challenge)
-    out["num_vehicles"] = 0
-    out["total_distance"] = out["score"]
     if per_field is None:
         out["viz_data"] = None
     else:
@@ -855,16 +853,18 @@ def main() -> int:
             if r.get(per_field)
         } or None
         out["viz_data"] = viz
-        # VRP-only roll-ups for the routes panel's headline numbers. Other
-        # challenges leave num_vehicles=0 / total_distance=score (the
-        # defaults set above).
-        if challenge == "vehicle" "_routing":
-            out["num_vehicles"] = sum(
-                r.get("num_vehicles", 0) for r in results if r.get("feasible")
-            )
-            out["total_distance"] = sum(
-                r["score"] for r in results if r.get("feasible")
-            )
+
+    # VRP-only roll-ups for the routes panel's headline numbers. Omitted
+    # entirely for other challenges so the wire payload doesn't carry
+    # num_vehicles=0 / total_distance=<score> placeholders that mean
+    # nothing for SAT, knapsack, scheduling, or energy.
+    if challenge == "vehicle" "_routing":
+        out["num_vehicles"] = sum(
+            r.get("num_vehicles", 0) for r in results if r.get("feasible")
+        )
+        out["total_distance"] = sum(
+            r["score"] for r in results if r.get("feasible")
+        )
 
     print(json.dumps(out, indent=2))
     return 0

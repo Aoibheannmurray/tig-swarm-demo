@@ -2,7 +2,7 @@ import * as d3 from "d3";
 import type { Panel, WSMessage, RouteData, AllRouteData, RoutePoint } from "../types";
 import { getAgentColor, getRouteColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
-import { getSwarmConfig } from "../lib/swarmConfig";
+import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 import { getViewedChallenge } from "../lib/viewedChallenge";
 
 // Drawing sizes as fractions of the viewBox side length. Everything else in
@@ -66,6 +66,7 @@ export class SolutionPanel implements Panel {
   private historyNavEl!: HTMLElement;
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
+  private emptyStateEl!: HTMLElement;
 
   private allInstances: AllRouteData = {};
   private currentIndex = 0;
@@ -99,75 +100,67 @@ export class SolutionPanel implements Panel {
   }
 
   init(container: HTMLElement) {
-    // SolutionPanel is the VRP route renderer (depot, customer-position
-    // tour drawing, BKS comparison all assume VRPTW geometry). Each other
-    // challenge has its own dedicated panel wired in main.ts; this `if`
-    // guard remains as a safety net for any future challenge added before
-    // its panel exists.
-    const activeChallenge = getSwarmConfig().challenge;
-    if (activeChallenge !== "vehicle_routing") {
-      container.innerHTML = `
-        <div class="panel-inner routes-panel">
-          <div class="panel-label">VISUALIZATION</div>
-          <div class="routes-agent-name">Active challenge: ${activeChallenge}</div>
-          <div style="padding: 24px; opacity: 0.6; text-align: center; line-height: 1.6;">
-            Per-challenge visualization not yet wired up.<br>
-            Score, leaderboard, feed, and chart panels still work.
-          </div>
-        </div>`;
-      return;
-    }
     container.innerHTML = `
-      <div class="panel-inner routes-panel">
+      <div class="panel-inner solution-panel">
         <div class="panel-label">ROUTES</div>
-        <div class="routes-agent-name" id="routes-agent-name"></div>
-        <div class="routes-history-nav" id="routes-history-nav" style="display:none">
-          <button class="routes-nav-btn" id="routes-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="routes-history-label" id="routes-history-label"></span>
-          <button class="routes-nav-btn" id="routes-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="routes-history-live" id="routes-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        <div class="solution-agent-name" id="solution-agent-name"></div>
+        <div class="solution-history-nav" id="solution-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="solution-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="solution-history-label"></span>
+          <button class="solution-nav-btn" id="solution-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="solution-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
         </div>
-        <div class="routes-nav" id="routes-nav" style="display:none">
-          <button class="routes-nav-btn" id="routes-prev">&lsaquo;</button>
-          <span class="routes-instance-label" id="routes-instance-label"></span>
-          <button class="routes-nav-btn" id="routes-next">&rsaquo;</button>
+        <div class="solution-nav" id="solution-nav" style="display:none">
+          <button class="solution-nav-btn" id="solution-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="solution-instance-label"></span>
+          <button class="solution-nav-btn" id="solution-next">&rsaquo;</button>
         </div>
-        <div class="routes-svg-wrap" id="routes-svg-wrap">
-          <svg id="routes-svg"></svg>
+        <div class="solution-svg-wrap" id="solution-svg-wrap">
+          <svg id="solution-svg"></svg>
+          <div class="solution-empty-state" id="solution-empty-state">
+            <div class="solution-empty-state-title">Challenge not started yet</div>
+            <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
+          </div>
         </div>
-        <div class="routes-route-distance">
-          <div class="routes-sub-label">ROUTE DISTANCE</div>
-          <div class="routes-sub-value" id="routes-route-distance">---</div>
+        <div class="solution-route-distance">
+          <div class="solution-sub-label">ROUTE DISTANCE</div>
+          <div class="solution-sub-value" id="solution-route-distance">---</div>
         </div>
-        <div class="routes-score">
-          <div class="routes-score-label">SCORE</div>
-          <div class="routes-score-value" id="routes-score">---</div>
-          <div class="routes-score-delta" id="routes-score-delta"></div>
+        <div class="solution-score">
+          <div class="solution-score-label">SCORE</div>
+          <div class="solution-score-value" id="solution-score">---</div>
+          <div class="solution-score-delta" id="solution-score-delta"></div>
         </div>
       </div>
     `;
 
-    this.scoreEl = document.getElementById("routes-score")!;
-    this.scoreDeltaEl = document.getElementById("routes-score-delta")!;
-    this.routeDistanceEl = document.getElementById("routes-route-distance")!;
-    this.instanceLabelEl = document.getElementById("routes-instance-label")!;
-    this.navEl = document.getElementById("routes-nav")!;
-    this.agentNameEl = document.getElementById("routes-agent-name")!;
-    this.historyNavEl = document.getElementById("routes-history-nav")!;
-    this.historyLabelEl = document.getElementById("routes-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("routes-hist-live")!;
+    this.scoreEl = document.getElementById("solution-score")!;
+    this.scoreDeltaEl = document.getElementById("solution-score-delta")!;
+    this.routeDistanceEl = document.getElementById("solution-route-distance")!;
+    this.instanceLabelEl = document.getElementById("solution-instance-label")!;
+    this.navEl = document.getElementById("solution-nav")!;
+    this.agentNameEl = document.getElementById("solution-agent-name")!;
+    this.historyNavEl = document.getElementById("solution-history-nav")!;
+    this.historyLabelEl = document.getElementById("solution-history-label")!;
+    this.historyLiveBtnEl = document.getElementById("solution-hist-live")!;
+    this.emptyStateEl = document.getElementById("solution-empty-state")!;
 
-    document.getElementById("routes-prev")!.addEventListener("click", () => this.navigate(-1));
-    document.getElementById("routes-next")!.addEventListener("click", () => this.navigate(1));
-    document.getElementById("routes-hist-prev")!.addEventListener("click", () => this.navigateHistory(-1));
-    document.getElementById("routes-hist-next")!.addEventListener("click", () => this.navigateHistory(1));
+    document.getElementById("solution-prev")!.addEventListener("click", () => this.navigate(-1));
+    document.getElementById("solution-next")!.addEventListener("click", () => this.navigate(1));
+    document.getElementById("solution-hist-prev")!.addEventListener("click", () => this.navigateHistory(-1));
+    document.getElementById("solution-hist-next")!.addEventListener("click", () => this.navigateHistory(1));
     this.historyLiveBtnEl.addEventListener("click", () => {
+      // When viewing a non-active challenge, "LIVE →" switches viewed
+      // challenge to the active one. On the active challenge, fall
+      // through to "jump to the latest historical entry".
+      if (liveSwitchToActive("vehicle_routing")) return;
       if (!this.historyEntries.length) return;
       this.historyIndex = this.historyEntries.length - 1;
       this.applyHistoryEntry();
     });
+    this.updateEmptyState();
 
-    this.svg = d3.select("#routes-svg");
+    this.svg = d3.select("#solution-svg");
     this.svg
       .attr("viewBox", "0 0 1000 1000")
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -187,7 +180,7 @@ export class SolutionPanel implements Panel {
     // inside the wrap. Without this the SVG fills the wrap rectangle but the
     // 1:1 viewBox letterboxes a square inside it, leaving large empty side
     // margins on a wide panel.
-    const wrap = document.getElementById("routes-svg-wrap")!;
+    const wrap = document.getElementById("solution-svg-wrap")!;
     const resize = () => {
       const size = Math.max(0, Math.min(wrap.clientWidth, wrap.clientHeight));
       this.svg.attr("width", size).attr("height", size);
@@ -254,6 +247,7 @@ export class SolutionPanel implements Panel {
         this.applyHistoryEntry();
       }
       this.updateHistoryLabel();
+      this.updateEmptyState();
     } catch {
       // network/transport errors are non-fatal — panel works without history
     }
@@ -314,15 +308,23 @@ export class SolutionPanel implements Panel {
 
   private updateHistoryLabel() {
     const total = this.historyEntries.length;
-    if (total <= 1) {
+    const atLatest = this.isAtLatest();
+    const showLive = shouldShowLiveButton("vehicle_routing", atLatest);
+    if (total <= 1 && !showLive) {
       this.historyNavEl.style.display = "none";
       return;
     }
     this.historyNavEl.style.display = "flex";
-    const atLatest = this.isAtLatest();
-    this.historyLiveBtnEl.style.display = atLatest ? "none" : "inline-block";
+    this.historyLiveBtnEl.style.display = showLive ? "inline-block" : "none";
     const suffix = atLatest ? " · LATEST" : "";
-    this.historyLabelEl.textContent = `BEST ${this.historyIndex + 1}/${total}${suffix}`;
+    this.historyLabelEl.textContent =
+      total > 0 ? `BEST ${this.historyIndex + 1}/${total}${suffix}` : "";
+  }
+
+  private updateEmptyState() {
+    if (!this.emptyStateEl) return;
+    const hasData = this.historyEntries.length > 0;
+    this.emptyStateEl.style.display = hasData ? "none" : "flex";
   }
 
   // Compute a square viewBox that tightly bounds *all* instances' data with a
@@ -407,6 +409,8 @@ export class SolutionPanel implements Panel {
       this.instanceLabelEl.textContent = "";
       this.agentNameEl.textContent = "";
       this.agentNameEl.style.color = "";
+      this.updateHistoryLabel();
+      this.updateEmptyState();
       return;
     }
 
@@ -458,6 +462,7 @@ export class SolutionPanel implements Panel {
           this.updateHistoryLabel();
         }
       }
+      this.updateEmptyState();
     }
   }
 
