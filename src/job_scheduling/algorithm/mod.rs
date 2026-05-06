@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-const TIME_LIMIT_MS: u64 = 4700;
+const TIME_LIMIT_MS: u64 = 4500;
 const WORK_MIN_WEIGHT: f64 = 0.3;
 
 struct Problem {
@@ -564,6 +564,67 @@ fn perturb(prob: &Problem, sched: &mut Schedule, rng: &mut SmallRng, n_kicks: us
     }
 }
 
+/// LNS-style destroy-and-recreate perturbation: pull `n_destroy` random ops out of the
+/// schedule and re-insert each at a randomly chosen eligible machine and position.
+/// Returns false (and reverts) if the resulting graph has a cycle.
+fn perturb_lns(
+    prob: &Problem,
+    sched: &mut Schedule,
+    rng: &mut SmallRng,
+    n_destroy: usize,
+) -> bool {
+    if n_destroy == 0 || n_destroy >= prob.total_ops {
+        return false;
+    }
+    let backup = sched.clone();
+
+    // Pick n_destroy distinct random ops.
+    let mut indices: Vec<usize> = (0..prob.total_ops).collect();
+    indices.shuffle(rng);
+    indices.truncate(n_destroy);
+
+    // Remove from machines (descending position to avoid index shifts).
+    let mut removed = indices.clone();
+    removed.sort_by(|a, b| {
+        let pa = (sched.assigned_machine[*a], sched.pos_in_machine[*a]);
+        let pb = (sched.assigned_machine[*b], sched.pos_in_machine[*b]);
+        pb.cmp(&pa)
+    });
+    for &op in &removed {
+        let m = sched.assigned_machine[op];
+        let pos = sched.pos_in_machine[op];
+        sched.machine_seq[m].remove(pos);
+        for i in pos..sched.machine_seq[m].len() {
+            let oo = sched.machine_seq[m][i];
+            sched.pos_in_machine[oo] = i;
+        }
+    }
+
+    // Reinsert in random order: random eligible machine, random position.
+    let mut order = indices;
+    order.shuffle(rng);
+    for &op in &order {
+        let eligible = &prob.op_eligible[op];
+        let &(m, pt) = &eligible[rng.gen_range(0..eligible.len())];
+        let n = sched.machine_seq[m].len();
+        let pos = if n == 0 { 0 } else { rng.gen_range(0..=n) };
+        sched.assigned_machine[op] = m;
+        sched.proc_time[op] = pt;
+        sched.machine_seq[m].insert(pos, op);
+        for i in pos..sched.machine_seq[m].len() {
+            let oo = sched.machine_seq[m][i];
+            sched.pos_in_machine[oo] = i;
+        }
+    }
+
+    if !sched.rebuild_times(prob) {
+        *sched = backup;
+        sched.rebuild_times(prob);
+        return false;
+    }
+    true
+}
+
 fn local_search(
     prob: &Problem,
     sched: &mut Schedule,
@@ -597,15 +658,14 @@ fn local_search(
         }
 
         let mut improved = false;
-        // Try swaps first (cheaper).
+        // Try swaps first (cheaper). N5 adjacent + N7 head/tail with non-adjacent.
         'outer: for &(b_start, b_end) in &blocks {
+            // N5: adjacent swaps in block.
             for i in b_start..(b_end - 1) {
                 if Instant::now() >= deadline {
                     return Ok(());
                 }
-                let a = cp[i];
-                let b = cp[i + 1];
-                if try_swap(prob, sched, a, b) {
+                if try_swap(prob, sched, cp[i], cp[i + 1]) {
                     improved = true;
                     break 'outer;
                 }
@@ -730,7 +790,7 @@ pub fn solve_challenge(
         }
     }
 
-    // Phase 3b: iterated local search on the global best — kick + re-LS, accept if better.
+    // Phase 3b: ILS — kick (swap or LNS destroy-recreate) + LS, accept if better.
     if let Some(mut current) = best_sched {
         if current.makespan < best_makespan {
             best_makespan = current.makespan;
@@ -760,15 +820,19 @@ pub fn solve_challenge(
                 }
                 current = snapshot.clone();
             }
-            let base = if consec_no_improve < 5 {
-                2
-            } else if consec_no_improve < 15 {
-                3
+            // Pick a kick type. LNS destroy-recreate every 4th iter for diversity.
+            let do_lns = consec_no_improve >= 3 && rng.gen::<u32>() % 4 == 0;
+            if do_lns {
+                let n_destroy = (prob.total_ops / 12).max(4).min(20);
+                if !perturb_lns(&prob, &mut current, &mut rng, n_destroy) {
+                    // LNS hit a cycle — revert to snapshot and skip.
+                    current = snapshot.clone();
+                    continue;
+                }
             } else {
-                5
-            };
-            let n_kicks = base + (rng.gen::<u32>() % 2) as usize;
-            perturb(&prob, &mut current, &mut rng, n_kicks);
+                let n_kicks = if consec_no_improve < 5 { 2 } else { 4 };
+                perturb(&prob, &mut current, &mut rng, n_kicks);
+            }
             local_search(&prob, &mut current, deadline, save_solution, &mut best_makespan)?;
             if current.makespan < snapshot.makespan {
                 snapshot = current.clone();
