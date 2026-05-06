@@ -60,3 +60,34 @@ pub fn solve_challenge(
 - Call `save_solution()` whenever you find an improved solution — only the last call is kept, and the solver may be killed at any time.
 - Use `challenge.seed` for any randomness to keep results reproducible.
 - Single-threaded only (no `std::thread`, `rayon`, etc.).
+
+## Exact Method Signatures
+
+These are the actual Rust signatures available on the types above.
+
+### `Challenge` methods
+
+```rust
+// Validate solution and return total value (individual + pairwise interaction values,
+// clamped to 0). Checks weight constraint and item validity.
+// Returns Err if any constraint is violated.
+pub fn evaluate_total_value(&self, solution: &Solution) -> Result<u32>
+```
+
+No other public helper methods are available on `Challenge`. You have direct access to all fields listed in the Types section — `weights`, `values`, `interaction_values`, `max_weight`, `num_items`.
+
+### `Solution` construction
+
+```rust
+pub struct Solution {
+    pub items: Vec<usize>,  // indices of selected items (0-based, no duplicates)
+}
+
+impl Solution {
+    pub fn new() -> Self  // creates empty Solution with no items
+}
+```
+
+### Available crates
+
+`anyhow`, `serde`, `serde_json`, `rand` (SmallRng, SeedableRng, Rng), `rand_distr`, `ndarray`, `statrs`, `std::*` (collections, time, etc.).

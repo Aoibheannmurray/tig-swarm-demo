@@ -71,3 +71,36 @@ pub fn solve_challenge(
 - Call `save_solution()` whenever you find an improved solution — only the last call is kept, and the solver may be killed at any time.
 - Use `challenge.seed` for any randomness to keep results reproducible.
 - Single-threaded only (no `std::thread`, `rayon`, etc.).
+
+## Exact Method Signatures
+
+These are the actual Rust signatures available on the types above.
+
+### `Challenge` methods
+
+```rust
+// Validate solution and return total distance. Checks all constraints (capacity,
+// time windows, fleet size, node coverage). Returns Err with a descriptive
+// message if any constraint is violated.
+pub fn evaluate_total_distance(&self, solution: &Solution) -> Result<i32>
+```
+
+No other public helper methods are available on `Challenge`. You have direct access to all fields listed in the Types section — use them to build and evaluate routes yourself.
+
+### `Solution` construction
+
+```rust
+pub struct Solution {
+    pub routes: Vec<Vec<usize>>,
+    // Each route: [0, customer1, customer2, ..., 0]
+    // Must start and end at depot (node 0).
+}
+
+impl Solution {
+    pub fn new() -> Self  // creates empty Solution with no routes
+}
+```
+
+### Available crates
+
+`anyhow`, `serde`, `serde_json`, `rand` (SmallRng, SeedableRng, Rng), `rand_distr`, `ndarray`, `statrs`, `std::*` (collections, time, etc.).

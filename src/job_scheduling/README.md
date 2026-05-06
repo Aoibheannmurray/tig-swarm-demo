@@ -77,3 +77,35 @@ pub fn solve_challenge(
 - Call `save_solution()` whenever you find an improved solution — only the last call is kept, and the solver may be killed at any time.
 - Use `challenge.seed` for any randomness to keep results reproducible.
 - Single-threaded only (no `std::thread`, `rayon`, etc.).
+
+## Exact Method Signatures
+
+These are the actual Rust signatures available on the types above.
+
+### `Challenge` methods
+
+```rust
+// Validate solution and return makespan. Checks all constraints (operation
+// precedence, machine eligibility, no overlapping operations on the same machine).
+// Returns Err with a descriptive message if any constraint is violated.
+pub fn evaluate_makespan(&self, solution: &Solution) -> Result<u32>
+```
+
+No other public helper methods are available on `Challenge`. You have direct access to all fields listed in the Types section. Use `product_processing_times[product][op_index]` (a `HashMap<usize, u32>`) to look up eligible machines and their processing times.
+
+### `Solution` construction
+
+```rust
+pub struct Solution {
+    pub job_schedule: Vec<Vec<(usize, u32)>>,
+    // job_schedule[job][op_index] = (machine_id, start_time)
+}
+
+impl Solution {
+    pub fn new() -> Self  // creates empty Solution with no jobs
+}
+```
+
+### Available crates
+
+`anyhow`, `serde`, `serde_json`, `rand` (SmallRng, SeedableRng, Rng), `rand_distr`, `ndarray`, `statrs`, `std::*` (collections, time, etc.).

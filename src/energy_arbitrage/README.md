@@ -167,6 +167,78 @@ The `Track` passed to `generate_instance` determines the scenario. All scenarios
 In harder scenarios, flow constraints become more binding and price spikes are more frequent (higher jump probability, heavier Pareto tails). Fleet heterogeneity also increases — batteries vary widely in size.
 
 
+## Exact Method Signatures
+
+These are the actual Rust signatures — use the exact return types shown.
+
+### `Challenge` methods
+
+```rust
+// Compute total nodal injections (exogenous + battery actions, slack-balanced).
+pub fn compute_total_injections(&self, state: &State, action: &[f64]) -> Vec<f64>
+
+// Compute per-step profit for given action.
+pub fn compute_profit(&self, state: &State, action: &[f64]) -> f64
+
+// Simulate one step without commitment (for look-ahead planning).
+// Validates action, returns Err if any constraint is violated.
+pub fn take_step(&self, state: &State, action: &[f64], next_rt_prices: NextRTPrices) -> Result<State>
+
+// Run the full rollout. Calls policy(challenge, state) at each step.
+// May only be called ONCE per challenge instance.
+pub fn grid_optimize(&self, policy: &dyn Fn(&Challenge, &State) -> Result<Vec<f64>>) -> Result<Solution>
+```
+
+### `Network` methods (accessed via `challenge.network`)
+
+```rust
+// Compute line flows from nodal injections. Returns Vec of length num_lines.
+// NOTE: returns Vec<f64> directly, NOT Result.
+pub fn compute_flows(&self, injections: &[f64]) -> Vec<f64>
+
+// Check all line flows are within limits. Returns Ok(()) or Err.
+pub fn verify_flows(&self, flows: &[f64]) -> Result<()>
+```
+
+### `Network` fields
+
+```rust
+pub num_nodes: usize
+pub num_lines: usize
+pub lines: Vec<(usize, usize)>        // (from_node, to_node)
+pub flow_limits: Vec<f64>              // effective limits after congestion scaling
+pub ptdf: Vec<Vec<f64>>               // PTDF matrix [num_lines][num_nodes]
+pub slack_bus: usize
+```
+
+### `Battery` methods (accessed via `challenge.batteries[b]`)
+
+```rust
+// Apply action to SOC, return new SOC (clamped to bounds).
+pub fn apply_action_to_soc(&self, action: f64, soc: f64) -> f64
+```
+
+### `NextRTPrices` enum (for `take_step`)
+
+```rust
+pub enum NextRTPrices {
+    Override(Vec<f64>),    // provide your own price forecast
+    Generate([u8; 32]),    // generate from seed (not useful for innovators)
+}
+```
+
+### `Market` fields (accessed via `challenge.market`)
+
+```rust
+pub params: MarketParams               // volatility, jump_probability, tail_index
+pub day_ahead_prices: Vec<Vec<f64>>    // [num_steps][num_nodes]
+```
+
+### Available crates
+
+`anyhow`, `serde`, `serde_json`, `rand` (SmallRng, SeedableRng, Rng), `rand_distr`, `ndarray`, `statrs`, `std::*` (collections, time, etc.).
+
+
 ## Practical Tips
 
 - **Day-ahead prices are your best forecast.** `challenge.market.day_ahead_prices[t][node]` gives the DA price at each node and step. RT prices are noisy deviations around DA prices.
