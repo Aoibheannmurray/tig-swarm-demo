@@ -283,19 +283,24 @@ def validate_code(original: str, modified: str) -> str | None:
 # ── Benchmark & publish ─────────────────────────────────────────────
 
 
-def run_benchmark() -> dict | None:
+def run_benchmark() -> tuple[dict | None, str]:
+    """Run benchmark. Returns (result_dict, error_text).
+
+    On success, result_dict is the parsed JSON and error_text is empty.
+    On failure, result_dict is None and error_text contains the stderr."""
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "benchmark.py")],
         capture_output=True, text=True, cwd=ROOT,
     )
     if result.returncode != 0:
-        print(f"  Benchmark failed:\n{result.stderr[-2000:]}", file=sys.stderr)
-        return None
+        err = result.stderr[-2000:]
+        print(f"  Benchmark failed:\n{err}", file=sys.stderr)
+        return None, err
     try:
-        return json.loads(result.stdout)
+        return json.loads(result.stdout), ""
     except json.JSONDecodeError:
         print(f"  Benchmark output not valid JSON:\n{result.stdout[:300]}", file=sys.stderr)
-        return None
+        return None, "Benchmark output was not valid JSON"
 
 
 def publish_results(
@@ -508,14 +513,49 @@ def main() -> int:
 
         write_algorithm(code, config)
 
-        # ── Step 4: benchmark ───────────────────────────────────
+        # ── Step 4: benchmark (with build-error retry) ─────────
         print("  Running benchmark ...")
         post_message(server, agent_name, agent_id,
                      f"Trying [{tag}] {title}")
 
         send_heartbeat(server, agent_id)
 
-        bench = run_benchmark()
+        max_build_retries = 2
+        bench = None
+        for build_attempt in range(1 + max_build_retries):
+            bench, build_err = run_benchmark()
+            if bench is not None:
+                break
+            if build_attempt >= max_build_retries:
+                break
+            # Feed compiler errors back to the LLM for a fix
+            print(f"  Build retry {build_attempt + 1}/{max_build_retries} — asking LLM to fix ...")
+            compiler_errors = build_err[-1500:]
+            fix_prompt = (
+                f"Current algorithm:\n```rust\n{read_algorithm(config)}\n```\n\n"
+                f"This code failed to compile. Here are the errors:\n```\n{compiler_errors}\n```\n\n"
+                "Fix the compile errors and return the complete Rust source file."
+            )
+            try:
+                fix_response = call_llm(
+                    args.provider, model, api_key,
+                    build_code_system_prompt(challenge_md, config),
+                    fix_prompt,
+                    args.api_base,
+                )
+            except Exception as e:
+                print(f"  Fix LLM call failed: {e}", file=sys.stderr)
+                break
+            fixed = parse_code(fix_response)
+            if not fixed:
+                print("  Empty fix response — giving up")
+                break
+            fix_violation = validate_code(original_code, fixed)
+            if fix_violation:
+                print(f"  Fix failed validation: {fix_violation}")
+                break
+            write_algorithm(fixed, config)
+
         if bench is None:
             print("  Benchmark failed — restoring previous code and continuing")
             if best_code:
