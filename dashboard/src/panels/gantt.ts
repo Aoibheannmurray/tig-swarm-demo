@@ -2,6 +2,7 @@ import * as d3 from "d3";
 import type { Panel, WSMessage } from "../types";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
+import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 
 interface GanttBar {
   job: number;
@@ -57,6 +58,7 @@ export class GanttPanel implements Panel {
   private historyNavEl!: HTMLElement;
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
+  private emptyStateEl!: HTMLElement;
 
   private allInstances: AllGanttData = {};
   private currentIndex = 0;
@@ -96,6 +98,10 @@ export class GanttPanel implements Panel {
         </div>
         <div class="gantt-svg-wrap" id="gantt-svg-wrap">
           <svg id="gantt-svg"></svg>
+          <div class="solution-empty-state" id="gantt-empty-state">
+            <div class="solution-empty-state-title">Challenge not started yet</div>
+            <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
+          </div>
         </div>
         <div class="gantt-makespan-box">
           <div class="solution-sub-label">MAKESPAN</div>
@@ -118,12 +124,16 @@ export class GanttPanel implements Panel {
     this.historyNavEl = document.getElementById("gantt-history-nav")!;
     this.historyLabelEl = document.getElementById("gantt-history-label")!;
     this.historyLiveBtnEl = document.getElementById("gantt-hist-live")!;
+    this.emptyStateEl = document.getElementById("gantt-empty-state")!;
 
     document.getElementById("gantt-prev")!.addEventListener("click", () => this.navigate(-1));
     document.getElementById("gantt-next")!.addEventListener("click", () => this.navigate(1));
     document.getElementById("gantt-hist-prev")!.addEventListener("click", () => this.navigateHistory(-1));
     document.getElementById("gantt-hist-next")!.addEventListener("click", () => this.navigateHistory(1));
     this.historyLiveBtnEl.addEventListener("click", () => {
+      // Non-active challenge → switch viewed to active. Active
+      // challenge → fall through to "jump to latest history".
+      if (liveSwitchToActive("job_scheduling")) return;
       if (!this.historyEntries.length) return;
       this.historyIndex = this.historyEntries.length - 1;
       this.applyHistoryEntry();
@@ -194,6 +204,7 @@ export class GanttPanel implements Panel {
         this.applyHistoryEntry();
       }
       this.updateHistoryLabel();
+      this.updateEmptyState();
     } catch {
       // non-fatal
     }
@@ -238,19 +249,27 @@ export class GanttPanel implements Panel {
     }
 
     this.updateHistoryLabel();
+    this.updateEmptyState();
   }
 
   private updateHistoryLabel() {
     const total = this.historyEntries.length;
-    if (total <= 1) {
+    const atLatest = this.isAtLatest();
+    const showLive = shouldShowLiveButton("job_scheduling", atLatest);
+    if (total <= 1 && !showLive) {
       this.historyNavEl.style.display = "none";
       return;
     }
     this.historyNavEl.style.display = "flex";
-    const atLatest = this.isAtLatest();
-    this.historyLiveBtnEl.style.display = atLatest ? "none" : "inline-block";
+    this.historyLiveBtnEl.style.display = showLive ? "inline-block" : "none";
     const suffix = atLatest ? " · LATEST" : "";
-    this.historyLabelEl.textContent = `BEST ${this.historyIndex + 1}/${total}${suffix}`;
+    this.historyLabelEl.textContent =
+      total > 0 ? `BEST ${this.historyIndex + 1}/${total}${suffix}` : "";
+  }
+
+  private updateEmptyState() {
+    if (!this.emptyStateEl) return;
+    this.emptyStateEl.style.display = this.historyEntries.length > 0 ? "none" : "flex";
   }
 
   private navigate(delta: number) {
@@ -279,6 +298,8 @@ export class GanttPanel implements Panel {
       this.rawScore = null;
       this.historyEntries = [];
       this.historyIndex = -1;
+      this.updateHistoryLabel();
+      this.updateEmptyState();
       this.chartG.selectAll("*").remove();
       this.axisG.selectAll("*").remove();
       this.labelG.selectAll("*").remove();
@@ -328,6 +349,7 @@ export class GanttPanel implements Panel {
           this.applyHistoryEntry();
         } else {
           this.updateHistoryLabel();
+          this.updateEmptyState();
         }
       }
     }

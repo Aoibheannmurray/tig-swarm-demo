@@ -492,6 +492,37 @@ html, body {
      square that fits inside .solution-svg-wrap, eliminating viewBox letterbox */
 }
 
+/* "Challenge not started yet" overlay shown when the panel has no
+ * historical data for the viewed challenge. Toggled imperatively by
+ * each panel's updateEmptyState() — display:none/flex via inline
+ * style so the CSS doesn't need to know about per-challenge classes. */
+.solution-empty-state {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  pointer-events: none;
+  z-index: 3;
+}
+.solution-empty-state-title {
+  font-family: var(--mono);
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  color: var(--text-mid);
+  text-transform: uppercase;
+}
+.solution-empty-state-hint {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  max-width: 280px;
+  line-height: 1.5;
+}
+
 .solution-score {
   position: absolute;
   bottom: 16px;
@@ -661,7 +692,8 @@ html, body {
   letter-spacing: 0.02em;
 }
 
-.knapsack-svg-wrap {
+.knapsack-svg-wrap,
+.sat-svg-wrap {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -670,7 +702,8 @@ html, body {
   position: relative;
 }
 
-.knapsack-panel svg {
+.knapsack-panel svg,
+.sat-panel svg {
   display: block;
 }
 
