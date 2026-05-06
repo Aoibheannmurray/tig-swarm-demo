@@ -289,7 +289,7 @@ def run_benchmark() -> dict | None:
         capture_output=True, text=True, cwd=ROOT,
     )
     if result.returncode != 0:
-        print(f"  Benchmark failed:\n{result.stderr[:500]}", file=sys.stderr)
+        print(f"  Benchmark failed:\n{result.stderr[-2000:]}", file=sys.stderr)
         return None
     try:
         return json.loads(result.stdout)
