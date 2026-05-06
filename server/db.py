@@ -256,6 +256,10 @@ async def init_db() -> None:
             "ALTER TABLE trajectories ADD COLUMN challenge TEXT",
             "ALTER TABLE best_history ADD COLUMN challenge TEXT",
             "ALTER TABLE messages ADD COLUMN challenge TEXT",
+            # Per-track score breakdown for the dashboard. Stored as JSON
+            # text. NULL on rows that pre-date the migration.
+            "ALTER TABLE experiments ADD COLUMN track_scores TEXT",
+            "ALTER TABLE agent_bests ADD COLUMN track_scores TEXT",
         ):
             try:
                 await db.execute(stmt)
@@ -480,7 +484,7 @@ async def get_global_best(
     order = _direction_order(direction)
     cursor = await conn.execute(
         f"SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
-        f"       score, feasible, num_vehicles, total_distance, route_data, updated_at "
+        f"       score, feasible, num_vehicles, total_distance, route_data, track_scores, updated_at "
         f"FROM agent_bests WHERE feasible = 1 AND challenge = ? "
         f"ORDER BY score {order} LIMIT 1",
         (challenge,),
@@ -494,7 +498,7 @@ async def get_agent_best(
 ) -> dict | None:
     cursor = await conn.execute(
         "SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
-        "       score, feasible, num_vehicles, total_distance, route_data, updated_at "
+        "       score, feasible, num_vehicles, total_distance, route_data, track_scores, updated_at "
         "FROM agent_bests WHERE agent_id = ? AND challenge = ?",
         (agent_id, challenge),
     )
@@ -515,12 +519,13 @@ async def upsert_agent_best(
     route_data: str | None,
     updated_at: str,
     trajectory_id: str | None = None,
+    track_scores: str | None = None,
 ) -> None:
     await conn.execute(
         """INSERT INTO agent_bests
            (agent_id, challenge, experiment_id, algorithm_code, score, feasible,
-            num_vehicles, total_distance, route_data, updated_at, trajectory_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            num_vehicles, total_distance, route_data, track_scores, updated_at, trajectory_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
@@ -529,11 +534,12 @@ async def upsert_agent_best(
              num_vehicles = excluded.num_vehicles,
              total_distance = excluded.total_distance,
              route_data = excluded.route_data,
+             track_scores = excluded.track_scores,
              updated_at = excluded.updated_at,
              trajectory_id = excluded.trajectory_id""",
         (agent_id, challenge, experiment_id, algorithm_code, score,
          1 if feasible else 0, num_vehicles, total_distance,
-         route_data, updated_at, trajectory_id),
+         route_data, track_scores, updated_at, trajectory_id),
     )
 
 

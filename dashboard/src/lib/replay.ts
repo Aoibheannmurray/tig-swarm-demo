@@ -1,4 +1,5 @@
 import type { WSMessage } from "../types";
+import { formatScore } from "./format";
 
 let playing = false;
 
@@ -52,7 +53,7 @@ export async function startReplay(
   for (let i = 0; i < history.length; i++) {
     const entry = history[i];
     stepEl.textContent = `${i + 1} / ${history.length}`;
-    scoreEl.textContent = `Score: ${entry.score.toFixed(0)}`;
+    scoreEl.textContent = `Score: ${formatScore(entry.score)}`;
 
     if (entry.route_data) {
       const prevScore = i > 0 ? history[i - 1].score : null;
@@ -86,7 +87,7 @@ export async function startReplay(
   overlay.innerHTML = `
     <div class="replay-banner">EVOLUTION COMPLETE</div>
     <div class="replay-final">
-      <div class="replay-final-score">${lastScore.toFixed(0)}</div>
+      <div class="replay-final-score">${formatScore(lastScore)}</div>
       <div class="replay-final-improvement">${totalImprovement.toFixed(1)}% improvement</div>
       <div class="replay-final-steps">${history.length} breakthroughs</div>
     </div>

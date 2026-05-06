@@ -1,6 +1,7 @@
 import type { Panel, WSMessage } from "../types";
 import { formatTime } from "../lib/animate";
 import { getAgentColor } from "../lib/colors";
+import { formatScore } from "../lib/format";
 
 const MAX_ITEMS = 200;
 
@@ -71,17 +72,17 @@ export class FeedPanel implements Panel {
           // Beat own best AND global best.
           const ownStr = ownDelta != null ? ` (${fmtDelta(ownDelta)} own)` : "";
           const globalStr = globalDelta != null ? ` ${fmtDelta(globalDelta)} vs global` : "";
-          text = `<b>${msg.agent_name}</b> improved &mdash; ${msg.score.toFixed(1)}${ownStr} · NEW GLOBAL BEST${globalStr}`;
+          text = `<b>${msg.agent_name}</b> improved &mdash; ${formatScore(msg.score)}${ownStr} · NEW GLOBAL BEST${globalStr}`;
           eventType = "new_global_best";
         } else if (beatsOwn) {
           const ownStr = ownDelta != null ? ` (${fmtDelta(ownDelta)})` : "";
-          text = `<b>${msg.agent_name}</b> improvement &mdash; ${msg.score.toFixed(1)}${ownStr}`;
+          text = `<b>${msg.agent_name}</b> improvement &mdash; ${formatScore(msg.score)}${ownStr}`;
           eventType = "experiment_success";
         } else {
           // Show the regression vs own best when available so the magnitude
           // of "no improvement" is visible (e.g. +0.42% = slightly worse).
           const ownStr = ownDelta != null ? ` (${fmtDelta(ownDelta)} vs own)` : "";
-          text = `<b>${msg.agent_name}</b> no improvement &mdash; ${msg.score.toFixed(1)}${ownStr}`;
+          text = `<b>${msg.agent_name}</b> no improvement &mdash; ${formatScore(msg.score)}${ownStr}`;
           eventType = "experiment_fail";
         }
         break;

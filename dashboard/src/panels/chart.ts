@@ -1,5 +1,6 @@
 import * as d3 from "d3";
 import { getAgentColor } from "../lib/colors";
+import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
 import type { Panel, WSMessage } from "../types";
 
@@ -494,7 +495,7 @@ export class ChartPanel implements Panel {
         .attr("font-size", "9px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "end")
-        .text(tick.toFixed(0));
+        .text(formatScore(tick));
     });
 
     const xTicks = xScale.ticks(6);
@@ -624,7 +625,7 @@ export class ChartPanel implements Panel {
         .attr("font-size", "9px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "end")
-        .text(tick.toFixed(0));
+        .text(formatScore(tick));
     });
 
     // Iteration-index axis: integer ticks, no time formatting.

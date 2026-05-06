@@ -1,6 +1,7 @@
 import * as d3 from "d3";
 import type { Panel, WSMessage, RouteData, AllRouteData, RoutePoint } from "../types";
 import { getAgentColor, getRouteColor } from "../lib/colors";
+import { formatScore } from "../lib/format";
 import { getSwarmConfig } from "../lib/swarmConfig";
 import { getViewedChallenge } from "../lib/viewedChallenge";
 
@@ -291,7 +292,7 @@ export class SolutionPanel implements Panel {
       this.showInstance(this.allInstances[keys[this.currentIndex]]);
     }
 
-    this.scoreEl.textContent = entry.score.toFixed(1);
+    this.scoreEl.textContent = formatScore(entry.score);
 
     // Score delta = improvement this entry represented over the previous
     // historical best. Shown as a negative score change ("-X.XXXXX%") in
@@ -416,7 +417,7 @@ export class SolutionPanel implements Panel {
       // per-instance average from the server.
       if (msg.best_score != null && !this.currentRouteData) {
         this.rawScore = msg.best_score;
-        this.scoreEl.textContent = msg.best_score.toFixed(1);
+        this.scoreEl.textContent = formatScore(msg.best_score);
       }
     }
 

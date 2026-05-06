@@ -1,11 +1,13 @@
 import type { Panel, WSMessage } from "../types";
 import { counterTween, pulseGlow } from "../lib/animate";
+import { formatScore } from "../lib/format";
 
 
 export class StatsPanel implements Panel {
   private agentsEl!: HTMLElement;
   private experimentsEl!: HTMLElement;
   private heroEl!: HTMLElement;
+  private trackBreakdownEl!: HTMLElement;
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -20,6 +22,7 @@ export class StatsPanel implements Panel {
           <a href="/trajectories.html" class="stats-nav-link">Trajectories &rarr;</a>
         </div>
         <div class="stats-chips">
+          <div class="track-breakdown" id="track-breakdown"></div>
           <div class="stat-chip" id="stat-agents">
             <span class="stat-label">ACTIVE</span>
             <span class="stat-value" id="stat-agents-val">0</span>
@@ -36,7 +39,32 @@ export class StatsPanel implements Panel {
     this.agentsEl = document.getElementById("stat-agents-val")!;
     this.experimentsEl = document.getElementById("stat-experiments-val")!;
     this.heroEl = document.getElementById("stat-hero")!;
+    this.trackBreakdownEl = document.getElementById("track-breakdown")!;
+  }
 
+  // Per-track breakdown of the swarm's best program. Only shown for the
+  // global best — agents' individual track-by-track scores aren't surfaced.
+  private renderTrackBreakdown(track_scores: Record<string, number> | null | undefined) {
+    if (!track_scores || Object.keys(track_scores).length === 0) {
+      this.trackBreakdownEl.innerHTML = "";
+      this.trackBreakdownEl.classList.remove("is-visible");
+      return;
+    }
+    const entries = Object.entries(track_scores);
+    const chips = entries
+      .map(
+        ([track, score]) => `
+        <span class="track-chip">
+          <span class="track-chip-label">${escapeHTML(track)}</span>
+          <span class="track-chip-value">${formatScore(score)}</span>
+        </span>`,
+      )
+      .join("");
+    this.trackBreakdownEl.innerHTML = `
+      <span class="track-breakdown-label">BEST · TRACKS</span>
+      ${chips}
+    `;
+    this.trackBreakdownEl.classList.add("is-visible");
   }
 
   handleMessage(msg: WSMessage) {
@@ -46,6 +74,7 @@ export class StatsPanel implements Panel {
       this.heroEl.textContent = "";
       this.heroEl.style.opacity = "0";
       this.heroEl.classList.remove("is-not-started");
+      this.renderTrackBreakdown(null);
       return;
     }
 
@@ -89,6 +118,14 @@ export class StatsPanel implements Panel {
       setTimeout(() => {
         this.heroEl.style.opacity = "0";
       }, 5000);
+      this.renderTrackBreakdown((msg as any).track_scores);
     }
   }
+}
+
+function escapeHTML(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }

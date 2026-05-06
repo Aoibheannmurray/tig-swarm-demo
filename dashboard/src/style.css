@@ -222,6 +222,48 @@ html, body {
   gap: 24px;
 }
 
+/* Per-track breakdown of the swarm's global best, rendered as inline chips
+ * in the stats bar. Hidden until the first global best lands. */
+.track-breakdown {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px 0 0;
+  border-right: 1px solid var(--border-subtle);
+  margin-right: 4px;
+}
+.track-breakdown.is-visible {
+  display: flex;
+}
+.track-breakdown-label {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-right: 4px;
+}
+.track-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 2px;
+  background: rgba(0, 229, 255, 0.04);
+}
+.track-chip-label {
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  color: var(--text-mid);
+  text-transform: lowercase;
+}
+.track-chip-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+
 .stat-chip {
   display: flex;
   align-items: baseline;

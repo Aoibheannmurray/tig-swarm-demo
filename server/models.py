@@ -87,6 +87,10 @@ class IterationCreate(BaseModel):
     total_distance: float = 0.0
     notes: str = ""
     route_data: Optional[dict] = None
+    # Per-track mean quality (e.g. {"n_nodes=200": 4.2e6, "n_nodes=600": 3.1e6}).
+    # Used by the dashboard to show how the best program scores on each track
+    # before they're combined into the overall geometric mean.
+    track_scores: Optional[dict] = None
     challenge: Optional["ChallengeName"] = None
 
 

@@ -1,5 +1,6 @@
 import type { Panel, WSMessage, LeaderboardEntry } from "../types";
 import { getAgentColor } from "../lib/colors";
+import { formatScore } from "../lib/format";
 
 type SortKey =
   | "current_score"
@@ -138,8 +139,8 @@ export class LeaderboardPanel implements Panel {
         ((goodDir === "asc" && (sortVal as number) < prev) ||
          (goodDir === "desc" && (sortVal as number) > prev));
 
-      const curText = entry.current_score === null ? "—" : entry.current_score.toFixed(1);
-      const bestText = entry.best_ever_score === null ? "—" : entry.best_ever_score.toFixed(1);
+      const curText = formatScore(entry.current_score);
+      const bestText = formatScore(entry.best_ever_score);
       const scoreImproved = improved && (this.sortKey === "current_score" || this.sortKey === "best_ever_score");
 
       row.innerHTML = `

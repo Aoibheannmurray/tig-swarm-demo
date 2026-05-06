@@ -99,6 +99,10 @@ export interface ExperimentPublished {
   strategy_tag?: string | null;
   title?: string | null;
   notes: string;
+  // Per-track mean quality — only set on iterations published with track
+  // scores. Map keys are track labels (e.g. "n_nodes=200"), values are
+  // mean quality on that track.
+  track_scores?: Record<string, number> | null;
   timestamp: string;
 }
 
@@ -113,6 +117,8 @@ export interface NewGlobalBest {
   incremental_improvement_pct: number | null;
   num_instances: number;
   route_data: AllRouteData | null;
+  // Per-track mean quality for the new global best (see ExperimentPublished).
+  track_scores?: Record<string, number> | null;
   timestamp: string;
 }
 

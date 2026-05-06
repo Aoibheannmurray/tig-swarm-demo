@@ -680,6 +680,11 @@ async def get_state(
         ),
         "best_experiment_id": served["id"] if served else None,
         "best_route_data": json.loads(served["route_data"]) if served and served["route_data"] else None,
+        "best_track_scores": (
+            json.loads(served["track_scores"])
+            if served and served.get("track_scores")
+            else None
+        ),
         "num_instances": num_instances,
         "active_agents": active,
         "total_agents": total_agents,
@@ -729,6 +734,7 @@ async def create_iteration(req: IterationCreate):
     hyp_id = new_id()
     timestamp = now()
     route_data_json = json.dumps(req.route_data) if req.route_data else None
+    track_scores_json = json.dumps(req.track_scores) if req.track_scores else None
     fp = fingerprint(req.title, req.strategy_tag)
 
     async with db.connect() as conn:
@@ -801,13 +807,13 @@ async def create_iteration(req: IterationCreate):
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, score, feasible,
-                num_vehicles, total_distance, notes, route_data,
+                num_vehicles, total_distance, notes, route_data, track_scores,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
                 trajectory_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
-             req.notes, route_data_json,
+             req.notes, route_data_json, track_scores_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
              1 if beats_own_best else 0,
              trajectory_id, timestamp),
@@ -839,6 +845,7 @@ async def create_iteration(req: IterationCreate):
                 feasible=req.feasible, num_vehicles=req.num_vehicles,
                 total_distance=req.total_distance, route_data=route_data_json,
                 updated_at=timestamp, trajectory_id=trajectory_id,
+                track_scores=track_scores_json,
             )
         else:
             await db.increment_agent_challenge_counters(
@@ -899,6 +906,7 @@ async def create_iteration(req: IterationCreate):
         "strategy_tag": req.strategy_tag,
         "title": req.title,
         "notes": req.notes,
+        "track_scores": req.track_scores,
         "timestamp": timestamp,
     })
 
@@ -914,6 +922,7 @@ async def create_iteration(req: IterationCreate):
             "incremental_improvement_pct": incremental_pct,
             "num_instances": num_instances,
             "route_data": req.route_data,
+            "track_scores": req.track_scores,
             "timestamp": timestamp,
         })
 

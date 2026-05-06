@@ -1,6 +1,7 @@
 import * as d3 from "d3";
 import type { Panel, WSMessage } from "../types";
 import { getAgentColor } from "../lib/colors";
+import { formatScore } from "../lib/format";
 
 interface KnapsackData {
   num_selected: number;
@@ -211,7 +212,7 @@ export class KnapsackPanel implements Panel {
       this.showInstance(this.allInstances[keys[this.currentIndex]]);
     }
 
-    this.scoreEl.textContent = entry.score.toFixed(1);
+    this.scoreEl.textContent = formatScore(entry.score);
 
     if (this.historyIndex > 0) {
       const prev = this.historyEntries[this.historyIndex - 1];
@@ -282,7 +283,7 @@ export class KnapsackPanel implements Panel {
     if (msg.type === "stats_update") {
       if (msg.best_score != null && this.historyEntries.length === 0) {
         this.rawScore = msg.best_score;
-        this.scoreEl.textContent = msg.best_score.toFixed(1);
+        this.scoreEl.textContent = formatScore(msg.best_score);
       }
     }
 
