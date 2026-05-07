@@ -822,6 +822,43 @@ html, body {
   z-index: 2;
 }
 
+/* Diverging legend strip — sits at top-right of the knapsack panel showing
+   the 8-bin earthen scale (4 cool + cream center + 4 warm) with min / max
+   endpoint labels that track the current instance's value range. */
+.kn-legend {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-mid);
+  font-variant-numeric: tabular-nums;
+  z-index: 2;
+}
+.kn-legend-swatches {
+  display: flex;
+  width: 130px;
+  height: 8px;
+  border-radius: 2px;
+  overflow: hidden;
+  border: 0.5px solid var(--border-subtle);
+}
+.kn-legend-swatches > span { flex: 1; }
+.kn-legend-zero {
+  flex: 0.5 !important;
+  background: var(--bg-card);
+  border-left: 0.5px solid var(--border-subtle);
+  border-right: 0.5px solid var(--border-subtle);
+}
+.kn-legend-end {
+  white-space: nowrap;
+  min-width: 4ch;
+  text-align: center;
+}
+
 /* ── Energy panel (energy arbitrage) ── */
 .energy-panel {
   display: flex;
