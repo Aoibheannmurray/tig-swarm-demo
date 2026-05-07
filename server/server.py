@@ -1215,6 +1215,63 @@ async def get_trajectories(challenge: str | None = None):
     }
 
 
+@app.get("/api/trajectory_experiments")
+async def get_trajectory_experiments(
+    challenge: str | None = None,
+    trajectory_id: str | None = None,
+    include_code: bool = False,
+):
+    """All experiments grouped by trajectory.
+
+    Optionally filter to a single trajectory via ?trajectory_id=...
+    Pass include_code=true to return algorithm_code per experiment.
+    """
+    challenge = await resolve_challenge(challenge)
+    async with db.connect() as conn:
+        traj_filter = ""
+        params: list = [challenge]
+        if trajectory_id:
+            traj_filter = "AND e.trajectory_id = ?"
+            params.append(trajectory_id)
+
+        code_col = ", e.algorithm_code" if include_code else ""
+        cursor = await conn.execute(
+            f"""SELECT e.id, e.trajectory_id, e.agent_id, a.name AS agent_name,
+                       e.score, e.feasible, e.beats_own_best, e.notes,
+                       e.created_at, h.title, h.description, h.strategy_tag
+                       {code_col}
+                FROM experiments e
+                LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
+                LEFT JOIN agents a ON a.id = e.agent_id
+                WHERE e.challenge = ? {traj_filter}
+                ORDER BY e.trajectory_id, e.created_at ASC""",
+            params,
+        )
+        rows = await cursor.fetchall()
+
+    grouped: dict[str, list] = {}
+    for r in rows:
+        tid = r["trajectory_id"] or "unknown"
+        d = {
+            "id": r["id"],
+            "agent_id": r["agent_id"],
+            "agent_name": r["agent_name"],
+            "score": r["score"],
+            "feasible": bool(r["feasible"]),
+            "beats_own_best": bool(r["beats_own_best"]) if r["beats_own_best"] is not None else False,
+            "notes": r["notes"],
+            "title": r["title"],
+            "description": r["description"],
+            "strategy_tag": r["strategy_tag"],
+            "created_at": r["created_at"],
+        }
+        if include_code:
+            d["algorithm_code"] = r["algorithm_code"]
+        grouped.setdefault(tid, []).append(d)
+
+    return {"challenge": challenge, "trajectories": grouped}
+
+
 # ── Admin endpoints ──
 
 @app.post("/api/admin/broadcast")

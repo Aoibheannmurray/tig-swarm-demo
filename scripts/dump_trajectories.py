@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Dump swarm trajectory code evolution for offline analysis.
 
-Pulls per-agent experiment histories (with full algorithm code) from the server
-and writes each iteration's code plus unified diffs between consecutive versions.
-Point Claude Code at the output file to get an LLM analysis of the trajectory.
+Pulls experiments grouped by trajectory (not by agent) and writes each
+trajectory's code evolution with unified diffs between consecutive iterations.
+Point Claude Code at the output file for LLM analysis.
 
 Usage:
-    # Dump all agents on the active challenge
+    # Dump all trajectories on the active challenge
     python scripts/dump_trajectories.py
 
     # Specific challenge
     python scripts/dump_trajectories.py --challenge energy_arbitrage
 
-    # Single agent
-    python scripts/dump_trajectories.py --agent-id abc123
+    # Single trajectory
+    python scripts/dump_trajectories.py --trajectory-id abc123
 
     # Custom output path
     python scripts/dump_trajectories.py -o /tmp/analysis.md
@@ -61,24 +61,30 @@ def unified_diff(old: str, new: str, old_label: str, new_label: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Dump swarm trajectory code for LLM analysis")
+        description="Dump trajectory code evolution for LLM analysis")
     parser.add_argument("--challenge", help="Challenge name (defaults to active)")
-    parser.add_argument("--agent-id", help="Dump only this agent")
+    parser.add_argument("--trajectory-id", help="Dump only this trajectory")
     parser.add_argument("-o", "--output",
                         help="Output file (default: trajectory_<challenge>.md)")
     args = parser.parse_args()
 
-    challenge_param = f"?challenge={args.challenge}" if args.challenge else ""
+    params = []
+    if args.challenge:
+        params.append(f"challenge={args.challenge}")
+    if args.trajectory_id:
+        params.append(f"trajectory_id={args.trajectory_id}")
+    params.append("include_code=true")
+    query = "&".join(params)
 
-    leaderboard = fetch(f"/api/leaderboard{challenge_param}")
-    challenge = leaderboard.get("challenge", args.challenge or "unknown")
-    entries = leaderboard.get("entries", [])
+    print("Fetching trajectory experiments...", file=sys.stderr)
+    data = fetch(f"/api/trajectory_experiments?{query}")
+    challenge = data.get("challenge", args.challenge or "unknown")
+    trajectories = data.get("trajectories", {})
 
-    if args.agent_id:
-        entries = [e for e in entries if e["agent_id"] == args.agent_id]
-        if not entries:
-            entries = [{"agent_id": args.agent_id, "agent_name": "unknown",
-                        "runs": "?", "improvements": "?", "current_score": None}]
+    # Also fetch trajectory metadata for lifecycle info
+    traj_meta_params = f"?challenge={challenge}" if args.challenge else ""
+    traj_meta = fetch(f"/api/trajectories{traj_meta_params}")
+    meta_by_id = {t["id"]: t for t in traj_meta.get("trajectories", [])}
 
     output_path = args.output or f"trajectory_{challenge}.md"
 
@@ -87,45 +93,65 @@ def main():
     lines.append(f"")
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"Challenge: {challenge}")
-    lines.append(f"Agents: {len(entries)}")
+    lines.append(f"Trajectories: {len(trajectories)}")
     lines.append(f"")
 
-    # Leaderboard summary
-    lines.append(f"## Leaderboard")
+    # Sort trajectories by their best score (descending)
+    def traj_best_score(tid):
+        meta = meta_by_id.get(tid)
+        if meta and meta.get("current_score") is not None:
+            return meta["current_score"]
+        exps = trajectories[tid]
+        scores = [e["score"] for e in exps if e.get("score") is not None]
+        return max(scores) if scores else float("-inf")
+
+    sorted_tids = sorted(trajectories.keys(), key=traj_best_score, reverse=True)
+
+    # Summary table
+    lines.append(f"## Summary")
     lines.append(f"")
-    for e in entries:
+    lines.append(f"| Trajectory | Status | Score | Edits | Improvements | Agents |")
+    lines.append(f"|------------|--------|-------|-------|--------------|--------|")
+    for tid in sorted_tids:
+        meta = meta_by_id.get(tid, {})
+        exps = trajectories[tid]
+        agents = sorted(set(e.get("agent_name", "?") for e in exps))
+        status = meta.get("status", "?")
         lines.append(
-            f"- **{e.get('agent_name', '?')}** — "
-            f"score {fmt_score(e.get('current_score'))}, "
-            f"{e.get('runs', 0)} runs, "
-            f"{e.get('improvements', 0)} improvements"
+            f"| {tid[:8]} | {status} "
+            f"| {fmt_score(meta.get('current_score'))} "
+            f"| {meta.get('num_edits', len(exps))} "
+            f"| {meta.get('num_improvements', sum(1 for e in exps if e.get('beats_own_best')))} "
+            f"| {', '.join(agents)} |"
         )
     lines.append(f"")
 
-    for entry in entries:
-        agent_id = entry["agent_id"]
-        agent_name = entry.get("agent_name", "unknown")
-
-        print(f"Fetching {agent_name}...", file=sys.stderr)
-        agent_data = fetch(
-            f"/api/agent_experiments?agent_id={agent_id}"
-            f"&include_code=true"
-            f"{'&challenge=' + challenge if challenge else ''}"
-        )
-        experiments = agent_data.get("experiments", [])
+    # Per-trajectory code evolution
+    for tid in sorted_tids:
+        exps = trajectories[tid]
+        meta = meta_by_id.get(tid, {})
+        status = meta.get("status", "active")
+        agents = sorted(set(e.get("agent_name", "?") for e in exps))
+        score_hist = meta.get("score_history", [])
 
         lines.append(f"---")
         lines.append(f"")
-        lines.append(f"## {agent_name} — {len(experiments)} iterations")
+        lines.append(f"## Trajectory {tid[:8]} [{status.upper()}] — {len(exps)} iterations")
+        lines.append(f"")
+        lines.append(f"- **Agents:** {', '.join(agents)}")
+        lines.append(f"- **Best score:** {fmt_score(meta.get('current_score'))}")
+        lines.append(f"- **Momentum:** {meta.get('momentum', 0):.4f}")
+        if score_hist:
+            lines.append(f"- **Score progression:** {' → '.join(fmt_score(h['score']) for h in score_hist)}")
         lines.append(f"")
 
-        if not experiments:
+        if not exps:
             lines.append(f"_No experiments recorded._")
             lines.append(f"")
             continue
 
         prev_code = ""
-        for i, e in enumerate(experiments, 1):
+        for i, e in enumerate(exps, 1):
             score = e.get("score")
             is_best = e.get("beats_own_best", False)
             feasible = e.get("feasible", True)
@@ -134,6 +160,7 @@ def main():
             desc = e.get("description") or ""
             code = e.get("algorithm_code") or ""
             ts = e.get("created_at", "")
+            agent = e.get("agent_name", "?")
 
             marker = ""
             if is_best:
@@ -144,6 +171,7 @@ def main():
             lines.append(f"### Iteration {i}{marker}")
             lines.append(f"")
             lines.append(f"- **Score:** {fmt_score(score)}")
+            lines.append(f"- **Agent:** {agent}")
             lines.append(f"- **Tag:** {tag}")
             lines.append(f"- **Title:** {title}")
             if desc:
@@ -178,9 +206,8 @@ def main():
     size_kb = len(report.encode()) / 1024
     print(f"Wrote {output_path} ({size_kb:.0f} KB, {len(lines)} lines)",
           file=sys.stderr)
-    print(f"  {len(entries)} agents, {challenge} challenge", file=sys.stderr)
-    print(f"\nTo analyze, tell Claude Code:", file=sys.stderr)
-    print(f"  Read {output_path} and analyze the code evolution", file=sys.stderr)
+    print(f"  {len(trajectories)} trajectories, {challenge} challenge",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":
