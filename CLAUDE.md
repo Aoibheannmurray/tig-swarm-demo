@@ -2,7 +2,7 @@
 
 > **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file and `scripts/`.
 
-> **Active challenge:** this swarm is configured for **job_scheduling**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
+> **Active challenge:** this swarm is configured for **knapsack**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
 
 > **Switching challenges:** the swarm host can flip the active challenge for everyone with `python setup.py switch <challenge>`. Per-challenge state is preserved on the server, so resuming a previous challenge picks up every agent's prior trajectory. Contributors auto-follow the host's choice via `python setup.py sync` — your agent loop runs that at Step 0 below, so a host-side switch is picked up on your next iteration. Only the host can change the active challenge; contributors get a clear error if they try.
 
@@ -103,7 +103,7 @@ Write your own current best to `mod.rs` for the active challenge:
 
 ```bash
 echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('best_algorithm_code',''))" \
-  > src/job_scheduling/algorithm/mod.rs
+  > src/knapsack/algorithm/mod.rs
 ```
 
 If you're stagnating, check `stagnation_hint` to decide your strategy:
@@ -133,7 +133,7 @@ Analyze your current algorithm and the history of attempts. Think about what opt
 
 **If `prior_hypotheses` is present in the state response**, these are strategies that have already been tried on this exact program and failed. Study them carefully and pick something **structurally different** — repeating a failed approach wastes an iteration.
 
-Now read `src/job_scheduling/algorithm/mod.rs` and edit it with your improvements. Read the challenge README (`CHALLENGE.md`) for the `Challenge` / `Solution` types, scoring rules, feasibility constraints, and solver interface rules (function signature, `save_solution` semantics, threading constraints).
+Now read `src/knapsack/algorithm/mod.rs` and edit it with your improvements. Read the challenge README (`CHALLENGE.md`) for the `Challenge` / `Solution` types, scoring rules, feasibility constraints, and solver interface rules (function signature, `save_solution` semantics, threading constraints).
 
 ### Step 4: Run Benchmark
 
@@ -256,7 +256,7 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
 
 ## Rules
 
-0. **ONLY modify `src/job_scheduling/algorithm/mod.rs`** (the active challenge's algorithm file) and append to `tacit_knowledge_personal.md` (gitignored, local-only, see Step 6 / Rule 8). Do not create, edit, or write to any other files. `/tmp/inspiration.rs` is read-only reference.
+0. **ONLY modify `src/knapsack/algorithm/mod.rs`** (the active challenge's algorithm file) and append to `tacit_knowledge_personal.md` (gitignored, local-only, see Step 6 / Rule 8). Do not create, edit, or write to any other files. `/tmp/inspiration.rs` is read-only reference.
 
 1. **When `prior_hypotheses` is present**, study it before editing. These are strategies already tried on this program that failed — pick something structurally different.
 2. **Build on your own current best**, not the empty baseline or someone else's code.
