@@ -13,25 +13,25 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The wizard rewrites the literal placeholder below to the swarm's URL.
-# TIG_SWARM_SERVER env var overrides — useful for ad-hoc testing without
-# rerunning setup. The startswith("$") check catches the un-substituted
-# placeholder so a contributor who forgot to run setup.py join gets a
-# loud failure instead of a silent post to nowhere.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t2-production-905b.up.railway.app///"
-if SERVER.startswith("$"):
+ROOT = Path(__file__).parent.parent
+
+def _resolve_server_url() -> str:
+    if os.environ.get("TIG_SWARM_SERVER"):
+        return os.environ["TIG_SWARM_SERVER"].rstrip("/")
+    cfg_path = ROOT / "swarm.config.json"
+    if cfg_path.exists():
+        try:
+            url = json.loads(cfg_path.read_text()).get("server_url", "")
+            if url and not url.startswith("$"):
+                return url.rstrip("/")
+        except Exception:
+            pass
     sys.exit(
         "publish.py: server URL not configured. Run "
         "`python setup.py join <swarm-url>` (or set TIG_SWARM_SERVER)."
     )
-# Strip trailing slashes — Railway's proxy turns POSTs to URLs with stacked
-# slashes (e.g. `…railway.app///api/iterations`) into a redirect that drops
-# the body / converts to GET, which surfaces as "Connection reset by peer"
-# on large solution_data payloads and HTTP 405 on small ones. The trailing
-# slash sneaks in through the wizard's URL substitution; normalise here so
-# solution_data actually lands on the server.
-SERVER = SERVER.rstrip("/")
-ROOT = Path(__file__).parent.parent
+
+SERVER = _resolve_server_url()
 
 
 def _resolve_algo_path() -> Path:
@@ -45,7 +45,8 @@ def _resolve_algo_path() -> Path:
                 return ROOT / algo
         except Exception:
             pass
-    return ROOT / "src" / "job_scheduling" / "algorithm" / "mod.rs"
+    print("error: swarm.config.json missing or has no algorithm_path — run setup.py first", file=sys.stderr)
+    sys.exit(1)
 
 
 def main():
@@ -83,7 +84,7 @@ def main():
         "challenge": bench.get("challenge"),
     }
     # VRP-only fields. benchmark.py omits these for non-VRP challenges; we
-    # forward them only when present so SAT / job_scheduling / etc. payloads
+    # forward them only when present so SAT / knapsack / etc. payloads
     # don't carry meaningless num_vehicles=0 / total_distance=score.
     if bench.get("num_vehicles") is not None:
         payload["num_vehicles"] = bench["num_vehicles"]

@@ -45,14 +45,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 
-# Files that carry a swarm URL the wizard rewrites in-place. README is in the
-# list defensively (it has no URL today, but did historically) so any future
-# README URL also gets templated.
+# Files that carry swarm-specific values (URL, active challenge name) the
+# wizard rewrites in-place.  benchmark.py and publish.py are intentionally
+# excluded — they contain challenge-generic code (function names, data keys,
+# docstrings for all five challenges) that must not be rewritten.  They read
+# the active challenge from swarm.config.json at runtime instead.
 TEMPLATED_FILES = [
     ROOT / "CLAUDE.md",
     ROOT / "README.md",
-    ROOT / "scripts" / "publish.py",
-    ROOT / "scripts" / "benchmark.py",
 ]
 
 # Heuristic URL patterns that the wizard treats as "the swarm URL" and
