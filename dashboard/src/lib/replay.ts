@@ -1,5 +1,6 @@
 import type { WSMessage } from "../types";
 import { formatScore } from "./format";
+import { getViewedChallenge } from "./viewedChallenge";
 
 let playing = false;
 
@@ -63,6 +64,7 @@ export async function startReplay(
           : null;
       handleMessage({
         type: "new_global_best",
+        challenge: getViewedChallenge(),
         experiment_id: entry.experiment_id,
         agent_name: entry.agent_name,
         agent_id: "",

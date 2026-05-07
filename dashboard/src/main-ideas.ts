@@ -113,6 +113,7 @@ async function loadInitialState(apiUrl: string) {
       for (const m of messages.reverse()) {
         handleMessage({
           type: "chat_message",
+          challenge: getViewedChallenge(),
           message_id: m.id,
           agent_name: m.agent_name,
           agent_id: m.agent_id,

@@ -11,7 +11,8 @@
 // to localStorage so a user's choice sticks across page loads (and across
 // pages, since each entry-point HTML loads this same module).
 
-import { getActiveChallenge, type Challenge, getAvailableChallenges } from "./swarmConfig";
+import { getActiveChallenge, getAvailableChallenges } from "./swarmConfig";
+import type { Challenge } from "./challengeRegistry";
 
 const STORAGE_KEY = "viewedChallenge";
 

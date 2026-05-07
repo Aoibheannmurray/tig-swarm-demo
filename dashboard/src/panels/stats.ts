@@ -220,9 +220,11 @@ export class StatsPanel implements Panel {
     if (msg.type === "stats_update") {
       // ACTIVE = agents currently working on the viewed challenge (not the
       // global swarm size). main.ts slices the per_challenge map so
-      // `msg.active_agents` is per-challenge after the filter.
-      counterTween(this.agentsEl, msg.active_agents);
-      counterTween(this.experimentsEl, msg.total_experiments);
+      // `msg.active_agents` is per-challenge after the filter. The
+      // flattened fields are optional in the schema (the wire form only
+      // carries `per_challenge`); default to 0 here.
+      counterTween(this.agentsEl, msg.active_agents ?? 0);
+      counterTween(this.experimentsEl, msg.total_experiments ?? 0);
 
       // "Not started" hero overlay when the viewed challenge has no data.
       // Cleared as soon as anything lands.

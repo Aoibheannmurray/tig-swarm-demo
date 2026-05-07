@@ -15,21 +15,17 @@ import {
   getActiveChallenge,
   getAvailableChallenges,
   onSwarmConfigChange,
-  type Challenge,
 } from "../lib/swarmConfig";
+import {
+  isKnownChallenge,
+  prettyName,
+  type Challenge,
+} from "../lib/challengeRegistry";
 import {
   getViewedChallenge,
   setViewedChallenge,
   onViewedChallengeChange,
 } from "../lib/viewedChallenge";
-
-const PRETTY: Record<string, string> = {
-  satisfiability: "Satisfiability",
-  vehicle_routing: "Vehicle Routing",
-  knapsack: "Knapsack",
-  job_scheduling: "Job Scheduling",
-  energy_arbitrage: "Energy Arbitrage",
-};
 
 export class ChallengeSelectorPanel implements Panel {
   private container!: HTMLElement;
@@ -76,7 +72,8 @@ export class ChallengeSelectorPanel implements Panel {
     for (const ch of available) {
       const opt = document.createElement("option");
       opt.value = ch;
-      opt.textContent = (PRETTY[ch] ?? ch) + (ch === active ? " (active)" : "");
+      const label = isKnownChallenge(ch) ? prettyName(ch) : ch;
+      opt.textContent = label + (ch === active ? " (active)" : "");
       this.select.appendChild(opt);
     }
     this.select.value = available.includes(viewed) ? viewed : (available[0] ?? "");

@@ -21,3 +21,5 @@ datasets/*/generated/
 # is the contributor's filesystem. The shared repo doesn't need them.
 tacit_knowledge_*.md
 tacit_knowledge_personal.md
+
+src/*/algorithm/mod.rs

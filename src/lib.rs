@@ -186,6 +186,14 @@ macro_rules! impl_base64_serde {
     };
 }
 
+// ── Per-challenge module declarations ──
+//
+// Cargo's `[features]` block must list each challenge by name (Cargo
+// doesn't expand macros at manifest time), so the `pub mod` block here
+// is also per-challenge — but it's the ONLY place a challenge name
+// appears as a Rust identifier. Adding a 6th challenge: add a
+// `[features]` line to Cargo.toml, add a `pub mod x;` line below, and
+// add `x` to the `enabled_challenge_arms!` invocation. Three lines.
 #[cfg(feature = "satisfiability")]
 pub mod satisfiability;
 #[cfg(feature = "vehicle_routing")]
@@ -196,3 +204,43 @@ pub mod knapsack;
 pub mod job_scheduling;
 #[cfg(feature = "energy_arbitrage")]
 pub mod energy_arbitrage;
+
+// ── Per-challenge dispatch macro ──
+//
+// Each binary (`main_solver.rs`, `main_generator.rs`, `main_evaluator.rs`)
+// previously hand-wrote a `match challenge { ... }` with 5 cfg-gated
+// arms — 15 lines of boilerplate that drifted whenever a challenge was
+// added. This macro emits those arms once.
+//
+// Caller defines a local `macro_rules!` (e.g. `dispatch_solve!`) that
+// takes a single `$c:ident` and produces the per-challenge expression
+// against `challenges::$c::Challenge`. Then:
+//
+//   enabled_challenge_arms!(challenge_name_string, dispatch_solve);
+//
+// emits the 5 cfg-gated arms plus a fall-through that bails with a
+// "challenge unknown or disabled" error.
+//
+// The match expression evaluates to whatever the dispatch macro
+// returns — `()` for the solver/generator, `f64` for the evaluator.
+#[macro_export]
+macro_rules! enabled_challenge_arms {
+    ($challenge:expr, $dispatch:ident) => {
+        match $challenge {
+            #[cfg(feature = "satisfiability")]
+            "satisfiability" => $dispatch!(satisfiability),
+            #[cfg(feature = "vehicle_routing")]
+            "vehicle_routing" => $dispatch!(vehicle_routing),
+            #[cfg(feature = "knapsack")]
+            "knapsack" => $dispatch!(knapsack),
+            #[cfg(feature = "job_scheduling")]
+            "job_scheduling" => $dispatch!(job_scheduling),
+            #[cfg(feature = "energy_arbitrage")]
+            "energy_arbitrage" => $dispatch!(energy_arbitrage),
+            _ => anyhow::bail!(
+                "Unknown or disabled challenge: {}. Enable its crate feature when building.",
+                $challenge
+            ),
+        }
+    };
+}

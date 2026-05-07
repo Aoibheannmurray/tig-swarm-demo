@@ -1,6 +1,15 @@
 from pydantic import BaseModel
-from typing import Literal, Optional
+from typing import Literal, Optional, get_args
 import uuid
+
+# Import the registry so we can fail loudly at import time if the Literal
+# below drifts away from server/challenges.py. The Literal itself stays
+# static — Python's type checker needs concrete strings — but the assert
+# at the bottom of this file proves the union and the registry agree.
+from challenges import (
+    CHALLENGE_NAMES,
+    assert_literal_matches_registry,
+)
 
 
 def new_id() -> str:
@@ -140,3 +149,10 @@ class IterationResponse(BaseModel):
     runs: int
     improvements: int
     runs_since_improvement: int
+
+
+# Boot-time consistency check. If you add a 6th challenge by editing the
+# registry but forget to extend ChallengeName above (or vice versa), the
+# server fails to import with a clear message — instead of half-broken
+# endpoints that silently reject an unknown name string at request time.
+assert_literal_matches_registry(get_args(ChallengeName))

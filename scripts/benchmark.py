@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
-Reads swarm-wide config from `https://t1-production-0047.up.railway.app////api/swarm_config` (or from
+Reads swarm-wide config from `https://t1-production-0047.up.railway.app/////api/swarm_config` (or from
 `./swarm.config.json` as a fallback for offline use) to pick the challenge,
 the per-track instance counts, and the per-instance solver timeout. Builds
 the right cargo binary, generates instances on first run (cached under
@@ -15,11 +15,11 @@ in the integer range [-QUALITY_PRECISION × 10, +QUALITY_PRECISION × 10]
 (QUALITY_PRECISION = 1,000,000). The baseline is the upstream baseline
 algorithm for that challenge:
 
-    - energy_arbitrage: binary (1M if all clauses satisfied, else 0).
-    - energy_arbitrage: Solomon nearest-neighbor (`solomon::run`).
-    - energy_arbitrage: greedy by value-density (`compute_greedy_baseline`).
-    - energy_arbitrage: SOTA dispatching rules (`compute_sota_baseline`).
-    - energy_arbitrage: max(greedy, conservative) (`compute_baseline`).
+    - knapsack: binary (1M if all clauses satisfied, else 0).
+    - knapsack: Solomon nearest-neighbor (`solomon::run`).
+    - knapsack: greedy by value-density (`compute_greedy_baseline`).
+    - knapsack: SOTA dispatching rules (`compute_sota_baseline`).
+    - knapsack: max(greedy, conservative) (`compute_baseline`).
 
 Higher quality is always better. Aggregation is two-step:
 
@@ -86,7 +86,7 @@ GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 
 # Wizard-baked URL with env-var override; mirrors scripts/publish.py so the
 # two stay in lockstep when the wizard re-runs.
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app///"
+SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app////"
 if SERVER.startswith("$"):
     SERVER = ""  # offline mode — read from swarm.config.json instead
 # Strip trailing slashes — Railway's proxy turns POSTs to URLs with stacked
@@ -118,7 +118,7 @@ def load_swarm_config() -> dict:
     if cfg_path.exists():
         local = json.loads(cfg_path.read_text())
         return {
-            "challenge": local.get("challenge", "energy_arbitrage"),
+            "challenge": local.get("challenge", "knapsack"),
             "tracks": local.get("tracks", {}),
             "timeout": local.get("timeout", 30),
             "scoring_direction": local.get("scoring_direction", "min"),
@@ -423,8 +423,8 @@ def _jsp_extras(inst_path: str, sol_path: str) -> dict:
 # ── Knapsack-specific extras (interaction matrix viz_data) ─────────
 
 
-def _energy_arbitrage_parse_solution(sol_path: str) -> list[int] | None:
-    """Decode a energy_arbitrage solution file (base64 → gzip → bincode)."""
+def _knapsack_parse_solution(sol_path: str) -> list[int] | None:
+    """Decode a knapsack solution file (base64 → gzip → bincode)."""
     import base64
     import gzip
     import struct
@@ -455,7 +455,7 @@ def _energy_arbitrage_parse_solution(sol_path: str) -> list[int] | None:
         return None
 
 
-def _energy_arbitrage_extras(inst_path: str, sol_path: str) -> dict:
+def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
     """Build interaction-matrix viz payload from instance + solution files.
 
     The matrix sent to the dashboard is K×K where K = len(selected items),
@@ -463,15 +463,15 @@ def _energy_arbitrage_extras(inst_path: str, sol_path: str) -> dict:
     """
     MAX_VIZ_ITEMS = 200
 
-    items = _energy_arbitrage_parse_solution(sol_path)
+    items = _knapsack_parse_solution(sol_path)
     if items is None:
-        return {"energy_arbitrage_data": None}
+        return {"knapsack_data": None}
 
     try:
         with open(inst_path) as f:
             challenge = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return {"energy_arbitrage_data": None}
+        return {"knapsack_data": None}
 
     n = challenge["num_items"]
     interaction_values = challenge["interaction_values"]
@@ -494,7 +494,7 @@ def _energy_arbitrage_extras(inst_path: str, sol_path: str) -> dict:
                 sub_matrix[ri][rj] = interaction_values[i][j]
 
     return {
-        "energy_arbitrage_data": {
+        "knapsack_data": {
             "num_selected": len(sorted_items),
             "num_items": n,
             "viz_items": viz_items,
@@ -510,7 +510,7 @@ def _energy_arbitrage_extras(inst_path: str, sol_path: str) -> dict:
 
 
 def _energy_parse_solution(sol_path: str) -> list[list[float]] | None:
-    """Decode an energy_arbitrage solution file (base64 → gzip → bincode).
+    """Decode an knapsack solution file (base64 → gzip → bincode).
 
     The schedule is Vec<Vec<f64>>: outer vec = timesteps, inner = batteries.
     """
@@ -602,7 +602,7 @@ def _energy_extras(inst_path: str, sol_path: str) -> dict:
 
 
 def _sat_parse_solution(sol_path: str) -> list[bool] | None:
-    """Decode a energy_arbitrage solution file (base64 → gzip → bincode).
+    """Decode a knapsack solution file (base64 → gzip → bincode).
 
     Bincode encoding of `Vec<bool>` is a little-endian u64 length followed
     by one byte per element (0x00 or 0x01).
@@ -717,10 +717,10 @@ def _sat_extras(inst_path: str, sol_path: str) -> dict:
 _PER_INSTANCE_EXTRAS = {
     "vehicle" "_routing":  _vrp_extras,
     "job" "_scheduling":   _jsp_extras,
-    # `_energy_arbitrage_extras` is historical mis-naming — it actually
+    # `_knapsack_extras` is historical mis-naming — it actually
     # builds the knapsack interaction-matrix payload (see comment above
-    # its definition). Same for the `energy_arbitrage_data` key below.
-    "knap" "sack":         _energy_arbitrage_extras,
+    # its definition). Same for the `knapsack_data` key below.
+    "knap" "sack":         _knapsack_extras,
     "energy" "_arbitrage": _energy_extras,
     "satisfia" "bility":   _sat_extras,
 }
@@ -734,7 +734,7 @@ _PER_INSTANCE_EXTRAS = {
 _AGG_EXTRAS = {
     "vehicle" "_routing":  "route_data",
     "job" "_scheduling":   "gantt_data",
-    "knap" "sack":         "energy_arbitrage_data",
+    "knap" "sack":         "knapsack_data",
     "energy" "_arbitrage": "energy_data",
     "satisfia" "bility":   "sat_data",
 }
