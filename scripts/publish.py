@@ -45,7 +45,7 @@ def _resolve_algo_path() -> Path:
                 return ROOT / algo
         except Exception:
             pass
-    return ROOT / "src" / "knapsack" / "algorithm" / "mod.rs"
+    return ROOT / "src" / "energy_arbitrage" / "algorithm" / "mod.rs"
 
 
 def main():
@@ -83,7 +83,7 @@ def main():
         "challenge": bench.get("challenge"),
     }
     # VRP-only fields. benchmark.py omits these for non-VRP challenges; we
-    # forward them only when present so SAT / knapsack / etc. payloads
+    # forward them only when present so SAT / energy_arbitrage / etc. payloads
     # don't carry meaningless num_vehicles=0 / total_distance=score.
     if bench.get("num_vehicles") is not None:
         payload["num_vehicles"] = bench["num_vehicles"]

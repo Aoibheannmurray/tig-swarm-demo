@@ -7,6 +7,13 @@ import type { Panel, WSMessage } from "../types";
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
 const GRID_LINE = () => token("--border-subtle", "rgba(26,26,26,0.08)");
 
+// Axis font scales with chart width so /benchmark.html (full-screen, ~1600px+)
+// gets readable axis labels while the multi-panel home grid (~600px) stays
+// compact. Clamps to [10, 22] px so it never goes microscopic on a phone or
+// gigantic on an ultrawide.
+const axisFontPx = (width: number) =>
+  Math.min(22, Math.max(10, Math.round(width / 90)));
+
 interface DataPoint {
   time: number; // ms since start
   score: number;
@@ -383,6 +390,7 @@ export class ChartPanel implements Panel {
     const m = this.margin;
     const w = this.width - m.left - m.right;
     const h = this.height - m.top - m.bottom;
+    const fs = axisFontPx(w);
 
     if (this.globalData.length < 1) {
       // Empty-state placeholder so an unstarted challenge doesn't look
@@ -395,7 +403,7 @@ export class ChartPanel implements Panel {
         .attr("y", h / 2)
         .attr("text-anchor", "middle")
         .attr("fill", AXIS_TEXT())
-        .attr("font-size", "12px")
+        .attr("font-size", `${fs + 2}px`)
         .attr("font-family", "var(--ui)")
         .text("No iterations yet — this challenge hasn't started");
       return;
@@ -493,7 +501,7 @@ export class ChartPanel implements Panel {
           .attr("x", x + 6)
           .attr("y", y - 8)
           .attr("fill", color)
-          .attr("font-size", "9px")
+          .attr("font-size", `${Math.max(9, fs - 1)}px`)
           .attr("font-family", "var(--mono)")
           .attr("opacity", 0.8)
           .text(d.agentName);
@@ -504,9 +512,9 @@ export class ChartPanel implements Panel {
     yTicks.forEach((tick) => {
       chartG.append("text")
         .attr("x", -8)
-        .attr("y", yScale(tick) + 3)
+        .attr("y", yScale(tick) + fs / 3)
         .attr("fill", AXIS_TEXT())
-        .attr("font-size", "10px")
+        .attr("font-size", `${fs}px`)
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "end")
         .text(formatScore(tick));
@@ -516,9 +524,9 @@ export class ChartPanel implements Panel {
     xTicks.forEach((tick) => {
       chartG.append("text")
         .attr("x", xScale(tick))
-        .attr("y", h + 16)
+        .attr("y", h + fs + 6)
         .attr("fill", AXIS_TEXT())
-        .attr("font-size", "10px")
+        .attr("font-size", `${fs}px`)
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "middle")
         .text(formatElapsed(tick));
@@ -532,6 +540,7 @@ export class ChartPanel implements Panel {
     const m = this.margin;
     const w = this.width - m.left - m.right;
     const h = this.height - m.top - m.bottom;
+    const fs = axisFontPx(w);
 
     const chartG = this.g.append("g")
       .attr("transform", `translate(${m.left},${m.top})`);
@@ -541,7 +550,7 @@ export class ChartPanel implements Panel {
         .attr("x", w / 2)
         .attr("y", h / 2)
         .attr("fill", AXIS_TEXT())
-        .attr("font-size", "11px")
+        .attr("font-size", `${fs + 1}px`)
         .attr("font-family", "var(--ui)")
         .attr("text-anchor", "middle")
         .text(progress ? `no attempts yet from ${agentName}` : "loading…");
@@ -634,9 +643,9 @@ export class ChartPanel implements Panel {
     yTicks.forEach((tick) => {
       chartG.append("text")
         .attr("x", -8)
-        .attr("y", yScale(tick) + 3)
+        .attr("y", yScale(tick) + fs / 3)
         .attr("fill", AXIS_TEXT())
-        .attr("font-size", "10px")
+        .attr("font-size", `${fs}px`)
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "end")
         .text(formatScore(tick));
@@ -647,9 +656,9 @@ export class ChartPanel implements Panel {
     for (let t = 0; t <= xDomainEnd; t += xTickStep) {
       chartG.append("text")
         .attr("x", xScale(t))
-        .attr("y", h + 16)
+        .attr("y", h + fs + 6)
         .attr("fill", AXIS_TEXT())
-        .attr("font-size", "10px")
+        .attr("font-size", `${fs}px`)
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "middle")
         .text(`#${t}`);

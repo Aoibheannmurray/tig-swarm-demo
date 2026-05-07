@@ -28,8 +28,27 @@ const selectorMount = document.getElementById("panel-challenge-selector");
 const challengeSelector = new ChallengeSelectorPanel();
 if (selectorMount) challengeSelector.init(selectorMount);
 
+const panelEl = document.getElementById("panel-chart")!;
+panelEl.innerHTML = `
+  <div class="page-flex">
+    <div class="ideas-header">
+      <div class="ideas-title">
+        <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
+        <span class="ideas-title-text">Benchmark Performance Graph</span>
+      </div>
+      <div class="ideas-nav">
+        <a href="/" class="ideas-nav-link">Dashboard</a>
+        <a href="/ideas.html" class="ideas-nav-link">Ideas</a>
+        <a href="/diversity.html" class="ideas-nav-link">Diversity</a>
+        <span class="ideas-nav-active">Benchmark</span>
+        <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
+      </div>
+    </div>
+    <div class="page-body" id="panel-chart-body"></div>
+  </div>
+`;
 const chartPanel = new ChartPanel();
-chartPanel.init(document.getElementById("panel-chart")!);
+chartPanel.init(document.getElementById("panel-chart-body")!);
 
 const CHALLENGE_SCOPED: Record<string, true> = {
   experiment_published: true,
