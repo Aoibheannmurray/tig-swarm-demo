@@ -25,7 +25,6 @@ Files this script reads / writes:
   - swarm.config.json (owner-only mirror of what's stored on the server)
   - CHALLENGE.md (per-challenge docs, from src/<challenge>/README.md)
   - tacit_knowledge_personal.md (per-contributor, gitignored)
-  - datasets/<challenge>/test.json (rewritten with chosen track counts)
   - .railway/config.json (managed by the `railway` CLI; gitignored)
 """
 
@@ -74,8 +73,8 @@ PLACEHOLDER_ALGO = "${ALGORITHM_PATH}"
 
 # Per-challenge defaults for the wizard prompts. The canonical definitions
 # live in server/challenges.py; this dict is built from there at module
-# load. Keep it local to setup.py so existing call sites (post_config,
-# write_dataset_test_json) don't need to be aware of the import.
+# load. Keep it local to setup.py so existing call sites (post_config)
+# don't need to be aware of the import.
 sys.path.insert(0, str(ROOT / "server"))
 from challenges import CHALLENGES as _CHALLENGE_REGISTRY  # noqa: E402
 
@@ -764,15 +763,6 @@ def run_create() -> int:
     )
     write_challenge_md(active_challenge)
     write_swarm_config(cfg)
-    # Drop a per-challenge test.json so local benchmarks (which read this
-    # file as a fallback when the server is unreachable) match what the
-    # server has stored for each challenge.
-    for ch, sub in challenges_cfg.items():
-        test_json_dir = ROOT / "datasets" / ch
-        test_json_dir.mkdir(parents=True, exist_ok=True)
-        (test_json_dir / "test.json").write_text(json.dumps(sub["tracks"], indent=2) + "\n")
-        print(f"  wrote {(test_json_dir / 'test.json').relative_to(ROOT)}")
-
     repo_url = "<this-repo-url>"
     try:
         result = sp.run(

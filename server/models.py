@@ -82,8 +82,7 @@ class AdminResetChallenge(AdminAuth):
 
 # Swarm-wide configuration set by the owner via the setup wizard.
 # challenge: which TIG challenge this swarm is optimizing.
-# tracks: object mirroring the per-challenge test.json — keys are track
-#         labels (e.g. "n_nodes=600"), values are instance counts.
+# tracks: keys are track labels (e.g. "n_nodes=600"), values are instance counts.
 # timeout: per-instance solver timeout in seconds.
 # scoring_direction: "min" (smaller score wins) or "max" (larger wins).
 # swarm_name / owner_name are display-only.
