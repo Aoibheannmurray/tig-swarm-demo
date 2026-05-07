@@ -19,25 +19,17 @@ const VB_H = 1000;
 const CHART_W = VB_W - MARGIN.left - MARGIN.right;
 const CHART_H = VB_H - MARGIN.top - MARGIN.bottom;
 
-// Sequential 8-bin heat scale through the earthen palette. Cool, faint hues
-// for weak interactions; warm, saturated hues for strong ones. Ordered by
-// perceived warmth so the eye reads cool → warm as low → high.
-// (Interaction values in this challenge are non-negative — no diverging
-// midpoint is needed.)
-const HEAT_BINS = [
-  "#4A8C8A", // dusty teal — lowest
-  "#4E6B85", // slate blue
-  "#8B6B8C", // dusty mauve
-  "#6B7F4E", // olive
-  "#7A4F6E", // plum
-  "#A66E45", // umber
-  "#C68F3E", // mustard
-  "#B8541F", // terracotta — highest
-];
+// Single-hue opacity ramp on the brand terracotta. Weakest cells nearly fade
+// into the cream surface; strongest cells reach full saturation. Using opacity
+// instead of categorical bins makes the highest-value cells unmistakable even
+// at K=200 where each cell is only a few pixels wide.
+const HEAT_HUE = "184, 84, 31"; // #B8541F terracotta as rgb triplet
+const OPACITY_LOW = 0.08;
+const OPACITY_HIGH = 1.0;
 
 // Axis labels become unreadable past this K. Below it we render item IDs on
 // the top and left margins so the user can identify each row/column.
-const AXIS_LABEL_K_THRESHOLD = 30;
+const AXIS_LABEL_K_THRESHOLD = 50;
 
 export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
   protected idPrefix = "knapsack";
@@ -89,14 +81,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         <div class="kn-legend" aria-hidden="true">
           <span class="kn-legend-end" id="knapsack-legend-min">0</span>
           <div class="kn-legend-swatches">
-            <span style="background:#4A8C8A"></span>
-            <span style="background:#4E6B85"></span>
-            <span style="background:#8B6B8C"></span>
-            <span style="background:#6B7F4E"></span>
-            <span style="background:#7A4F6E"></span>
-            <span style="background:#A66E45"></span>
-            <span style="background:#C68F3E"></span>
-            <span style="background:#B8541F"></span>
+            <span style="background: linear-gradient(to right, rgba(184,84,31,0.08), rgba(184,84,31,1));"></span>
           </div>
           <span class="kn-legend-end" id="knapsack-legend-max">+</span>
         </div>
@@ -177,11 +162,13 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
       maxVal = 1;
     }
 
-    // Single quantize ramp across the positive value range. d3 handles the
-    // bucket boundaries (equal-width across [minVal, maxVal] / 8).
-    const heatScale = d3.scaleQuantize<string>()
+    // Continuous opacity scale: maps the value range to [OPACITY_LOW, OPACITY_HIGH].
+    // The eye reads opacity as intensity, so the strongest cells stand out
+    // sharply against the cream surface even at small cell sizes.
+    const opacityScale = d3.scaleLinear()
       .domain([minVal, maxVal])
-      .range(HEAT_BINS);
+      .range([OPACITY_LOW, OPACITY_HIGH])
+      .clamp(true);
 
     // Hairline gap between cells — visible at low k, still holds at k=200
     // where cells are ~5px. Caps at 1px so big cells don't leak too much.
@@ -223,12 +210,9 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         const fill = i === j
           ? "rgba(26,26,26,0.06)"
           : v <= 0
-            // Zero-interaction cells: very transparent version of the
-            // lowest heat-bucket color (#4A8C8A dusty teal). Reads as
-            // "barely-there" while staying in the same color family as the
-            // rest of the heat scale.
-            ? "rgba(74, 140, 138, 0.12)"
-            : heatScale(v);
+            // Explicit zero — barely visible terracotta tint.
+            ? `rgba(${HEAT_HUE}, 0.04)`
+            : `rgba(${HEAT_HUE}, ${opacityScale(v).toFixed(3)})`;
         const colItem = data.viz_items[j];
         parts.push(
           `<rect x="${xPos}" y="${yPos}" width="${w}" height="${w}" fill="${fill}">` +

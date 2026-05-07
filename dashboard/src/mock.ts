@@ -1,9 +1,20 @@
 import type { WSMessage, RouteData, AllRouteData, LeaderboardEntry } from "./types";
 
-// Mock data is hand-crafted for VRP — its solution_data shape is RouteData
-// and the route generator below assumes that. Kept as a constant so it
-// shows up in the per_challenge map of the synthesized stats_update.
-const MOCK_CHALLENGE = "vehicle_routing";
+// Mock data targets the knapsack challenge so /?mock shows the
+// interaction-matrix heatmap. Flip back to "vehicle_routing" if you need
+// to mock the VRP panel instead — the route generator at the bottom is
+// kept for that case.
+const MOCK_CHALLENGE = "knapsack";
+
+interface MockKnapsackInstance {
+  num_selected: number;
+  num_items: number;
+  viz_items: number[];
+  interaction_values: number[][];
+  total_value: number;
+  max_weight: number;
+  total_weight: number;
+}
 
 const ADJECTIVES = [
   "swift", "bold", "keen", "bright", "sharp", "vivid", "fierce", "noble",
@@ -199,6 +210,10 @@ export class MockDataGenerator {
       });
 
       if (isNewBest) {
+        const solutionData =
+          MOCK_CHALLENGE === "knapsack"
+            ? (generateMockKnapsack() as unknown as AllRouteData)
+            : generateMockRoutes();
         this.emit({
           type: "new_global_best",
           challenge: MOCK_CHALLENGE,
@@ -212,7 +227,7 @@ export class MockDataGenerator {
               ? Number((((prevBestForBroadcast - score) / prevBestForBroadcast) * 100).toFixed(2))
               : null,
           num_instances: 8,
-          solution_data: generateMockRoutes(),
+          solution_data: solutionData,
           timestamp: this.now(),
         });
       }
@@ -300,6 +315,69 @@ function generateMockRoutes(): AllRouteData {
     instances[`RC1_4_${i}.txt`] = generateMockInstance();
   }
   return instances;
+}
+
+// 8 instances of synthetic knapsack data — symmetric K×K interaction matrix
+// with a realistic distribution: most pairs near zero, a handful of strong
+// "synergy" cells, K varying from 18–28 so the axis-label path also exercises.
+function generateMockKnapsack(): Record<string, MockKnapsackInstance> {
+  const instances: Record<string, MockKnapsackInstance> = {};
+  for (let i = 1; i <= 8; i++) {
+    instances[`knap_inst_${i}`] = generateMockKnapsackInstance();
+  }
+  return instances;
+}
+
+function generateMockKnapsackInstance(): MockKnapsackInstance {
+  // Mock always shows 50 selected items; real solutions with fewer items
+  // would display at their actual size — this is just the synthetic upper
+  // bound for the local-host preview.
+  const num_items = randomBetween(500, 1200);
+  const k = Math.min(50, num_items);
+
+  // Pick k unique random item IDs, sort ascending so axis labels read
+  // monotonically.
+  const used = new Set<number>();
+  const viz_items: number[] = [];
+  while (viz_items.length < k) {
+    const id = Math.floor(Math.random() * num_items);
+    if (!used.has(id)) {
+      used.add(id);
+      viz_items.push(id);
+    }
+  }
+  viz_items.sort((a, b) => a - b);
+
+  // Build symmetric interaction matrix. ~70% of cells are zero. Of the
+  // non-zero ~30%, most are small (1–30) and ~15% are large (50–250) so
+  // the heatmap shows a few clearly hot cells against many faint ones.
+  const interaction_values: number[][] = [];
+  for (let i = 0; i < k; i++) interaction_values.push(new Array(k).fill(0));
+
+  let total_value = 0;
+  for (let i = 0; i < k; i++) {
+    for (let j = i + 1; j < k; j++) {
+      let v = 0;
+      if (Math.random() < 0.30) {
+        v = Math.random() < 0.85
+          ? randomBetween(1, 30)
+          : randomBetween(50, 250);
+      }
+      interaction_values[i][j] = v;
+      interaction_values[j][i] = v;
+      total_value += v;
+    }
+  }
+
+  return {
+    num_selected: k,
+    num_items,
+    viz_items,
+    interaction_values,
+    total_value,
+    max_weight: 100,
+    total_weight: randomBetween(60, 95),
+  };
 }
 
 function generateMockInstance(): RouteData {
