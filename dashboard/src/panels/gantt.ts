@@ -366,11 +366,14 @@ export class GanttPanel implements Panel {
   }
 
   private showInstance(data: GanttData) {
-    this.chartG.selectAll("*").remove();
-    this.axisG.selectAll("*").remove();
-    this.labelG.selectAll("*").remove();
+    const chartNode = this.chartG.node() as SVGGElement;
+    const axisNode = this.axisG.node() as SVGGElement;
+    const labelNode = this.labelG.node() as SVGGElement;
 
     if (!data || !data.bars || !data.bars.length) {
+      chartNode.innerHTML = "";
+      axisNode.innerHTML = "";
+      labelNode.innerHTML = "";
       this.makespanEl.textContent = "---";
       return;
     }
@@ -383,79 +386,50 @@ export class GanttPanel implements Panel {
     const barH = rowH * 0.78;
     const barPad = (rowH - barH) / 2;
 
-    // alternating row backgrounds
+    // Build the whole chart in one string. With many jobs/operations
+    // the per-element .append() calls dominate render time.
+    const parts: string[] = [];
+
     for (let m = 0; m < nMachines; m++) {
       if (m % 2 === 0) {
-        this.chartG.append("rect")
-          .attr("x", 0).attr("y", m * rowH)
-          .attr("width", CHART_W).attr("height", rowH)
-          .attr("fill", "rgba(255,255,255,0.015)");
+        parts.push(`<rect x="0" y="${(m * rowH).toFixed(2)}" width="${CHART_W}" height="${rowH.toFixed(2)}" fill="rgba(255,255,255,0.015)"/>`);
       }
     }
 
-    // light grid lines at time ticks
     const ticks = x.ticks(8);
     for (const t of ticks) {
-      this.chartG.append("line")
-        .attr("x1", x(t)).attr("x2", x(t))
-        .attr("y1", 0).attr("y2", CHART_H)
-        .attr("stroke", "rgba(255,255,255,0.04)")
-        .attr("stroke-width", 0.5);
+      const xv = x(t).toFixed(2);
+      parts.push(`<line x1="${xv}" x2="${xv}" y1="0" y2="${CHART_H}" stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/>`);
     }
 
-    // bars
+    const barHStr = barH.toFixed(2);
     for (const bar of data.bars) {
       const bx = x(bar.start);
-      const bw = x(bar.end) - x(bar.start);
+      const bw = Math.max(x(bar.end) - x(bar.start), 0.8);
       const by = bar.machine * rowH + barPad;
-      this.chartG.append("rect")
-        .attr("x", bx).attr("y", by)
-        .attr("width", Math.max(bw, 0.8))
-        .attr("height", barH)
-        .attr("fill", jobColor(bar.job))
-        .attr("stroke", "rgba(0,0,0,0.4)")
-        .attr("stroke-width", 0.4)
-        .attr("rx", 1);
+      parts.push(`<rect x="${bx.toFixed(2)}" y="${by.toFixed(2)}" width="${bw.toFixed(2)}" height="${barHStr}" fill="${jobColor(bar.job)}" stroke="rgba(0,0,0,0.4)" stroke-width="0.4" rx="1"/>`);
     }
 
-    // makespan line
-    this.chartG.append("line")
-      .attr("x1", x(makespan)).attr("x2", x(makespan))
-      .attr("y1", 0).attr("y2", CHART_H)
-      .attr("stroke", "#ff5252")
-      .attr("stroke-width", 1)
-      .attr("stroke-dasharray", "4,3")
-      .attr("opacity", 0.6);
+    const xMakespan = x(makespan).toFixed(2);
+    parts.push(`<line x1="${xMakespan}" x2="${xMakespan}" y1="0" y2="${CHART_H}" stroke="#ff5252" stroke-width="1" stroke-dasharray="4,3" opacity="0.6"/>`);
+    chartNode.innerHTML = parts.join("");
 
-    // machine labels
-    const fontSize = Math.min(11, rowH * 0.55);
+    // Machine labels.
+    const fontSize = Math.min(11, rowH * 0.55).toFixed(2);
+    const labelParts: string[] = [];
     for (let m = 0; m < nMachines; m++) {
-      this.labelG.append("text")
-        .attr("x", MARGIN.left - 5)
-        .attr("y", m * rowH + rowH / 2)
-        .attr("text-anchor", "end")
-        .attr("dominant-baseline", "central")
-        .attr("fill", "#3d4a5c")
-        .attr("font-size", fontSize)
-        .attr("font-family", "'JetBrains Mono', monospace")
-        .text(m);
+      labelParts.push(`<text x="${MARGIN.left - 5}" y="${(m * rowH + rowH / 2).toFixed(2)}" text-anchor="end" dominant-baseline="central" fill="#3d4a5c" font-size="${fontSize}" font-family="'JetBrains Mono', monospace">${m}</text>`);
     }
+    labelNode.innerHTML = labelParts.join("");
 
-    // time axis ticks
+    // Axis ticks.
+    const axisParts: string[] = [];
     for (const t of ticks) {
-      this.axisG.append("line")
-        .attr("x1", x(t)).attr("x2", x(t))
-        .attr("y1", 0).attr("y2", 5)
-        .attr("stroke", "#3d4a5c")
-        .attr("stroke-width", 0.5);
-      this.axisG.append("text")
-        .attr("x", x(t)).attr("y", 16)
-        .attr("text-anchor", "middle")
-        .attr("fill", "#3d4a5c")
-        .attr("font-size", 9)
-        .attr("font-family", "'JetBrains Mono', monospace")
-        .text(t);
+      const xv = x(t).toFixed(2);
+      axisParts.push(`<line x1="${xv}" x2="${xv}" y1="0" y2="5" stroke="#3d4a5c" stroke-width="0.5"/>`);
+      axisParts.push(`<text x="${xv}" y="16" text-anchor="middle" fill="#3d4a5c" font-size="9" font-family="'JetBrains Mono', monospace">${t}</text>`);
     }
+    axisNode.innerHTML = axisParts.join("");
 
     this.makespanEl.textContent = makespan.toLocaleString();
   }

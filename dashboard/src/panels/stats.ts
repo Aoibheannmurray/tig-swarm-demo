@@ -133,16 +133,31 @@ export class StatsPanel implements Panel {
   // after the publish, brief disconnect, or early-load race).
   private async hydrateFromState() {
     if (!this.apiUrl) return;
+    // Read the viewed challenge directly rather than from this.viewedChallenge.
+    // main.ts dispatches `reset` to all panels BEFORE our own
+    // onViewedChallengeChange listener has fired, so this.viewedChallenge can
+    // be one tick stale during the reset handler — which would request stats
+    // for the *previous* challenge and re-populate the popover with its
+    // track scores after the reset cleared them.
+    const requested = getViewedChallenge();
     try {
-      const url = `${this.apiUrl}/api/state?challenge=${encodeURIComponent(this.viewedChallenge)}`;
+      const url = `${this.apiUrl}/api/state?challenge=${encodeURIComponent(requested)}`;
       const res = await fetch(url);
       if (!res.ok) return;
+      // Discard stale responses: if the user has already switched again
+      // before this resolved, don't overwrite trackScores with the
+      // previous challenge's data.
+      if (requested !== getViewedChallenge()) return;
       const state = await res.json();
       const ts = state?.best_track_scores;
       if (ts && typeof ts === "object" && Object.keys(ts).length > 0) {
         this.trackScores = ts as Record<string, number>;
-        this.renderTrackBreakdown();
+      } else {
+        // Viewed challenge has no published best yet — make sure we
+        // don't render the previous challenge's chips.
+        this.trackScores = null;
       }
+      this.renderTrackBreakdown();
     } catch {
       // Swallow — popover will just stay empty and a future new_global_best
       // event will repopulate.

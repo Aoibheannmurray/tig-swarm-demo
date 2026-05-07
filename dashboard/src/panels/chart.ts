@@ -46,6 +46,7 @@ export class ChartPanel implements Panel {
   private tabLabelEl!: HTMLElement;
   private tabPrevEl!: HTMLElement;
   private tabNextEl!: HTMLElement;
+  private redrawScheduled = false;
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -356,12 +357,21 @@ export class ChartPanel implements Panel {
   // ── Rendering ──
 
   private redraw() {
-    const tab = this.currentTab();
-    if (tab.type === "global") {
-      this.redrawGlobal();
-    } else {
-      this.redrawAgent(tab.agentId, tab.agentName);
-    }
+    // Coalesce multiple redraw requests in the same frame. Hot paths
+    // (experiment_published bursts, leaderboard sync, resize observer)
+    // can fire several times per tick — without rAF batching each one
+    // does an O(N) SVG rebuild.
+    if (this.redrawScheduled) return;
+    this.redrawScheduled = true;
+    requestAnimationFrame(() => {
+      this.redrawScheduled = false;
+      const tab = this.currentTab();
+      if (tab.type === "global") {
+        this.redrawGlobal();
+      } else {
+        this.redrawAgent(tab.agentId, tab.agentName);
+      }
+    });
   }
 
   private redrawGlobal() {

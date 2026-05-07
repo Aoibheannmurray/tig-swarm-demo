@@ -350,9 +350,10 @@ export class KnapsackPanel implements Panel {
   }
 
   private showInstance(data: KnapsackData) {
-    this.chartG.selectAll("*").remove();
+    const chartNode = this.chartG.node() as SVGGElement;
 
     if (!data || !data.interaction_values || !data.interaction_values.length) {
+      chartNode.innerHTML = "";
       this.valueEl.textContent = "---";
       this.itemsEl.textContent = "---";
       return;
@@ -378,24 +379,26 @@ export class KnapsackPanel implements Panel {
     const colorScale = d3.scaleSequential(d3.interpolateRdYlBu)
       .domain([maxVal, minVal]);
 
+    // Build grid as a single SVG string. With k up to ~32 we can
+    // generate >1000 rects per redraw — per-element d3.append calls
+    // become a measurable lag.
+    const w = cellSize.toFixed(3);
+    const cells: string[] = [];
     for (let i = 0; i < k; i++) {
+      const yPos = (i * cellSize).toFixed(3);
+      const rowVals = data.interaction_values[i];
       for (let j = 0; j < k; j++) {
-        const x = j * cellSize;
-        const y = i * cellSize;
-        const v = data.interaction_values[i][j];
-
-        this.chartG.append("rect")
-          .attr("x", x)
-          .attr("y", y)
-          .attr("width", cellSize)
-          .attr("height", cellSize)
-          .attr("fill", i === j
-            ? "rgba(255,255,255,0.03)"
-            : v === 0
-              ? "rgba(255,255,255,0.02)"
-              : colorScale(v));
+        const xPos = (j * cellSize).toFixed(3);
+        const v = rowVals[j];
+        const fill = i === j
+          ? "rgba(255,255,255,0.03)"
+          : v === 0
+            ? "rgba(255,255,255,0.02)"
+            : colorScale(v);
+        cells.push(`<rect x="${xPos}" y="${yPos}" width="${w}" height="${w}" fill="${fill}"/>`);
       }
     }
+    chartNode.innerHTML = cells.join("");
 
     this.valueEl.textContent = data.total_value.toLocaleString();
     const suffix = data.num_selected > k ? ` (showing ${k})` : "";
