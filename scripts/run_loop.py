@@ -89,6 +89,13 @@ def post_message(server: str, agent_name: str, agent_id: str, content: str) -> N
 # ── File I/O ────────────────────────────────────────────────────────
 
 
+def is_stub_code(code: str) -> bool:
+    """True when the algorithm is a placeholder that can't produce solutions."""
+    if not code or not code.strip():
+        return True
+    return "unimplemented!" in code or "todo!" in code
+
+
 def algo_path(config: dict) -> Path:
     return ROOT / config.get("algorithm_path", "src/knapsack/algorithm/mod.rs")
 
@@ -133,15 +140,24 @@ def get_strategy_tags(config: dict) -> list[str]:
     return tags if tags else DEFAULT_STRATEGY_TAGS
 
 
-def build_hypothesis_system_prompt(challenge_md: str, config: dict) -> str:
+def build_hypothesis_system_prompt(
+    challenge_md: str, config: dict, *, is_bootstrap: bool = False,
+) -> str:
     challenge = config.get("challenge", "unknown")
     tags = ", ".join(get_strategy_tags(config))
+    if is_bootstrap:
+        job = (
+            "propose an initial algorithm strategy. The current code is a "
+            "stub — you need a complete working approach, not a tweak."
+        )
+    else:
+        job = "propose ONE specific change to try."
     return f"""\
 You are planning an improvement to a Rust algorithm for the "{challenge}" challenge.
 
 {challenge_md}
 
-Your job: propose ONE specific change to try. Do NOT write code — just describe the idea.
+Your job: {job} Do NOT write code — just describe the idea.
 
 Respond in EXACTLY this format (4 lines, nothing else):
 
@@ -155,10 +171,13 @@ def build_hypothesis_user_prompt(state: dict) -> str:
     parts: list[str] = []
 
     code = state.get("best_algorithm_code") or ""
-    if code:
-        parts.append(f"Current algorithm:\n```rust\n{code}\n```")
+    if is_stub_code(code):
+        parts.append(
+            "No working algorithm yet — the current code is a stub. "
+            "Propose an initial implementation strategy from scratch."
+        )
     else:
-        parts.append("No existing algorithm yet — starting from scratch.")
+        parts.append(f"Current algorithm:\n```rust\n{code}\n```")
 
     prior = state.get("prior_hypotheses") or []
     if prior:
@@ -219,17 +238,21 @@ def build_code_user_prompt(state: dict, hypothesis: dict) -> str:
     parts: list[str] = []
 
     code = state.get("best_algorithm_code") or ""
-    if code:
-        parts.append(f"Current algorithm:\n```rust\n{code}\n```")
-    else:
+    if is_stub_code(code):
         parts.append(
-            "No existing algorithm yet — write a complete solve_challenge "
-            "implementation from scratch."
+            "No working algorithm yet — write a complete solve_challenge "
+            "implementation from scratch. Call save_solution() whenever you "
+            "find an improved solution."
         )
+    else:
+        parts.append(f"Current algorithm:\n```rust\n{code}\n```")
 
     title = hypothesis.get("title", "")
     description = hypothesis.get("description", "")
-    parts.append(f"\nApply this change:\n{title}\n{description}")
+    if is_stub_code(code):
+        parts.append(f"\nImplement this strategy:\n{title}\n{description}")
+    else:
+        parts.append(f"\nApply this change:\n{title}\n{description}")
 
     return "\n".join(parts)
 
@@ -278,6 +301,11 @@ def validate_code(original: str, modified: str) -> str | None:
         return "`use super::*;` is missing — it must remain as the first import."
     if "fn solve_challenge(" not in modified:
         return "`fn solve_challenge(` not found — the function signature must not change."
+    if "unimplemented!" in modified or "todo!" in modified:
+        return (
+            "Code still contains `unimplemented!()` or `todo!()` — "
+            "you must provide a complete working implementation."
+        )
     return None
 
 
@@ -445,8 +473,12 @@ def main() -> int:
 
         # ── Step 2: write current best to mod.rs ────────────────
         best_code = state.get("best_algorithm_code") or ""
-        if best_code:
+        bootstrap = is_stub_code(best_code)
+        if best_code and not bootstrap:
             write_algorithm(best_code, config)
+
+        if bootstrap:
+            print("  Starting from stub — will ask LLM to write initial implementation")
 
         # ── Step 3a: LLM hypothesis ────────────────────────────
         hint = state.get("stagnation_hint")
@@ -457,7 +489,7 @@ def main() -> int:
         try:
             hyp_response = call_llm(
                 args.provider, model, api_key,
-                build_hypothesis_system_prompt(challenge_md, config),
+                build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
                 build_hypothesis_user_prompt(state),
                 args.api_base,
             )
