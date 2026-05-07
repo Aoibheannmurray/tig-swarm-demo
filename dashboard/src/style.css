@@ -243,9 +243,11 @@ html, body {
 }
 
 .stats-mark {
-  color: var(--color-accent);
-  font-size: 22px;
-  line-height: 1;
+  width: 28px;
+  height: 28px;
+  display: block;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 6px rgba(255, 138, 43, 0.35));
 }
 
 .stats-wordmark {
