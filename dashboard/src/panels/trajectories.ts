@@ -26,17 +26,15 @@ interface TrajectoriesResponse {
   trajectories: Trajectory[];
 }
 
-const PALETTE = [
-  "#00e5ff", "#ff6d00", "#00e676", "#e040fb", "#ffea00",
-  "#ff5252", "#40c4ff", "#69f0ae", "#ff80ab", "#ffd740",
-  "#b388ff", "#00bfa5", "#ffab00", "#18ffff", "#ff9100",
-  "#76ff03", "#ff4081", "#3d5afe", "#d500f9", "#ff3d00",
-  "#1de9b6", "#c6ff00", "#ff1744", "#7c4dff",
-];
+import { PALETTE, token } from "../lib/colors";
 
 function trajColor(index: number): string {
   return PALETTE[index % PALETTE.length];
 }
+
+const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
+const AXIS_LINE = () => token("--border-default", "rgba(26,26,26,0.15)");
+const GRID_LINE = () => token("--border-subtle", "rgba(26,26,26,0.08)");
 
 function fmtScore(v: number | null): string {
   if (v == null) return "---";
@@ -71,7 +69,7 @@ export class TrajectoriesPanel {
         <div class="traj-header">
           <div class="traj-title-row">
             <div class="traj-title">
-              <span class="stats-diamond">◆</span>
+              <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
               <span class="traj-title-text">Trajectories</span>
             </div>
             <div class="traj-nav">
@@ -87,11 +85,11 @@ export class TrajectoriesPanel {
             </div>
             <div class="stat-chip">
               <span class="stat-label">Active</span>
-              <span class="stat-value" id="traj-active" style="color:var(--green)">0</span>
+              <span class="stat-value" id="traj-active" style="color:var(--success)">0</span>
             </div>
             <div class="stat-chip">
               <span class="stat-label">Inactive</span>
-              <span class="stat-value" id="traj-inactive" style="color:var(--text-dim)">0</span>
+              <span class="stat-value" id="traj-inactive" style="color:var(--ink-dim)">0</span>
             </div>
           </div>
         </div>
@@ -168,9 +166,9 @@ export class TrajectoriesPanel {
       svg.append("text")
         .attr("x", w / 2).attr("y", h / 2)
         .attr("text-anchor", "middle")
-        .attr("fill", "#3d4a5c")
+        .attr("fill", AXIS_TEXT())
         .attr("font-size", 13)
-        .attr("font-family", "'JetBrains Mono', monospace")
+        .attr("font-family", "var(--ui)")
         .text("No trajectory data yet");
       return;
     }
@@ -201,7 +199,7 @@ export class TrajectoriesPanel {
       g.append("line")
         .attr("x1", 0).attr("x2", cw)
         .attr("y1", y(t)).attr("y2", y(t))
-        .attr("stroke", "rgba(255,255,255,0.04)")
+        .attr("stroke", GRID_LINE())
         .attr("stroke-width", 0.5);
     }
 
@@ -213,16 +211,16 @@ export class TrajectoriesPanel {
         return `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
       }) as any
     );
-    xAxis.selectAll("text").attr("fill", "#3d4a5c").attr("font-size", 9);
-    xAxis.selectAll("line").attr("stroke", "#1a2333");
-    xAxis.select(".domain").attr("stroke", "#1a2333");
+    xAxis.selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+    xAxis.selectAll("line").attr("stroke", AXIS_LINE());
+    xAxis.select(".domain").attr("stroke", AXIS_LINE());
 
     // Y axis
     const yAxis = g.append("g");
     yAxis.call(d3.axisLeft(y).ticks(6).tickFormat(d3.format(",.0f")) as any);
-    yAxis.selectAll("text").attr("fill", "#3d4a5c").attr("font-size", 9);
-    yAxis.selectAll("line").attr("stroke", "#1a2333");
-    yAxis.select(".domain").attr("stroke", "#1a2333");
+    yAxis.selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+    yAxis.selectAll("line").attr("stroke", AXIS_LINE());
+    yAxis.select(".domain").attr("stroke", AXIS_LINE());
 
     // Step function lines per trajectory
     const stepLine = d3.line<{ t: Date; s: number }>()

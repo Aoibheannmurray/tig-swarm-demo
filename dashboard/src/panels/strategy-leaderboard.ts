@@ -15,17 +15,18 @@ interface TopEntry {
 
 const MAX_ROWS = 20;
 
-// Colored pills for the eight canonical strategy tags. Unknown / null tags
-// fall back to the "other" styling.
+// Colored pills for the eight canonical strategy tags. Mapped to the earthen
+// viz palette (--viz-1..--viz-8) so each tag has a stable, on-brand hue.
+// Unknown / null tags fall back to the muted "other" slot.
 const TAG_COLORS: Record<string, string> = {
-  construction:          "#b388ff",
-  local_search:          "#00e5ff",
-  metaheuristic:         "#ffab00",
-  constraint_relaxation: "#ff80ab",
-  decomposition:         "#00e676",
-  hybrid:                "#40c4ff",
-  data_structure:        "#00bfa5",
-  other:                 "#7a869a",
+  construction:          "#7A4F6E", // plum (--viz-5)
+  local_search:          "#B8541F", // terracotta (--viz-1)
+  metaheuristic:         "#C68F3E", // mustard (--viz-2)
+  constraint_relaxation: "#A66E45", // umber (--viz-7)
+  decomposition:         "#6B7F4E", // olive (--viz-3)
+  hybrid:                "#4E6B85", // slate-blue (--viz-4)
+  data_structure:        "#4A8C8A", // dusty teal (--viz-6)
+  other:                 "#8B6B8C", // dusty mauve (--viz-8)
 };
 
 export class StrategyLeaderboardPanel implements Panel {

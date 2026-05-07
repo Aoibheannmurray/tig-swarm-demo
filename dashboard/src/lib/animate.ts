@@ -28,9 +28,16 @@ export function counterTween(
 /**
  * Pulse glow effect on an element.
  */
-export function pulseGlow(el: HTMLElement, color = "#00e5ff", duration = 600): void {
+export function pulseGlow(el: HTMLElement, color?: string, duration = 600): void {
+  const resolved =
+    color ??
+    (typeof document !== "undefined"
+      ? getComputedStyle(document.documentElement)
+          .getPropertyValue("--color-accent")
+          .trim() || "#B8541F"
+      : "#B8541F");
   el.style.transition = `box-shadow ${duration / 2}ms ease-out`;
-  el.style.boxShadow = `0 0 20px ${color}66, inset 0 0 10px ${color}22`;
+  el.style.boxShadow = `0 0 20px ${resolved}66, inset 0 0 10px ${resolved}22`;
   setTimeout(() => {
     el.style.boxShadow = "";
     setTimeout(() => {
@@ -42,7 +49,7 @@ export function pulseGlow(el: HTMLElement, color = "#00e5ff", duration = 600): v
 /**
  * Flash the entire viewport with a subtle color overlay.
  */
-export function viewportFlash(color = "rgba(0, 229, 255, 0.03)", duration = 150): void {
+export function viewportFlash(color = "rgba(184, 84, 31, 0.06)", duration = 150): void {
   const overlay = document.createElement("div");
   overlay.style.cssText = `
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;

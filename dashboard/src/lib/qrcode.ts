@@ -11,7 +11,7 @@ export function initQROverlay() {
   overlayEl.className = "qr-overlay";
   overlayEl.innerHTML = `
     <div class="qr-card">
-      <div class="qr-title">Join the Swarm</div>
+      <div class="qr-title">Join Prometheus</div>
       <div class="qr-canvas-wrap">
         <canvas id="qr-canvas" width="200" height="200"></canvas>
       </div>
@@ -38,7 +38,7 @@ async function drawQR() {
       await QRCode.toCanvas(canvas, REPO_URL, {
         width: 200,
         margin: 1,
-        color: { dark: "#e8edf5", light: "#0a0e16" },
+        color: { dark: "#1A1A1A", light: "#FFFFFF" },
       });
     }
   } catch {

@@ -1,5 +1,5 @@
+import "@phosphor-icons/web/regular/style.css";
 import "./style.css";
-import { initParticles } from "./lib/particles";
 import { SwarmWebSocket } from "./lib/websocket";
 import { MockDataGenerator } from "./mock";
 import { viewportFlash } from "./lib/animate";
@@ -43,10 +43,6 @@ function getApiUrl(): string {
     .replace("wss://", "https://")
     .replace("/ws/dashboard", "");
 }
-
-// ── Background particles ──
-const canvas = document.getElementById("particleCanvas") as HTMLCanvasElement;
-initParticles(canvas);
 
 // ── Initialize panels ──
 // Panels are constructed inside `bootstrap()` after loadSwarmConfig() so
@@ -135,7 +131,7 @@ function handleMessage(msg: WSMessage) {
   }
 
   if (msg.type === "new_global_best") {
-    viewportFlash("rgba(0, 229, 255, 0.03)", 150);
+    viewportFlash("rgba(184, 84, 31, 0.06)", 150);
   }
 
   // For stats_update we slice `per_challenge` down to the viewed

@@ -1,5 +1,5 @@
+import "@phosphor-icons/web/regular/style.css";
 import "./style.css";
-import { initParticles } from "./lib/particles";
 import { SwarmWebSocket } from "./lib/websocket";
 import { MockDataGenerator } from "./mock";
 import { DiversityPanel } from "./panels/diversity";
@@ -13,10 +13,6 @@ const params = new URLSearchParams(window.location.search);
 const isMock = params.has("mock");
 const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 const wsUrl = params.get("ws") || `${wsProtocol}//${window.location.host}/ws/dashboard`;
-
-// ── Background particles ──
-const canvas = document.getElementById("particleCanvas") as HTMLCanvasElement;
-initParticles(canvas);
 
 // ── Initialize single panel ──
 const selectorMount = document.getElementById("panel-challenge-selector");

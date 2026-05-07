@@ -1,5 +1,5 @@
+import "@phosphor-icons/web/regular/style.css";
 import "./style.css";
-import { initParticles } from "./lib/particles";
 import { TrajectoriesPanel } from "./panels/trajectories";
 import { ChallengeSelectorPanel } from "./panels/challenge-selector";
 import { loadSwarmConfig } from "./lib/swarmConfig";
@@ -17,9 +17,6 @@ function getApiUrl(): string {
     .replace("wss://", "https://")
     .replace("/ws/dashboard", "");
 }
-
-const canvas = document.getElementById("particleCanvas") as HTMLCanvasElement;
-initParticles(canvas);
 
 const selectorMount = document.getElementById("panel-challenge-selector");
 const challengeSelector = new ChallengeSelectorPanel();

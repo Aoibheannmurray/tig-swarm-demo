@@ -44,8 +44,11 @@ export class StatsPanel implements Panel {
     container.innerHTML = `
       <div class="stats-bar">
         <div class="stats-logo">
-          <span class="stats-diamond">&#9670;</span>
-          <span class="stats-title">Automated Discovery</span>
+          <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
+          <span class="stats-wordmark">
+            <span class="stats-title">Prometheus</span>
+            <span class="stats-subtitle">AI Driven Discovery of Algorithms</span>
+          </span>
           <span id="ws-status" class="ws-status connected">LIVE</span>
           <a href="/ideas.html" class="stats-nav-link">Ideas &rarr;</a>
           <a href="/diversity.html" class="stats-nav-link">Diversity &rarr;</a>

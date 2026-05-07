@@ -1,9 +1,16 @@
-const PALETTE = [
-  "#00e5ff", "#ff6d00", "#00e676", "#e040fb", "#ffea00",
-  "#ff5252", "#40c4ff", "#69f0ae", "#ff80ab", "#ffd740",
-  "#b388ff", "#00bfa5", "#ffab00", "#18ffff", "#ff9100",
-  "#76ff03", "#ff4081", "#3d5afe", "#d500f9", "#ff3d00",
-  "#1de9b6", "#c6ff00", "#ff1744", "#7c4dff",
+// Earthen-extended palette — 8 base hues from the Prometheus design system,
+// 8 lighter variants, 4 darker accents. Order is chosen so adjacent slots
+// stay visually distinguishable (FNV-1a hashing distributes agents across
+// the full range, but rank-ordered displays should still read cleanly).
+export const PALETTE = [
+  // 8 base earthen hues (mirror of --viz-1 .. --viz-8)
+  "#B8541F", "#C68F3E", "#6B7F4E", "#4E6B85",
+  "#7A4F6E", "#4A8C8A", "#A66E45", "#8B6B8C",
+  // 8 lighter variants
+  "#D9794A", "#E0BE6E", "#A4B26A", "#8FA8C2",
+  "#A88AB6", "#92BABA", "#C49074", "#B8A0BA",
+  // 4 darker hue-shifted accents
+  "#7A3812", "#8E6A14", "#4D5A26", "#3F5A78",
 ];
 
 export const ROUTE_COLORS = PALETTE.slice(0, 10);
@@ -50,4 +57,20 @@ export function getAgentColor(agentId: string): string {
 
 export function getRouteColor(vehicleIndex: number): string {
   return ROUTE_COLORS[vehicleIndex % ROUTE_COLORS.length];
+}
+
+// Resolve a CSS custom property to a concrete color string for use in D3
+// `.attr("fill", ...)` etc., where var() references aren't accepted. Cached
+// after first read; the dashboard never live-toggles tokens at runtime.
+const tokenCache = new Map<string, string>();
+export function token(name: string, fallback: string): string {
+  const cached = tokenCache.get(name);
+  if (cached) return cached;
+  if (typeof document === "undefined") return fallback;
+  const v = getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  const value = v || fallback;
+  tokenCache.set(name, value);
+  return value;
 }

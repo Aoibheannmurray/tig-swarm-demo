@@ -1,5 +1,17 @@
 import * as d3 from "d3";
 import { DisplayPanelBase } from "./displayPanelBase";
+import { token } from "../lib/colors";
+
+// Categorical assignments from the earthen viz palette:
+//   discharge (energy out) → terracotta (--viz-1)
+//   charge    (energy in)  → slate blue (--viz-4)
+//   da-price line          → mustard    (--viz-2)
+const DISCHARGE = () => token("--viz-1", "#B8541F");
+const CHARGE    = () => token("--viz-4", "#4E6B85");
+const PRICE     = () => token("--viz-2", "#C68F3E");
+const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
+const AXIS_LBL  = () => token("--ink-mid", "rgba(26,26,26,0.70)");
+const ZERO_LINE = () => "rgba(26, 26, 26, 0.18)";
 
 interface EnergyData {
   num_steps: number;
@@ -143,7 +155,7 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
     // 96 steps × 2 bar types this is ~200 elements per redraw.
     const parts: string[] = [];
     const yZero = yPower(0).toFixed(2);
-    parts.push(`<line x1="0" x2="${CHART_W}" y1="${yZero}" y2="${yZero}" stroke="rgba(255,255,255,0.15)" stroke-width="0.5"/>`);
+    parts.push(`<line x1="0" x2="${CHART_W}" y1="${yZero}" y2="${yZero}" stroke="${ZERO_LINE()}" stroke-width="0.5"/>`);
 
     const barW = Math.max(0.5, CHART_W / n - 0.5).toFixed(3);
     for (let t = 0; t < n; t++) {
@@ -152,11 +164,11 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       const discharge = data.agg_discharge[t];
       if (discharge > 0) {
         const yTop = yPower(discharge);
-        parts.push(`<rect x="${xPos}" y="${yTop.toFixed(2)}" width="${barW}" height="${(yPower(0) - yTop).toFixed(2)}" fill="#ef5350" opacity="0.8"/>`);
+        parts.push(`<rect x="${xPos}" y="${yTop.toFixed(2)}" width="${barW}" height="${(yPower(0) - yTop).toFixed(2)}" fill="${DISCHARGE()}" opacity="0.85"/>`);
       }
       if (charge < 0) {
         const yBot = yPower(charge);
-        parts.push(`<rect x="${xPos}" y="${yZero}" width="${barW}" height="${(yBot - yPower(0)).toFixed(2)}" fill="#42a5f5" opacity="0.8"/>`);
+        parts.push(`<rect x="${xPos}" y="${yZero}" width="${barW}" height="${(yBot - yPower(0)).toFixed(2)}" fill="${CHARGE()}" opacity="0.85"/>`);
       }
     }
 
@@ -166,7 +178,7 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
         .y((d) => yPrice(d));
       const path = priceLine(data.avg_da_price);
       if (path) {
-        parts.push(`<path d="${path}" fill="none" stroke="#ffd740" stroke-width="1.5" opacity="0.9"/>`);
+        parts.push(`<path d="${path}" fill="none" stroke="${PRICE()}" stroke-width="1.5" opacity="0.95"/>`);
       }
     }
     chartNode.innerHTML = parts.join("");
@@ -174,35 +186,35 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
     // axes
     const xTicks = d3.axisBottom(x).ticks(8).tickFormat((d) => `${d}h`);
     this.xAxisG.call(xTicks as any)
-      .selectAll("text").attr("fill", "#3d4a5c").attr("font-size", 9);
-    this.xAxisG.selectAll("line").attr("stroke", "#3d4a5c");
-    this.xAxisG.select(".domain").attr("stroke", "#3d4a5c");
+      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+    this.xAxisG.selectAll("line").attr("stroke", AXIS_TEXT());
+    this.xAxisG.select(".domain").attr("stroke", AXIS_TEXT());
 
     const yLeftTicks = d3.axisLeft(yPower).ticks(6).tickFormat((d) => `${d}`);
     this.yLeftAxisG.call(yLeftTicks as any)
-      .selectAll("text").attr("fill", "#3d4a5c").attr("font-size", 9);
-    this.yLeftAxisG.selectAll("line").attr("stroke", "#3d4a5c");
-    this.yLeftAxisG.select(".domain").attr("stroke", "#3d4a5c");
+      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+    this.yLeftAxisG.selectAll("line").attr("stroke", AXIS_TEXT());
+    this.yLeftAxisG.select(".domain").attr("stroke", AXIS_TEXT());
 
     this.yLeftAxisG.append("text")
       .attr("transform", "rotate(-90)")
       .attr("x", -CHART_H / 2).attr("y", -38)
       .attr("text-anchor", "middle")
-      .attr("fill", "#5a6a7e")
+      .attr("fill", AXIS_LBL())
       .attr("font-size", 9)
       .text("MW");
 
     const yRightTicks = d3.axisRight(yPrice).ticks(6).tickFormat((d) => `$${d}`);
     this.yRightAxisG.call(yRightTicks as any)
-      .selectAll("text").attr("fill", "#ffd740").attr("font-size", 9);
-    this.yRightAxisG.selectAll("line").attr("stroke", "rgba(255,215,64,0.3)");
-    this.yRightAxisG.select(".domain").attr("stroke", "rgba(255,215,64,0.3)");
+      .selectAll("text").attr("fill", PRICE()).attr("font-size", 9);
+    this.yRightAxisG.selectAll("line").attr("stroke", PRICE()).attr("opacity", 0.4);
+    this.yRightAxisG.select(".domain").attr("stroke", PRICE()).attr("opacity", 0.4);
 
     this.yRightAxisG.append("text")
       .attr("transform", "rotate(90)")
       .attr("x", CHART_H / 2).attr("y", -40)
       .attr("text-anchor", "middle")
-      .attr("fill", "#ffd740")
+      .attr("fill", PRICE())
       .attr("font-size", 9)
       .text("$/MWh");
 
@@ -210,24 +222,24 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
     const legendY = -2;
     this.chartG.append("rect")
       .attr("x", 4).attr("y", legendY).attr("width", 10).attr("height", 10)
-      .attr("fill", "#ef5350").attr("opacity", 0.8);
+      .attr("fill", DISCHARGE()).attr("opacity", 0.85);
     this.chartG.append("text")
       .attr("x", 18).attr("y", legendY + 9)
-      .attr("fill", "#8a9bb5").attr("font-size", 9).text("Discharge");
+      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("Discharge");
 
     this.chartG.append("rect")
       .attr("x", 84).attr("y", legendY).attr("width", 10).attr("height", 10)
-      .attr("fill", "#42a5f5").attr("opacity", 0.8);
+      .attr("fill", CHARGE()).attr("opacity", 0.85);
     this.chartG.append("text")
       .attr("x", 98).attr("y", legendY + 9)
-      .attr("fill", "#8a9bb5").attr("font-size", 9).text("Charge");
+      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("Charge");
 
     this.chartG.append("line")
       .attr("x1", 152).attr("x2", 162).attr("y1", legendY + 5).attr("y2", legendY + 5)
-      .attr("stroke", "#ffd740").attr("stroke-width", 1.5);
+      .attr("stroke", PRICE()).attr("stroke-width", 1.5);
     this.chartG.append("text")
       .attr("x", 166).attr("y", legendY + 9)
-      .attr("fill", "#8a9bb5").attr("font-size", 9).text("DA Price");
+      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("DA Price");
 
     this.batteriesEl.textContent = String(data.num_batteries);
   }

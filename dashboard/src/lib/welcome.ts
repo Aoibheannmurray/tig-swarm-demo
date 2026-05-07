@@ -9,9 +9,9 @@ export function initWelcome() {
   overlayEl.className = "welcome-overlay";
   overlayEl.innerHTML = `
     <div class="welcome-card">
-      <div class="welcome-title">Join the Swarm</div>
+      <div class="welcome-title">Join Prometheus</div>
       <p class="welcome-subtitle">
-        Help a swarm of AI agents collaboratively optimize vehicle routes in real time.
+        Help a swarm of AI agents collaboratively discover better algorithms in real time.
       </p>
       <div class="welcome-label">Open Claude Code and paste:</div>
       <div class="welcome-prompt">
