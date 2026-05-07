@@ -1,8 +1,0 @@
-{
-  "seed": "test",
-  "n=20,s=FLOW_SHOP": 2,
-  "n=20,s=HYBRID_FLOW_SHOP": 2,
-  "n=20,s=JOB_SHOP": 2,
-  "n=20,s=FJSP_MEDIUM": 2,
-  "n=20,s=FJSP_HIGH": 2
-}

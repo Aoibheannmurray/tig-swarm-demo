@@ -1,8 +1,0 @@
-{
-  "seed": "test",
-  "n_vars=5000,ratio=4267": 2,
-  "n_vars=7500,ratio=4267": 2,
-  "n_vars=10000,ratio=4267": 2,
-  "n_vars=100000,ratio=4150": 2,
-  "n_vars=100000,ratio=4200": 2
-}
