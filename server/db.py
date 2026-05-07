@@ -14,34 +14,28 @@ CREATE TABLE IF NOT EXISTS agents (
     name TEXT UNIQUE NOT NULL,
     registered_at TEXT NOT NULL,
     last_heartbeat TEXT NOT NULL,
-    status TEXT DEFAULT 'idle',
-    experiments_completed INTEGER DEFAULT 0,
-    best_score REAL,
-    runs_since_improvement INTEGER DEFAULT 0,
-    improvements INTEGER DEFAULT 0,
-    best_ever_score REAL,
-    num_trajectories INTEGER DEFAULT 0,
-    tacit_knowledge_count INTEGER DEFAULT 0,
-    inspiration_count INTEGER DEFAULT 0
+    status TEXT DEFAULT 'idle'
 );
 
 CREATE TABLE IF NOT EXISTS hypotheses (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
+    challenge TEXT NOT NULL,
     title TEXT NOT NULL,
     description TEXT DEFAULT '',
     strategy_tag TEXT NOT NULL,
     status TEXT DEFAULT 'failed',
     fingerprint TEXT NOT NULL,
     parent_hypothesis_id TEXT,
-    created_at TEXT NOT NULL,
+    program_id TEXT,
     target_best_experiment_id TEXT,
+    created_at TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
 CREATE TABLE IF NOT EXISTS agent_bests (
     agent_id TEXT NOT NULL,
-    challenge TEXT NOT NULL DEFAULT 'vehicle_routing',
+    challenge TEXT NOT NULL,
     experiment_id TEXT NOT NULL,
     algorithm_code TEXT NOT NULL,
     score REAL NOT NULL,
@@ -49,6 +43,7 @@ CREATE TABLE IF NOT EXISTS agent_bests (
     num_vehicles INTEGER DEFAULT 0,
     total_distance REAL DEFAULT 0.0,
     solution_data TEXT,
+    track_scores TEXT,
     updated_at TEXT NOT NULL,
     trajectory_id TEXT,
     PRIMARY KEY (agent_id, challenge),
@@ -58,6 +53,7 @@ CREATE TABLE IF NOT EXISTS agent_bests (
 CREATE TABLE IF NOT EXISTS experiments (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
+    challenge TEXT NOT NULL,
     hypothesis_id TEXT,
     algorithm_code TEXT DEFAULT '',
     score REAL NOT NULL,
@@ -67,9 +63,11 @@ CREATE TABLE IF NOT EXISTS experiments (
     runtime_seconds REAL DEFAULT 0.0,
     notes TEXT DEFAULT '',
     solution_data TEXT,
+    track_scores TEXT,
     delta_vs_best_pct REAL,
     delta_vs_own_best_pct REAL,
     beats_own_best INTEGER DEFAULT 0,
+    trajectory_id TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
@@ -82,6 +80,7 @@ CREATE TABLE IF NOT EXISTS config (
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     agent_id TEXT,
+    challenge TEXT NOT NULL,
     agent_name TEXT NOT NULL,
     content TEXT NOT NULL,
     msg_type TEXT DEFAULT 'agent',
@@ -92,6 +91,7 @@ CREATE TABLE IF NOT EXISTS best_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     experiment_id TEXT NOT NULL,
     agent_id TEXT,
+    challenge TEXT NOT NULL,
     agent_name TEXT NOT NULL,
     score REAL NOT NULL,
     solution_data TEXT,
@@ -101,15 +101,18 @@ CREATE TABLE IF NOT EXISTS best_history (
 CREATE TABLE IF NOT EXISTS inactive_algorithms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
+    challenge TEXT NOT NULL,
     algorithm_code TEXT NOT NULL,
     score REAL,
     deposited_at TEXT NOT NULL,
     trajectory_id TEXT,
+    program_id TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
 CREATE TABLE IF NOT EXISTS trajectories (
     id TEXT PRIMARY KEY,
+    challenge TEXT NOT NULL,
     started_at TEXT NOT NULL,
     status TEXT DEFAULT 'active',
     current_score REAL,
@@ -117,16 +120,15 @@ CREATE TABLE IF NOT EXISTS trajectories (
     num_improvements INTEGER DEFAULT 0,
     momentum REAL DEFAULT 0.0,
     num_agents INTEGER DEFAULT 1,
-    deactivated_at TEXT,
     edits_since_improvement INTEGER DEFAULT 0,
-    num_deactivations INTEGER DEFAULT 0
+    num_deactivations INTEGER DEFAULT 0,
+    deactivated_at TEXT
 );
 
--- Per-(agent, challenge) state. Replaces the per-challenge counter columns
--- on the `agents` table. One row per (agent_id, challenge) — created lazily
--- the first time an agent works on a given challenge. When the swarm host
--- switches the active challenge, agents resume from their existing row for
--- the new challenge (or get a fresh row if it's their first time).
+-- Per-(agent, challenge) state. One row per (agent_id, challenge) — created
+-- lazily the first time an agent works on a given challenge. When the swarm
+-- host switches the active challenge, agents resume from their existing row
+-- for the new challenge (or get a fresh row if it's their first time).
 CREATE TABLE IF NOT EXISTS agent_challenge_state (
     agent_id TEXT NOT NULL,
     challenge TEXT NOT NULL,
@@ -157,16 +159,6 @@ CREATE TABLE IF NOT EXISTS challenge_configs (
     strategy_tags TEXT NOT NULL DEFAULT '[]'
 );
 """
-
-# Names of the five supported challenges. Used during backfill to seed
-# challenge_configs rows even for challenges the legacy swarm never used.
-KNOWN_CHALLENGES = (
-    "satisfiability",
-    "vehicle_routing",
-    "knapsack",
-    "job_scheduling",
-    "energy_arbitrage",
-)
 
 # Indexes are split out from the main schema so they can be applied after
 # ALTER TABLE migrations in init_db, which keeps both fresh and upgraded
@@ -208,226 +200,15 @@ DEFAULT_CONFIG = {
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
-        # 1) Tables first. All table DDL is IF NOT EXISTS so fresh and
-        #    upgraded databases both work.
+        # Tables, then indexes. All DDL is IF NOT EXISTS, so calling
+        # init_db() against an existing DB is a no-op — the schema only
+        # ever moves forward via deliberate edits to SCHEMA / SCHEMA_INDEXES.
+        # No in-place migrations are supported: a schema change implies
+        # wiping the DB (or the persistent volume) before redeploy.
         await db.executescript(SCHEMA)
-        # 2) Column migrations. ADD COLUMN fails if the column exists;
-        #    that's expected on every subsequent run.
-        try:
-            await db.execute("ALTER TABLE experiments RENAME COLUMN algorithm_diff TO algorithm_code")
-            await db.commit()
-        except Exception:
-            pass
-        # Rename route_data → solution_data on every table that holds the
-        # per-iteration visualization payload. RENAME COLUMN fails when the
-        # column has already been renamed (or the table was created fresh
-        # under the new name), which is expected on every subsequent boot.
-        for stmt in (
-            "ALTER TABLE experiments RENAME COLUMN route_data TO solution_data",
-            "ALTER TABLE agent_bests RENAME COLUMN route_data TO solution_data",
-            "ALTER TABLE best_history RENAME COLUMN route_data TO solution_data",
-        ):
-            try:
-                await db.execute(stmt)
-                await db.commit()
-            except Exception:
-                pass
-
-        for stmt in (
-            "ALTER TABLE agents ADD COLUMN runs_since_improvement INTEGER DEFAULT 0",
-            "ALTER TABLE agents ADD COLUMN improvements INTEGER DEFAULT 0",
-            "ALTER TABLE hypotheses ADD COLUMN target_best_experiment_id TEXT",
-            "ALTER TABLE best_history ADD COLUMN agent_id TEXT",
-            "ALTER TABLE experiments ADD COLUMN delta_vs_best_pct REAL",
-            "ALTER TABLE experiments ADD COLUMN delta_vs_own_best_pct REAL",
-            "ALTER TABLE experiments ADD COLUMN beats_own_best INTEGER DEFAULT 0",
-            "ALTER TABLE experiments ADD COLUMN trajectory_id TEXT",
-            "ALTER TABLE agent_bests ADD COLUMN trajectory_id TEXT",
-            "ALTER TABLE agents ADD COLUMN current_trajectory_id TEXT",
-            "ALTER TABLE inactive_algorithms ADD COLUMN trajectory_id TEXT",
-            "ALTER TABLE trajectories ADD COLUMN edits_since_improvement INTEGER DEFAULT 0",
-            "ALTER TABLE agents ADD COLUMN best_ever_score REAL",
-            "ALTER TABLE agents ADD COLUMN num_trajectories INTEGER DEFAULT 0",
-            "ALTER TABLE agents ADD COLUMN tacit_knowledge_count INTEGER DEFAULT 0",
-            "ALTER TABLE agents ADD COLUMN inspiration_count INTEGER DEFAULT 0",
-            "ALTER TABLE agents ADD COLUMN current_program_id TEXT",
-            "ALTER TABLE hypotheses ADD COLUMN program_id TEXT",
-            "ALTER TABLE inactive_algorithms ADD COLUMN program_id TEXT",
-            # Multi-challenge migration: every per-agent state table gains a
-            # `challenge` column. Existing rows get backfilled below to the
-            # legacy single-challenge value. Idempotent on re-boot.
-            "ALTER TABLE agent_bests ADD COLUMN challenge TEXT",
-            "ALTER TABLE experiments ADD COLUMN challenge TEXT",
-            "ALTER TABLE hypotheses ADD COLUMN challenge TEXT",
-            "ALTER TABLE inactive_algorithms ADD COLUMN challenge TEXT",
-            "ALTER TABLE trajectories ADD COLUMN challenge TEXT",
-            "ALTER TABLE best_history ADD COLUMN challenge TEXT",
-            "ALTER TABLE messages ADD COLUMN challenge TEXT",
-            # Per-track score breakdown for the dashboard. Stored as JSON
-            # text. NULL on rows that pre-date the migration.
-            "ALTER TABLE experiments ADD COLUMN track_scores TEXT",
-            "ALTER TABLE agent_bests ADD COLUMN track_scores TEXT",
-            "ALTER TABLE trajectories ADD COLUMN num_deactivations INTEGER DEFAULT 0",
-            "ALTER TABLE challenge_configs ADD COLUMN strategy_tags TEXT NOT NULL DEFAULT '[]'",
-        ):
-            try:
-                await db.execute(stmt)
-                await db.commit()
-            except Exception:
-                pass
-
-        # Multi-challenge backfill — run once, idempotent.
-        # Pull the legacy active challenge so every existing row becomes
-        # owned by it. Default to vehicle_routing on a brand-new DB.
-        cur = await db.execute("SELECT value FROM config WHERE key='challenge'")
-        legacy_row = await cur.fetchone()
-        legacy_challenge = legacy_row[0] if legacy_row else "vehicle_routing"
-
-        # Seed `active_challenge` from the legacy `challenge` row if missing.
-        await db.execute(
-            "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
-            ("active_challenge", legacy_challenge),
-        )
-
-        for tbl in (
-            "agent_bests", "experiments", "hypotheses",
-            "inactive_algorithms", "trajectories",
-            "best_history", "messages",
-        ):
-            await db.execute(
-                f"UPDATE {tbl} SET challenge = ? WHERE challenge IS NULL",
-                (legacy_challenge,),
-            )
-
-        # Backfill agent_challenge_state from the per-challenge counter
-        # columns currently on the `agents` table. After this, those columns
-        # are no longer the source of truth — agent_challenge_state is.
-        await db.execute(
-            """INSERT OR IGNORE INTO agent_challenge_state
-                 (agent_id, challenge, current_trajectory_id, current_program_id,
-                  runs_since_improvement, improvements, experiments_completed,
-                  best_ever_score, num_trajectories,
-                  tacit_knowledge_count, inspiration_count, last_active_at)
-               SELECT id, ?, current_trajectory_id, current_program_id,
-                      runs_since_improvement, improvements, experiments_completed,
-                      best_ever_score, num_trajectories,
-                      tacit_knowledge_count, inspiration_count, last_heartbeat
-               FROM agents""",
-            (legacy_challenge,),
-        )
-
-        # Seed challenge_configs from the legacy flat config keys.
-        async def _legacy(key: str, default: str = "") -> str:
-            cur = await db.execute("SELECT value FROM config WHERE key=?", (key,))
-            row = await cur.fetchone()
-            return row[0] if row else default
-
-        legacy_tracks = await _legacy("tracks", "{}")
-        legacy_timeout = await _legacy("timeout", "5")
-        legacy_dir = await _legacy("scoring_direction", "max")
-        legacy_init = await _legacy("initial_algorithm_code", "")
-
-        await db.execute(
-            """INSERT OR IGNORE INTO challenge_configs
-                 (challenge, tracks, timeout, scoring_direction, initial_algorithm_code)
-               VALUES (?, ?, ?, ?, ?)""",
-            (legacy_challenge, legacy_tracks, int(legacy_timeout) if legacy_timeout.isdigit() else 5,
-             legacy_dir, legacy_init),
-        )
-        for ch in KNOWN_CHALLENGES:
-            if ch == legacy_challenge:
-                continue
-            await db.execute(
-                "INSERT OR IGNORE INTO challenge_configs (challenge) VALUES (?)",
-                (ch,),
-            )
-
-        # `agent_bests` PK rebuild: must move from agent_id-only to (agent_id,
-        # challenge). SQLite can't ALTER a PK, so we detect-and-rebuild once.
-        cur = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_bests'")
-        ab_row = await cur.fetchone()
-        ab_sql = (ab_row[0] if ab_row else "") or ""
-        if "PRIMARY KEY (agent_id, challenge)" not in ab_sql:
-            # Existing rows must have a non-null challenge before we rebuild.
-            await db.execute(
-                "UPDATE agent_bests SET challenge = ? WHERE challenge IS NULL",
-                (legacy_challenge,),
-            )
-            await db.execute("ALTER TABLE agent_bests RENAME TO agent_bests_old")
-            await db.execute(
-                """CREATE TABLE agent_bests (
-                    agent_id TEXT NOT NULL,
-                    challenge TEXT NOT NULL,
-                    experiment_id TEXT NOT NULL,
-                    algorithm_code TEXT NOT NULL,
-                    score REAL NOT NULL,
-                    feasible INTEGER NOT NULL DEFAULT 1,
-                    num_vehicles INTEGER DEFAULT 0,
-                    total_distance REAL DEFAULT 0.0,
-                    solution_data TEXT,
-                    updated_at TEXT NOT NULL,
-                    trajectory_id TEXT,
-                    PRIMARY KEY (agent_id, challenge),
-                    FOREIGN KEY (agent_id) REFERENCES agents(id)
-                )"""
-            )
-            await db.execute(
-                """INSERT INTO agent_bests
-                     (agent_id, challenge, experiment_id, algorithm_code, score,
-                      feasible, num_vehicles, total_distance, solution_data,
-                      updated_at, trajectory_id)
-                   SELECT agent_id, challenge, experiment_id, algorithm_code, score,
-                          feasible, num_vehicles, total_distance, solution_data,
-                          updated_at, trajectory_id
-                   FROM agent_bests_old"""
-            )
-            await db.execute("DROP TABLE agent_bests_old")
-            await db.commit()
-        # The current model has no "active" hypotheses: every attempt is
-        # recorded as succeeded/failed once evaluated. Legacy statuses are
-        # normalized to failed so old rows don't appear in a third state.
-        await db.execute(
-            "UPDATE hypotheses SET status = 'failed' "
-            "WHERE status IN ('proposed', 'claimed', 'testing')"
-        )
-        await db.commit()
-        # 3) Indexes last, *after* the migrations above — some of them
-        #    reference columns that only exist post-migration.
         await db.executescript(SCHEMA_INDEXES)
-        # 4) Backfill agent_bests from the existing experiments table on
-        #    first upgrade. Without this, an existing deployment would see
-        #    an empty agent_bests, collapse to cold start, and serve every
-        #    agent the challenge seed until someone republishes. ON CONFLICT
-        #    DO NOTHING makes this a no-op on subsequent boots.
-        cursor = await db.execute(
-            "SELECT value FROM config WHERE key = 'scoring_direction'"
-        )
-        row = await cursor.fetchone()
-        backfill_order = "DESC" if (row and row[0] == "max") else "ASC"
-        # Multi-challenge: backfill is per-(agent, challenge). On a fresh
-        # multi-challenge DB this is a no-op (no experiments yet). On an
-        # upgraded DB, every existing experiment row already has its
-        # `challenge` set by the migration block above, so we partition by
-        # (agent_id, challenge) and pick the best per partition.
-        await db.execute(
-            f"""INSERT INTO agent_bests
-               (agent_id, challenge, experiment_id, algorithm_code, score, feasible,
-                num_vehicles, total_distance, solution_data, updated_at)
-               SELECT agent_id, challenge, id, algorithm_code, score, 1,
-                      num_vehicles, total_distance, solution_data, created_at
-               FROM (
-                   SELECT e.*,
-                          ROW_NUMBER() OVER (
-                              PARTITION BY e.agent_id, e.challenge
-                              ORDER BY e.score {backfill_order}, e.created_at ASC
-                          ) AS rn
-                   FROM experiments e
-                   WHERE e.feasible = 1 AND e.challenge IS NOT NULL
-               )
-               WHERE rn = 1
-               ON CONFLICT(agent_id, challenge) DO NOTHING"""
-        )
         await db.commit()
+
         for key, value in DEFAULT_CONFIG.items():
             await db.execute(
                 "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",

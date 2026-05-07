@@ -23,6 +23,7 @@ from dedup import fingerprint
 import db
 import ws_events
 import api_models
+import challenges
 
 logger = logging.getLogger("swarm")
 
@@ -251,7 +252,7 @@ async def periodic_stats():
                 total_agents = await db.get_agent_count(conn, active_only=False)
                 # Per-challenge slices.
                 per_challenge: dict[str, dict] = {}
-                for ch in db.KNOWN_CHALLENGES:
+                for ch in challenges.CHALLENGE_NAMES:
                     direction = await get_direction(ch)
                     cfg = await get_challenge_config_cached(ch)
                     best = await db.get_global_best(conn, ch, direction=direction)
@@ -351,7 +352,7 @@ async def register_agent(req: RegisterRequest):
             "heartbeat_interval_seconds": 30,
             "active_challenge": active_challenge,
             "challenge": active_challenge,
-            "available_challenges": list(db.KNOWN_CHALLENGES),
+            "available_challenges": list(challenges.CHALLENGE_NAMES),
         },
     )
 
