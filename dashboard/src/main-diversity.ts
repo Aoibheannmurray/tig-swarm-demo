@@ -19,8 +19,27 @@ const selectorMount = document.getElementById("panel-challenge-selector");
 const challengeSelector = new ChallengeSelectorPanel();
 if (selectorMount) challengeSelector.init(selectorMount);
 
+const panelEl = document.getElementById("panel-diversity")!;
+panelEl.innerHTML = `
+  <div class="page-flex">
+    <div class="ideas-header">
+      <div class="ideas-title">
+        <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
+        <span class="ideas-title-text">Diversity Map</span>
+      </div>
+      <div class="ideas-nav">
+        <a href="/" class="ideas-nav-link">Dashboard</a>
+        <a href="/ideas.html" class="ideas-nav-link">Ideas</a>
+        <span class="ideas-nav-active">Diversity</span>
+        <a href="/benchmark.html" class="ideas-nav-link">Benchmark</a>
+        <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
+      </div>
+    </div>
+    <div class="page-body" id="panel-diversity-body"></div>
+  </div>
+`;
 const panel = new DiversityPanel();
-panel.init(document.getElementById("panel-diversity")!);
+panel.init(document.getElementById("panel-diversity-body")!);
 
 function getApiUrl(): string {
   const explicit = params.get("api");

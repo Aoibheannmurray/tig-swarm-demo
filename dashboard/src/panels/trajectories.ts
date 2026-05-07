@@ -70,11 +70,13 @@ export class TrajectoriesPanel {
           <div class="traj-title-row">
             <div class="traj-title">
               <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
-              <span class="traj-title-text">Trajectories</span>
+              <span class="traj-title-text">Trajectory Profile</span>
             </div>
             <div class="traj-nav">
               <a class="ideas-nav-link" href="/">Dashboard</a>
               <a class="ideas-nav-link" href="/ideas.html">Ideas</a>
+              <a class="ideas-nav-link" href="/diversity.html">Diversity</a>
+              <a class="ideas-nav-link" href="/benchmark.html">Benchmark</a>
               <span class="ideas-nav-active">Trajectories</span>
             </div>
           </div>

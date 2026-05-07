@@ -28,11 +28,14 @@ export class IdeasTree {
         <div class="ideas-header">
           <div class="ideas-title">
             <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
-            <span class="ideas-title-text">Prometheus</span>
+            <span class="ideas-title-text">Insight Library</span>
           </div>
           <div class="ideas-nav">
             <a href="/" class="ideas-nav-link">Dashboard</a>
             <span class="ideas-nav-active">Ideas</span>
+            <a href="/diversity.html" class="ideas-nav-link">Diversity</a>
+            <a href="/benchmark.html" class="ideas-nav-link">Benchmark</a>
+            <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
           </div>
         </div>
 

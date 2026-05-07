@@ -131,8 +131,12 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
       maxVal = 1;
     }
 
-    const colorScale = d3.scaleSequential(d3.interpolateRdYlBu)
-      .domain([maxVal, minVal]);
+    // Cream → terracotta single-hue ramp in HCL space (perceptually uniform,
+    // no blue dominating the grid). Low-interaction cells fade into the cream
+    // surface; high-interaction cells read as saturated terracotta.
+    const colorScale = d3.scaleSequential(
+      d3.interpolateHcl("#F2EDE4", "#B8541F"),
+    ).domain([minVal, maxVal]);
 
     const w = cellSize.toFixed(3);
     const cells: string[] = [];

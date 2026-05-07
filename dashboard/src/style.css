@@ -6,8 +6,8 @@
 
 :root {
   /* Surfaces */
-  --bg-page:        #FAF7F2;
-  --bg-card:        #FFFFFF;
+  --bg-page:        #FFFFFF;
+  --bg-card:        #FAF7F2;
   --bg-sunken:      #F2EDE4;
   --bg-hover:       #F5F0E7;
 
@@ -171,12 +171,27 @@ html, body {
   height: 100vh;
   width: 100vw;
   display: grid;
-  grid-template-rows: 1fr;
+  grid-template-rows: 32px 1fr;
   background: var(--bg-page);
 }
 
 .dashboard-single > .panel-solo {
   background: var(--bg-card);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Wrapper for single-page views that need a header bar above their panel
+   content (diversity.html, benchmark.html). Trajectories uses its own
+   .traj-page wrapper with the same shape; ideas uses .ideas-page. */
+.page-flex {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.page-body {
+  flex: 1;
+  min-height: 0;
   position: relative;
   overflow: hidden;
 }
@@ -202,6 +217,9 @@ html, body {
 }
 
 /* ── Stats bar ── */
+/* Off-white masthead (parchment-tone --bg-sunken) — slightly recessed against
+   the cream content cards below, giving the navigation chrome its own visual
+   register without going dark. */
 .stats-bar {
   display: flex;
   justify-content: space-between;
@@ -210,12 +228,12 @@ html, body {
   padding: 0 24px;
   position: relative;
   z-index: 1;
-  background: var(--bg-card);
+  background: var(--bg-sunken);
 }
 
 .panel-stats {
-  background: var(--bg-card) !important;
-  border-bottom: 0.5px solid var(--border-subtle) !important;
+  background: var(--bg-sunken) !important;
+  border-bottom: 0.5px solid var(--border-default) !important;
 }
 
 .stats-logo {
@@ -465,7 +483,7 @@ html, body {
   justify-content: flex-start;
   padding-top: 20px;
   pointer-events: none;
-  background: linear-gradient(to bottom, rgba(250, 247, 242, 0.85) 0%, transparent 30%, transparent 70%, rgba(250, 247, 242, 0.85) 100%);
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.85) 0%, transparent 30%, transparent 70%, rgba(255, 255, 255, 0.85) 100%);
 }
 
 .replay-banner {
@@ -939,8 +957,12 @@ html, body {
   align-items: center;
   justify-content: center;
   padding: 8px;
-  overflow: hidden;
+  overflow: auto;
 }
+.diversity-grid::-webkit-scrollbar { width: 6px; height: 6px; }
+.diversity-grid::-webkit-scrollbar-track { background: transparent; }
+.diversity-grid::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+.diversity-grid::-webkit-scrollbar-thumb:hover { background: var(--ink-dim); }
 
 .dv-grid {
   display: grid;
@@ -1002,10 +1024,10 @@ html, body {
   height: calc(100% - 28px);
 }
 
-.feed-list::-webkit-scrollbar { width: 4px; }
+.feed-list::-webkit-scrollbar { width: 6px; }
 .feed-list::-webkit-scrollbar-track { background: transparent; }
-.feed-list::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 2px; }
-.feed-list::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+.feed-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+.feed-list::-webkit-scrollbar-thumb:hover { background: var(--ink-dim); }
 
 .feed-item {
   display: flex;
@@ -1076,9 +1098,13 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  overflow: hidden;
+  overflow-y: auto;
   height: calc(100% - 56px);
 }
+.leaderboard-list::-webkit-scrollbar { width: 6px; }
+.leaderboard-list::-webkit-scrollbar-track { background: transparent; }
+.leaderboard-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+.leaderboard-list::-webkit-scrollbar-thumb:hover { background: var(--ink-dim); }
 
 .leaderboard-row {
   display: flex;
@@ -1160,17 +1186,24 @@ html, body {
   letter-spacing: inherit;
   text-transform: inherit;
   cursor: pointer;
-  text-align: right;
   flex-shrink: 0;
+  /* Buttons in a flex container have an intrinsic vertical baseline that
+     differs from sibling <span>s. Force inline-flex centering so the sort
+     buttons line up with the plain-span "#" and "Agent" headers. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  line-height: 1;
+  height: 100%;
   transition: color 0.15s ease;
 }
 
 .leaderboard-header .lb-sortable:hover {
-  color: var(--text-bright);
+  color: var(--ink);
 }
 
 .leaderboard-header .lb-sortable--active {
-  color: var(--cyan);
+  color: var(--color-accent);
 }
 
 .lb-arrow {
@@ -1204,7 +1237,7 @@ html, body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bg-page);
+  background: var(--bg-card);
 }
 
 /* Header */

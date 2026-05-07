@@ -38,7 +38,7 @@ async function drawQR() {
       await QRCode.toCanvas(canvas, REPO_URL, {
         width: 200,
         margin: 1,
-        color: { dark: "#1A1A1A", light: "#FFFFFF" },
+        color: { dark: "#1A1A1A", light: "#FAF7F2" },
       });
     }
   } catch {
