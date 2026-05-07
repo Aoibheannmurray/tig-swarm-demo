@@ -50,6 +50,7 @@ export class SatPanel implements Panel {
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
   private emptyStateEl!: HTMLElement;
+  private historyLoaded = false;
 
   private allInstances: AllSatData = {};
   private currentIndex = 0;
@@ -172,7 +173,7 @@ export class SatPanel implements Panel {
 
   private async fetchHistory() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/replay`);
+      const res = await fetch(`${this.apiUrl}/api/replay?challenge=satisfiability`);
       if (!res.ok) return;
       const rows: any[] = await res.json();
       const fetched: HistoryEntry[] = rows
@@ -196,10 +197,13 @@ export class SatPanel implements Panel {
         this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
       }
+      this.historyLoaded = true;
       this.updateHistoryLabel();
       this.updateEmptyState();
     } catch {
       // non-fatal
+      this.historyLoaded = true;
+      this.updateEmptyState();
     }
   }
 
@@ -262,7 +266,12 @@ export class SatPanel implements Panel {
 
   private updateEmptyState() {
     if (!this.emptyStateEl) return;
-    this.emptyStateEl.style.display = this.historyEntries.length > 0 ? "none" : "flex";
+    // Hide while we're still fetching the initial replay so the
+    // user doesn't see "Challenge not started yet" flash for a few
+    // seconds during the in-flight load. Only show the overlay
+    // once we've definitively confirmed the channel has no data.
+    const showEmpty = this.historyLoaded && this.historyEntries.length === 0;
+    this.emptyStateEl.style.display = showEmpty ? "flex" : "none";
   }
 
   private navigate(delta: number) {
@@ -315,6 +324,7 @@ export class SatPanel implements Panel {
     }
 
     if (msg.type === "new_global_best" && msg.solution_data) {
+      this.historyLoaded = true;
       const entry: HistoryEntry = {
         experiment_id: msg.experiment_id,
         agent_name: msg.agent_name,
@@ -345,71 +355,65 @@ export class SatPanel implements Panel {
   }
 
   private showInstance(data: SatData) {
-    this.histG.selectAll("*").remove();
-    this.gridG.selectAll("*").remove();
-
     if (!data || !data.assignment_bits || !data.clause_bins) {
+      (this.histG.node() as SVGGElement).innerHTML = "";
+      (this.gridG.node() as SVGGElement).innerHTML = "";
       this.satEl.textContent = "---";
       this.varsEl.textContent = "---";
       return;
     }
 
-    // ── Top strip: stacked clause-satisfaction histogram ──────────────
+    // Build SVG via a string buffer and assign once. d3.append per
+    // element triggers a layout pass each call — for thousands of
+    // assignment cells that becomes the dominant cost.
+    let histHtml = "";
     const bins = data.clause_bins;
     const numBins = bins.length;
     const binW = VB_W / numBins;
-    const maxBinTotal = bins.reduce(
-      (m, b) => Math.max(m, b[0] + b[1] + b[2] + b[3]),
-      1,
-    );
+    let maxBinTotal = 1;
+    for (const b of bins) {
+      const t = b[0] + b[1] + b[2] + b[3];
+      if (t > maxBinTotal) maxBinTotal = t;
+    }
+    const segWidth = (binW - 0.6).toFixed(2);
     for (let bi = 0; bi < numBins; bi++) {
       let yCursor = HIST_H;
       const bin = bins[bi];
+      const xPos = (bi * binW).toFixed(2);
       for (let k = 0; k < 4; k++) {
         const segH = (bin[k] / maxBinTotal) * HIST_H;
         if (segH <= 0) continue;
         yCursor -= segH;
-        this.histG.append("rect")
-          .attr("x", bi * binW)
-          .attr("y", yCursor)
-          .attr("width", binW - 0.6)
-          .attr("height", segH)
-          .attr("fill", BIN_COLORS[k]);
+        histHtml += `<rect x="${xPos}" y="${yCursor.toFixed(2)}" width="${segWidth}" height="${segH.toFixed(2)}" fill="${BIN_COLORS[k]}"/>`;
       }
     }
-    // Light divider line under the histogram.
-    this.histG.append("line")
-      .attr("x1", 0).attr("x2", VB_W)
-      .attr("y1", HIST_H + 1).attr("y2", HIST_H + 1)
-      .attr("stroke", "rgba(255,255,255,0.18)")
-      .attr("stroke-width", 1);
+    histHtml += `<line x1="0" x2="${VB_W}" y1="${HIST_H + 1}" y2="${HIST_H + 1}" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>`;
+    (this.histG.node() as SVGGElement).innerHTML = histHtml;
 
-    // ── Bottom: variable-assignment grid ─────────────────────────────
+    // Variable-assignment grid.
+    let gridHtml = "";
     const gridH = VB_H - GRID_TOP;
     const n = data.viz_count;
     if (n > 0) {
-      // Choose grid dimensions so cells fill the area roughly square.
       const aspect = VB_W / gridH;
       const cols = Math.max(1, Math.round(Math.sqrt(n * aspect)));
       const rows = Math.ceil(n / cols);
       const cellW = VB_W / cols;
       const cellH = gridH / rows;
-      const trueColor = "#4a7fd6";       // T = solid blue
-      const falseColor = "rgba(255,255,255,0.06)"; // F = faint background
+      const trueColor = "#4a7fd6";
+      const falseColor = "rgba(255,255,255,0.06)";
       const bits = data.assignment_bits;
+      const w = Math.max(0.5, cellW - 0.4).toFixed(3);
+      const h = Math.max(0.5, cellH - 0.4).toFixed(3);
 
       for (let i = 0; i < n; i++) {
         const r = Math.floor(i / cols);
         const c = i % cols;
-        const isTrue = bits.charCodeAt(i) === 49; // "1"
-        this.gridG.append("rect")
-          .attr("x", c * cellW)
-          .attr("y", r * cellH)
-          .attr("width", Math.max(0.5, cellW - 0.4))
-          .attr("height", Math.max(0.5, cellH - 0.4))
-          .attr("fill", isTrue ? trueColor : falseColor);
+        const isTrue = bits.charCodeAt(i) === 49;
+        gridHtml += `<rect x="${(c * cellW).toFixed(3)}" y="${(r * cellH).toFixed(3)}" width="${w}" height="${h}" fill="${isTrue ? trueColor : falseColor}"/>`;
       }
     }
+    (this.gridG.node() as SVGGElement).innerHTML = gridHtml;
 
     // ── Stats overlays ───────────────────────────────────────────────
     const satPct = data.num_clauses > 0

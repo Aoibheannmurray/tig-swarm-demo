@@ -1,5 +1,6 @@
 import { getAgentColor } from "../lib/colors";
 import type { Panel, WSMessage } from "../types";
+import { getViewedChallenge } from "../lib/viewedChallenge";
 
 interface DiversityData {
   agents: { agent_id: string; agent_name: string }[];
@@ -12,6 +13,10 @@ export class DiversityPanel implements Panel {
   private apiUrl = "";
   private throttleTimer: ReturnType<typeof setTimeout> | null = null;
   private lastFetch = 0;
+  // Tracks the challenge whose data is currently in `inner`. Used to detect
+  // a viewed-challenge switch so we can drop stale rows immediately rather
+  // than letting the previous matrix linger until the next fetch.
+  private renderedChallenge = "";
   private static THROTTLE_MS = 30_000;
 
   init(container: HTMLElement) {
@@ -45,9 +50,19 @@ export class DiversityPanel implements Panel {
     this.fetchAndRender();
   }
 
+  setChallenge(_c: string) {
+    // main.ts dispatches a `reset` to every panel before invoking
+    // setChallenge. We fetch here (not in reset) so the inner is empty
+    // while the new challenge's matrix is in flight, then refetched
+    // against the now-current viewed challenge.
+    this.lastFetch = 0;
+    this.fetchAndRender();
+  }
+
   handleMessage(msg: WSMessage) {
     if (msg.type === "reset") {
       this.inner.innerHTML = "";
+      this.renderedChallenge = "";
       return;
     }
     if (msg.type !== "leaderboard_update") return;
@@ -65,10 +80,21 @@ export class DiversityPanel implements Panel {
 
   private async fetchAndRender() {
     this.lastFetch = Date.now();
+    // Always scope the matrix to the viewed challenge — the server
+    // endpoint defaults to the active challenge otherwise, which would
+    // show e.g. the energy_arbitrage matrix while the user is viewing
+    // VRP.
+    const ch = getViewedChallenge();
     try {
-      const res = await fetch(`${this.apiUrl}/api/diversity`);
+      const res = await fetch(
+        `${this.apiUrl}/api/diversity?challenge=${encodeURIComponent(ch)}`,
+      );
       if (!res.ok) return;
       const data: DiversityData = await res.json();
+      // Discard a stale response if the user has already switched to a
+      // different challenge while this request was in flight.
+      if (ch !== getViewedChallenge()) return;
+      this.renderedChallenge = ch;
       this.render(data);
     } catch {
       // silently retry on next update

@@ -46,6 +46,7 @@ export class KnapsackPanel implements Panel {
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
   private emptyStateEl!: HTMLElement;
+  private historyLoaded = false;
 
   private allInstances: AllKnapsackData = {};
   private currentIndex = 0;
@@ -167,7 +168,7 @@ export class KnapsackPanel implements Panel {
 
   private async fetchHistory() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/replay`);
+      const res = await fetch(`${this.apiUrl}/api/replay?challenge=knapsack`);
       if (!res.ok) return;
       const rows: any[] = await res.json();
       const fetched: HistoryEntry[] = rows
@@ -191,10 +192,13 @@ export class KnapsackPanel implements Panel {
         this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
       }
+      this.historyLoaded = true;
       this.updateHistoryLabel();
       this.updateEmptyState();
     } catch {
       // non-fatal
+      this.historyLoaded = true;
+      this.updateEmptyState();
     }
   }
 
@@ -257,7 +261,12 @@ export class KnapsackPanel implements Panel {
 
   private updateEmptyState() {
     if (!this.emptyStateEl) return;
-    this.emptyStateEl.style.display = this.historyEntries.length > 0 ? "none" : "flex";
+    // Hide while we're still fetching the initial replay so the
+    // user doesn't see "Challenge not started yet" flash for a few
+    // seconds during the in-flight load. Only show the overlay
+    // once we've definitively confirmed the channel has no data.
+    const showEmpty = this.historyLoaded && this.historyEntries.length === 0;
+    this.emptyStateEl.style.display = showEmpty ? "flex" : "none";
   }
 
   private navigate(delta: number) {
@@ -309,6 +318,7 @@ export class KnapsackPanel implements Panel {
     }
 
     if (msg.type === "new_global_best" && msg.solution_data) {
+      this.historyLoaded = true;
       const entry: HistoryEntry = {
         experiment_id: msg.experiment_id,
         agent_name: msg.agent_name,
@@ -340,9 +350,10 @@ export class KnapsackPanel implements Panel {
   }
 
   private showInstance(data: KnapsackData) {
-    this.chartG.selectAll("*").remove();
+    const chartNode = this.chartG.node() as SVGGElement;
 
     if (!data || !data.interaction_values || !data.interaction_values.length) {
+      chartNode.innerHTML = "";
       this.valueEl.textContent = "---";
       this.itemsEl.textContent = "---";
       return;
@@ -368,24 +379,26 @@ export class KnapsackPanel implements Panel {
     const colorScale = d3.scaleSequential(d3.interpolateRdYlBu)
       .domain([maxVal, minVal]);
 
+    // Build grid as a single SVG string. With k up to ~32 we can
+    // generate >1000 rects per redraw — per-element d3.append calls
+    // become a measurable lag.
+    const w = cellSize.toFixed(3);
+    const cells: string[] = [];
     for (let i = 0; i < k; i++) {
+      const yPos = (i * cellSize).toFixed(3);
+      const rowVals = data.interaction_values[i];
       for (let j = 0; j < k; j++) {
-        const x = j * cellSize;
-        const y = i * cellSize;
-        const v = data.interaction_values[i][j];
-
-        this.chartG.append("rect")
-          .attr("x", x)
-          .attr("y", y)
-          .attr("width", cellSize)
-          .attr("height", cellSize)
-          .attr("fill", i === j
-            ? "rgba(255,255,255,0.03)"
-            : v === 0
-              ? "rgba(255,255,255,0.02)"
-              : colorScale(v));
+        const xPos = (j * cellSize).toFixed(3);
+        const v = rowVals[j];
+        const fill = i === j
+          ? "rgba(255,255,255,0.03)"
+          : v === 0
+            ? "rgba(255,255,255,0.02)"
+            : colorScale(v);
+        cells.push(`<rect x="${xPos}" y="${yPos}" width="${w}" height="${w}" fill="${fill}"/>`);
       }
     }
+    chartNode.innerHTML = cells.join("");
 
     this.valueEl.textContent = data.total_value.toLocaleString();
     const suffix = data.num_selected > k ? ` (showing ${k})` : "";

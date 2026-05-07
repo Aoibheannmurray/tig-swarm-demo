@@ -1054,7 +1054,14 @@ async def get_diversity(challenge: str | None = None):
 # ── Replay ──
 
 @app.get("/api/replay")
-async def get_replay(challenge: str | None = None):
+async def get_replay(challenge: str | None = None, compact: int = 0):
+    """Best-history replay for a challenge.
+
+    `compact=1` omits the per-row `solution_data` field so callers that
+    only need score/agent/timestamp (the chart panel's score-history
+    feed) don't pay for 100 KB+ of viz payload they'd just discard.
+    The visualization panels continue to use the default full payload.
+    """
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         cursor = await conn.execute(
@@ -1062,6 +1069,17 @@ async def get_replay(challenge: str | None = None):
             (challenge,),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
+    if compact:
+        return [
+            {
+                "experiment_id": r["experiment_id"],
+                "agent_id": r.get("agent_id"),
+                "agent_name": r["agent_name"],
+                "score": r["score"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
     return [
         {
             "experiment_id": r["experiment_id"],

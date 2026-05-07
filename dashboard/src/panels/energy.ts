@@ -46,6 +46,7 @@ export class EnergyPanel implements Panel {
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
   private emptyStateEl!: HTMLElement;
+  private historyLoaded = false;
 
   private allInstances: AllEnergyData = {};
   private currentIndex = 0;
@@ -167,7 +168,7 @@ export class EnergyPanel implements Panel {
 
   private async fetchHistory() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/replay`);
+      const res = await fetch(`${this.apiUrl}/api/replay?challenge=energy_arbitrage`);
       if (!res.ok) return;
       const rows: any[] = await res.json();
       const fetched: HistoryEntry[] = rows
@@ -191,10 +192,13 @@ export class EnergyPanel implements Panel {
         this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
       }
+      this.historyLoaded = true;
       this.updateHistoryLabel();
       this.updateEmptyState();
     } catch {
       // non-fatal
+      this.historyLoaded = true;
+      this.updateEmptyState();
     }
   }
 
@@ -257,7 +261,12 @@ export class EnergyPanel implements Panel {
 
   private updateEmptyState() {
     if (!this.emptyStateEl) return;
-    this.emptyStateEl.style.display = this.historyEntries.length > 0 ? "none" : "flex";
+    // Hide while we're still fetching the initial replay so the
+    // user doesn't see "Challenge not started yet" flash for a few
+    // seconds during the in-flight load. Only show the overlay
+    // once we've definitively confirmed the channel has no data.
+    const showEmpty = this.historyLoaded && this.historyEntries.length === 0;
+    this.emptyStateEl.style.display = showEmpty ? "flex" : "none";
   }
 
   private navigate(delta: number) {
@@ -311,6 +320,7 @@ export class EnergyPanel implements Panel {
     }
 
     if (msg.type === "new_global_best" && msg.solution_data) {
+      this.historyLoaded = true;
       const entry: HistoryEntry = {
         experiment_id: msg.experiment_id,
         agent_name: msg.agent_name,
@@ -342,7 +352,8 @@ export class EnergyPanel implements Panel {
   }
 
   private showInstance(data: EnergyData) {
-    this.chartG.selectAll("*").remove();
+    const chartNode = this.chartG.node() as SVGGElement;
+    chartNode.innerHTML = "";
     this.xAxisG.selectAll("*").remove();
     this.yLeftAxisG.selectAll("*").remove();
     this.yRightAxisG.selectAll("*").remove();
@@ -373,54 +384,39 @@ export class EnergyPanel implements Panel {
       .domain([priceMin, priceMax])
       .range([CHART_H, 0]);
 
-    // zero line
-    this.chartG.append("line")
-      .attr("x1", 0).attr("x2", CHART_W)
-      .attr("y1", yPower(0)).attr("y2", yPower(0))
-      .attr("stroke", "rgba(255,255,255,0.15)")
-      .attr("stroke-width", 0.5);
+    // Build bars + zero-line + price-line in a single SVG string. With
+    // 96 steps × 2 bar types this is ~200 elements per redraw; rotating
+    // through instances every 8s, the cumulative cost of d3.append
+    // shows up as visible jank.
+    const parts: string[] = [];
+    const yZero = yPower(0).toFixed(2);
+    parts.push(`<line x1="0" x2="${CHART_W}" y1="${yZero}" y2="${yZero}" stroke="rgba(255,255,255,0.15)" stroke-width="0.5"/>`);
 
-    // bars
-    const barW = Math.max(0.5, CHART_W / n - 0.5);
+    const barW = Math.max(0.5, CHART_W / n - 0.5).toFixed(3);
     for (let t = 0; t < n; t++) {
-      const xPos = x(t * dt);
+      const xPos = x(t * dt).toFixed(3);
       const charge = data.agg_charge[t];
       const discharge = data.agg_discharge[t];
-
       if (discharge > 0) {
-        this.chartG.append("rect")
-          .attr("x", xPos)
-          .attr("y", yPower(discharge))
-          .attr("width", barW)
-          .attr("height", yPower(0) - yPower(discharge))
-          .attr("fill", "#ef5350")
-          .attr("opacity", 0.8);
+        const yTop = yPower(discharge);
+        parts.push(`<rect x="${xPos}" y="${yTop.toFixed(2)}" width="${barW}" height="${(yPower(0) - yTop).toFixed(2)}" fill="#ef5350" opacity="0.8"/>`);
       }
       if (charge < 0) {
-        this.chartG.append("rect")
-          .attr("x", xPos)
-          .attr("y", yPower(0))
-          .attr("width", barW)
-          .attr("height", yPower(charge) - yPower(0))
-          .attr("fill", "#42a5f5")
-          .attr("opacity", 0.8);
+        const yBot = yPower(charge);
+        parts.push(`<rect x="${xPos}" y="${yZero}" width="${barW}" height="${(yBot - yPower(0)).toFixed(2)}" fill="#42a5f5" opacity="0.8"/>`);
       }
     }
 
-    // DA price line
     if (data.avg_da_price.length > 0) {
       const priceLine = d3.line<number>()
         .x((_, i) => x(i * dt))
         .y((d) => yPrice(d));
-
-      this.chartG.append("path")
-        .datum(data.avg_da_price)
-        .attr("d", priceLine as any)
-        .attr("fill", "none")
-        .attr("stroke", "#ffd740")
-        .attr("stroke-width", 1.5)
-        .attr("opacity", 0.9);
+      const path = priceLine(data.avg_da_price);
+      if (path) {
+        parts.push(`<path d="${path}" fill="none" stroke="#ffd740" stroke-width="1.5" opacity="0.9"/>`);
+      }
     }
+    chartNode.innerHTML = parts.join("");
 
     // axes
     const xTicks = d3.axisBottom(x).ticks(8).tickFormat((d) => `${d}h`);

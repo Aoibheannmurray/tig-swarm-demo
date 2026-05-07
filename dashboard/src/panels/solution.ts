@@ -67,6 +67,7 @@ export class SolutionPanel implements Panel {
   private historyLabelEl!: HTMLElement;
   private historyLiveBtnEl!: HTMLElement;
   private emptyStateEl!: HTMLElement;
+  private historyLoaded = false;
 
   private allInstances: AllRouteData = {};
   private currentIndex = 0;
@@ -246,10 +247,13 @@ export class SolutionPanel implements Panel {
         this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
       }
+      this.historyLoaded = true;
       this.updateHistoryLabel();
       this.updateEmptyState();
     } catch {
       // network/transport errors are non-fatal — panel works without history
+      this.historyLoaded = true;
+      this.updateEmptyState();
     }
   }
 
@@ -323,8 +327,12 @@ export class SolutionPanel implements Panel {
 
   private updateEmptyState() {
     if (!this.emptyStateEl) return;
-    const hasData = this.historyEntries.length > 0;
-    this.emptyStateEl.style.display = hasData ? "none" : "flex";
+    // Hide while we're still fetching the initial replay so the
+    // user doesn't see "Challenge not started yet" flash for a few
+    // seconds during the in-flight load. Only show the overlay
+    // once we've definitively confirmed the channel has no data.
+    const showEmpty = this.historyLoaded && this.historyEntries.length === 0;
+    this.emptyStateEl.style.display = showEmpty ? "flex" : "none";
   }
 
   // Compute a square viewBox that tightly bounds *all* instances' data with a
@@ -426,6 +434,7 @@ export class SolutionPanel implements Panel {
     }
 
     if (msg.type === "new_global_best" && msg.solution_data) {
+      this.historyLoaded = true;
       if (msg.num_instances) this.numInstances = msg.num_instances;
 
       const entry: HistoryEntry = {
@@ -470,66 +479,45 @@ export class SolutionPanel implements Panel {
   private showInstance(data: RouteData) {
     this.currentRouteData = data;
 
-    this.routeGroup.selectAll("*").remove();
-    this.customerGroup.selectAll("*").remove();
-    this.depotGroup.selectAll("*").remove();
+    const routeNode = this.routeGroup.node() as SVGGElement;
+    const customerNode = this.customerGroup.node() as SVGGElement;
+    const depotNode = this.depotGroup.node() as SVGGElement;
 
     const s = this.viewSide;
-    const customerR = STYLE.customerRadius * s;
-    const routeW = STYLE.routeStroke * s;
-    const glowW = STYLE.glowStroke * s;
-    const dashOn = STYLE.routeDashOn * s;
-    const dashOff = STYLE.routeDashOff * s;
+    const customerR = (STYLE.customerRadius * s).toFixed(3);
+    const routeW = (STYLE.routeStroke * s).toFixed(3);
+    const glowW = (STYLE.glowStroke * s).toFixed(3);
+    const dashOn = (STYLE.routeDashOn * s).toFixed(3);
+    const dashOff = (STYLE.routeDashOff * s).toFixed(3);
 
+    // The dashFlow CSS animation runs on every .route-flowing path
+    // simultaneously. With many short routes that's a lot of GPU work
+    // every frame; cap the animation to keep the dashboard smooth on
+    // larger instances.
+    const animateRoutes = data.routes.length <= 30;
+
+    const routeParts: string[] = [];
+    const customerParts: string[] = [];
     data.routes.forEach((route, i) => {
       const path = fullPath(data, route);
       const color = getRouteColor(i);
+      const d = routeLine(path);
+      if (!d) return;
 
-      // Glow halo
-      this.routeGroup.append("path")
-        .datum(path)
-        .attr("d", routeLine as any)
-        .attr("fill", "none")
-        .attr("stroke", color)
-        .attr("stroke-width", glowW)
-        .attr("stroke-opacity", 0.1)
-        .attr("filter", "url(#route-glow)");
+      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${glowW}" stroke-opacity="0.1" filter="url(#route-glow)"/>`);
+      const cls = animateRoutes ? ' class="route-flowing"' : "";
+      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-opacity="0.9" stroke-dasharray="${dashOn} ${dashOff}"${cls}/>`);
 
-      // Main path
-      this.routeGroup.append("path")
-        .datum(path)
-        .attr("d", routeLine as any)
-        .attr("fill", "none")
-        .attr("stroke", color)
-        .attr("stroke-width", routeW)
-        .attr("stroke-opacity", 0.9)
-        .attr("stroke-dasharray", `${dashOn} ${dashOff}`)
-        .attr("class", "route-flowing");
-
-      // Customers
-      route.path.forEach((pt) => {
-        this.customerGroup.append("circle")
-          .attr("cx", pt.x)
-          .attr("cy", pt.y)
-          .attr("r", customerR)
-          .attr("fill", color)
-          .attr("opacity", 0.75);
-      });
+      for (const pt of route.path) {
+        customerParts.push(`<circle cx="${pt.x}" cy="${pt.y}" r="${customerR}" fill="${color}" opacity="0.75"/>`);
+      }
     });
+    routeNode.innerHTML = routeParts.join("");
+    customerNode.innerHTML = customerParts.join("");
 
-    // Depot
     const depotSize = STYLE.depotSize * s;
-    this.depotGroup.append("rect")
-      .attr("x", data.depot.x - depotSize / 2)
-      .attr("y", data.depot.y - depotSize / 2)
-      .attr("width", depotSize)
-      .attr("height", depotSize)
-      .attr("fill", "#fff")
-      .attr("opacity", 0.9)
-      .attr("transform", `rotate(45, ${data.depot.x}, ${data.depot.y})`)
-      .attr("class", "depot-pulse");
+    depotNode.innerHTML = `<rect x="${data.depot.x - depotSize / 2}" y="${data.depot.y - depotSize / 2}" width="${depotSize}" height="${depotSize}" fill="#fff" opacity="0.9" transform="rotate(45, ${data.depot.x}, ${data.depot.y})" class="depot-pulse"/>`;
 
-    // ROUTE DISTANCE = total Euclidean distance for the currently shown instance
     this.routeDistanceEl.textContent = computeRouteDistance(data).toFixed(1);
   }
 }

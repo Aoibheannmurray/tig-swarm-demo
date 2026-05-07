@@ -621,9 +621,10 @@ async def compute_leaderboard(
     direction: str = "min",
 ) -> list[dict]:
     # Per-challenge leaderboard. Only includes agents that have actually
-    # touched this challenge (have an agent_challenge_state row for it),
-    # so a not-yet-started challenge returns an empty list rather than
-    # listing every swarm member with NULL counters.
+    # PUBLISHED at least one iteration on this challenge. An agent that
+    # only ever fetched /api/state for this challenge gets a row in
+    # agent_challenge_state via ensure_agent_challenge_state, but with
+    # zero experiments — those would otherwise show up as ghosts.
     order = _direction_order(direction)
     # CORRECTNESS INVARIANT: `active` is sourced from acs.last_active_at,
     # NOT from a.last_heartbeat. An agent currently working on VRP is alive
@@ -648,6 +649,7 @@ async def compute_leaderboard(
         LEFT JOIN agent_bests ab
             ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
         WHERE acs.challenge = ?
+          AND acs.experiments_completed > 0
         ORDER BY current_score IS NULL, current_score {order}, a.name ASC
         """,
         (challenge, challenge),
