@@ -166,14 +166,14 @@ export class DiversityPanel implements Panel {
   }
 
   private cellColor(val: number): string {
-    // 0 = dark, 1 = bright cyan
+    // 0 = pale cream, 1 = saturated terracotta (similarity heat)
     const a = Math.max(0.05, val * 0.7);
-    return `rgba(0, 229, 255, ${a})`;
+    return `rgba(184, 84, 31, ${a})`;
   }
 
   private diagColor(val: number): string {
-    // 0 = dark, 1 = bright amber (uniqueness)
+    // 0 = pale cream, 1 = saturated mustard (uniqueness)
     const a = Math.max(0.05, val * 0.8);
-    return `rgba(255, 170, 0, ${a})`;
+    return `rgba(198, 143, 62, ${a})`;
   }
 }

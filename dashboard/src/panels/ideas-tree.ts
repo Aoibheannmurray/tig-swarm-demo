@@ -27,8 +27,8 @@ export class IdeasTree {
       <div class="ideas-page">
         <div class="ideas-header">
           <div class="ideas-title">
-            <span class="stats-diamond">&#9670;</span>
-            <span class="ideas-title-text">Collective Intelligence</span>
+            <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
+            <span class="ideas-title-text">Prometheus</span>
           </div>
           <div class="ideas-nav">
             <a href="/" class="ideas-nav-link">Dashboard</a>

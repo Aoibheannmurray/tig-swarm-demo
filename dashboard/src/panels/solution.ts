@@ -221,7 +221,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
     customerNode.innerHTML = customerParts.join("");
 
     const depotSize = STYLE.depotSize * s;
-    depotNode.innerHTML = `<rect x="${data.depot.x - depotSize / 2}" y="${data.depot.y - depotSize / 2}" width="${depotSize}" height="${depotSize}" fill="#fff" opacity="0.9" transform="rotate(45, ${data.depot.x}, ${data.depot.y})" class="depot-pulse"/>`;
+    depotNode.innerHTML = `<rect x="${data.depot.x - depotSize / 2}" y="${data.depot.y - depotSize / 2}" width="${depotSize}" height="${depotSize}" fill="#1A1A1A" opacity="0.9" transform="rotate(45, ${data.depot.x}, ${data.depot.y})" class="depot-pulse"/>`;
 
     this.routeDistanceEl.textContent = computeRouteDistance(data).toFixed(1);
   }

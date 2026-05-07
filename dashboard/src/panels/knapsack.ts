@@ -143,9 +143,9 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         const xPos = (j * cellSize).toFixed(3);
         const v = rowVals[j];
         const fill = i === j
-          ? "rgba(255,255,255,0.03)"
+          ? "rgba(26,26,26,0.06)"
           : v === 0
-            ? "rgba(255,255,255,0.02)"
+            ? "rgba(26,26,26,0.03)"
             : colorScale(v);
         cells.push(`<rect x="${xPos}" y="${yPos}" width="${w}" height="${w}" fill="${fill}"/>`);
       }

@@ -20,7 +20,9 @@ const HIST_GAP = 20;             // gap between histogram and grid
 const GRID_TOP = HIST_H + HIST_GAP;
 
 // Stacked-bar colors per "satisfying-literal count" bucket.
-const BIN_COLORS = ["#d04d4d", "#d8a13a", "#7ec043", "#3a8a3a"]; // 0,1,2,3 sats
+// Earthen progression — danger → umber → olive → forest-green — keeps
+// "more sats is better" reading clear under the cream theme.
+const BIN_COLORS = ["#8B2D2D", "#A66E45", "#6B7F4E", "#4A7C5A"]; // 0,1,2,3 sats
 
 export class SatPanel extends DisplayPanelBase<AllSatData> {
   protected idPrefix = "sat";
@@ -143,7 +145,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
         histHtml += `<rect x="${xPos}" y="${yCursor.toFixed(2)}" width="${segWidth}" height="${segH.toFixed(2)}" fill="${BIN_COLORS[k]}"/>`;
       }
     }
-    histHtml += `<line x1="0" x2="${VB_W}" y1="${HIST_H + 1}" y2="${HIST_H + 1}" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>`;
+    histHtml += `<line x1="0" x2="${VB_W}" y1="${HIST_H + 1}" y2="${HIST_H + 1}" stroke="rgba(26,26,26,0.18)" stroke-width="1"/>`;
     (this.histG.node() as SVGGElement).innerHTML = histHtml;
 
     // Variable-assignment grid.
@@ -156,8 +158,8 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
       const rows = Math.ceil(n / cols);
       const cellW = VB_W / cols;
       const cellH = gridH / rows;
-      const trueColor = "#4a7fd6";
-      const falseColor = "rgba(255,255,255,0.06)";
+      const trueColor = "#4E6B85";
+      const falseColor = "rgba(26,26,26,0.06)";
       const bits = data.assignment_bits;
       const w = Math.max(0.5, cellW - 0.4).toFixed(3);
       const h = Math.max(0.5, cellH - 0.4).toFixed(3);

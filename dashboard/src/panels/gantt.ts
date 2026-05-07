@@ -1,5 +1,11 @@
 import * as d3 from "d3";
 import { DisplayPanelBase } from "./displayPanelBase";
+import { token } from "../lib/colors";
+
+const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
+const ROW_STRIPE = () => "rgba(26, 26, 26, 0.025)";
+const TICK_LINE = () => "rgba(26, 26, 26, 0.06)";
+const DANGER = () => token("--danger", "#8B2D2D");
 
 interface GanttBar {
   job: number;
@@ -141,14 +147,14 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
 
     for (let m = 0; m < nMachines; m++) {
       if (m % 2 === 0) {
-        parts.push(`<rect x="0" y="${(m * rowH).toFixed(2)}" width="${CHART_W}" height="${rowH.toFixed(2)}" fill="rgba(255,255,255,0.015)"/>`);
+        parts.push(`<rect x="0" y="${(m * rowH).toFixed(2)}" width="${CHART_W}" height="${rowH.toFixed(2)}" fill="${ROW_STRIPE()}"/>`);
       }
     }
 
     const ticks = x.ticks(8);
     for (const t of ticks) {
       const xv = x(t).toFixed(2);
-      parts.push(`<line x1="${xv}" x2="${xv}" y1="0" y2="${CHART_H}" stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/>`);
+      parts.push(`<line x1="${xv}" x2="${xv}" y1="0" y2="${CHART_H}" stroke="${TICK_LINE()}" stroke-width="0.5"/>`);
     }
 
     const barHStr = barH.toFixed(2);
@@ -156,25 +162,25 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
       const bx = x(bar.start);
       const bw = Math.max(x(bar.end) - x(bar.start), 0.8);
       const by = bar.machine * rowH + barPad;
-      parts.push(`<rect x="${bx.toFixed(2)}" y="${by.toFixed(2)}" width="${bw.toFixed(2)}" height="${barHStr}" fill="${jobColor(bar.job)}" stroke="rgba(0,0,0,0.4)" stroke-width="0.4" rx="1"/>`);
+      parts.push(`<rect x="${bx.toFixed(2)}" y="${by.toFixed(2)}" width="${bw.toFixed(2)}" height="${barHStr}" fill="${jobColor(bar.job)}" stroke="rgba(26,26,26,0.20)" stroke-width="0.4" rx="1"/>`);
     }
 
     const xMakespan = x(makespan).toFixed(2);
-    parts.push(`<line x1="${xMakespan}" x2="${xMakespan}" y1="0" y2="${CHART_H}" stroke="#ff5252" stroke-width="1" stroke-dasharray="4,3" opacity="0.6"/>`);
+    parts.push(`<line x1="${xMakespan}" x2="${xMakespan}" y1="0" y2="${CHART_H}" stroke="${DANGER()}" stroke-width="1" stroke-dasharray="4,3" opacity="0.6"/>`);
     chartNode.innerHTML = parts.join("");
 
     const fontSize = Math.min(11, rowH * 0.55).toFixed(2);
     const labelParts: string[] = [];
     for (let m = 0; m < nMachines; m++) {
-      labelParts.push(`<text x="${MARGIN.left - 5}" y="${(m * rowH + rowH / 2).toFixed(2)}" text-anchor="end" dominant-baseline="central" fill="#3d4a5c" font-size="${fontSize}" font-family="'JetBrains Mono', monospace">${m}</text>`);
+      labelParts.push(`<text x="${MARGIN.left - 5}" y="${(m * rowH + rowH / 2).toFixed(2)}" text-anchor="end" dominant-baseline="central" fill="${AXIS_TEXT()}" font-size="${fontSize}" font-family="'JetBrains Mono', monospace">${m}</text>`);
     }
     labelNode.innerHTML = labelParts.join("");
 
     const axisParts: string[] = [];
     for (const t of ticks) {
       const xv = x(t).toFixed(2);
-      axisParts.push(`<line x1="${xv}" x2="${xv}" y1="0" y2="5" stroke="#3d4a5c" stroke-width="0.5"/>`);
-      axisParts.push(`<text x="${xv}" y="16" text-anchor="middle" fill="#3d4a5c" font-size="9" font-family="'JetBrains Mono', monospace">${t}</text>`);
+      axisParts.push(`<line x1="${xv}" x2="${xv}" y1="0" y2="5" stroke="${AXIS_TEXT()}" stroke-width="0.5"/>`);
+      axisParts.push(`<text x="${xv}" y="16" text-anchor="middle" fill="${AXIS_TEXT()}" font-size="9" font-family="'JetBrains Mono', monospace">${t}</text>`);
     }
     axisNode.innerHTML = axisParts.join("");
 

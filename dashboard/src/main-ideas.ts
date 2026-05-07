@@ -1,5 +1,5 @@
+import "@phosphor-icons/web/regular/style.css";
 import "./style.css";
-import { initParticles } from "./lib/particles";
 import { SwarmWebSocket } from "./lib/websocket";
 import { MockDataGenerator } from "./mock";
 import { IdeasTree } from "./panels/ideas-tree";
@@ -23,10 +23,6 @@ function getApiUrl(): string {
     .replace("wss://", "https://")
     .replace("/ws/dashboard", "");
 }
-
-// ── Background particles ──
-const canvas = document.getElementById("particleCanvas") as HTMLCanvasElement;
-initParticles(canvas);
 
 // ── Initialize ideas tree ──
 const selectorMount = document.getElementById("panel-challenge-selector");

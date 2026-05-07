@@ -1,8 +1,11 @@
 import * as d3 from "d3";
-import { getAgentColor } from "../lib/colors";
+import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
 import type { Panel, WSMessage } from "../types";
+
+const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
+const GRID_LINE = () => token("--border-subtle", "rgba(26,26,26,0.08)");
 
 interface DataPoint {
   time: number; // ms since start
@@ -391,9 +394,9 @@ export class ChartPanel implements Panel {
         .attr("x", w / 2)
         .attr("y", h / 2)
         .attr("text-anchor", "middle")
-        .attr("fill", "#3d4a5c")
+        .attr("fill", AXIS_TEXT())
         .attr("font-size", "12px")
-        .attr("font-family", "var(--mono)")
+        .attr("font-family", "var(--ui)")
         .text("No iterations yet — this challenge hasn't started");
       return;
     }
@@ -419,7 +422,7 @@ export class ChartPanel implements Panel {
       chartG.append("line")
         .attr("x1", 0).attr("x2", w)
         .attr("y1", yScale(tick)).attr("y2", yScale(tick))
-        .attr("stroke", "#141c2a")
+        .attr("stroke", GRID_LINE())
         .attr("stroke-width", 0.5);
     });
 
@@ -502,8 +505,8 @@ export class ChartPanel implements Panel {
       chartG.append("text")
         .attr("x", -8)
         .attr("y", yScale(tick) + 3)
-        .attr("fill", "#3d4a5c")
-        .attr("font-size", "9px")
+        .attr("fill", AXIS_TEXT())
+        .attr("font-size", "10px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "end")
         .text(formatScore(tick));
@@ -514,8 +517,8 @@ export class ChartPanel implements Panel {
       chartG.append("text")
         .attr("x", xScale(tick))
         .attr("y", h + 16)
-        .attr("fill", "#3d4a5c")
-        .attr("font-size", "9px")
+        .attr("fill", AXIS_TEXT())
+        .attr("font-size", "10px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "middle")
         .text(formatElapsed(tick));
@@ -537,9 +540,9 @@ export class ChartPanel implements Panel {
       chartG.append("text")
         .attr("x", w / 2)
         .attr("y", h / 2)
-        .attr("fill", "#3d4a5c")
+        .attr("fill", AXIS_TEXT())
         .attr("font-size", "11px")
-        .attr("font-family", "var(--mono)")
+        .attr("font-family", "var(--ui)")
         .attr("text-anchor", "middle")
         .text(progress ? `no attempts yet from ${agentName}` : "loading…");
       return;
@@ -587,7 +590,7 @@ export class ChartPanel implements Panel {
       chartG.append("line")
         .attr("x1", 0).attr("x2", w)
         .attr("y1", yScale(tick)).attr("y2", yScale(tick))
-        .attr("stroke", "#141c2a")
+        .attr("stroke", GRID_LINE())
         .attr("stroke-width", 0.5);
     });
 
@@ -632,8 +635,8 @@ export class ChartPanel implements Panel {
       chartG.append("text")
         .attr("x", -8)
         .attr("y", yScale(tick) + 3)
-        .attr("fill", "#3d4a5c")
-        .attr("font-size", "9px")
+        .attr("fill", AXIS_TEXT())
+        .attr("font-size", "10px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "end")
         .text(formatScore(tick));
@@ -645,8 +648,8 @@ export class ChartPanel implements Panel {
       chartG.append("text")
         .attr("x", xScale(t))
         .attr("y", h + 16)
-        .attr("fill", "#3d4a5c")
-        .attr("font-size", "9px")
+        .attr("fill", AXIS_TEXT())
+        .attr("font-size", "10px")
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "middle")
         .text(`#${t}`);
