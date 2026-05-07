@@ -72,85 +72,20 @@ PLACEHOLDER_URL = "${SERVER_URL}"
 PLACEHOLDER_CHALLENGE = "${CHALLENGE_NAME}"
 PLACEHOLDER_ALGO = "${ALGORITHM_PATH}"
 
-# Per-challenge defaults for the wizard prompts. tracks shape mirrors what
-# datasets/<challenge>/test.json must contain. scoring_direction is uniformly
-# "max" for every challenge: each upstream evaluator returns a baseline-
-# relative quality score where higher is better — even VRP and JSP, whose
-# raw objective is to minimise distance/makespan, return `(baseline − ours)
-# / baseline` so the per-instance score is "max" semantics.
-CHALLENGES = {
-    "satisfiability": {
-        "scoring_direction": "max",
-        "track_keys": [
-            "n_vars=5000,ratio=4267",
-            "n_vars=7500,ratio=4267",
-            "n_vars=10000,ratio=4267",
-            "n_vars=100000,ratio=4150",
-            "n_vars=100000,ratio=4200",
-        ],
-        "strategy_tags": [
-            "construction", "local_search", "metaheuristic",
-            "decomposition", "hybrid", "data_structure", "other",
-        ],
-    },
-    "vehicle_routing": {
-        "scoring_direction": "max",
-        "track_keys": [
-            "n_nodes=600",
-            "n_nodes=700",
-            "n_nodes=800",
-            "n_nodes=900",
-            "n_nodes=1000",
-        ],
-        "strategy_tags": [
-            "construction", "local_search", "metaheuristic",
-            "constraint_relaxation", "decomposition", "hybrid",
-            "data_structure", "other",
-        ],
-    },
-    "knapsack": {
-        "scoring_direction": "max",
-        "track_keys": [
-            "n_items=1000,budget=10",
-            "n_items=1000,budget=25",
-            "n_items=1000,budget=5",
-            "n_items=5000,budget=10",
-            "n_items=5000,budget=25",
-        ],
-        "strategy_tags": [
-            "greedy", "dp", "branch_and_bound", "metaheuristic",
-            "decomposition", "hybrid", "data_structure", "other",
-        ],
-    },
-    "job_scheduling": {
-        "scoring_direction": "max",
-        "track_keys": [
-            "n=20,s=FLOW_SHOP",
-            "n=20,s=HYBRID_FLOW_SHOP",
-            "n=20,s=JOB_SHOP",
-            "n=20,s=FJSP_MEDIUM",
-            "n=20,s=FJSP_HIGH",
-        ],
-        "strategy_tags": [
-            "greedy", "construction", "local_search", "metaheuristic",
-            "constraint_relaxation", "decomposition", "hybrid",
-            "data_structure", "other",
-        ],
-    },
-    "energy_arbitrage": {
-        "scoring_direction": "max",
-        "track_keys": [
-            "s=BASELINE",
-            "s=CONGESTED",
-            "s=MULTIDAY",
-            "s=DENSE",
-            "s=CAPSTONE",
-        ],
-        "strategy_tags": [
-            "greedy", "dp", "local_search", "metaheuristic",
-            "decomposition", "hybrid", "data_structure", "other",
-        ],
-    },
+# Per-challenge defaults for the wizard prompts. The canonical definitions
+# live in server/challenges.py; this dict is built from there at module
+# load. Keep it local to setup.py so existing call sites (post_config,
+# write_dataset_test_json) don't need to be aware of the import.
+sys.path.insert(0, str(ROOT / "server"))
+from challenges import CHALLENGES as _CHALLENGE_REGISTRY  # noqa: E402
+
+CHALLENGES: dict[str, dict] = {
+    name: {
+        "scoring_direction": d.scoring_direction,
+        "track_keys": list(d.track_keys),
+        "strategy_tags": list(d.strategy_tags),
+    }
+    for name, d in _CHALLENGE_REGISTRY.items()
 }
 
 DEFAULT_TIMEOUT = 5

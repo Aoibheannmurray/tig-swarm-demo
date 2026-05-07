@@ -1,5 +1,10 @@
 import type { WSMessage, RouteData, AllRouteData, LeaderboardEntry } from "./types";
 
+// Mock data is hand-crafted for VRP — its solution_data shape is RouteData
+// and the route generator below assumes that. Kept as a constant so it
+// shows up in the per_challenge map of the synthesized stats_update.
+const MOCK_CHALLENGE = "vehicle_routing";
+
 const ADJECTIVES = [
   "swift", "bold", "keen", "bright", "sharp", "vivid", "fierce", "noble",
   "agile", "lucid", "cosmic", "astral", "quantum", "neural", "radiant",
@@ -178,6 +183,7 @@ export class MockDataGenerator {
       );
       this.emit({
         type: "experiment_published",
+        challenge: MOCK_CHALLENGE,
         experiment_id: `exp-${this.totalExperiments}`,
         agent_name: agent.name,
         agent_id: agent.id,
@@ -195,6 +201,7 @@ export class MockDataGenerator {
       if (isNewBest) {
         this.emit({
           type: "new_global_best",
+          challenge: MOCK_CHALLENGE,
           experiment_id: `exp-${this.totalExperiments}`,
           agent_name: agent.name,
           agent_id: agent.id,
@@ -239,6 +246,7 @@ export class MockDataGenerator {
 
       this.emit({
         type: "leaderboard_update",
+        challenge: MOCK_CHALLENGE,
         entries,
         timestamp: this.now(),
       });
@@ -254,6 +262,21 @@ export class MockDataGenerator {
         : 0;
     this.emit({
       type: "stats_update",
+      active_challenge: MOCK_CHALLENGE,
+      per_challenge: {
+        [MOCK_CHALLENGE]: {
+          active_agents: this.agents.length,
+          best_score: this.bestScore,
+          baseline_score: this.baseline,
+          num_instances: 8,
+          improvement_pct: impPct,
+          total_experiments: this.totalExperiments,
+          hypotheses_count: this.totalHypotheses,
+          total_trajectories: 0,
+        },
+      },
+      // Flattened convenience fields, matching what main.ts attaches
+      // after slicing per_challenge for the viewed challenge.
       active_agents: this.agents.length,
       total_agents: this.agents.length,
       total_experiments: this.totalExperiments,

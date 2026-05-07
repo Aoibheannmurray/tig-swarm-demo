@@ -71,22 +71,7 @@ fn run_generate(
         }};
     }
 
-    match challenge {
-        #[cfg(feature = "satisfiability")]
-        "satisfiability" => dispatch_generate!(satisfiability),
-        #[cfg(feature = "vehicle_routing")]
-        "vehicle_routing" => dispatch_generate!(vehicle_routing),
-        #[cfg(feature = "knapsack")]
-        "knapsack" => dispatch_generate!(knapsack),
-        #[cfg(feature = "job_scheduling")]
-        "job_scheduling" => dispatch_generate!(job_scheduling),
-        #[cfg(feature = "energy_arbitrage")]
-        "energy_arbitrage" => dispatch_generate!(energy_arbitrage),
-        _ => anyhow::bail!(
-            "Unknown or disabled challenge: {}. Enable the corresponding crate feature (e.g. `--features generator,{}`).",
-            challenge, challenge
-        ),
-    }
+    challenges::enabled_challenge_arms!(challenge, dispatch_generate);
     Ok(())
 }
 

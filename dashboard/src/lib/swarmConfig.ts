@@ -12,22 +12,25 @@
 // challenge's data to view via the in-page selector. Most labels and
 // visualizations honour `viewedChallenge`; the active one is highlighted in
 // the selector so viewers see which challenge agents are actively working on.
+//
+// Per-challenge UI metadata (pretty name, score label, panel factory, fallback
+// sub-config) lives in `challengeRegistry.ts` — this file owns only the
+// server-driven slice.
 
-export type ScoringDirection = "min" | "max";
+import {
+  fallbackSubConfig,
+  challengeScoreLabel,
+  isKnownChallenge,
+  listChallenges,
+  type Challenge,
+  type ChallengeSubConfig,
+  type ScoringDirection,
+} from "./challengeRegistry";
 
-export type Challenge =
-  | "satisfiability"
-  | "vehicle_routing"
-  | "knapsack"
-  | "job_scheduling"
-  | "energy_arbitrage";
-
-export interface ChallengeSubConfig {
-  tracks: Record<string, number | string>;
-  timeout: number;
-  scoring_direction: ScoringDirection;
-  has_initial_algorithm: boolean;
-}
+// Re-export the challenge type aliases so callers can grab them from one
+// place — but `Challenge` itself is owned by challengeRegistry.ts; this
+// file just consumes it.
+export type { Challenge, ChallengeSubConfig, ScoringDirection };
 
 export interface SwarmConfig {
   active_challenge: Challenge;
@@ -36,27 +39,22 @@ export interface SwarmConfig {
   owner_name: string;
 }
 
-const FALLBACK_CH: ChallengeSubConfig = {
-  tracks: {},
-  timeout: 5,
-  scoring_direction: "max",
-  has_initial_algorithm: false,
-};
+function buildFallback(): SwarmConfig {
+  // The fallback exposes every registered challenge — when the server is
+  // unreachable, the dashboard still renders something coherent. The
+  // active_challenge default is the first registry entry.
+  const ids = listChallenges();
+  const available: Record<string, ChallengeSubConfig> = {};
+  for (const id of ids) available[id] = fallbackSubConfig(id);
+  return {
+    active_challenge: ids[0],
+    available_challenges: available,
+    swarm_name: "",
+    owner_name: "",
+  };
+}
 
-const FALLBACK: SwarmConfig = {
-  active_challenge: "vehicle_routing",
-  available_challenges: {
-    satisfiability: { ...FALLBACK_CH },
-    vehicle_routing: { ...FALLBACK_CH },
-    knapsack: { ...FALLBACK_CH },
-    job_scheduling: { ...FALLBACK_CH },
-    energy_arbitrage: { ...FALLBACK_CH },
-  },
-  swarm_name: "",
-  owner_name: "",
-};
-
-let current: SwarmConfig = FALLBACK;
+let current: SwarmConfig = buildFallback();
 let listeners: Array<(cfg: SwarmConfig) => void> = [];
 
 export function getSwarmConfig(): SwarmConfig {
@@ -68,11 +66,14 @@ export function getActiveChallenge(): Challenge {
 }
 
 export function getAvailableChallenges(): Challenge[] {
-  return Object.keys(current.available_challenges) as Challenge[];
+  // Filter to registered challenges only — if the server reports an
+  // unknown challenge id (e.g. running against a dashboard build without
+  // its registry entry), skip it rather than crash.
+  return Object.keys(current.available_challenges).filter(isKnownChallenge);
 }
 
 export function getChallengeConfig(c: Challenge): ChallengeSubConfig {
-  return current.available_challenges[c] ?? FALLBACK_CH;
+  return current.available_challenges[c] ?? fallbackSubConfig(c);
 }
 
 // `challenge` arg is optional; defaults to the swarm's active challenge for
@@ -96,15 +97,12 @@ export function isBetter(candidate: number, prior: number, challenge?: Challenge
 }
 
 // Score label for stats / leaderboard headers, scoped to the given challenge
-// (or the active one when no arg is passed).
+// (or the active one when no arg is passed). Reads from the registry — the
+// per-challenge label is no longer encoded as an if/else here.
 export function scoreLabel(challenge?: Challenge): string {
   const c = challenge ?? current.active_challenge;
-  if (c === "vehicle_routing") return "DISTANCE";
-  if (c === "satisfiability") return "QUALITY";
-  if (c === "knapsack") return "VALUE";
-  if (c === "job_scheduling") return "MAKESPAN";
-  if (c === "energy_arbitrage") return "PROFIT";
-  return "SCORE";
+  if (!isKnownChallenge(c)) return "SCORE";
+  return challengeScoreLabel(c);
 }
 
 export async function loadSwarmConfig(apiBase: string): Promise<SwarmConfig> {
@@ -112,7 +110,10 @@ export async function loadSwarmConfig(apiBase: string): Promise<SwarmConfig> {
     const r = await fetch(`${apiBase}/api/swarm_config`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    const active = (data.active_challenge ?? FALLBACK.active_challenge) as Challenge;
+    const reportedActive = data.active_challenge as string | undefined;
+    const active = (reportedActive && isKnownChallenge(reportedActive)
+      ? reportedActive
+      : listChallenges()[0]) as Challenge;
     const available: Record<string, ChallengeSubConfig> = {};
     const raw = (data.available_challenges ?? {}) as Record<string, any>;
     for (const [name, sub] of Object.entries(raw)) {
@@ -161,3 +162,4 @@ export function handleWsEvent(apiBase: string, msg: any): void {
     void loadSwarmConfig(apiBase);
   }
 }
+

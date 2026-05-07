@@ -83,6 +83,7 @@ async function loadInitialState(apiUrl: string) {
     if (state.leaderboard?.length) {
       handleMessage({
         type: "leaderboard_update",
+        challenge: getViewedChallenge(),
         entries: state.leaderboard,
         timestamp: new Date().toISOString(),
       });

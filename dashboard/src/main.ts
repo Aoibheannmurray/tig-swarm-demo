@@ -20,15 +20,11 @@ import {
 
 import { ChallengeSelectorPanel } from "./panels/challenge-selector";
 import { StatsPanel } from "./panels/stats";
-import { SolutionPanel } from "./panels/solution";
-import { GanttPanel } from "./panels/gantt";
-import { KnapsackPanel } from "./panels/knapsack";
-import { EnergyPanel } from "./panels/energy";
-import { SatPanel } from "./panels/sat";
 import { ChartPanel } from "./panels/chart";
 import { DiversityPanel } from "./panels/diversity";
 import { FeedPanel } from "./panels/feed";
 import { LeaderboardPanel } from "./panels/leaderboard";
+import { buildPanelFor, isKnownChallenge } from "./lib/challengeRegistry";
 
 import type { WSMessage, Panel } from "./types";
 
@@ -79,12 +75,14 @@ function constructDisplayPanel() {
     displayPanel = undefined;
     container.innerHTML = "";
   }
+  // The registry maps challenge id → panel factory. Adding a 6th challenge
+  // is one entry in lib/challengeRegistry.ts — no edit here.
   const challenge = getViewedChallenge();
-  if (challenge === "job_scheduling") displayPanel = new GanttPanel();
-  else if (challenge === "knapsack") displayPanel = new KnapsackPanel();
-  else if (challenge === "energy_arbitrage") displayPanel = new EnergyPanel();
-  else if (challenge === "satisfiability") displayPanel = new SatPanel();
-  else displayPanel = new SolutionPanel(); // VRP (and any future challenge before it gets a dedicated panel)
+  if (!isKnownChallenge(challenge)) {
+    console.warn(`[Dashboard] No panel registered for challenge "${challenge}"`);
+    return;
+  }
+  displayPanel = buildPanelFor(challenge);
   displayPanel.init(container);
   panels.push(displayPanel);
 }
@@ -133,7 +131,7 @@ function handleMessage(msg: WSMessage) {
     if (msg.type === "hypothesis_proposed") soundHypothesisProposed(msg.strategy_tag);
     if (msg.type === "experiment_published") soundExperimentPublished();
     if (msg.type === "new_global_best") soundNewGlobalBest();
-    if (msg.type === "stats_update") startHeartbeat(msg.total_agents ?? msg.active_agents);
+    if (msg.type === "stats_update") startHeartbeat(msg.total_agents ?? msg.active_agents ?? 0);
   }
 
   if (msg.type === "new_global_best") {
@@ -166,7 +164,7 @@ function handleMessage(msg: WSMessage) {
   // above. Re-hydrate from /api/state + /api/replay so counters and
   // baselines are correct without requiring a full page reload. Without
   // this, panels sit blank until the next live event arrives.
-  if (msg.type === "reset" && (msg as any).challenge === getViewedChallenge()) {
+  if (msg.type === "reset" && msg.challenge === getViewedChallenge()) {
     void loadInitialState(getApiUrl(), getViewedChallenge());
   }
 }

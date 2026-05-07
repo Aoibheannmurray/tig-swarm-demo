@@ -40,22 +40,7 @@ fn run_evaluate(challenge: &str, instance_file: &Path, solution_file: &Path) -> 
         }};
     }
 
-    let out = match challenge {
-        #[cfg(feature = "satisfiability")]
-        "satisfiability" => dispatch_evaluate!(satisfiability),
-        #[cfg(feature = "vehicle_routing")]
-        "vehicle_routing" => dispatch_evaluate!(vehicle_routing),
-        #[cfg(feature = "knapsack")]
-        "knapsack" => dispatch_evaluate!(knapsack),
-        #[cfg(feature = "job_scheduling")]
-        "job_scheduling" => dispatch_evaluate!(job_scheduling),
-        #[cfg(feature = "energy_arbitrage")]
-        "energy_arbitrage" => dispatch_evaluate!(energy_arbitrage),
-        _ => anyhow::bail!(
-            "Unknown or disabled challenge: {}. Enable the corresponding crate feature (e.g. `--features {}`).",
-            challenge, challenge
-        ),
-    };
+    let out: f64 = challenges::enabled_challenge_arms!(challenge, dispatch_evaluate);
     // The dispatch returns each challenge's native score type; print it
     // as a generic `score` field so downstream tooling can stay challenge-
     // agnostic. (We keep the legacy "distance" key as a fallback for

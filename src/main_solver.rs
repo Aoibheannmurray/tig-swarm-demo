@@ -51,23 +51,7 @@ fn run_solve(
         }};
     }
 
-    match challenge {
-        #[cfg(feature = "satisfiability")]
-        "satisfiability" => dispatch_solve!(satisfiability),
-        #[cfg(feature = "vehicle_routing")]
-        "vehicle_routing" => dispatch_solve!(vehicle_routing),
-        #[cfg(feature = "knapsack")]
-        "knapsack" => dispatch_solve!(knapsack),
-        #[cfg(feature = "job_scheduling")]
-        "job_scheduling" => dispatch_solve!(job_scheduling),
-        #[cfg(feature = "energy_arbitrage")]
-        "energy_arbitrage" => dispatch_solve!(energy_arbitrage),
-        _ => anyhow::bail!(
-            "Unknown or disabled challenge: {}. Enable the corresponding crate feature (e.g. `--features {}`) when building.",
-            challenge,
-            challenge
-        ),
-    }
+    challenges::enabled_challenge_arms!(challenge, dispatch_solve);
     Ok(())
 }
 

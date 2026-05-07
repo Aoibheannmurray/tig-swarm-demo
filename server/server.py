@@ -21,6 +21,8 @@ from models import (
 from names import generate_agent_name, load_used_names
 from dedup import fingerprint
 import db
+import ws_events
+import api_models
 
 logger = logging.getLogger("swarm")
 
@@ -185,11 +187,14 @@ class ConnectionManager:
         if ws in self.connections:
             self.connections.remove(ws)
 
-    async def broadcast(self, event: dict):
+    async def broadcast(self, event):
+        # Every event must be a typed Pydantic model from ws_events.py;
+        # the union (`WSEvent`) is the wire-level contract.
         if not self.connections:
             return
+        payload = event.model_dump(mode="json")
         results = await asyncio.gather(
-            *(ws.send_json(event) for ws in self.connections),
+            *(ws.send_json(payload) for ws in self.connections),
             return_exceptions=True,
         )
         self.connections = [
@@ -295,13 +300,12 @@ async def periodic_stats():
 
             # `per_challenge` is the source of truth; the dashboard slices
             # it down to the viewed challenge before populating panels.
-            await manager.broadcast({
-                "type": "stats_update",
-                "active_challenge": active_challenge,
-                "per_challenge": per_challenge,
-                "total_agents": total_agents,
-                "timestamp": now(),
-            })
+            await manager.broadcast(ws_events.StatsUpdate(
+                active_challenge=active_challenge,
+                per_challenge={ch: ws_events._StatsPerChallenge(**v) for ch, v in per_challenge.items()},
+                total_agents=total_agents,
+                timestamp=now(),
+            ))
         except Exception:
             logger.exception("Error in periodic_stats")
 
@@ -322,12 +326,11 @@ async def register_agent(req: RegisterRequest):
         await conn.commit()
         config = await db.get_config(conn)
 
-    await manager.broadcast({
-        "type": "agent_joined",
-        "agent_id": agent_id,
-        "agent_name": agent_name,
-        "timestamp": timestamp,
-    })
+    await manager.broadcast(ws_events.AgentJoined(
+        agent_id=agent_id,
+        agent_name=agent_name,
+        timestamp=timestamp,
+    ))
 
     active_challenge = (
         config.get("active_challenge")
@@ -515,14 +518,13 @@ async def get_state(
                 my_best_experiment_id = None
                 runs_since = 0
                 agent_name = await get_agent_name(conn, agent_id)
-                await manager.broadcast({
-                    "type": "trajectory_reset",
-                    "challenge": challenge,
-                    "agent_name": agent_name,
-                    "agent_id": agent_id,
-                    "reset_type": trajectory_reset["type"],
-                    "timestamp": timestamp,
-                })
+                await manager.broadcast(ws_events.TrajectoryReset(
+                    challenge=challenge,
+                    agent_name=agent_name,
+                    agent_id=agent_id,
+                    reset_type=trajectory_reset["type"],
+                    timestamp=timestamp,
+                ))
                 # Re-read acs so subsequent reads see the reset state.
                 acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
             else:
@@ -888,50 +890,47 @@ async def create_iteration(req: IterationCreate):
     num_instances = get_num_instances_for(challenge_cfg, effective_solution_data)
     imp = improvement_pct(baseline, req.score, direction) if baseline is not None else 0.0
 
-    await manager.broadcast({
-        "type": "experiment_published",
-        "challenge": challenge,
-        "experiment_id": exp_id,
-        "agent_name": agent_name,
-        "agent_id": req.agent_id,
-        "score": req.score,
-        "feasible": req.feasible,
-        "improvement_pct": imp,
-        "delta_vs_best_pct": delta_vs_best_pct,
-        "beats_own_best": beats_own_best,
-        "delta_vs_own_best_pct": delta_vs_own_best_pct,
-        "num_instances": num_instances,
-        "is_new_best": is_new_best,
-        "hypothesis_id": hyp_id,
-        "strategy_tag": req.strategy_tag,
-        "title": req.title,
-        "notes": req.notes,
-        "track_scores": req.track_scores,
-        "timestamp": timestamp,
-    })
+    await manager.broadcast(ws_events.ExperimentPublished(
+        challenge=challenge,
+        experiment_id=exp_id,
+        agent_name=agent_name,
+        agent_id=req.agent_id,
+        score=req.score,
+        feasible=req.feasible,
+        improvement_pct=imp,
+        delta_vs_best_pct=delta_vs_best_pct,
+        beats_own_best=beats_own_best,
+        delta_vs_own_best_pct=delta_vs_own_best_pct,
+        num_instances=num_instances,
+        is_new_best=is_new_best,
+        hypothesis_id=hyp_id,
+        strategy_tag=req.strategy_tag,
+        title=req.title,
+        notes=req.notes or "",
+        track_scores=req.track_scores,
+        timestamp=timestamp,
+    ))
 
     if is_new_best:
-        await manager.broadcast({
-            "type": "new_global_best",
-            "challenge": challenge,
-            "experiment_id": exp_id,
-            "agent_name": agent_name,
-            "agent_id": req.agent_id,
-            "score": req.score,
-            "improvement_pct": imp,
-            "incremental_improvement_pct": incremental_pct,
-            "num_instances": num_instances,
-            "solution_data": req.solution_data,
-            "track_scores": req.track_scores,
-            "timestamp": timestamp,
-        })
+        await manager.broadcast(ws_events.NewGlobalBest(
+            challenge=challenge,
+            experiment_id=exp_id,
+            agent_name=agent_name,
+            agent_id=req.agent_id,
+            score=req.score,
+            improvement_pct=imp,
+            incremental_improvement_pct=incremental_pct,
+            num_instances=num_instances,
+            solution_data=req.solution_data,
+            track_scores=req.track_scores,
+            timestamp=timestamp,
+        ))
 
-    await manager.broadcast({
-        "type": "leaderboard_update",
-        "challenge": challenge,
-        "entries": leaderboard,
-        "timestamp": timestamp,
-    })
+    await manager.broadcast(ws_events.LeaderboardUpdate(
+        challenge=challenge,
+        entries=leaderboard,
+        timestamp=timestamp,
+    ))
 
     return IterationResponse(
         experiment_id=exp_id,
@@ -972,16 +971,15 @@ async def create_message(req: MessageCreate):
         )
         await conn.commit()
 
-    await manager.broadcast({
-        "type": "chat_message",
-        "challenge": challenge,
-        "message_id": msg_id,
-        "agent_name": req.agent_name,
-        "agent_id": req.agent_id,
-        "content": req.content,
-        "msg_type": req.msg_type,
-        "timestamp": timestamp,
-    })
+    await manager.broadcast(ws_events.ChatMessage(
+        challenge=challenge,
+        message_id=msg_id,
+        agent_name=req.agent_name,
+        agent_id=req.agent_id,
+        content=req.content,
+        msg_type=req.msg_type,
+        timestamp=timestamp,
+    ))
 
     return {"message_id": msg_id, "timestamp": timestamp, "challenge": challenge}
 
@@ -1002,7 +1000,7 @@ async def list_messages(limit: int = 50, challenge: str | None = None):
 
 # ── Diversity ──
 
-@app.get("/api/diversity")
+@app.get("/api/diversity", response_model=api_models.DiversityResponse)
 async def get_diversity(challenge: str | None = None):
     challenge = await resolve_challenge(challenge)
     direction = await get_direction(challenge)
@@ -1053,7 +1051,7 @@ async def get_diversity(challenge: str | None = None):
 
 # ── Replay ──
 
-@app.get("/api/replay")
+@app.get("/api/replay", response_model=list[api_models.ReplayRow])
 async def get_replay(challenge: str | None = None, compact: int = 0):
     """Best-history replay for a challenge.
 
@@ -1061,6 +1059,10 @@ async def get_replay(challenge: str | None = None, compact: int = 0):
     only need score/agent/timestamp (the chart panel's score-history
     feed) don't pay for 100 KB+ of viz payload they'd just discard.
     The visualization panels continue to use the default full payload.
+
+    Schema: see ``server/api_models.py:ReplayRow``. The compact variant
+    leaves ``solution_data=None`` in the response — same model shape so
+    callers don't have to branch on the ``compact`` query param.
     """
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
@@ -1071,24 +1073,24 @@ async def get_replay(challenge: str | None = None, compact: int = 0):
         rows = [dict(row) for row in await cursor.fetchall()]
     if compact:
         return [
-            {
-                "experiment_id": r["experiment_id"],
-                "agent_id": r.get("agent_id"),
-                "agent_name": r["agent_name"],
-                "score": r["score"],
-                "created_at": r["created_at"],
-            }
+            api_models.ReplayRow(
+                experiment_id=r["experiment_id"],
+                agent_id=r.get("agent_id"),
+                agent_name=r["agent_name"],
+                score=r["score"],
+                created_at=r["created_at"],
+            )
             for r in rows
         ]
     return [
-        {
-            "experiment_id": r["experiment_id"],
-            "agent_id": r.get("agent_id"),
-            "agent_name": r["agent_name"],
-            "score": r["score"],
-            "solution_data": json.loads(r["solution_data"]) if r["solution_data"] else None,
-            "created_at": r["created_at"],
-        }
+        api_models.ReplayRow(
+            experiment_id=r["experiment_id"],
+            agent_id=r.get("agent_id"),
+            agent_name=r["agent_name"],
+            score=r["score"],
+            solution_data=json.loads(r["solution_data"]) if r["solution_data"] else None,
+            created_at=r["created_at"],
+        )
         for r in rows
     ]
 
@@ -1220,12 +1222,11 @@ async def get_trajectories(challenge: str | None = None):
 @app.post("/api/admin/broadcast")
 async def admin_broadcast(req: AdminBroadcast):
     await verify_admin(req)
-    await manager.broadcast({
-        "type": "admin_broadcast",
-        "message": req.message,
-        "priority": req.priority,
-        "timestamp": now(),
-    })
+    await manager.broadcast(ws_events.AdminBroadcastEvt(
+        message=req.message,
+        priority=req.priority,
+        timestamp=now(),
+    ))
     return {"sent": True}
 
 
@@ -1254,11 +1255,10 @@ async def admin_reset_challenge(req: AdminResetChallenge):
         )
         agent_bests_deleted = cur.rowcount
         await conn.commit()
-    await manager.broadcast({
-        "type": "reset",
-        "challenge": challenge,
-        "timestamp": now(),
-    })
+    await manager.broadcast(ws_events.ResetEvt(
+        challenge=challenge,
+        timestamp=now(),
+    ))
     return {
         "reset": True,
         "challenge": challenge,
@@ -1421,14 +1421,13 @@ async def update_swarm_config(req: SwarmConfigUpdate):
 
     # Tell connected dashboards to refetch swarm_config so labels and the
     # active visualization swap to the new challenge without a page reload.
-    await manager.broadcast({
-        "type": "swarm_config_updated",
-        "active_challenge": config_after["active_challenge"],
-        "available_challenges": config_after["available_challenges"],
-        "scoring_direction": config_after["scoring_direction"],
-        "swarm_name": config_after["swarm_name"],
-        "timestamp": now(),
-    })
+    await manager.broadcast(ws_events.SwarmConfigUpdated(
+        active_challenge=config_after["active_challenge"],
+        available_challenges=config_after["available_challenges"],
+        scoring_direction=config_after["scoring_direction"],
+        swarm_name=config_after["swarm_name"],
+        timestamp=now(),
+    ))
     return {"updated": True, **config_after}
 
 

@@ -15,7 +15,8 @@
 //     through breakthroughs with the < / > arrows. Hidden when already
 //     at the latest.
 
-import { getActiveChallenge, type Challenge } from "./swarmConfig";
+import { getActiveChallenge } from "./swarmConfig";
+import type { Challenge } from "./challengeRegistry";
 import { setViewedChallenge } from "./viewedChallenge";
 
 /**
