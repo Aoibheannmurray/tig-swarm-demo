@@ -1101,11 +1101,16 @@ async def get_top_scores(limit: int = 20, challenge: str | None = None):
 
 
 @app.get("/api/agent_experiments")
-async def get_agent_experiments(agent_id: str, challenge: str | None = None):
+async def get_agent_experiments(
+    agent_id: str,
+    challenge: str | None = None,
+    include_code: bool = False,
+):
     # Per-agent full attempt history for the personal progress chart, scoped
     # to the requested challenge (defaults to active). Returns every experiment
     # (improvement or not, feasible or not) so the dashboard can render a
     # step plot of the agent's whole journey on this challenge.
+    # Pass include_code=true to also return algorithm_code per experiment.
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         ag = await conn.execute(
@@ -1117,9 +1122,11 @@ async def get_agent_experiments(agent_id: str, challenge: str | None = None):
             return {"agent_id": agent_id, "agent_name": None,
                     "registered_at": None, "challenge": challenge, "experiments": []}
 
+        code_col = ", e.algorithm_code" if include_code else ""
         cursor = await conn.execute(
-            """SELECT e.id, e.score, e.feasible, e.beats_own_best, e.notes,
+            f"""SELECT e.id, e.score, e.feasible, e.beats_own_best, e.notes,
                       e.created_at, h.title, h.description, h.strategy_tag
+                      {code_col}
                FROM experiments e
                LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
                WHERE e.agent_id = ? AND e.challenge = ?
@@ -1128,25 +1135,28 @@ async def get_agent_experiments(agent_id: str, challenge: str | None = None):
         )
         rows = await cursor.fetchall()
 
+    def _row_dict(r):
+        d = {
+            "id": r["id"],
+            "score": r["score"],
+            "feasible": bool(r["feasible"]),
+            "beats_own_best": bool(r["beats_own_best"]) if r["beats_own_best"] is not None else False,
+            "notes": r["notes"],
+            "title": r["title"],
+            "description": r["description"],
+            "strategy_tag": r["strategy_tag"],
+            "created_at": r["created_at"],
+        }
+        if include_code:
+            d["algorithm_code"] = r["algorithm_code"]
+        return d
+
     return {
         "agent_id": agent_id,
         "challenge": challenge,
         "agent_name": agent_row["name"],
         "registered_at": agent_row["registered_at"],
-        "experiments": [
-            {
-                "id": r["id"],
-                "score": r["score"],
-                "feasible": bool(r["feasible"]),
-                "beats_own_best": bool(r["beats_own_best"]) if r["beats_own_best"] is not None else False,
-                "notes": r["notes"],
-                "title": r["title"],
-                "description": r["description"],
-                "strategy_tag": r["strategy_tag"],
-                "created_at": r["created_at"],
-            }
-            for r in rows
-        ],
+        "experiments": [_row_dict(r) for r in rows],
     }
 
 
