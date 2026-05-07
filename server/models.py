@@ -99,7 +99,7 @@ class ChallengeSubConfig(BaseModel):
     """Per-challenge configuration. The owner can populate all five in
     parallel via the wizard; switching the active challenge is independent."""
     tracks: dict = {}
-    timeout: int = 5
+    timeout: int = 30
     scoring_direction: Literal["min", "max"] = "max"
     initial_algorithm_code: str = ""
     strategy_tags: Optional[list[str]] = None

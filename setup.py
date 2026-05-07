@@ -87,8 +87,15 @@ CHALLENGES: dict[str, dict] = {
     for name, d in _CHALLENGE_REGISTRY.items()
 }
 
-DEFAULT_TIMEOUT = 5
+DEFAULT_TIMEOUT = 30
 DEFAULT_INSTANCES_PER_TRACK = 2
+DEFAULT_TRACKS_PER_CHALLENGE = {
+    "satisfiability": {"n_vars=100000,ratio=4150": 2},
+    "vehicle_routing": {"n_nodes=600": 2},
+    "knapsack": {"n_items=1000,budget=10": 2},
+    "job_scheduling": {"n=20,s=HYBRID_FLOW_SHOP": 2},
+    "energy_arbitrage": {"s=BASELINE": 2},
+}
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -286,8 +293,13 @@ def collect_per_challenge_configs(
     for ch, meta in CHALLENGES.items():
         tracks: dict = {"seed": "test"}
         if use_defaults:
-            for key in meta["track_keys"]:
-                tracks[key] = DEFAULT_INSTANCES_PER_TRACK
+            default_tracks = DEFAULT_TRACKS_PER_CHALLENGE.get(ch)
+            if default_tracks:
+                for key, count in default_tracks.items():
+                    tracks[key] = count
+            else:
+                for key in meta["track_keys"]:
+                    tracks[key] = DEFAULT_INSTANCES_PER_TRACK
             timeout = DEFAULT_TIMEOUT
         else:
             print(f"\n── {ch} ──")

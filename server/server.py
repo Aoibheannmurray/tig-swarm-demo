@@ -482,8 +482,7 @@ async def get_state(
                         new_program_id = new_id()
                         trajectory_reset = {"type": "fresh_start"}
                     else:
-                        weights = [1.0 / max(row["num_deactivations"], 1) for row in inactive_pool]
-                        picked = random.choices(inactive_pool, weights=weights, k=1)[0]
+                        picked = random.choice(inactive_pool)
                         new_code = picked["algorithm_code"]
                         new_program_id = picked.get("program_id") or new_id()
                         await db.remove_inactive(conn, picked["id"])

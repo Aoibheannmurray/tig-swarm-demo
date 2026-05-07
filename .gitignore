@@ -23,3 +23,4 @@ tacit_knowledge_*.md
 tacit_knowledge_personal.md
 
 src/*/algorithm/mod.rs
+tig-monorepo/

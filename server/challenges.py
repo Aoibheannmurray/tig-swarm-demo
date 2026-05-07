@@ -32,7 +32,7 @@ class ChallengeDef:
     scoring_direction: Literal["min", "max"]
     track_keys: tuple[str, ...]
     strategy_tags: tuple[str, ...]
-    default_timeout: int = 5
+    default_timeout: int = 30
 
 
 CHALLENGES: dict[str, ChallengeDef] = {

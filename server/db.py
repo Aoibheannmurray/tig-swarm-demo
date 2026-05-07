@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
 CREATE TABLE IF NOT EXISTS challenge_configs (
     challenge TEXT PRIMARY KEY,
     tracks TEXT NOT NULL DEFAULT '{}',
-    timeout INTEGER NOT NULL DEFAULT 5,
+    timeout INTEGER NOT NULL DEFAULT 30,
     scoring_direction TEXT NOT NULL DEFAULT 'max',
     initial_algorithm_code TEXT NOT NULL DEFAULT '',
     strategy_tags TEXT NOT NULL DEFAULT '[]'
