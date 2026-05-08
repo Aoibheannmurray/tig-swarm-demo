@@ -26,9 +26,25 @@ type Tab =
   | { type: "global" }
   | { type: "agent"; agentId: string; agentName: string };
 
+interface AgentExperiment {
+  time: number;
+  score: number;
+  feasible: boolean;
+  experimentId?: string;
+  // Per-iteration metadata fed back from /api/agent_experiments — used to
+  // mark events on the per-agent progress plot:
+  //  - trajectoryId   → group of consecutive experiments sharing a trajectory
+  //  - trajectoryDeactivated → last experiment on a trajectory that became
+  //                            inactive (cross marker)
+  //  - receivedHint   → "tacit_knowledge" (star) / "inspiration" (square)
+  trajectoryId?: string | null;
+  trajectoryDeactivated?: boolean;
+  receivedHint?: "tacit_knowledge" | "inspiration" | null;
+}
+
 interface AgentProgress {
   registeredAt: number; // epoch ms
-  experiments: { time: number; score: number; feasible: boolean; experimentId?: string }[]; // time = ms since registeredAt
+  experiments: AgentExperiment[]; // time = ms since registeredAt
   experimentIds: Set<string>;
   loaded: boolean;
   lastEventTime: number; // epoch ms of most recent appended experiment
@@ -279,18 +295,29 @@ export class ChartPanel implements Panel {
         agent_id: string;
         agent_name: string | null;
         registered_at: string | null;
-        experiments: { id?: string; score: number; feasible: boolean; created_at: string }[];
+        experiments: {
+          id?: string;
+          score: number;
+          feasible: boolean;
+          created_at: string;
+          trajectory_id?: string | null;
+          received_hint?: "tacit_knowledge" | "inspiration" | null;
+          trajectory_deactivated?: boolean;
+        }[];
       } = await res.json();
 
       const registeredAt = data.registered_at
         ? new Date(data.registered_at).getTime()
         : Date.now();
 
-      const experiments = data.experiments.map((e) => ({
+      const experiments: AgentExperiment[] = data.experiments.map((e) => ({
         time: Math.max(0, new Date(e.created_at).getTime() - registeredAt),
         score: e.score,
         feasible: e.feasible,
         experimentId: e.id,
+        trajectoryId: e.trajectory_id ?? null,
+        trajectoryDeactivated: !!e.trajectory_deactivated,
+        receivedHint: e.received_hint ?? null,
       }));
 
       const experimentIds = new Set(
@@ -632,13 +659,48 @@ export class ChartPanel implements Panel {
       }
 
       // Attempt marker — dimmer for infeasible so they're distinguishable.
-      chartG.append("circle")
-        .attr("cx", x0)
-        .attr("cy", y0)
-        .attr("r", 2.5)
-        .attr("fill", color)
-        .attr("opacity", d.feasible ? 0.9 : 0.4);
+      // Replaced with a richer event marker below when this iteration was
+      // hinted with tacit knowledge / inspiration, or was the last iteration
+      // on a trajectory that subsequently became inactive.
+      const event = pickEventKind(d);
+      if (event === "trajectory_deactivated") {
+        // Cross — trajectory went into the inactive pool after this point.
+        const r = 5;
+        chartG.append("line")
+          .attr("x1", x0 - r).attr("x2", x0 + r)
+          .attr("y1", y0 - r).attr("y2", y0 + r)
+          .attr("stroke", color).attr("stroke-width", 1.6).attr("opacity", 0.95);
+        chartG.append("line")
+          .attr("x1", x0 - r).attr("x2", x0 + r)
+          .attr("y1", y0 + r).attr("y2", y0 - r)
+          .attr("stroke", color).attr("stroke-width", 1.6).attr("opacity", 0.95);
+      } else if (event === "tacit_knowledge") {
+        // Star — agent was nudged with a tacit-knowledge hint on the prior
+        // /api/state call.
+        chartG.append("path")
+          .attr("d", d3.symbol(d3.symbolStar, 60)())
+          .attr("transform", `translate(${x0},${y0})`)
+          .attr("fill", color).attr("opacity", 0.95)
+          .attr("stroke", color).attr("stroke-width", 0.5);
+      } else if (event === "inspiration") {
+        // Square — agent was given another agent's code as inspiration.
+        chartG.append("path")
+          .attr("d", d3.symbol(d3.symbolSquare, 50)())
+          .attr("transform", `translate(${x0},${y0})`)
+          .attr("fill", color).attr("opacity", 0.95)
+          .attr("stroke", color).attr("stroke-width", 0.5);
+      } else {
+        chartG.append("circle")
+          .attr("cx", x0)
+          .attr("cy", y0)
+          .attr("r", 2.5)
+          .attr("fill", color)
+          .attr("opacity", d.feasible ? 0.9 : 0.4);
+      }
     }
+
+    // Legend for the event markers.
+    this.drawAgentEventLegend(chartG, w, fs, color);
 
     yTicks.forEach((tick) => {
       chartG.append("text")
@@ -665,6 +727,54 @@ export class ChartPanel implements Panel {
     }
   }
 
+  private drawAgentEventLegend(
+    chartG: any, chartWidth: number, fs: number, color: string,
+  ) {
+    // Stack short rows in the top-right corner. Each row is a tiny marker
+    // followed by a label. Kept compact so it doesn't crowd the plot.
+    const items: { kind: "trajectory_deactivated" | "tacit_knowledge" | "inspiration"; label: string }[] = [
+      { kind: "trajectory_deactivated", label: "trajectory deactivated" },
+      { kind: "tacit_knowledge",        label: "tacit knowledge" },
+      { kind: "inspiration",            label: "inspiration" },
+    ];
+    const lineH = Math.max(12, fs + 2);
+    const x0 = chartWidth - 130;
+    let y0 = 4;
+    const legend = chartG.append("g").attr("class", "agent-event-legend");
+    items.forEach((item) => {
+      const cy = y0 + lineH / 2;
+      if (item.kind === "trajectory_deactivated") {
+        const r = 4;
+        legend.append("line")
+          .attr("x1", x0 - r).attr("x2", x0 + r)
+          .attr("y1", cy - r).attr("y2", cy + r)
+          .attr("stroke", color).attr("stroke-width", 1.4);
+        legend.append("line")
+          .attr("x1", x0 - r).attr("x2", x0 + r)
+          .attr("y1", cy + r).attr("y2", cy - r)
+          .attr("stroke", color).attr("stroke-width", 1.4);
+      } else if (item.kind === "tacit_knowledge") {
+        legend.append("path")
+          .attr("d", d3.symbol(d3.symbolStar, 36)())
+          .attr("transform", `translate(${x0},${cy})`)
+          .attr("fill", color).attr("opacity", 0.9);
+      } else {
+        legend.append("path")
+          .attr("d", d3.symbol(d3.symbolSquare, 30)())
+          .attr("transform", `translate(${x0},${cy})`)
+          .attr("fill", color).attr("opacity", 0.9);
+      }
+      legend.append("text")
+        .attr("x", x0 + 10)
+        .attr("y", cy + fs / 3)
+        .attr("fill", AXIS_TEXT())
+        .attr("font-size", `${Math.max(9, fs - 2)}px`)
+        .attr("font-family", "var(--ui)")
+        .text(item.label);
+      y0 += lineH;
+    });
+  }
+
   private getGlobalYDomain(): [number, number] | null {
     if (this.globalData.length < 1) return null;
     const scoreMin = d3.min(this.globalData, (d) => d.score);
@@ -676,6 +786,19 @@ export class ChartPanel implements Panel {
     const yMax = scoreMax + pad;
     return [yMin, yMax];
   }
+}
+
+function pickEventKind(
+  e: AgentExperiment,
+): "trajectory_deactivated" | "tacit_knowledge" | "inspiration" | null {
+  // Priority: a trajectory deactivation is the loudest event, so it wins
+  // when both apply (rare — the agent published an iteration that was then
+  // the last on a trajectory which became inactive on its next /api/state
+  // call). Hint markers come next.
+  if (e.trajectoryDeactivated) return "trajectory_deactivated";
+  if (e.receivedHint === "tacit_knowledge") return "tacit_knowledge";
+  if (e.receivedHint === "inspiration") return "inspiration";
+  return null;
 }
 
 function formatElapsed(ms: number): string {

@@ -23,7 +23,7 @@ export class DiversityPanel implements Panel {
     this.container = container;
     container.innerHTML = `
       <div class="panel-inner diversity-panel">
-        <div class="panel-label">CODE DIVERSITY</div>
+        <div class="panel-label">CODE DIVERSITY · TRAJECTORIES</div>
         <div class="diversity-grid" id="diversity-grid"></div>
       </div>
     `;
@@ -161,8 +161,20 @@ export class DiversityPanel implements Panel {
   }
 
   private shortName(name: string): string {
-    if (name.length <= 8) return name;
-    return name.slice(0, 7) + "…";
+    // The server now labels rows as "<traj-id> · <agent-name>(possibly · inactive)".
+    // The traj-id prefix is what the operator scans for, so keep it intact
+    // and truncate from the trailing agent-name half when the label is too
+    // long for the heatmap chip.
+    if (name.length <= 12) return name;
+    const dot = " · ";
+    const idx = name.indexOf(dot);
+    if (idx < 0 || idx >= 10) return name.slice(0, 11) + "…";
+    const head = name.slice(0, idx); // traj-id
+    const tail = name.slice(idx + dot.length);
+    const tailBudget = Math.max(1, 12 - head.length - dot.length);
+    return tail.length <= tailBudget
+      ? `${head}${dot}${tail}`
+      : `${head}${dot}${tail.slice(0, tailBudget)}…`;
   }
 
   private cellColor(val: number): string {

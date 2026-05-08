@@ -33,7 +33,7 @@ panelEl.innerHTML = `
   <div class="page-flex">
     <div class="ideas-header">
       <div class="ideas-title">
-        <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
+        <img class="stats-mark" src="/prometheus-icon.png" alt="" draggable="false" />
         <span class="ideas-title-text">Benchmark Performance Graph</span>
       </div>
       <div class="ideas-nav">

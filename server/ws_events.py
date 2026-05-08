@@ -89,6 +89,9 @@ class _LeaderboardEntry(BaseModel):
     rank: int
     agent_id: str
     agent_name: str
+    # Free-form label identifying which LLM is running this agent's loop.
+    # Empty string when the contributor didn't supply one at register time.
+    llm_type: str = ""
     runs: int
     improvements: int
     runs_since_improvement: int
@@ -119,6 +122,9 @@ class _StatsPerChallenge(BaseModel):
     total_experiments: int
     hypotheses_count: int
     total_trajectories: int
+    # Distinct agents that have ever worked on this challenge (active +
+    # inactive). Sourced from the agent_challenge_state table.
+    total_agents_in_challenge: int = 0
 
 
 class StatsUpdate(_EventBase):

@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS agents (
     name TEXT UNIQUE NOT NULL,
     registered_at TEXT NOT NULL,
     last_heartbeat TEXT NOT NULL,
-    status TEXT DEFAULT 'idle'
+    status TEXT DEFAULT 'idle',
+    llm_type TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hypotheses (
@@ -68,6 +69,10 @@ CREATE TABLE IF NOT EXISTS experiments (
     delta_vs_own_best_pct REAL,
     beats_own_best INTEGER DEFAULT 0,
     trajectory_id TEXT,
+    -- "tacit_knowledge" or "inspiration" when the agent fetched /api/state
+    -- with that hint right before publishing this iteration; NULL otherwise.
+    -- Lets the dashboard mark hint events on per-agent progress plots.
+    received_hint TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
@@ -141,6 +146,11 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
     num_trajectories INTEGER DEFAULT 0,
     tacit_knowledge_count INTEGER DEFAULT 0,
     inspiration_count INTEGER DEFAULT 0,
+    -- "tacit_knowledge" / "inspiration" / NULL — the most recent hint the
+    -- server gave this agent on this challenge. Set when /api/state issues
+    -- the hint, cleared when the agent publishes the next iteration (whose
+    -- experiments.received_hint absorbs the value).
+    pending_hint TEXT,
     last_active_at TEXT,
     PRIMARY KEY (agent_id, challenge),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
@@ -198,14 +208,37 @@ DEFAULT_CONFIG = {
 }
 
 
+async def _add_column_if_missing(
+    db: aiosqlite.Connection, table: str, column: str, ddl: str
+) -> None:
+    """Idempotent ALTER TABLE ... ADD COLUMN. Lets us evolve the schema in
+    place for the few columns that have been added after a deploy went out
+    (llm_type on agents, received_hint on experiments, pending_hint on
+    agent_challenge_state). For larger schema changes we still wipe the
+    persistent volume on redeploy."""
+    cur = await db.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in await cur.fetchall()}
+    if column in existing:
+        return
+    await db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         # Tables, then indexes. All DDL is IF NOT EXISTS, so calling
         # init_db() against an existing DB is a no-op — the schema only
         # ever moves forward via deliberate edits to SCHEMA / SCHEMA_INDEXES.
-        # No in-place migrations are supported: a schema change implies
-        # wiping the DB (or the persistent volume) before redeploy.
+        # Small column additions are handled below via _add_column_if_missing
+        # so existing deploys pick them up without wiping the volume; bigger
+        # changes still imply a wipe.
         await db.executescript(SCHEMA)
+        await _add_column_if_missing(db, "agents", "llm_type", "llm_type TEXT")
+        await _add_column_if_missing(
+            db, "experiments", "received_hint", "received_hint TEXT"
+        )
+        await _add_column_if_missing(
+            db, "agent_challenge_state", "pending_hint", "pending_hint TEXT"
+        )
         await db.executescript(SCHEMA_INDEXES)
         await db.commit()
 
@@ -416,6 +449,7 @@ async def compute_leaderboard(
         SELECT
             a.id   as agent_id,
             a.name as agent_name,
+            a.llm_type as llm_type,
             acs.experiments_completed as runs,
             acs.improvements as improvements,
             acs.runs_since_improvement as runs_since_improvement,
@@ -441,6 +475,7 @@ async def compute_leaderboard(
             "rank": i + 1,
             "agent_id": row["agent_id"],
             "agent_name": row["agent_name"],
+            "llm_type": row["llm_type"] or "",
             "runs": row["runs"],
             "improvements": row["improvements"],
             "runs_since_improvement": row["runs_since_improvement"],
@@ -453,6 +488,37 @@ async def compute_leaderboard(
         }
         for i, row in enumerate(rows)
     ]
+
+
+async def get_challenge_total_agents(
+    conn: aiosqlite.Connection, challenge: str
+) -> int:
+    """Count of distinct agents that have ever fetched state for or published
+    on this challenge. Sourced from agent_challenge_state (one row per
+    agent×challenge), which is created lazily on first /api/state hit."""
+    cur = await conn.execute(
+        "SELECT COUNT(*) as c FROM agent_challenge_state WHERE challenge = ?",
+        (challenge,),
+    )
+    row = await cur.fetchone()
+    return row["c"] if row else 0
+
+
+async def get_trajectory_unique_agents(
+    conn: aiosqlite.Connection, trajectory_id: str
+) -> int:
+    """Number of distinct agents that have published an experiment on the
+    given trajectory. Authoritative replacement for trajectories.num_agents,
+    which is only ever incremented on creation / adoption — not for the case
+    where the same trajectory has been worked on by multiple agents in
+    sequence after each adoption."""
+    cur = await conn.execute(
+        "SELECT COUNT(DISTINCT agent_id) as c FROM experiments "
+        "WHERE trajectory_id = ?",
+        (trajectory_id,),
+    )
+    row = await cur.fetchone()
+    return row["c"] if row else 0
 
 
 # ── agent_challenge_state helpers ──
@@ -799,13 +865,28 @@ async def increment_trajectory_agents(
 async def list_trajectories(
     conn: aiosqlite.Connection, challenge: str | None = None
 ) -> list[dict]:
+    """Trajectory rows enriched with the actual count of distinct agents that
+    have published an experiment on each one. This `unique_agents` column is
+    what the dashboard table renders — `num_agents` on the row is only ever
+    bumped on creation / adoption, so it under-counts when the same active
+    trajectory has been worked on by several agents."""
     if challenge is None:
         cursor = await conn.execute(
-            "SELECT * FROM trajectories ORDER BY started_at DESC"
+            """SELECT t.*,
+                      (SELECT COUNT(DISTINCT e.agent_id)
+                         FROM experiments e
+                        WHERE e.trajectory_id = t.id) AS unique_agents
+                 FROM trajectories t ORDER BY t.started_at DESC"""
         )
     else:
         cursor = await conn.execute(
-            "SELECT * FROM trajectories WHERE challenge = ? ORDER BY started_at DESC",
+            """SELECT t.*,
+                      (SELECT COUNT(DISTINCT e.agent_id)
+                         FROM experiments e
+                        WHERE e.trajectory_id = t.id) AS unique_agents
+                 FROM trajectories t
+                 WHERE t.challenge = ?
+                 ORDER BY t.started_at DESC""",
             (challenge,),
         )
     return [dict(row) for row in await cursor.fetchall()]

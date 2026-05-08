@@ -34,6 +34,14 @@ def improvement_pct(baseline: float, score: float, direction: str = "min") -> fl
 
 class RegisterRequest(BaseModel):
     client_version: str = "1.0"
+    # Optional: contributor's own preferred display name. The server falls
+    # back to its built-in name generator when this is omitted or already
+    # taken (so the wizard's "use default" path still works).
+    agent_name: Optional[str] = None
+    # Optional: free-form label identifying which LLM is driving this agent
+    # (e.g. "claude_code", "gemini_api", "gpt-4o"). Surfaced on the dashboard
+    # so projected swarms can see what each contributor is running.
+    llm_type: Optional[str] = None
 
 
 class HeartbeatRequest(BaseModel):

@@ -21,6 +21,10 @@ export interface LeaderboardEntry {
   rank: number;
   agent_id: string;
   agent_name: string;
+  // Free-form label identifying which LLM is driving this agent (e.g.
+  // "claude_code", "gemini_api"). Empty string when not supplied at
+  // register time.
+  llm_type?: string;
   runs: number;
   improvements: number;
   runs_since_improvement: number;
@@ -150,6 +154,8 @@ export interface StatsPerChallenge {
   total_experiments: number;
   hypotheses_count: number;
   total_trajectories: number;
+  // Distinct agents that have ever worked on this challenge.
+  total_agents_in_challenge?: number;
 }
 
 export interface StatsUpdate {
@@ -165,6 +171,8 @@ export interface StatsUpdate {
   // the wire from server.py.
   active_agents?: number;
   total_agents?: number;
+  total_agents_in_challenge?: number;
+  total_trajectories?: number;
   total_experiments?: number;
   hypotheses_count?: number;
   best_score?: number | null;

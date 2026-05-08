@@ -27,7 +27,7 @@ export class IdeasTree {
       <div class="ideas-page">
         <div class="ideas-header">
           <div class="ideas-title">
-            <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
+            <img class="stats-mark" src="/prometheus-icon.png" alt="" draggable="false" />
             <span class="ideas-title-text">Insight Library</span>
           </div>
           <div class="ideas-nav">

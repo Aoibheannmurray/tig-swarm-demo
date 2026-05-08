@@ -13,7 +13,13 @@ interface Trajectory {
   num_edits: number;
   num_improvements: number;
   momentum: number;
+  // Distinct agents that have ever published an experiment on this
+  // trajectory. The server computes this with COUNT(DISTINCT agent_id).
   num_agents: number;
+  // Number of times this trajectory has gone into the inactive pool. A
+  // trajectory can be re-deactivated after being adopted from the pool, so
+  // this can be > 1.
+  num_deactivations: number;
   edits_since_improvement: number;
   deactivated_at: string | null;
   score_history: ScorePoint[];
@@ -54,11 +60,17 @@ function fmtMomentum(m: number): string {
   return m.toFixed(2);
 }
 
+// Chart "view" the user can cycle through:
+//  - { kind: "all" }     → every trajectory overlaid on absolute time
+//  - { kind: "single" }  → one trajectory, x-axis re-zeroed at its start
+type ChartView = { kind: "all" } | { kind: "single"; trajectoryId: string };
+
 export class TrajectoriesPanel {
   private container!: HTMLElement;
   private apiUrl = "";
   private data: TrajectoriesResponse | null = null;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private view: ChartView = { kind: "all" };
 
   init(container: HTMLElement, apiUrl: string) {
     this.container = container;
@@ -69,7 +81,7 @@ export class TrajectoriesPanel {
         <div class="traj-header">
           <div class="traj-title-row">
             <div class="traj-title">
-              <i class="ph ph-flame stats-mark" aria-hidden="true"></i>
+              <img class="stats-mark" src="/prometheus-icon.png" alt="" draggable="false" />
               <span class="traj-title-text">Trajectory Profile</span>
             </div>
             <div class="traj-nav">
@@ -97,7 +109,14 @@ export class TrajectoriesPanel {
         </div>
         <div class="traj-body">
           <div class="traj-chart-area">
-            <div class="panel-label">SCORE PROGRESSION</div>
+            <div class="traj-chart-header">
+              <div class="panel-label">SCORE PROGRESSION</div>
+              <div class="traj-chart-tabs" id="traj-chart-tabs">
+                <button type="button" class="traj-chart-tab-btn" id="traj-chart-prev">&lsaquo;</button>
+                <span class="traj-chart-tab-label" id="traj-chart-label">ALL TRAJECTORIES</span>
+                <button type="button" class="traj-chart-tab-btn" id="traj-chart-next">&rsaquo;</button>
+              </div>
+            </div>
             <div class="traj-chart-wrap" id="traj-chart-wrap">
               <svg id="traj-chart-svg"></svg>
             </div>
@@ -114,12 +133,20 @@ export class TrajectoriesPanel {
               <span class="traj-col traj-col-momentum">MOMENTUM</span>
               <span class="traj-col traj-col-stagnation">STAG</span>
               <span class="traj-col traj-col-agents">AGENTS</span>
+              <span class="traj-col traj-col-deactivations">DEACT</span>
             </div>
             <div class="traj-table-list" id="traj-table-list"></div>
           </div>
         </div>
       </div>
     `;
+
+    document.getElementById("traj-chart-prev")!.addEventListener(
+      "click", () => this.cycleView(-1),
+    );
+    document.getElementById("traj-chart-next")!.addEventListener(
+      "click", () => this.cycleView(1),
+    );
 
     this.fetchData();
     this.refreshTimer = setInterval(() => this.fetchData(), 15000);
@@ -144,8 +171,59 @@ export class TrajectoriesPanel {
     document.getElementById("traj-active")!.textContent = String(active);
     document.getElementById("traj-inactive")!.textContent = String(inactive);
 
+    // If the trajectory we're viewing has been removed from the response,
+    // fall back to the all-trajectories overlay so the chart doesn't go
+    // blank with no way to recover.
+    if (this.view.kind === "single") {
+      const targetId = this.view.trajectoryId;
+      if (!trajectories.some(t => t.id === targetId)) {
+        this.view = { kind: "all" };
+      }
+    }
+
     this.renderChart(trajectories);
     this.renderTable(trajectories);
+    this.renderViewLabel(trajectories);
+  }
+
+  private cycleView(delta: number) {
+    if (!this.data) return;
+    // The cycle order is [all, traj#0, traj#1, …]. Trajectories are listed
+    // in the same order returned by the server (started_at DESC), so the
+    // "next" arrow walks through them newest-first.
+    const trajectories = this.data.trajectories;
+    const ids = trajectories.map(t => t.id);
+    const order: (string | null)[] = [null, ...ids];
+
+    let idx: number;
+    if (this.view.kind === "all") idx = 0;
+    else idx = Math.max(0, ids.indexOf(this.view.trajectoryId) + 1);
+
+    const next = (idx + delta + order.length) % order.length;
+    const target = order[next];
+    this.view = target == null ? { kind: "all" } : { kind: "single", trajectoryId: target };
+
+    this.renderChart(trajectories);
+    this.renderViewLabel(trajectories);
+  }
+
+  private renderViewLabel(trajectories: Trajectory[]) {
+    const el = document.getElementById("traj-chart-label");
+    if (!el) return;
+    const view = this.view;
+    if (view.kind === "all") {
+      el.textContent = "ALL TRAJECTORIES";
+      el.style.color = "";
+      return;
+    }
+    const idx = trajectories.findIndex(t => t.id === view.trajectoryId);
+    const t = trajectories[idx];
+    if (!t) {
+      el.textContent = "ALL TRAJECTORIES";
+      return;
+    }
+    el.textContent = `TRAJECTORY ${t.id.slice(0, 6)}`;
+    el.style.color = trajColor(idx);
   }
 
   private renderChart(trajectories: Trajectory[]) {
@@ -163,7 +241,12 @@ export class TrajectoriesPanel {
     const cw = w - margin.left - margin.right;
     const ch = h - margin.top - margin.bottom;
 
-    const withHistory = trajectories.filter((t) => t.score_history.length > 0);
+    const view = this.view;
+    let trajectoriesToDraw = trajectories;
+    if (view.kind === "single") {
+      trajectoriesToDraw = trajectories.filter(t => t.id === view.trajectoryId);
+    }
+    const withHistory = trajectoriesToDraw.filter((t) => t.score_history.length > 0);
     if (withHistory.length === 0) {
       svg.append("text")
         .attr("x", w / 2).attr("y", h / 2)
@@ -171,25 +254,43 @@ export class TrajectoriesPanel {
         .attr("fill", AXIS_TEXT())
         .attr("font-size", 13)
         .attr("font-family", "var(--ui)")
-        .text("No trajectory data yet");
+        .text(view.kind === "single" ? "No data on this trajectory yet" : "No trajectory data yet");
       return;
     }
 
-    let allTimes: Date[] = [];
-    let allScores: number[] = [];
-    for (const t of withHistory) {
-      for (const p of t.score_history) {
-        allTimes.push(new Date(p.created_at));
-        allScores.push(p.score);
+    // X scale: in the all-trajectories view we plot wall-clock time. In the
+    // per-trajectory view we re-zero the axis at the trajectory's started_at
+    // so the user can see the relative time spent on this attempt.
+    const isSingle = this.view.kind === "single";
+    let xDomain: [number, number];
+    if (isSingle) {
+      const t = withHistory[0];
+      const start = new Date(t.started_at).getTime();
+      const end = t.score_history.length
+        ? Math.max(...t.score_history.map(p => new Date(p.created_at).getTime()))
+        : start;
+      // Pad the right edge so the last point is visible; widen the domain
+      // slightly when start == end (single point) so the line still draws.
+      const span = Math.max(end - start, 1);
+      xDomain = [0, span * 1.05];
+    } else {
+      const allTimes: Date[] = [];
+      for (const t of withHistory) {
+        for (const p of t.score_history) allTimes.push(new Date(p.created_at));
       }
+      const ext = d3.extent(allTimes) as [Date, Date];
+      xDomain = [ext[0].getTime(), ext[1].getTime()];
     }
 
-    const xDomain = d3.extent(allTimes) as [Date, Date];
+    const allScores: number[] = [];
+    for (const t of withHistory) {
+      for (const p of t.score_history) allScores.push(p.score);
+    }
     const yMin = d3.min(allScores)!;
     const yMax = d3.max(allScores)!;
     const yPad = Math.max(Math.abs(yMax - yMin) * 0.08, 1);
 
-    const x = d3.scaleTime().domain(xDomain).range([0, cw]);
+    const x = d3.scaleLinear().domain(xDomain).range([0, cw]);
     const y = d3.scaleLinear().domain([yMin - yPad, yMax + yPad]).range([ch, 0]);
 
     const g = svg.append("g")
@@ -205,17 +306,43 @@ export class TrajectoriesPanel {
         .attr("stroke-width", 0.5);
     }
 
-    // X axis
+    // X axis. In the single-trajectory view ticks are formatted as
+    // "+m:ss" elapsed since the trajectory started; in the all-overlay
+    // view they're wall-clock HH:MM.
     const xAxis = g.append("g").attr("transform", `translate(0,${ch})`);
-    xAxis.call(
-      d3.axisBottom(x).ticks(6).tickFormat((d) => {
-        const dt = d as Date;
-        return `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
-      }) as any
-    );
-    xAxis.selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
-    xAxis.selectAll("line").attr("stroke", AXIS_LINE());
-    xAxis.select(".domain").attr("stroke", AXIS_LINE());
+    if (isSingle) {
+      const xTicks = x.ticks(6);
+      xAxis.selectAll("line.tick").data(xTicks).enter().append("line")
+        .attr("class", "tick")
+        .attr("x1", d => x(d as number))
+        .attr("x2", d => x(d as number))
+        .attr("y1", 0).attr("y2", 4)
+        .attr("stroke", AXIS_LINE());
+      xAxis.selectAll("text.tick").data(xTicks).enter().append("text")
+        .attr("class", "tick")
+        .attr("x", d => x(d as number))
+        .attr("y", 16)
+        .attr("text-anchor", "middle")
+        .attr("fill", AXIS_TEXT())
+        .attr("font-size", 9)
+        .text(d => formatRelative(d as number));
+      xAxis.append("line")
+        .attr("x1", 0).attr("x2", cw)
+        .attr("y1", 0).attr("y2", 0)
+        .attr("stroke", AXIS_LINE());
+    } else {
+      xAxis.call(
+        d3.axisBottom(x as unknown as d3.AxisScale<number>)
+          .ticks(6)
+          .tickFormat((d) => {
+            const dt = new Date(d as number);
+            return `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+          }) as any,
+      );
+      xAxis.selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+      xAxis.selectAll("line").attr("stroke", AXIS_LINE());
+      xAxis.select(".domain").attr("stroke", AXIS_LINE());
+    }
 
     // Y axis
     const yAxis = g.append("g");
@@ -225,17 +352,21 @@ export class TrajectoriesPanel {
     yAxis.select(".domain").attr("stroke", AXIS_LINE());
 
     // Step function lines per trajectory
-    const stepLine = d3.line<{ t: Date; s: number }>()
+    const stepLine = d3.line<{ t: number; s: number }>()
       .x((d) => x(d.t))
       .y((d) => y(d.s))
       .curve(d3.curveStepAfter);
 
     for (let i = 0; i < withHistory.length; i++) {
       const traj = withHistory[i];
-      const color = trajColor(i);
+      // Preserve the original color when in single view by looking up the
+      // trajectory's index in the FULL list, not the filtered list.
+      const fullIndex = isSingle ? trajectories.findIndex(t => t.id === traj.id) : i;
+      const color = trajColor(fullIndex >= 0 ? fullIndex : i);
       const isInactive = traj.status === "inactive";
+      const start = isSingle ? new Date(traj.started_at).getTime() : 0;
       const pts = traj.score_history.map((p) => ({
-        t: new Date(p.created_at),
+        t: isSingle ? new Date(p.created_at).getTime() - start : new Date(p.created_at).getTime(),
         s: p.score,
       }));
 
@@ -281,12 +412,12 @@ export class TrajectoriesPanel {
       return sb - sa;
     });
 
-    list.innerHTML = sorted.map((t, i) => {
+    list.innerHTML = sorted.map((t) => {
       const isInactive = t.status === "inactive";
       const color = trajColor(trajectories.indexOf(t));
       const cls = isInactive ? "traj-row traj-row--inactive" : "traj-row";
       return `
-        <div class="${cls}">
+        <div class="${cls}" data-traj-id="${t.id}">
           <span class="traj-col traj-col-id">
             <span class="traj-dot" style="background:${color}"></span>
             ${t.id.slice(0, 6)}
@@ -301,8 +432,30 @@ export class TrajectoriesPanel {
           <span class="traj-col traj-col-momentum">${fmtMomentum(t.momentum)}</span>
           <span class="traj-col traj-col-stagnation">${t.edits_since_improvement}</span>
           <span class="traj-col traj-col-agents">${t.num_agents}</span>
+          <span class="traj-col traj-col-deactivations">${t.num_deactivations}</span>
         </div>
       `;
     }).join("");
+
+    // Click a row to focus the chart on that trajectory.
+    list.querySelectorAll<HTMLElement>(".traj-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const id = row.dataset.trajId || "";
+        if (!id) return;
+        this.view = { kind: "single", trajectoryId: id };
+        if (this.data) {
+          this.renderChart(this.data.trajectories);
+          this.renderViewLabel(this.data.trajectories);
+        }
+      });
+    });
   }
+}
+
+function formatRelative(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m === 0) return `+${s}s`;
+  return `+${m}:${s.toString().padStart(2, "0")}`;
 }

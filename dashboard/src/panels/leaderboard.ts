@@ -2,6 +2,13 @@ import type { Panel, WSMessage, LeaderboardEntry } from "../types";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
 
+function escapeHTML(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 type SortKey =
   | "current_score"
   | "best_ever_score"
@@ -143,11 +150,14 @@ export class LeaderboardPanel implements Panel {
       const bestText = formatScore(entry.best_ever_score);
       const scoreImproved = improved && (this.sortKey === "current_score" || this.sortKey === "best_ever_score");
 
+      const llmBadge = entry.llm_type
+        ? `<span class="lb-llm" title="LLM: ${escapeHTML(entry.llm_type)}">${escapeHTML(entry.llm_type)}</span>`
+        : "";
       row.innerHTML = `
         <span class="lb-rank">${rank}</span>
         <span class="lb-name">
           <span class="lb-dot" style="background:${color}"></span>
-          ${entry.agent_name}
+          ${entry.agent_name}${llmBadge}
         </span>
         <span class="lb-col-sm">${entry.runs}</span>
         <span class="lb-col-sm">${entry.improvements}</span>

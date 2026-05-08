@@ -27,6 +27,8 @@ function resolveViewedChallenge(): string {
 export class StatsPanel implements Panel {
   private agentsEl!: HTMLElement;
   private experimentsEl!: HTMLElement;
+  private agentsTotalEl!: HTMLElement;
+  private trajectoriesEl!: HTMLElement;
   private heroEl!: HTMLElement;
   // Latest track_scores for the global best of the viewed challenge. Rendered
   // on demand into the solution panel's `.solution-score` block when the user
@@ -44,55 +46,8 @@ export class StatsPanel implements Panel {
     container.innerHTML = `
       <div class="stats-bar">
         <div class="stats-logo">
-          <svg class="stats-mark" viewBox="0 0 64 64" aria-hidden="true">
-            <defs>
-              <linearGradient id="statsFlameG" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#FFD74A"/>
-                <stop offset="40%" stop-color="#FF8A2B"/>
-                <stop offset="80%" stop-color="#D24515"/>
-                <stop offset="100%" stop-color="#7A2A0F"/>
-              </linearGradient>
-              <radialGradient id="statsCoreG" cx="50%" cy="60%" r="55%">
-                <stop offset="0%" stop-color="#FFFFFF"/>
-                <stop offset="55%" stop-color="#FFE8A8" stop-opacity="0.85"/>
-                <stop offset="100%" stop-color="#FFE8A8" stop-opacity="0"/>
-              </radialGradient>
-            </defs>
-            <path d="M32 2 C 28 10, 22 14, 20 22 C 18 30, 21 38, 26 42 C 23 38, 23 33, 27 31 C 25 36, 28 41, 32 41 C 30 36, 31 31, 33 27 C 35 31, 36 36, 38 41 C 40 38, 39 33, 37 31 C 41 33, 43 38, 40 42 C 44 38, 47 30, 44 22 C 42 14, 36 10, 32 2 Z" fill="url(#statsFlameG)"/>
-            <ellipse cx="32" cy="32" rx="6" ry="9" fill="url(#statsCoreG)"/>
-            <g fill="#FFF6D6" opacity="0.95">
-              <circle cx="28" cy="18" r="1.1"/>
-              <circle cx="36" cy="22" r="1.1"/>
-              <circle cx="26" cy="28" r="1"/>
-              <circle cx="38" cy="30" r="1"/>
-              <circle cx="32" cy="36" r="1"/>
-            </g>
-            <g stroke="#FFF6D6" stroke-width="0.7" opacity="0.7" fill="none">
-              <line x1="28" y1="18" x2="36" y2="22"/>
-              <line x1="28" y1="18" x2="26" y2="28"/>
-              <line x1="36" y1="22" x2="38" y2="30"/>
-              <line x1="26" y1="28" x2="32" y2="36"/>
-              <line x1="38" y1="30" x2="32" y2="36"/>
-            </g>
-            <path d="M21 41 L 43 41 L 40 46 L 24 46 Z" fill="#241914"/>
-            <rect x="22" y="43" width="20" height="1.2" fill="#5A3A1F" opacity="0.6"/>
-            <g fill="#8A6230">
-              <rect x="24" y="44.6" width="1.5" height="1.3"/>
-              <rect x="27" y="44.6" width="1.5" height="1.3"/>
-              <rect x="30" y="44.6" width="1.5" height="1.3"/>
-              <rect x="33" y="44.6" width="1.5" height="1.3"/>
-              <rect x="36" y="44.6" width="1.5" height="1.3"/>
-              <rect x="39" y="44.6" width="1.5" height="1.3"/>
-            </g>
-            <rect x="28" y="46" width="8" height="9" fill="#241914"/>
-            <rect x="28" y="46" width="2" height="9" fill="#3F2918"/>
-            <path d="M21 51 C 17 51, 15 54, 16 58 C 16 60, 18 62, 21 62 L 32 62 C 33 62, 34 61, 34 60 L 34 50 C 34 49, 33 48, 32 48 Z" fill="#241914"/>
-            <path d="M32 48 C 35 48, 37 49, 37 52 C 37 54, 35 55, 33 55 L 32 55 Z" fill="#241914"/>
-            <line x1="21" y1="53" x2="30" y2="53" stroke="#3F2918" stroke-width="0.7" opacity="0.7"/>
-            <line x1="21" y1="56" x2="30" y2="56" stroke="#3F2918" stroke-width="0.7" opacity="0.7"/>
-            <line x1="21" y1="59" x2="30" y2="59" stroke="#3F2918" stroke-width="0.7" opacity="0.7"/>
-            <path d="M2 64 L 16 56 L 21 60 L 8 64 Z" fill="#241914"/>
-          </svg>
+          <img class="stats-mark" src="/prometheus-icon.png" alt="" draggable="false" />
+
           <span class="stats-wordmark">
             <span class="stats-title">Prometheus</span>
             <span class="stats-subtitle">AI Driven Discovery of Algorithms</span>
@@ -112,6 +67,14 @@ export class StatsPanel implements Panel {
             <span class="stat-label">EXPERIMENTS</span>
             <span class="stat-value" id="stat-experiments-val">0</span>
           </div>
+          <div class="stat-chip" id="stat-agents-total">
+            <span class="stat-label">AGENTS</span>
+            <span class="stat-value" id="stat-agents-total-val">0</span>
+          </div>
+          <div class="stat-chip" id="stat-trajectories">
+            <span class="stat-label">TRAJECTORIES</span>
+            <span class="stat-value" id="stat-trajectories-val">0</span>
+          </div>
           <div class="stat-hero" id="stat-hero"></div>
         </div>
       </div>
@@ -119,6 +82,8 @@ export class StatsPanel implements Panel {
 
     this.agentsEl = document.getElementById("stat-agents-val")!;
     this.experimentsEl = document.getElementById("stat-experiments-val")!;
+    this.agentsTotalEl = document.getElementById("stat-agents-total-val")!;
+    this.trajectoriesEl = document.getElementById("stat-trajectories-val")!;
     this.heroEl = document.getElementById("stat-hero")!;
 
     this.apiUrl = resolveApiUrl();
@@ -252,6 +217,8 @@ export class StatsPanel implements Panel {
     if (msg.type === "reset") {
       this.agentsEl.textContent = "0";
       this.experimentsEl.textContent = "0";
+      this.agentsTotalEl.textContent = "0";
+      this.trajectoriesEl.textContent = "0";
       this.heroEl.textContent = "";
       this.heroEl.style.opacity = "0";
       this.heroEl.classList.remove("is-not-started");
@@ -276,6 +243,8 @@ export class StatsPanel implements Panel {
       // carries `per_challenge`); default to 0 here.
       counterTween(this.agentsEl, msg.active_agents ?? 0);
       counterTween(this.experimentsEl, msg.total_experiments ?? 0);
+      counterTween(this.agentsTotalEl, (msg as any).total_agents_in_challenge ?? 0);
+      counterTween(this.trajectoriesEl, (msg as any).total_trajectories ?? 0);
 
       // "Not started" hero overlay when the viewed challenge has no data.
       // Cleared as soon as anything lands.

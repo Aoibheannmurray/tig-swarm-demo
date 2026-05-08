@@ -280,6 +280,7 @@ async def periodic_stats():
                         (ch,),
                     )
                     total_traj = (await cur.fetchone())["c"]
+                    total_agents_ch = await db.get_challenge_total_agents(conn, ch)
                     best_solution_data = best["solution_data"] if best else None
                     num_instances = get_num_instances_for(cfg, best_solution_data)
                     best_score = best["score"] if best else None
@@ -297,6 +298,7 @@ async def periodic_stats():
                         "total_experiments": total_exp,
                         "hypotheses_count": total_hyp,
                         "total_trajectories": total_traj,
+                        "total_agents_in_challenge": total_agents_ch,
                     }
 
             # `per_challenge` is the source of truth; the dashboard slices
@@ -316,13 +318,30 @@ async def periodic_stats():
 @app.post("/api/agents/register", response_model=AgentResponse)
 async def register_agent(req: RegisterRequest):
     agent_id = new_id()
-    agent_name = generate_agent_name()
     timestamp = now()
+    # Honour the contributor's chosen name when supplied AND not already
+    # taken; fall back to the server's auto-generator otherwise. We can't
+    # rely on the UNIQUE constraint to handle collisions because we want to
+    # transparently degrade to a generated name rather than 409 the wizard.
+    agent_name: str | None = None
+    requested = (req.agent_name or "").strip()
+    if requested:
+        async with db.connect() as conn:
+            cur = await conn.execute(
+                "SELECT 1 FROM agents WHERE name = ?", (requested,),
+            )
+            taken = await cur.fetchone()
+        if not taken:
+            agent_name = requested
+    if agent_name is None:
+        agent_name = generate_agent_name()
+    llm_type = (req.llm_type or "").strip() or None
 
     async with db.connect() as conn:
         await conn.execute(
-            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status) VALUES (?, ?, ?, ?, ?)",
-            (agent_id, agent_name, timestamp, timestamp, "idle"),
+            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type),
         )
         await conn.commit()
         config = await db.get_config(conn)
@@ -413,6 +432,9 @@ async def get_state(
         )
         active = (await cur.fetchone())["c"]
         total_agents = await db.get_agent_count(conn, active_only=False)
+        total_agents_in_challenge = await db.get_challenge_total_agents(
+            conn, challenge,
+        )
         cur = await conn.execute(
             "SELECT COUNT(*) as c FROM experiments WHERE challenge = ?",
             (challenge,),
@@ -589,6 +611,13 @@ async def get_state(
                         inspiration_inc=1,
                         runs_since_improvement_inc=0,
                     )
+                # Stash the hint so the next iteration this agent publishes
+                # can be tagged with the hint that produced it. /api/iterations
+                # reads + clears this field atomically.
+                await db.update_agent_challenge_state(
+                    conn, agent_id, challenge,
+                    set_fields={"pending_hint": stagnation_hint},
+                )
                 await conn.commit()
                 all_bests = await db.list_agent_bests(
                     conn, challenge,
@@ -690,6 +719,7 @@ async def get_state(
         "num_instances": num_instances,
         "active_agents": active,
         "total_agents": total_agents,
+        "total_agents_in_challenge": total_agents_in_challenge,
         "total_experiments": total_exp,
         "hypotheses_count": total_hyp,
         "total_trajectories": total_traj,
@@ -806,20 +836,32 @@ async def create_iteration(req: IterationCreate):
                 conn, req.agent_id, challenge, num_trajectories_inc=1,
             )
 
+        # Hint that drove this iteration (set on the prior /api/state call
+        # when the agent was stagnating). We read + clear atomically so the
+        # next iteration only carries a hint if the server hands one out
+        # again.
+        received_hint = (acs or {}).get("pending_hint")
+
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, score, feasible,
                 num_vehicles, total_distance, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
-                trajectory_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                trajectory_id, received_hint, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
              req.notes, solution_data_json, track_scores_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
              1 if beats_own_best else 0,
-             trajectory_id, timestamp),
+             trajectory_id, received_hint, timestamp),
         )
+
+        if received_hint is not None:
+            await db.update_agent_challenge_state(
+                conn, req.agent_id, challenge,
+                set_fields={"pending_hint": None},
+            )
 
         await db.update_trajectory_after_edit(
             conn, trajectory_id, beats_own_best,
@@ -1002,36 +1044,99 @@ async def list_messages(limit: int = 50, challenge: str | None = None):
 
 @app.get("/api/diversity", response_model=api_models.DiversityResponse)
 async def get_diversity(challenge: str | None = None):
+    """Pairwise code-diversity matrix over **trajectories** (active +
+    inactive), not over current agents.
+
+    Each cell compares the algorithm code that defines a trajectory:
+      - Active trajectories → the latest feasible experiment on that
+        trajectory (i.e. the agent_bests row whose trajectory_id matches).
+      - Inactive trajectories → the algorithm_code stored in
+        inactive_algorithms when the trajectory was deposited.
+
+    The response keeps the legacy `agents` field name for wire-compat with
+    the existing dashboard panel (which renders an N×N matrix); each entry
+    represents one trajectory. The `agent_name` field carries a human-
+    readable trajectory label like "traj abcdef · alice".
+    """
     challenge = await resolve_challenge(challenge)
     direction = await get_direction(challenge)
     order = db._direction_order(direction)
+
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            f"""SELECT ab.agent_id, a.name as agent_name, ab.algorithm_code
-               FROM agent_bests ab
-               JOIN agents a ON a.id = ab.agent_id
-               WHERE ab.feasible = 1 AND ab.challenge = ?
-               ORDER BY ab.score {order}""",
+        # Active trajectories: pick the latest feasible code via agent_bests.
+        # We take the highest-scoring agent_bests row per trajectory_id when
+        # there are multiple — this matches the trajectory's `current_score`
+        # surfaced elsewhere.
+        active_cur = await conn.execute(
+            f"""SELECT t.id AS trajectory_id, t.started_at,
+                       ab.algorithm_code, ab.agent_id, a.name AS agent_name
+                  FROM trajectories t
+                  JOIN agent_bests ab
+                    ON ab.trajectory_id = t.id
+                   AND ab.challenge = t.challenge
+                   AND ab.feasible = 1
+                  JOIN agents a ON a.id = ab.agent_id
+                 WHERE t.challenge = ? AND t.status = 'active'
+                 ORDER BY ab.score {order}""",
             (challenge,),
         )
-        rows = [dict(row) for row in await cursor.fetchall()]
+        active_rows = [dict(r) for r in await active_cur.fetchall()]
 
-    if not rows:
+        # Inactive trajectories: use the deposited algorithm code, picking
+        # the most recent deposit when a trajectory has been deposited
+        # multiple times (rare but possible after re-deactivation).
+        inactive_cur = await conn.execute(
+            """SELECT ia.trajectory_id, ia.algorithm_code, ia.agent_id,
+                      a.name AS agent_name, ia.deposited_at
+                 FROM inactive_algorithms ia
+                 LEFT JOIN agents a ON a.id = ia.agent_id
+                WHERE ia.challenge = ?
+                ORDER BY ia.deposited_at DESC""",
+            (challenge,),
+        )
+        inactive_raw = [dict(r) for r in await inactive_cur.fetchall()]
+
+    # Dedupe both lists by trajectory_id (one entry per trajectory). Active
+    # is dedup'd because a trajectory could in theory have multiple
+    # agent_bests rows after adoption; inactive is dedup'd to keep the
+    # most recent deposit when re-deactivation happened.
+    seen: set[str] = set()
+    entries: list[dict] = []
+    for r in active_rows:
+        tid = r["trajectory_id"]
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        entries.append({
+            "agent_id": tid,
+            "agent_name": _traj_label(tid, r.get("agent_name"), "active"),
+            "algorithm_code": r["algorithm_code"] or "",
+        })
+    for r in inactive_raw:
+        tid = r["trajectory_id"]
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        entries.append({
+            "agent_id": tid,
+            "agent_name": _traj_label(tid, r.get("agent_name"), "inactive"),
+            "algorithm_code": r["algorithm_code"] or "",
+        })
+
+    if not entries:
         return {"agents": [], "matrix": []}
 
-    agents = []
     line_sets = []
-    for row in rows:
-        agents.append({
-            "agent_id": row["agent_id"],
-            "agent_name": row["agent_name"],
-        })
-        lines = set(row["algorithm_code"].splitlines())
+    for e in entries:
+        lines = set(e["algorithm_code"].splitlines())
         lines.discard("")
         line_sets.append(lines)
 
-    n = len(agents)
-    all_others = [set().union(*(line_sets[k] for k in range(n) if k != i)) for i in range(n)]
+    n = len(entries)
+    all_others = [
+        set().union(*(line_sets[k] for k in range(n) if k != i))
+        for i in range(n)
+    ]
 
     matrix = []
     for i in range(n):
@@ -1046,7 +1151,21 @@ async def get_diversity(challenge: str | None = None):
                 row.append(round(len(shared) / total, 3))
         matrix.append(row)
 
+    agents = [{"agent_id": e["agent_id"], "agent_name": e["agent_name"]} for e in entries]
     return {"agents": agents, "matrix": matrix}
+
+
+def _traj_label(traj_id: str, agent_name: str | None, status: str) -> str:
+    """Compact label for a trajectory in the diversity matrix headers.
+
+    Format: ``<6-char traj-id> · <agent-name>`` — short enough to fit in the
+    diversity panel's column / row chips, with a trailing tag when inactive
+    so projected swarms can see at a glance which trajectories are still
+    being worked on."""
+    head = traj_id[:6] if traj_id else "?"
+    tail = agent_name or "?"
+    suffix = "" if status == "active" else " (inactive)"
+    return f"{head} · {tail}{suffix}"
 
 
 # ── Replay ──
@@ -1145,15 +1264,35 @@ async def get_agent_experiments(
         code_col = ", e.algorithm_code" if include_code else ""
         cursor = await conn.execute(
             f"""SELECT e.id, e.score, e.feasible, e.beats_own_best, e.notes,
-                      e.created_at, h.title, h.description, h.strategy_tag
+                      e.created_at, e.trajectory_id, e.received_hint,
+                      t.status AS trajectory_status,
+                      h.title, h.description, h.strategy_tag
                       {code_col}
                FROM experiments e
                LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
+               LEFT JOIN trajectories t ON t.id = e.trajectory_id
                WHERE e.agent_id = ? AND e.challenge = ?
                ORDER BY e.created_at ASC""",
             (agent_id, challenge),
         )
         rows = await cursor.fetchall()
+
+    # Augment each row with `trajectory_deactivated`: True when this is the
+    # last experiment the agent ran on a trajectory that subsequently became
+    # inactive. The dashboard uses this to mark the deactivation point on
+    # the per-agent benchmark plot.
+    rows_list = [dict(r) for r in rows]
+    last_idx_by_traj: dict[str, int] = {}
+    for i, r in enumerate(rows_list):
+        tid = r.get("trajectory_id")
+        if tid:
+            last_idx_by_traj[tid] = i
+    for i, r in enumerate(rows_list):
+        tid = r.get("trajectory_id")
+        is_last_for_traj = bool(tid) and last_idx_by_traj.get(tid) == i
+        r["trajectory_deactivated"] = bool(
+            is_last_for_traj and (r.get("trajectory_status") == "inactive")
+        )
 
     def _row_dict(r):
         d = {
@@ -1165,6 +1304,9 @@ async def get_agent_experiments(
             "title": r["title"],
             "description": r["description"],
             "strategy_tag": r["strategy_tag"],
+            "trajectory_id": r.get("trajectory_id"),
+            "received_hint": r.get("received_hint"),
+            "trajectory_deactivated": bool(r.get("trajectory_deactivated")),
             "created_at": r["created_at"],
         }
         if include_code:
@@ -1176,7 +1318,7 @@ async def get_agent_experiments(
         "challenge": challenge,
         "agent_name": agent_row["name"],
         "registered_at": agent_row["registered_at"],
-        "experiments": [_row_dict(r) for r in rows],
+        "experiments": [_row_dict(r) for r in rows_list],
     }
 
 
@@ -1193,6 +1335,16 @@ async def get_trajectories(challenge: str | None = None):
             history = await db.get_trajectory_score_history(
                 conn, t["id"], challenge=challenge, direction=direction,
             )
+            # `unique_agents` is the authoritative count of distinct agents
+            # that have published an experiment on this trajectory (computed
+            # by list_trajectories via DISTINCT on experiments.agent_id).
+            # `num_agents` on the row is only ever bumped on creation /
+            # adoption, so it under-counts in practice. Surface the
+            # authoritative value as `num_agents` on the wire so the
+            # dashboard's existing column wiring keeps working.
+            unique_agents = t.get("unique_agents")
+            if unique_agents is None or unique_agents == 0:
+                unique_agents = t.get("num_agents") or 0
             result.append({
                 "id": t["id"],
                 "started_at": t["started_at"],
@@ -1201,7 +1353,8 @@ async def get_trajectories(challenge: str | None = None):
                 "num_edits": t["num_edits"],
                 "num_improvements": t["num_improvements"],
                 "momentum": round(t["momentum"], 4) if t["momentum"] else 0,
-                "num_agents": t["num_agents"],
+                "num_agents": unique_agents,
+                "num_deactivations": t.get("num_deactivations") or 0,
                 "edits_since_improvement": t["edits_since_improvement"] or 0,
                 "deactivated_at": t["deactivated_at"],
                 "score_history": history,

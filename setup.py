@@ -942,6 +942,45 @@ def run_sync() -> int:
     return 0
 
 
+_LLM_CHOICES = [
+    "claude_code",
+    "claude_api",
+    "openai_api",
+    "gemini_api",
+    "other",
+]
+
+
+def _prompt_contributor_identity(prior: dict | None) -> tuple[str | None, str | None]:
+    """Ask the contributor for an optional display name and which LLM is
+    driving their agent. Both are optional (Enter to accept defaults).
+
+    The chosen values are stored in swarm.config.json under
+    `contributor_name` / `contributor_llm` and forwarded to the server on
+    `/api/agents/register` so the dashboard can show "alice (gemini_api)"
+    instead of every contributor showing as a generated codename."""
+    print(
+        "\n── Your identity (optional) ──\n"
+        "Pick a name for your agent and tell the swarm which LLM is driving it.\n"
+        "Both default to the values from a previous run / a server-generated\n"
+        "codename — press Enter to skip either prompt.\n"
+    )
+    prior_name = (prior or {}).get("contributor_name") or ""
+    prior_llm = (prior or {}).get("contributor_llm") or "claude_code"
+    name_default = prior_name or "(let server generate)"
+    raw_name = input(f"Agent name [{name_default}]: ").strip()
+    if raw_name == "" and prior_name:
+        chosen_name: str | None = prior_name
+    elif raw_name == "":
+        chosen_name = None
+    else:
+        chosen_name = raw_name
+    llm = prompt_choice(
+        "Which LLM drives this agent?", _LLM_CHOICES, default=prior_llm,
+    )
+    return chosen_name, llm
+
+
 def run_join(server_url: str) -> int:
     print(f"TIG Swarm — joining {server_url}")
     print("=" * 48)
@@ -964,6 +1003,8 @@ def run_join(server_url: str) -> int:
         print(f"  couldn't fetch swarm config from {server_url}: {e}")
         print("  CLAUDE.md / CHALLENGE.md will only have the URL templated; rerun this command once the server is up.")
 
+    contributor_name, contributor_llm = _prompt_contributor_identity(prior)
+
     template_files(
         server_url,
         challenge=challenge,
@@ -983,6 +1024,12 @@ def run_join(server_url: str) -> int:
         "active_challenge": challenge or (prior or {}).get("active_challenge"),
         "challenge": challenge or (prior or {}).get("challenge"),
         "algorithm_path": algorithm_path or (prior or {}).get("algorithm_path"),
+        # Identity persisted across runs. The agent loop's register curl
+        # reads these from swarm.config.json and forwards them to
+        # /api/agents/register so the dashboard can show the LLM type
+        # alongside the agent's name.
+        "contributor_name": contributor_name,
+        "contributor_llm": contributor_llm,
     }
     # Mirror the active challenge's sub-config to top-level so benchmark.py's
     # offline fallback finds the right tracks/timeout.
