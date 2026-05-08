@@ -24,27 +24,9 @@ pub struct Solution {
 }
 ```
 
-Instances are parameterised by `Track { n: usize, s: Scenario }`.
-
-- `num_machines = n / 2 + 5`
-- `num_operations = n / 2 + 5` (distinct op types; individual jobs may have more steps due to reentrance)
-- Base processing times per operation type are drawn from `[1, 200]`, then scaled per machine by a speed factor in `[0.8, 1.2]`.
-
 ## Job Ordering
 
 Jobs in `job_schedule` are grouped by product in order: the first `jobs_per_product[0]` entries belong to product 0, the next `jobs_per_product[1]` to product 1, and so on. All jobs of the same product share the same operation sequence defined by `product_processing_times[product]`.
-
-## Scenarios
-
-Each scenario controls operation flexibility (how many machines each op is eligible for), reentrance (an operation type appearing multiple times in a route), flow structure, and product diversity.
-
-| Scenario | Flexibility | Reentrance | Flow structure | Product mix |
-|---|---|---|---|---|
-| `FLOW_SHOP` | 1 machine/op | moderate | sequential | few products |
-| `HYBRID_FLOW_SHOP` | ~3 machines/op | moderate | sequential | few products |
-| `JOB_SHOP` | 1 machine/op | none | random permutation | many products |
-| `FJSP_MEDIUM` | ~3 machines/op | moderate | mixed | many products |
-| `FJSP_HIGH` | ~all machines/op | none | fully random | many products |
 
 ## Feasibility Constraints
 
@@ -92,19 +74,6 @@ pub fn evaluate_makespan(&self, solution: &Solution) -> Result<u32>
 ```
 
 No other public helper methods are available on `Challenge`. You have direct access to all fields listed in the Types section. Use `product_processing_times[product][op_index]` (a `HashMap<usize, u32>`) to look up eligible machines and their processing times.
-
-### `Solution` construction
-
-```rust
-pub struct Solution {
-    pub job_schedule: Vec<Vec<(usize, u32)>>,
-    // job_schedule[job][op_index] = (machine_id, start_time)
-}
-
-impl Solution {
-    pub fn new() -> Self  // creates empty Solution with no jobs
-}
-```
 
 ### Available crates
 

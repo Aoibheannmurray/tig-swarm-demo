@@ -6,6 +6,7 @@ license = "https://github.com/tig-foundation/tig-monorepo/tree/main/docs/agreeme
 edition = "2021"
 
 [dependencies]
+ahash = "0.8.12"
 anyhow = "1.0.81"
 clap = "4.5.4"
 blake3 = "1.5.4"
@@ -26,6 +27,9 @@ base64 = "0.21"
 bincode = "1.3"
 flate2 = "1.0"
 nalgebra = "0.33"
+cudarc = { git = "https://github.com/tig-foundation/cudarc.git", branch = "runtime-fuel/cudnn-cublas", features = [
+    "cuda-version-from-build-system",
+], optional = true }
 
 [[bin]]
 name = "tig_generator"
@@ -42,12 +46,19 @@ name = "tig_evaluator"
 path = "src/main_evaluator.rs"
 required-features = ["evaluator"]
 
+[[bin]]
+name = "tig_gpu_benchmark"
+path = "src/main_gpu_benchmark.rs"
+required-features = ["gpu_benchmark"]
+
 [features]
 satisfiability = []
 vehicle_routing = []
 knapsack = []
 job_scheduling = []
 energy_arbitrage = []
+hypergraph = ["cudarc"]
+neuralnet_optimizer = ["cudarc", "cudarc/cublas", "cudarc/cudnn"]
 
 # Convenience feature sets for the bins. Each binary needs at least one
 # challenge feature enabled — pick e.g. `--features solver,knapsack`.
@@ -55,3 +66,4 @@ generator = ["rayon"]
 evaluator = []
 solver = []
 baseline = []
+gpu_benchmark = []

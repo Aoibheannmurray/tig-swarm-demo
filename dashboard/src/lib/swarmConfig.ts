@@ -32,11 +32,14 @@ import {
 // file just consumes it.
 export type { Challenge, ChallengeSubConfig, ScoringDirection };
 
+export type SwarmType = "cpu" | "gpu";
+
 export interface SwarmConfig {
   active_challenge: Challenge;
   available_challenges: Record<string, ChallengeSubConfig>;
   swarm_name: string;
   owner_name: string;
+  swarm_type: SwarmType;
 }
 
 function buildFallback(): SwarmConfig {
@@ -51,6 +54,7 @@ function buildFallback(): SwarmConfig {
     available_challenges: available,
     swarm_name: "",
     owner_name: "",
+    swarm_type: "cpu",
   };
 }
 
@@ -63,6 +67,10 @@ export function getSwarmConfig(): SwarmConfig {
 
 export function getActiveChallenge(): Challenge {
   return current.active_challenge;
+}
+
+export function getSwarmType(): SwarmType {
+  return current.swarm_type;
 }
 
 export function getAvailableChallenges(): Challenge[] {
@@ -124,11 +132,14 @@ export async function loadSwarmConfig(apiBase: string): Promise<SwarmConfig> {
         has_initial_algorithm: !!sub?.has_initial_algorithm,
       };
     }
+    const swarm_type: SwarmType =
+      data.swarm_type === "gpu" ? "gpu" : "cpu";
     current = {
       active_challenge: active,
       available_challenges: available,
       swarm_name: data.swarm_name ?? "",
       owner_name: data.owner_name ?? "",
+      swarm_type,
     };
     notify();
   } catch (e) {

@@ -4,7 +4,7 @@ Multiple AI agents collaboratively optimize TIG challenges in Rust, sharing resu
 
 Run as an **agent** (Claude Code, Codex, Gemini CLI — anything that reads `CLAUDE.md`) or as a **script** (`scripts/run_loop.py`, which calls any LLM API).
 
-Supports 5 challenges: **Satisfiability**, **Vehicle Routing**, **Knapsack**, **Job Scheduling**, **Energy Arbitrage**.
+Supports 7 challenges: **Satisfiability**, **Vehicle Routing**, **Knapsack**, **Job Scheduling**, **Energy Arbitrage**, **Hypergraph** (GPU), **Neural Net Optimizer** (GPU).
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally. See [CLAUDE.md](./CLAUDE.md) for the agent's runtime instructions.
 
@@ -24,7 +24,7 @@ The wizard provisions a Railway service, deploys, and prints your **swarm URL** 
 
 ### Join a swarm
 
-Need: Python 3. Rust toolchain (the agent installs it on demand if missing).
+Need: Python 3, Docker.
 
 ```bash
 git clone <repo>
@@ -61,4 +61,4 @@ Open the swarm URL in a browser. Hotkeys: `1` main / `2` ideas / `Q` QR code / `
 
 ## Seeding the initial algorithm
 
-Every agent starts a fresh trajectory from the same seed: `initial_algorithm.rs` at the repo root. Default is a stub with `unimplemented!()` — edit this file *before* `setup.py create` to seed the swarm with a working baseline. Changing it later requires re-creating the swarm.
+Every agent starts a fresh trajectory from the same seed: `initial_algorithms/<challenge>.rs` (one per challenge). Default is a stub with `unimplemented!()` — edit these files *before* `setup.py create` to seed the swarm with working baselines. GPU challenges also have `initial_algorithms/<challenge>.cu` for CUDA kernels.

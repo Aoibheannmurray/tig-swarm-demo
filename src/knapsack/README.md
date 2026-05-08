@@ -21,8 +21,6 @@ pub struct Solution {
 }
 ```
 
-Instances are parameterised by `Track { n_items, budget }`. `max_weight = floor(budget / 100 × sum(weights))`.
-
 ## Value Calculation
 
 ```
@@ -75,18 +73,6 @@ pub fn evaluate_total_value(&self, solution: &Solution) -> Result<u32>
 ```
 
 No other public helper methods are available on `Challenge`. You have direct access to all fields listed in the Types section — `weights`, `values`, `interaction_values`, `max_weight`, `num_items`.
-
-### `Solution` construction
-
-```rust
-pub struct Solution {
-    pub items: Vec<usize>,  // indices of selected items (0-based, no duplicates)
-}
-
-impl Solution {
-    pub fn new() -> Self  // creates empty Solution with no items
-}
-```
 
 ### Available crates
 

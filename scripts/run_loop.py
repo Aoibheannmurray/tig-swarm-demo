@@ -222,16 +222,7 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
 {challenge_md}
 
-The code must compile as valid Rust.
-
-Rules:
-- Do NOT change the `solve_challenge` function signature.
-- `use super::*;` must remain as the first import.
-- You may add, remove, or change any `use` statements, helper functions, \
-structs, or code within `solve_challenge`.
-- Return the complete file.
-
-No explanation, no markdown fences — just the complete Rust source file."""
+`use super::*;` must remain as the first import. Return the complete Rust source file — no explanation, no markdown fences."""
 
 
 def build_code_user_prompt(state: dict, hypothesis: dict) -> str:
@@ -255,6 +246,61 @@ def build_code_user_prompt(state: dict, hypothesis: dict) -> str:
         parts.append(f"\nApply this change:\n{title}\n{description}")
 
     return "\n".join(parts)
+
+
+def build_runtime_fix_prompt(code: str, bench: dict) -> str:
+    """Build a prompt that feeds runtime errors back to the LLM for fixing."""
+    errors = bench.get("errors") or []
+    error_lines = "\n".join(f"  - {e}" for e in errors)
+    score = bench.get("score", 0)
+    feasible = bench.get("feasible", False)
+    track_scores = bench.get("track_scores", {})
+    track_summary = "\n".join(
+        f"  - {track}: {s:.0f}" for track, s in track_scores.items()
+    )
+    return (
+        f"Current algorithm:\n```rust\n{code}\n```\n\n"
+        f"This code compiled successfully but failed at runtime.\n\n"
+        f"Score: {score}  Feasible: {feasible}\n"
+        f"Per-track scores:\n{track_summary}\n"
+        f"Errors:\n{error_lines}\n\n"
+        "How to interpret the errors:\n"
+        "- 'no solution saved' = the code crashed, panicked, or returned Err() "
+        "before ever calling save_solution(). Fix: save_solution() MUST be "
+        "called before any fallible operation. Build a partial solution and "
+        "save it first, then try to improve.\n"
+        "- Any other error = the code saved a solution but the evaluator "
+        "rejected it (constraint violation). Fix: check that your solution "
+        "satisfies all feasibility constraints described in the challenge.\n\n"
+        "Fix the runtime errors and return the complete Rust source file."
+    )
+
+
+def build_redescribe_hypothesis_prompt(
+    original_code: str, final_code: str, original_hypothesis: dict,
+) -> str:
+    """Ask the LLM to re-describe what the final code actually does,
+    since error recovery may have changed it from the original plan."""
+    orig_title = original_hypothesis.get("title", "")
+    orig_desc = original_hypothesis.get("description", "")
+    orig_tag = original_hypothesis.get("strategy_tag", "other")
+    return (
+        f"The original hypothesis was:\n"
+        f"  TITLE: {orig_title}\n"
+        f"  DESCRIPTION: {orig_desc}\n"
+        f"  STRATEGY_TAG: {orig_tag}\n\n"
+        f"Original code (before):\n```rust\n{original_code}\n```\n\n"
+        f"Final code (after fixing runtime errors):\n```rust\n{final_code}\n```\n\n"
+        "The code was modified to fix runtime errors. Compare the original "
+        "hypothesis against the final code. If the error recovery changed the "
+        "core approach (e.g. replaced the construction heuristic, added a "
+        "fundamentally different fallback strategy, restructured the solver), "
+        "update the TITLE, DESCRIPTION, and STRATEGY_TAG to accurately reflect "
+        "what the final code actually does. If the fixes were minor (e.g. "
+        "bounds checks, error handling wrappers) and the core approach is "
+        "unchanged, keep the original hypothesis as-is.\n\n"
+        "Respond with the corrected hypothesis."
+    )
 
 
 # ── Response parsing ────────────────────────────────────────────────
@@ -575,6 +621,7 @@ def main() -> int:
 
         max_build_retries = 2
         bench = None
+        code_changed_by_fix = False
         for build_attempt in range(1 + max_build_retries):
             bench, build_err = run_benchmark()
             if bench is not None:
@@ -611,6 +658,7 @@ def main() -> int:
             fix_sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
             print(f"  Fix similarity to broken code: {fix_sim * 100:.0f}%")
             write_algorithm(fixed, config)
+            code_changed_by_fix = True
 
         if bench is None:
             print("  Benchmark failed — restoring previous code and continuing")
@@ -621,6 +669,104 @@ def main() -> int:
             continue
 
         print(f"  Score: {bench['score']}  Feasible: {bench['feasible']}")
+
+        # ── Step 4b: runtime error retry ───────────────────────
+        max_runtime_retries = 2
+        runtime_errors = bench.get("errors") or []
+        if runtime_errors and not bench["feasible"]:
+            for rt_attempt in range(max_runtime_retries):
+                print(f"  Runtime retry {rt_attempt + 1}/{max_runtime_retries} — asking LLM to fix ...")
+                print(f"  Errors: {runtime_errors}")
+                current_code = read_algorithm(config)
+                try:
+                    fix_response = call_llm(
+                        args.provider, model, api_key,
+                        build_code_system_prompt(challenge_md, config),
+                        build_runtime_fix_prompt(current_code, bench),
+                        args.api_base,
+                    )
+                except Exception as e:
+                    print(f"  Runtime fix LLM call failed: {e}", file=sys.stderr)
+                    break
+                fixed = parse_code(fix_response)
+                if not fixed:
+                    print("  Empty fix response — giving up")
+                    break
+                fix_violation = validate_code(original_code, fixed)
+                if fix_violation:
+                    print(f"  Fix failed validation: {fix_violation}")
+                    break
+                fix_sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
+                print(f"  Fix similarity: {fix_sim * 100:.0f}%")
+                write_algorithm(fixed, config)
+                code_changed_by_fix = True
+
+                print("  Re-running benchmark ...")
+                send_heartbeat(server, agent_id)
+                bench, build_err = run_benchmark()
+                if bench is None:
+                    # Runtime fix introduced a compile error — one retry
+                    print(f"  Runtime fix caused compile error — asking LLM to fix ...")
+                    compile_fix_prompt = (
+                        f"Current algorithm:\n```rust\n{read_algorithm(config)}\n```\n\n"
+                        f"This code failed to compile. Here are the errors:\n```\n{build_err[-1500:]}\n```\n\n"
+                        "Fix the compile errors and return the complete Rust source file."
+                    )
+                    try:
+                        compile_fix_resp = call_llm(
+                            args.provider, model, api_key,
+                            build_code_system_prompt(challenge_md, config),
+                            compile_fix_prompt,
+                            args.api_base,
+                        )
+                    except Exception as e:
+                        print(f"  Compile fix LLM call failed: {e}", file=sys.stderr)
+                        if best_code:
+                            write_algorithm(best_code, config)
+                        break
+                    compile_fixed = parse_code(compile_fix_resp)
+                    if not compile_fixed or validate_code(original_code, compile_fixed):
+                        print("  Compile fix failed validation — restoring and continuing")
+                        if best_code:
+                            write_algorithm(best_code, config)
+                        break
+                    write_algorithm(compile_fixed, config)
+                    bench, build_err = run_benchmark()
+                    if bench is None:
+                        print("  Still won't compile — restoring and continuing")
+                        if best_code:
+                            write_algorithm(best_code, config)
+                        break
+                print(f"  Score: {bench['score']}  Feasible: {bench['feasible']}")
+                runtime_errors = bench.get("errors") or []
+                if not runtime_errors or bench["feasible"]:
+                    break
+
+        if bench is None:
+            post_message(server, agent_name, agent_id,
+                         f"[{tag}] {title} — benchmark failed after runtime fix")
+            continue
+
+        # ── Step 4c: re-describe hypothesis if code changed ────
+        if code_changed_by_fix:
+            print("  Code changed during error recovery — re-describing hypothesis ...")
+            final_code = read_algorithm(config)
+            try:
+                redesc_response = call_llm(
+                    args.provider, model, api_key,
+                    build_hypothesis_system_prompt(challenge_md, config),
+                    build_redescribe_hypothesis_prompt(
+                        original_code or best_code or "", final_code, hypothesis,
+                    ),
+                    args.api_base,
+                )
+                updated = parse_hypothesis(redesc_response)
+                print(f"  Updated hypothesis: [{updated.get('strategy_tag', '?')}] {updated.get('title', '?')}")
+                hypothesis = updated
+                tag = hypothesis.get("strategy_tag", "?")
+                title = hypothesis.get("title", "?")
+            except Exception as e:
+                print(f"  Re-describe failed: {e} — using original hypothesis", file=sys.stderr)
 
         # ── Step 5: publish ─────────────────────────────────────
         is_new_best = False

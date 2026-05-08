@@ -34,15 +34,18 @@ def _resolve_server_url() -> str:
 SERVER = _resolve_server_url()
 
 
-def _resolve_algo_path() -> Path:
-    """Determine the active challenge's algorithm file from swarm.config.json."""
+def _resolve_algo_path() -> tuple[Path, Path | None]:
+    """Determine the active challenge's algorithm and optional kernel file
+    from swarm.config.json. Returns (algorithm_path, kernel_path_or_None)."""
     cfg_path = ROOT / "swarm.config.json"
     if cfg_path.exists():
         try:
             cfg = json.loads(cfg_path.read_text())
             algo = cfg.get("algorithm_path")
             if algo:
-                return ROOT / algo
+                kernel = cfg.get("kernel_path")
+                kernel_path = (ROOT / kernel) if kernel else None
+                return ROOT / algo, kernel_path
         except Exception:
             pass
     print("error: swarm.config.json missing or has no algorithm_path — run setup.py first", file=sys.stderr)
@@ -65,7 +68,7 @@ def main():
 
     bench = json.load(sys.stdin)
 
-    algo_path = _resolve_algo_path()
+    algo_path, kernel_path = _resolve_algo_path()
     if not algo_path.exists():
         sys.exit(f"publish.py: algorithm file not found: {algo_path}")
     code = algo_path.read_text()
@@ -83,6 +86,8 @@ def main():
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
     }
+    if kernel_path and kernel_path.exists():
+        payload["kernel_code"] = kernel_path.read_text()
     # VRP-only fields. benchmark.py omits these for non-VRP challenges; we
     # forward them only when present so SAT / knapsack / etc. payloads
     # don't carry meaningless num_vehicles=0 / total_distance=score.
