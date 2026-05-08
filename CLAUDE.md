@@ -1,6 +1,6 @@
 # Swarm Agent — Automated Discovery at Scale
 
-> **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file and `scripts/`.
+> **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file.
 
 > **Active challenge:** this swarm is configured for **vehicle_routing**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
 
@@ -154,9 +154,44 @@ Key output fields:
 Quality of zero means matching the baseline; positive means beating it; negative means worse than the baseline. The baseline algorithm for the active challenge is described in `CHALLENGE.md`.
 **Docker note:** Benchmarks are built and run inside a Docker container automatically by `benchmark.py`. Build the Docker image once: `docker build -f Dockerfile.cpu -t tig-swarm-cpu .`
 
+### Step 4b: Fix Runtime Errors (only if benchmark failed)
+
+After running the benchmark, check the `errors` field and `feasible` flag in `$BENCH`:
+
+```bash
+echo "$BENCH" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+errors=d.get('errors') or []
+if errors:
+    print('ERRORS:')
+    for e in errors: print(f'  - {e}')
+if d['feasible']:
+    print('STATUS: feasible — proceed to Step 5 (publish)')
+else:
+    print('STATUS: infeasible — fix and retry')
+"
+```
+
+**If `feasible` is `true`**: skip this step entirely and go straight to Step 5. You MUST publish the result even if the score is poor — every iteration counts.
+
+**If `feasible` is `false` and there are errors**: you have up to 2 attempts to fix the code and re-benchmark. Read the errors carefully:
+- `"no solution saved"` — your code crashed, panicked, or returned `Err()` before calling `save_solution()`. You MUST call `save_solution()` before any fallible operation. Build a partial solution and save it first, then improve.
+- Any other error — your code saved a solution but the evaluator rejected it (constraint violation). Check that your solution satisfies all feasibility constraints described in `CHALLENGE.md`.
+
+Fix the issue in `mod.rs`, then re-run the benchmark:
+```bash
+BENCH=$(python3 scripts/benchmark.py 2>/dev/null)
+echo "$BENCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Score: {d[\"score\"]}, Feasible: {d[\"feasible\"]}')"
+```
+
+If it's now feasible (or you've used both retry attempts), proceed to Step 5.
+
+**If you modified the code during this step**, your original hypothesis (the title, description, and strategy tag you planned in Step 3) may no longer accurately describe what the code does. Before publishing, compare your original plan against the final code. If the core approach changed (e.g. you replaced the construction heuristic, added a fundamentally different fallback), update your hypothesis to reflect what the code actually does. If the fixes were minor (e.g. bounds checks, error handling wrappers), keep the original hypothesis.
+
 ### Step 5: Publish Results
 
-Reuse the `$BENCH` output from Step 4 — do **NOT** re-run the benchmark.
+Reuse the `$BENCH` output from Step 4 (or Step 4b if you retried) — do **NOT** re-run the benchmark.
 
 ```bash
 echo "$BENCH" | python3 scripts/publish.py YOUR_AGENT_ID \
