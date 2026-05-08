@@ -18,7 +18,7 @@ export class InspirationMatrixPanel implements Panel {
   init(container: HTMLElement) {
     container.innerHTML = `
       <div class="panel-inner diversity-panel">
-        <div class="panel-label">INSPIRATION MATRIX</div>
+        <div class="panel-label">INSPIRATION MATRIX · TRAJECTORIES</div>
         <div class="diversity-grid" id="inspiration-grid"></div>
       </div>
     `;
@@ -109,7 +109,7 @@ export class InspirationMatrixPanel implements Panel {
       hdr.className = "dv-col-hdr";
       hdr.style.color = getAgentColor(agents[j].agent_id);
       hdr.textContent = this.shortName(agents[j].agent_name);
-      hdr.title = `${agents[j].agent_name} (source)`;
+      hdr.title = `${agents[j].agent_name} (source trajectory)`;
       grid.appendChild(hdr);
     }
 
@@ -118,7 +118,7 @@ export class InspirationMatrixPanel implements Panel {
       rh.className = "dv-row-hdr";
       rh.style.color = getAgentColor(agents[i].agent_id);
       rh.textContent = this.shortName(agents[i].agent_name);
-      rh.title = `${agents[i].agent_name} (receiver)`;
+      rh.title = `${agents[i].agent_name} (receiver trajectory)`;
       grid.appendChild(rh);
 
       for (let j = 0; j < n; j++) {
@@ -131,7 +131,7 @@ export class InspirationMatrixPanel implements Panel {
         cell.textContent = String(val);
         cell.title = i === j
           ? `${agents[i].agent_name} (self)`
-          : `${agents[i].agent_name} received inspiration from ${agents[j].agent_name}: ${val} time${val !== 1 ? "s" : ""}`;
+          : `${agents[i].agent_name} inspired by ${agents[j].agent_name}: ${val} time${val !== 1 ? "s" : ""}`;
         grid.appendChild(cell);
       }
     }
@@ -147,8 +147,16 @@ export class InspirationMatrixPanel implements Panel {
   }
 
   private shortName(name: string): string {
-    if (name.length <= 10) return name;
-    return name.slice(0, 9) + "…";
+    if (name.length <= 12) return name;
+    const dot = " · ";
+    const idx = name.indexOf(dot);
+    if (idx < 0 || idx >= 10) return name.slice(0, 11) + "…";
+    const head = name.slice(0, idx);
+    const tail = name.slice(idx + dot.length);
+    const tailBudget = Math.max(1, 12 - head.length - dot.length);
+    return tail.length <= tailBudget
+      ? `${head}${dot}${tail}`
+      : `${head}${dot}${tail.slice(0, tailBudget)}…`;
   }
 
   private cellColor(val: number, maxVal: number): string {

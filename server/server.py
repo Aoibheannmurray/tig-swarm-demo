@@ -1201,59 +1201,68 @@ def _traj_label(traj_id: str, agent_name: str | None, status: str) -> str:
 
 @app.get("/api/inspiration_matrix")
 async def get_inspiration_matrix(challenge: str | None = None):
-    """NxN matrix of inspiration counts between agents.
+    """NxN matrix of inspiration counts between **trajectories**.
 
-    matrix[i][j] = number of times agent i received inspiration from agent j.
-    Diagonal is always 0 (an agent cannot inspire itself).
+    matrix[i][j] = number of times trajectory i received inspiration from
+    trajectory j.  The receiver trajectory comes from the experiment's own
+    trajectory_id; the source trajectory is looked up via the source agent's
+    agent_bests row (their trajectory at inspiration time is approximated by
+    their current trajectory — exact enough for the dashboard view).
     """
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         cursor = await conn.execute(
-            """SELECT e.agent_id AS receiver_id,
-                      e.inspiration_source_id AS source_id,
-                      a_recv.name AS receiver_name,
-                      a_src.name AS source_name,
-                      COUNT(*) AS cnt
+            """SELECT e.trajectory_id        AS recv_traj,
+                      ab_src.trajectory_id   AS src_traj,
+                      a_recv.name            AS recv_agent,
+                      a_src.name             AS src_agent,
+                      COUNT(*)               AS cnt
                FROM experiments e
                JOIN agents a_recv ON a_recv.id = e.agent_id
-               JOIN agents a_src ON a_src.id = e.inspiration_source_id
+               JOIN agents a_src  ON a_src.id  = e.inspiration_source_id
+               JOIN agent_bests ab_src
+                 ON ab_src.agent_id  = e.inspiration_source_id
+                AND ab_src.challenge = e.challenge
               WHERE e.challenge = ?
                 AND e.received_hint = 'inspiration'
                 AND e.inspiration_source_id IS NOT NULL
-              GROUP BY e.agent_id, e.inspiration_source_id""",
+                AND e.trajectory_id IS NOT NULL
+              GROUP BY e.trajectory_id, ab_src.trajectory_id""",
             (challenge,),
         )
         rows = [dict(r) for r in await cursor.fetchall()]
 
-    agent_ids: list[str] = []
-    agent_names: dict[str, str] = {}
+    traj_ids: list[str] = []
+    traj_labels: dict[str, str] = {}
     seen: set[str] = set()
     for r in rows:
-        for aid, aname in [(r["receiver_id"], r["receiver_name"]),
-                           (r["source_id"], r["source_name"])]:
-            if aid not in seen:
-                seen.add(aid)
-                agent_ids.append(aid)
-                agent_names[aid] = aname
+        for tid, aname in [(r["recv_traj"], r["recv_agent"]),
+                           (r["src_traj"], r["src_agent"])]:
+            if tid and tid not in seen:
+                seen.add(tid)
+                traj_ids.append(tid)
+                traj_labels[tid] = _traj_label(tid, aname, "active")
 
-    if not agent_ids:
+    if not traj_ids:
         return {"agents": [], "matrix": []}
 
     counts: dict[tuple[str, str], int] = {}
     for r in rows:
-        counts[(r["receiver_id"], r["source_id"])] = r["cnt"]
+        rt, st = r["recv_traj"], r["src_traj"]
+        if rt and st:
+            counts[(rt, st)] = r["cnt"]
 
-    n = len(agent_ids)
+    n = len(traj_ids)
     matrix = []
     for i in range(n):
         row = []
         for j in range(n):
-            row.append(counts.get((agent_ids[i], agent_ids[j]), 0))
+            row.append(counts.get((traj_ids[i], traj_ids[j]), 0))
         matrix.append(row)
 
     agents = [
-        {"agent_id": aid, "agent_name": agent_names[aid]}
-        for aid in agent_ids
+        {"agent_id": tid, "agent_name": traj_labels[tid]}
+        for tid in traj_ids
     ]
     return {"agents": agents, "matrix": matrix}
 
