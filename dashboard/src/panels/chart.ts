@@ -57,7 +57,6 @@ export class ChartPanel implements Panel {
   private globalStartTime = 0;
   private width = 0;
   private height = 0;
-  private margin = { top: 28, right: 16, bottom: 28, left: 52 };
 
   private apiUrl = "";
 
@@ -411,13 +410,38 @@ export class ChartPanel implements Panel {
     });
   }
 
+  // Margins scale with the axis font size so the same chart code works
+  // for the small dashboard panel (fs≈10) and the full-screen benchmark
+  // page (fs up to 22) without y-axis labels overflowing the left edge,
+  // x-axis tick labels clipping at the bottom, or rightmost agent-name
+  // labels running off the right. The Math.max with the prior constants
+  // preserves the original layout on small charts.
+  private computeLayout() {
+    const fs = axisFontPx(this.width);
+    // Each margin sized to the worst case at this font size:
+    //   top:    breakthrough labels are drawn at y - 8, so we need fs + 8
+    //           clearance above the chart for a label sitting at y = 0.
+    //   bottom: tick labels baseline at h + fs + 6, descender ~fs/4 below,
+    //           plus a few px breathing room.
+    //   left:   y-axis labels (text-anchor=end at x = -8) can be ~8 chars
+    //           wide on log-scaled scores ("100.00M"); at ~0.55em/char
+    //           that's ~4.4·fs.
+    //   right:  half-strokes from end-of-data lines plus a small buffer.
+    const m = {
+      top: Math.max(28, fs + 12),
+      right: Math.max(16, Math.round(fs * 2)),
+      bottom: Math.max(28, fs + 18),
+      left: Math.max(52, Math.round(fs * 5)),
+    };
+    const w = Math.max(0, this.width - m.left - m.right);
+    const h = Math.max(0, this.height - m.top - m.bottom);
+    return { m, w, h, fs };
+  }
+
   private redrawGlobal() {
     this.g.selectAll("*").remove();
 
-    const m = this.margin;
-    const w = this.width - m.left - m.right;
-    const h = this.height - m.top - m.bottom;
-    const fs = axisFontPx(w);
+    const { m, w, h, fs } = this.computeLayout();
 
     if (this.globalData.length < 1) {
       // Empty-state placeholder so an unstarted challenge doesn't look
@@ -564,10 +588,7 @@ export class ChartPanel implements Panel {
     this.g.selectAll("*").remove();
 
     const progress = this.agentProgress.get(agentId);
-    const m = this.margin;
-    const w = this.width - m.left - m.right;
-    const h = this.height - m.top - m.bottom;
-    const fs = axisFontPx(w);
+    const { m, w, h, fs } = this.computeLayout();
 
     const chartG = this.g.append("g")
       .attr("transform", `translate(${m.left},${m.top})`);
@@ -738,7 +759,10 @@ export class ChartPanel implements Panel {
       { kind: "inspiration",            label: "inspiration" },
     ];
     const lineH = Math.max(12, fs + 2);
-    const x0 = chartWidth - 130;
+    // "trajectory deactivated" is the longest label (~21 chars). Reserve
+    // ~0.6em per char so the legend doesn't run off the right edge once
+    // fs grows on the full-screen benchmark page.
+    const x0 = chartWidth - Math.max(130, Math.round(fs * 13));
     let y0 = 4;
     const legend = chartG.append("g").attr("class", "agent-event-legend");
     items.forEach((item) => {
