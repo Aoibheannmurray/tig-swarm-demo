@@ -71,6 +71,7 @@ _RAW_IP_URL_RE = re.compile(r"https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?")
 PLACEHOLDER_URL = "${SERVER_URL}"
 PLACEHOLDER_CHALLENGE = "${CHALLENGE_NAME}"
 PLACEHOLDER_ALGO = "${ALGORITHM_PATH}"
+PLACEHOLDER_TIMEOUT = "${TIMEOUT}"
 
 # Per-challenge defaults for the wizard prompts. The canonical definitions
 # live in server/challenges.py; this dict is built from there at module
@@ -184,6 +185,7 @@ def template_files(
     challenge: str | None = None,
     algorithm_path: str | None = None,
     prior: dict | None = None,
+    timeout: int | None = None,
 ) -> None:
     """Substitute swarm-specific placeholders into every tracked file that
     contains them. CLAUDE.md is regenerated from CLAUDE.md.template each
@@ -203,6 +205,7 @@ def template_files(
         text = text.replace(PLACEHOLDER_URL, server_url)
         if challenge:
             text = text.replace(PLACEHOLDER_CHALLENGE, challenge)
+        text = text.replace(PLACEHOLDER_TIMEOUT, str(timeout or DEFAULT_TIMEOUT))
         text = _strip_conditional_blocks(text, is_gpu)
         CLAUDE_OUTPUT.write_text(text)
         print(f"  generated {CLAUDE_OUTPUT.relative_to(ROOT)}")
@@ -838,6 +841,7 @@ def run_create() -> int:
         challenge=active_challenge,
         algorithm_path=cfg["algorithm_path"],
         prior=prior,
+        timeout=active_sub["timeout"],
     )
     write_challenge_md(active_challenge)
     write_swarm_config(cfg)
@@ -939,9 +943,13 @@ def run_switch(challenge: str) -> int:
     # 2. Re-template the owner's local clone so they can also work on the new challenge.
     new_algo_path = f"src/{challenge}/algorithm/mod.rs"
     ch_def = _CHALLENGE_REGISTRY[challenge]
+    # Mirror the new challenge's sub-config to top-level so benchmark.py's
+    # offline fallback uses the right tracks/timeout.
+    sub = fetch_challenge_sub_config(server_url, challenge)
     template_files(
         server_url, challenge=challenge,
         algorithm_path=new_algo_path, prior=prior,
+        timeout=sub.get("timeout") if sub else None,
     )
     write_challenge_md(challenge)
     cfg = dict(prior)
@@ -954,9 +962,6 @@ def run_switch(challenge: str) -> int:
     else:
         cfg.pop("kernel_path", None)
         cfg.pop("is_gpu", None)
-    # Mirror the new challenge's sub-config to top-level so benchmark.py's
-    # offline fallback uses the right tracks/timeout.
-    sub = fetch_challenge_sub_config(server_url, challenge)
     if sub:
         cfg["tracks"] = sub.get("tracks", {})
         cfg["timeout"] = sub.get("timeout", 5)
@@ -1007,9 +1012,11 @@ def run_sync() -> int:
 
     new_algo_path = f"src/{new_challenge}/algorithm/mod.rs"
     ch_def = _CHALLENGE_REGISTRY.get(new_challenge)
+    sub = fetch_challenge_sub_config(server_url, new_challenge)
     template_files(
         server_url, challenge=new_challenge,
         algorithm_path=new_algo_path, prior=prior,
+        timeout=sub.get("timeout") if sub else None,
     )
     write_challenge_md(new_challenge)
     cfg = dict(prior)
@@ -1025,7 +1032,6 @@ def run_sync() -> int:
     else:
         cfg.pop("kernel_path", None)
         cfg.pop("is_gpu", None)
-    sub = fetch_challenge_sub_config(server_url, new_challenge)
     if sub:
         cfg["tracks"] = sub.get("tracks", {})
         cfg["timeout"] = sub.get("timeout", 5)
@@ -1085,12 +1091,14 @@ def run_join(server_url: str) -> int:
     algorithm_path = None
     stagnation_threshold = 2
     swarm_type = "cpu"
+    timeout = None
     try:
         with urllib.request.urlopen(f"{server_url.rstrip('/')}/api/swarm_config", timeout=4) as r:
             swarm = json.load(r)
         challenge = swarm.get("active_challenge") or swarm.get("challenge")
         stagnation_threshold = swarm.get("stagnation_threshold", 2)
         swarm_type = swarm.get("swarm_type", "cpu")
+        timeout = swarm.get("timeout")
         if challenge:
             algorithm_path = f"src/{challenge}/algorithm/mod.rs"
     except Exception as e:
@@ -1107,6 +1115,7 @@ def run_join(server_url: str) -> int:
         challenge=challenge,
         algorithm_path=algorithm_path,
         prior=prior,
+        timeout=timeout,
     )
     if challenge:
         write_challenge_md(challenge)

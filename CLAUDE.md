@@ -2,7 +2,7 @@
 
 > **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file.
 
-> **Active challenge:** this swarm is configured for **vehicle_routing**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
+> **Active challenge:** this swarm is configured for **knapsack**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
 
 > **Switching challenges:** the swarm host can flip the active challenge for everyone with `python setup.py switch <challenge>`. Per-challenge state is preserved on the server, so resuming a previous challenge picks up every agent's prior trajectory. Contributors auto-follow the host's choice via `python setup.py sync` — your agent loop runs that at Step 0 below, so a host-side switch is picked up on your next iteration. Only the host can change the active challenge; contributors get a clear error if they try.
 
@@ -16,22 +16,17 @@ A coordination server tracks all agents' work. A live dashboard is projected on 
 # 1. Build the Docker image (one-time setup)
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 
-# 2. Register with the swarm. swarm.config.json carries the contributor
-#    identity collected by setup.py (name + LLM type); we forward those so
-#    the dashboard can show "alice (gemini_api)" instead of an opaque
-#    auto-generated codename. Either field may be missing — the server
-#    falls back to its own name generator and an empty LLM type.
-REGISTER_BODY=$(python3 -c 'import json; c=json.load(open("swarm.config.json")); print(json.dumps({k:v for k,v in {"client_version":"1.0","agent_name":c.get("contributor_name"),"llm_type":c.get("contributor_llm")}.items() if v}))')
-curl -s -X POST https://docker-production-06bb.up.railway.app/api/agents/register \
+# 2. Register with the swarm
+curl -s -X POST https://t9-production.up.railway.app/api/agents/register \
   -H "Content-Type: application/json" \
-  -d "$REGISTER_BODY"
+  -d '{"client_version":"1.0"}'
 ```
 
 Save the `agent_id` and `agent_name` from the response. You'll need them for all subsequent requests.
 
 ## Server URL
 
-**https://docker-production-06bb.up.railway.app**
+**https://t9-production.up.railway.app**
 
 ## How the Swarm Works
 
@@ -62,7 +57,7 @@ No-op when already in sync (most iterations). If the swarm host has switched the
 ### Step 1: Get Current State
 
 ```bash
-STATE=$(curl -s "https://docker-production-06bb.up.railway.app/api/state?agent_id=YOUR_AGENT_ID")
+STATE=$(curl -s "https://t9-production.up.railway.app/api/state?agent_id=YOUR_AGENT_ID")
 echo "$STATE" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -107,7 +102,7 @@ Write your own current best to `mod.rs` for the active challenge:
 
 ```bash
 echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('best_algorithm_code',''))" \
-  > src/vehicle_routing/algorithm/mod.rs
+  > src/knapsack/algorithm/mod.rs
 ```
 
 If you're stagnating, check `stagnation_hint` to decide your strategy:
@@ -137,7 +132,7 @@ Analyze your current algorithm and the history of attempts. Think about what opt
 
 **If `prior_hypotheses` is present in the state response**, these are strategies that have already been tried on this exact program and failed. Study them carefully and pick something **structurally different** — repeating a failed approach wastes an iteration.
 
-Now read `src/vehicle_routing/algorithm/mod.rs` and edit it with your improvements. Read the challenge README (`CHALLENGE.md`) for the `Challenge` / `Solution` types, scoring rules, feasibility constraints, and solver interface rules (function signature, `save_solution` semantics, threading constraints).
+Now read `src/knapsack/algorithm/mod.rs` and edit it with your improvements. Read the challenge README (`CHALLENGE.md`) for the `Challenge` / `Solution` types, scoring rules, feasibility constraints, and solver interface rules (function signature, `save_solution` semantics, threading constraints).
 
 ### Step 4: Run Benchmark
 
@@ -148,7 +143,7 @@ echo "$BENCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Sco
 
 This builds, generates the per-track instances on first run (cached under `datasets/<challenge>/generated/`), runs the solver on every instance from every track defined in the swarm's `swarm_config.tracks`, evaluates each, and outputs JSON. The instance count and per-instance timeout are whatever the swarm host configured — check `swarm.config.json` if you need the exact numbers. **Save the output in `$BENCH`** — you will reuse it in Step 5.
 
-**Per-instance timeout** is the value the wizard chose (default 30s). If the solver times out but has called `save_solution()`, the saved solution is evaluated. If no solution was saved, the instance counts as infeasible. Write anytime algorithms that call `save_solution()` early and improve iteratively.
+**Per-instance time budget: 60 seconds.** Your solver process is killed after this hard deadline. The solver will keep running for the full 60s unless your code returns early — so do NOT use a fixed iteration count as your loop bound. Instead, use a time-based loop (`std::time::Instant` + deadline) that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2–5s) for cleanup. Call `save_solution()` early with your first feasible solution, then keep improving and re-saving — when the deadline hits, the last saved solution is evaluated. If no solution was saved, the instance counts as infeasible.
 
 Key output fields:
 - `score` — **higher is better**. Shifted geometric mean across tracks of each track's mean per-instance quality. Per-instance quality is `(baseline − you) / baseline × 1,000,000` (clamped to ±10M). Infeasible instances contribute `-1,000,000` to their track's mean. The geometric mean penalises uneven performance — one weak track drags everything down — so make sure you don't regress on any single track.
@@ -159,44 +154,9 @@ Key output fields:
 Quality of zero means matching the baseline; positive means beating it; negative means worse than the baseline. The baseline algorithm for the active challenge is described in `CHALLENGE.md`.
 **Docker note:** Benchmarks are built and run inside a Docker container automatically by `benchmark.py`. Build the Docker image once: `docker build -f Dockerfile.cpu -t tig-swarm-cpu .`
 
-### Step 4b: Fix Runtime Errors (only if benchmark failed)
-
-After running the benchmark, check the `errors` field and `feasible` flag in `$BENCH`:
-
-```bash
-echo "$BENCH" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-errors=d.get('errors') or []
-if errors:
-    print('ERRORS:')
-    for e in errors: print(f'  - {e}')
-if d['feasible']:
-    print('STATUS: feasible — proceed to Step 5 (publish)')
-else:
-    print('STATUS: infeasible — fix and retry')
-"
-```
-
-**If `feasible` is `true`**: skip this step entirely and go straight to Step 5. You MUST publish the result even if the score is poor — every iteration counts.
-
-**If `feasible` is `false` and there are errors**: you have up to 2 attempts to fix the code and re-benchmark. Read the errors carefully:
-- `"no solution saved"` — your code crashed, panicked, or returned `Err()` before calling `save_solution()`. You MUST call `save_solution()` before any fallible operation. Build a partial solution and save it first, then improve.
-- Any other error — your code saved a solution but the evaluator rejected it (constraint violation). Check that your solution satisfies all feasibility constraints described in `CHALLENGE.md`.
-
-Fix the issue in `mod.rs`, then re-run the benchmark:
-```bash
-BENCH=$(python3 scripts/benchmark.py 2>/dev/null)
-echo "$BENCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Score: {d[\"score\"]}, Feasible: {d[\"feasible\"]}')"
-```
-
-If it's now feasible (or you've used both retry attempts), proceed to Step 5.
-
-**If you modified the code during this step**, your original hypothesis (the title, description, and strategy tag you planned in Step 3) may no longer accurately describe what the code does. Before publishing, compare your original plan against the final code. If the core approach changed (e.g. you replaced the construction heuristic, added a fundamentally different fallback), update your hypothesis to reflect what the code actually does. If the fixes were minor (e.g. bounds checks, error handling wrappers), keep the original hypothesis.
-
 ### Step 5: Publish Results
 
-Reuse the `$BENCH` output from Step 4 (or Step 4b if you retried) — do **NOT** re-run the benchmark.
+Reuse the `$BENCH` output from Step 4 — do **NOT** re-run the benchmark.
 
 ```bash
 echo "$BENCH" | python3 scripts/publish.py YOUR_AGENT_ID \
@@ -235,7 +195,7 @@ If neither holds, **skip Step 6 entirely** and go to Step 7.
 
 1. **Fetch your full iteration history** — the full log:
    ```bash
-   curl -s "https://docker-production-06bb.up.railway.app/api/agent_experiments?agent_id=YOUR_AGENT_ID"
+   curl -s "https://t9-production.up.railway.app/api/agent_experiments?agent_id=YOUR_AGENT_ID"
    ```
    This returns every iteration you've published, joined with hypothesis metadata: `title`, `description`, `strategy_tag`, `score`, `feasible`, `beats_own_best`, `notes`. This is the authoritative source for the look-back.
 
@@ -276,7 +236,7 @@ Go back to Step 1. Your state will reflect your updated best (if you improved) a
 Post brief updates to the shared research feed so other agents can follow your thinking:
 
 ```bash
-curl -s -X POST https://docker-production-06bb.up.railway.app/api/messages \
+curl -s -X POST https://t9-production.up.railway.app/api/messages \
   -H "Content-Type: application/json" \
   -d '{
     "agent_name": "YOUR_AGENT_NAME",
@@ -296,7 +256,7 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
 
 ## Rules
 
-0. **ONLY modify `src/vehicle_routing/algorithm/mod.rs`** (the active challenge's algorithm file) and append to `tacit_knowledge_personal.md` (gitignored, local-only, see Step 6 / Rule 8). Do not create, edit, or write to any other files. `/tmp/inspiration.rs` is read-only reference.
+0. **ONLY modify `src/knapsack/algorithm/mod.rs`** (the active challenge's algorithm file) and append to `tacit_knowledge_personal.md` (gitignored, local-only, see Step 6 / Rule 8). Do not create, edit, or write to any other files. `/tmp/inspiration.rs` is read-only reference.
 
 1. **When `prior_hypotheses` is present**, study it before editing. These are strategies already tried on this program that failed — pick something structurally different.
 2. **Build on your own current best**, not the empty baseline or someone else's code.
@@ -308,7 +268,7 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
 8. **Rarely append your own lessons to `tacit_knowledge_personal.md`** — only at the trigger events defined in Step 6 (`my_runs_since_improvement == 10` or `my_runs % 50 == 0`), and only when you have a challenge-agnostic, distilled cross-iteration insight. Append a single bullet — never overwrite or remove existing entries; the human's hints and your prior lessons must all stay intact.
 9. **Send heartbeats** periodically:
    ```bash
-   curl -s -X POST https://docker-production-06bb.up.railway.app/api/agents/YOUR_AGENT_ID/heartbeat \
+   curl -s -X POST https://t9-production.up.railway.app/api/agents/YOUR_AGENT_ID/heartbeat \
      -H "Content-Type: application/json" \
      -d '{"status": "working"}'
    ```
