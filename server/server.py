@@ -627,14 +627,6 @@ async def get_state(
                         inspiration_inc=1,
                         runs_since_improvement_inc=0,
                     )
-                # Stash the hint so the next iteration this agent publishes
-                # can be tagged with the hint that produced it. /api/iterations
-                # reads + clears this field atomically.
-                await db.update_agent_challenge_state(
-                    conn, agent_id, challenge,
-                    set_fields={"pending_hint": stagnation_hint},
-                )
-                await conn.commit()
                 all_bests = await db.list_agent_bests(
                     conn, challenge,
                     exclude_agent_ids=[agent_id],
@@ -642,6 +634,7 @@ async def get_state(
                     active_only=True,
                     inactive_cutoff=cutoff_ts,
                 )
+                pending_source = None
                 if all_bests:
                     chosen = random.choice(all_bests)
                     inspiration_code = chosen["algorithm_code"]
@@ -649,6 +642,19 @@ async def get_state(
                     inspiration_agent_name = await get_agent_name(
                         conn, chosen["agent_id"]
                     )
+                    if stagnation_hint == "inspiration":
+                        pending_source = chosen["agent_id"]
+                # Stash the hint (and inspiration source) so the next
+                # iteration this agent publishes can be tagged with them.
+                # /api/iterations reads + clears both atomically.
+                await db.update_agent_challenge_state(
+                    conn, agent_id, challenge,
+                    set_fields={
+                        "pending_hint": stagnation_hint,
+                        "pending_inspiration_source": pending_source,
+                    },
+                )
+                await conn.commit()
 
             best_solution_data = my_best["solution_data"] if my_best else None
             num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
@@ -859,6 +865,7 @@ async def create_iteration(req: IterationCreate):
         # next iteration only carries a hint if the server hands one out
         # again.
         received_hint = (acs or {}).get("pending_hint")
+        inspiration_source_id = (acs or {}).get("pending_inspiration_source")
 
         await conn.execute(
             """INSERT INTO experiments
@@ -866,21 +873,24 @@ async def create_iteration(req: IterationCreate):
                 score, feasible,
                 num_vehicles, total_distance, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
-                trajectory_id, received_hint, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                trajectory_id, received_hint, inspiration_source_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
              req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
              req.notes, solution_data_json, track_scores_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
              1 if beats_own_best else 0,
-             trajectory_id, received_hint, timestamp),
+             trajectory_id, received_hint, inspiration_source_id, timestamp),
         )
 
         if received_hint is not None:
             await db.update_agent_challenge_state(
                 conn, req.agent_id, challenge,
-                set_fields={"pending_hint": None},
+                set_fields={
+                    "pending_hint": None,
+                    "pending_inspiration_source": None,
+                },
             )
 
         await db.update_trajectory_after_edit(
@@ -1187,6 +1197,65 @@ def _traj_label(traj_id: str, agent_name: str | None, status: str) -> str:
     tail = agent_name or "?"
     suffix = "" if status == "active" else " (inactive)"
     return f"{head} · {tail}{suffix}"
+
+
+@app.get("/api/inspiration_matrix")
+async def get_inspiration_matrix(challenge: str | None = None):
+    """NxN matrix of inspiration counts between agents.
+
+    matrix[i][j] = number of times agent i received inspiration from agent j.
+    Diagonal is always 0 (an agent cannot inspire itself).
+    """
+    challenge = await resolve_challenge(challenge)
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            """SELECT e.agent_id AS receiver_id,
+                      e.inspiration_source_id AS source_id,
+                      a_recv.name AS receiver_name,
+                      a_src.name AS source_name,
+                      COUNT(*) AS cnt
+               FROM experiments e
+               JOIN agents a_recv ON a_recv.id = e.agent_id
+               JOIN agents a_src ON a_src.id = e.inspiration_source_id
+              WHERE e.challenge = ?
+                AND e.received_hint = 'inspiration'
+                AND e.inspiration_source_id IS NOT NULL
+              GROUP BY e.agent_id, e.inspiration_source_id""",
+            (challenge,),
+        )
+        rows = [dict(r) for r in await cursor.fetchall()]
+
+    agent_ids: list[str] = []
+    agent_names: dict[str, str] = {}
+    seen: set[str] = set()
+    for r in rows:
+        for aid, aname in [(r["receiver_id"], r["receiver_name"]),
+                           (r["source_id"], r["source_name"])]:
+            if aid not in seen:
+                seen.add(aid)
+                agent_ids.append(aid)
+                agent_names[aid] = aname
+
+    if not agent_ids:
+        return {"agents": [], "matrix": []}
+
+    counts: dict[tuple[str, str], int] = {}
+    for r in rows:
+        counts[(r["receiver_id"], r["source_id"])] = r["cnt"]
+
+    n = len(agent_ids)
+    matrix = []
+    for i in range(n):
+        row = []
+        for j in range(n):
+            row.append(counts.get((agent_ids[i], agent_ids[j]), 0))
+        matrix.append(row)
+
+    agents = [
+        {"agent_id": aid, "agent_name": agent_names[aid]}
+        for aid in agent_ids
+    ]
+    return {"agents": agents, "matrix": matrix}
 
 
 # ── Replay ──

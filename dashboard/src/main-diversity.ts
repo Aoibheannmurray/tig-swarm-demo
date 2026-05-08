@@ -3,6 +3,7 @@ import "./style.css";
 import { SwarmWebSocket } from "./lib/websocket";
 import { MockDataGenerator } from "./mock";
 import { DiversityPanel } from "./panels/diversity";
+import { InspirationMatrixPanel } from "./panels/inspiration-matrix";
 import { ChallengeSelectorPanel } from "./panels/challenge-selector";
 import { loadSwarmConfig, handleWsEvent as handleSwarmConfigEvent } from "./lib/swarmConfig";
 import { onViewedChallengeChange } from "./lib/viewedChallenge";
@@ -35,11 +36,16 @@ panelEl.innerHTML = `
         <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
       </div>
     </div>
-    <div class="page-body" id="panel-diversity-body"></div>
+    <div class="page-body diversity-page-body">
+      <div id="panel-diversity-body"></div>
+      <div id="panel-inspiration-body"></div>
+    </div>
   </div>
 `;
 const panel = new DiversityPanel();
 panel.init(document.getElementById("panel-diversity-body")!);
+const inspirationPanel = new InspirationMatrixPanel();
+inspirationPanel.init(document.getElementById("panel-inspiration-body")!);
 
 function getApiUrl(): string {
   const explicit = params.get("api");
@@ -54,13 +60,13 @@ function handleMessage(msg: WSMessage) {
   handleSwarmConfigEvent(getApiUrl(), msg);
   challengeSelector.handleMessage(msg);
   panel.handleMessage(msg);
+  inspirationPanel.handleMessage(msg);
 }
 
 onViewedChallengeChange(() => {
-  panel.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
-  // The DiversityPanel re-fetches /api/diversity on its own when the
-  // challenge changes via the swarm_config_updated WS event flow; no
-  // explicit setChallenge call needed here.
+  const resetMsg = { type: "reset", timestamp: new Date().toISOString() } as any;
+  panel.handleMessage(resetMsg);
+  inspirationPanel.handleMessage(resetMsg);
 });
 
 // ── Keyboard navigation ──

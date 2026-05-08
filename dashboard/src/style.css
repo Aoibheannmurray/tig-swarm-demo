@@ -1011,6 +1011,17 @@ html, body {
 }
 
 /* ── Diversity ── */
+.diversity-page-body {
+  display: flex;
+  flex-direction: row;
+  gap: 1px;
+}
+.diversity-page-body > div {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 .diversity-panel {
   display: flex;
   flex-direction: column;

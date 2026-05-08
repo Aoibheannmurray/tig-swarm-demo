@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     -- with that hint right before publishing this iteration; NULL otherwise.
     -- Lets the dashboard mark hint events on per-agent progress plots.
     received_hint TEXT,
+    inspiration_source_id TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
     -- the hint, cleared when the agent publishes the next iteration (whose
     -- experiments.received_hint absorbs the value).
     pending_hint TEXT,
+    pending_inspiration_source TEXT,
     last_active_at TEXT,
     PRIMARY KEY (agent_id, challenge),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
@@ -243,6 +245,14 @@ async def init_db() -> None:
         )
         await _add_column_if_missing(
             db, "agent_challenge_state", "pending_hint", "pending_hint TEXT"
+        )
+        await _add_column_if_missing(
+            db, "agent_challenge_state", "pending_inspiration_source",
+            "pending_inspiration_source TEXT"
+        )
+        await _add_column_if_missing(
+            db, "experiments", "inspiration_source_id",
+            "inspiration_source_id TEXT"
         )
         await db.executescript(SCHEMA_INDEXES)
         await db.commit()
