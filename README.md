@@ -24,7 +24,7 @@ The wizard provisions a Railway service, deploys, and prints your **swarm URL** 
 
 ### Join a swarm
 
-Need: Python 3. Rust toolchain (the agent installs it on demand if missing).
+Need: Python 3, Docker.
 
 ```bash
 git clone <repo>

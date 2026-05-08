@@ -189,6 +189,8 @@ Challenges are feature-gated in `Cargo.toml`. The workspace produces three binar
 
 Each binary dispatches to the active challenge via `#[cfg(feature = "<challenge>")]` arms. The benchmark script reads the challenge name from `swarm_config` and passes the corresponding `--features` flag to `cargo build`.
 
+All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` for CPU challenges, `tig-swarm-gpu` for GPU challenges). `benchmark.py` auto-detects the challenge type and re-launches itself inside the appropriate container when invoked on the host. The repo is volume-mounted at `/app` and Cargo build caches are persisted via named Docker volumes for fast incremental builds.
+
 ## Key Files
 
 | File | Role |

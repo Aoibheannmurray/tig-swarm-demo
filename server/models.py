@@ -47,6 +47,7 @@ class IterationCreate(BaseModel):
     description: str = ""
     strategy_tag: str = "other"
     algorithm_code: str = ""
+    kernel_code: Optional[str] = None
     score: float
     feasible: bool = True
     notes: str = ""
@@ -92,16 +93,19 @@ ChallengeName = Literal[
     "knapsack",
     "job_scheduling",
     "energy_arbitrage",
+    "hypergraph",
+    "neuralnet_optimizer",
 ]
 
 
 class ChallengeSubConfig(BaseModel):
-    """Per-challenge configuration. The owner can populate all five in
+    """Per-challenge configuration. The owner can populate all seven in
     parallel via the wizard; switching the active challenge is independent."""
     tracks: dict = {}
     timeout: int = 30
     scoring_direction: Literal["min", "max"] = "max"
     initial_algorithm_code: str = ""
+    initial_kernel_code: str = ""
     strategy_tags: Optional[list[str]] = None
 
 

@@ -84,6 +84,7 @@ async def get_challenge_config_cached(challenge: str) -> dict:
         "timeout": 5,
         "scoring_direction": "max",
         "initial_algorithm_code": "",
+        "initial_kernel_code": "",
     }
     _challenge_config_cache[challenge] = cfg
     return cfg
@@ -95,13 +96,16 @@ def _invalidate_caches() -> None:
     _challenge_config_cache = None
 
 
-async def load_initial_algorithm(challenge: str) -> str:
+async def load_initial_algorithm(challenge: str) -> tuple[str, str]:
     """Initial algorithm broadcast to every agent on a fresh trajectory for
     the given challenge: their first iteration on it, and again whenever a
     trajectory reset draws the "fresh start" slot from the per-challenge
-    inactive pool."""
+    inactive pool. Returns (algorithm_code, kernel_code)."""
     cfg = await get_challenge_config_cached(challenge)
-    return (cfg.get("initial_algorithm_code") or "")
+    return (
+        cfg.get("initial_algorithm_code") or "",
+        cfg.get("initial_kernel_code") or "",
+    )
 
 
 async def get_direction(challenge: str | None = None) -> str:
@@ -466,7 +470,7 @@ async def get_state(
                 new_program_id = None
 
                 if not inactive_pool:
-                    new_code = await load_initial_algorithm(challenge)
+                    new_code, new_kernel_code = await load_initial_algorithm(challenge)
                     new_program_id = new_id()
                     trajectory_reset = {"type": "fresh_start"}
                 else:
@@ -478,12 +482,13 @@ async def get_state(
                     p_fresh = max(0.0, 1.0 - kappa / mean_deact) if mean_deact > 0 else 0.0
 
                     if random.random() < p_fresh:
-                        new_code = await load_initial_algorithm(challenge)
+                        new_code, new_kernel_code = await load_initial_algorithm(challenge)
                         new_program_id = new_id()
                         trajectory_reset = {"type": "fresh_start"}
                     else:
                         picked = random.choice(inactive_pool)
                         new_code = picked["algorithm_code"]
+                        new_kernel_code = picked.get("kernel_code")
                         new_program_id = picked.get("program_id") or new_id()
                         await db.remove_inactive(conn, picked["id"])
                         trajectory_reset = {
@@ -500,6 +505,7 @@ async def get_state(
                     conn, agent_id, challenge,
                     my_best["algorithm_code"], my_best["score"], timestamp,
                     trajectory_id=cur_traj_id, program_id=old_program_id,
+                    kernel_code=my_best.get("kernel_code"),
                 )
 
                 await db.clear_agent_best(conn, agent_id, challenge)
@@ -514,6 +520,7 @@ async def get_state(
                 await conn.commit()
                 my_best = None
                 my_best_code = new_code
+                my_best_kernel_code = new_kernel_code
                 my_best_score = None
                 my_best_experiment_id = None
                 runs_since = 0
@@ -528,10 +535,11 @@ async def get_state(
                 # Re-read acs so subsequent reads see the reset state.
                 acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
             else:
-                my_best_code = (
-                    my_best["algorithm_code"] if my_best
-                    else await load_initial_algorithm(challenge)
-                )
+                if my_best:
+                    my_best_code = my_best["algorithm_code"]
+                    my_best_kernel_code = my_best.get("kernel_code")
+                else:
+                    my_best_code, my_best_kernel_code = await load_initial_algorithm(challenge)
                 my_best_score = my_best["score"] if my_best else None
                 my_best_experiment_id = my_best["experiment_id"] if my_best else None
 
@@ -572,6 +580,7 @@ async def get_state(
             # global heartbeat is recent but whose last_active_at on this
             # challenge is stale.
             inspiration_code = None
+            inspiration_kernel_code = None
             inspiration_agent_name = None
             stagnation_hint = None
             n_stagnation = int(config.get("stagnation_threshold", "2"))
@@ -600,6 +609,7 @@ async def get_state(
                 if all_bests:
                     chosen = random.choice(all_bests)
                     inspiration_code = chosen["algorithm_code"]
+                    inspiration_kernel_code = chosen.get("kernel_code")
                     inspiration_agent_name = await get_agent_name(
                         conn, chosen["agent_id"]
                     )
@@ -615,6 +625,7 @@ async def get_state(
                 "challenge": challenge,
                 "best_score": global_best_score,
                 "best_algorithm_code": my_best_code,
+                "best_kernel_code": my_best_kernel_code or None,
                 "best_experiment_id": my_best_experiment_id,
                 "my_best_score": my_best_score,
                 "my_runs": (acs or {}).get("experiments_completed") if acs else 0,
@@ -628,6 +639,7 @@ async def get_state(
                 "prior_hypotheses": prior_hypotheses,
                 "hypothesis_recall_message": hypothesis_recall_message,
                 "inspiration_code": inspiration_code,
+                "inspiration_kernel_code": inspiration_kernel_code or None,
                 "inspiration_agent_name": inspiration_agent_name,
                 "stagnation_hint": stagnation_hint,
                 "trajectory_reset": trajectory_reset,
@@ -671,15 +683,14 @@ async def get_state(
         else 0
     )
 
+    _initial_algo = (None, None) if served else await load_initial_algorithm(challenge)
     return {
         "challenge": challenge,
         "baseline_score": baseline,
         "best_score": global_best_score,
         "improvement_pct": overall_imp,
-        "best_algorithm_code": (
-            served["algorithm_code"] if served
-            else await load_initial_algorithm(challenge)
-        ),
+        "best_algorithm_code": served["algorithm_code"] if served else _initial_algo[0],
+        "best_kernel_code": (served.get("kernel_code") if served else _initial_algo[1]) or None,
         "best_experiment_id": served["id"] if served else None,
         "best_solution_data": json.loads(served["solution_data"]) if served and served["solution_data"] else None,
         "best_track_scores": (
@@ -808,12 +819,14 @@ async def create_iteration(req: IterationCreate):
 
         await conn.execute(
             """INSERT INTO experiments
-               (id, agent_id, challenge, hypothesis_id, algorithm_code, score, feasible,
+               (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
+                score, feasible,
                 num_vehicles, total_distance, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
                 trajectory_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.score,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
+             req.score,
              1 if req.feasible else 0, req.num_vehicles, req.total_distance,
              req.notes, solution_data_json, track_scores_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
@@ -848,6 +861,7 @@ async def create_iteration(req: IterationCreate):
                 total_distance=req.total_distance, solution_data=solution_data_json,
                 updated_at=timestamp, trajectory_id=trajectory_id,
                 track_scores=track_scores_json,
+                kernel_code=req.kernel_code,
             )
         else:
             await db.increment_agent_challenge_counters(
@@ -1387,13 +1401,17 @@ async def get_swarm_config():
             strategy_tags = json.loads(row.get("strategy_tags") or "[]")
         except Exception:
             strategy_tags = []
-        available[row["challenge"]] = {
+        ch_name = row["challenge"]
+        ch_def = challenges.CHALLENGES.get(ch_name)
+        available[ch_name] = {
             "tracks": tracks,
             "timeout": row.get("timeout") or 5,
             "scoring_direction": row.get("scoring_direction") or "max",
             # Flag-only: don't ship the algorithm body in this response (it
             # can be large and is fetched separately from /api/initial_algorithm).
             "has_initial_algorithm": bool(row.get("initial_algorithm_code")),
+            "has_initial_kernel_code": bool(row.get("initial_kernel_code")),
+            "is_gpu": ch_def.is_gpu if ch_def else False,
             "strategy_tags": strategy_tags,
         }
 
@@ -1424,6 +1442,7 @@ async def get_initial_algorithm(challenge: str | None = None):
     return {
         "challenge": challenge,
         "algorithm_code": cfg.get("initial_algorithm_code", "") or "",
+        "kernel_code": cfg.get("initial_kernel_code", "") or "",
     }
 
 
@@ -1454,6 +1473,7 @@ async def update_swarm_config(req: SwarmConfigUpdate):
                 timeout=sub.get("timeout"),
                 scoring_direction=sub.get("scoring_direction"),
                 initial_algorithm_code=sub.get("initial_algorithm_code"),
+                initial_kernel_code=sub.get("initial_kernel_code"),
                 strategy_tags=json.dumps(sub["strategy_tags"]) if sub.get("strategy_tags") is not None else None,
             )
         if req.active_challenge:

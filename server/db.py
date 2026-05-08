@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS agent_bests (
     challenge TEXT NOT NULL,
     experiment_id TEXT NOT NULL,
     algorithm_code TEXT NOT NULL,
+    kernel_code TEXT,
     score REAL NOT NULL,
     feasible INTEGER NOT NULL DEFAULT 1,
     num_vehicles INTEGER DEFAULT 0,
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     challenge TEXT NOT NULL,
     hypothesis_id TEXT,
     algorithm_code TEXT DEFAULT '',
+    kernel_code TEXT,
     score REAL NOT NULL,
     feasible INTEGER DEFAULT 1,
     num_vehicles INTEGER DEFAULT 0,
@@ -103,6 +105,7 @@ CREATE TABLE IF NOT EXISTS inactive_algorithms (
     agent_id TEXT NOT NULL,
     challenge TEXT NOT NULL,
     algorithm_code TEXT NOT NULL,
+    kernel_code TEXT,
     score REAL,
     deposited_at TEXT NOT NULL,
     trajectory_id TEXT,
@@ -156,6 +159,7 @@ CREATE TABLE IF NOT EXISTS challenge_configs (
     timeout INTEGER NOT NULL DEFAULT 30,
     scoring_direction TEXT NOT NULL DEFAULT 'max',
     initial_algorithm_code TEXT NOT NULL DEFAULT '',
+    initial_kernel_code TEXT NOT NULL DEFAULT '',
     strategy_tags TEXT NOT NULL DEFAULT '[]'
 );
 """
@@ -273,7 +277,7 @@ async def get_global_best(
     # expect the old experiments shape keep working.
     order = _direction_order(direction)
     cursor = await conn.execute(
-        f"SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
+        f"SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, kernel_code, "
         f"       score, feasible, num_vehicles, total_distance, solution_data, track_scores, updated_at "
         f"FROM agent_bests WHERE feasible = 1 AND challenge = ? "
         f"ORDER BY score {order} LIMIT 1",
@@ -287,7 +291,7 @@ async def get_agent_best(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> dict | None:
     cursor = await conn.execute(
-        "SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
+        "SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, kernel_code, "
         "       score, feasible, num_vehicles, total_distance, solution_data, track_scores, updated_at "
         "FROM agent_bests WHERE agent_id = ? AND challenge = ?",
         (agent_id, challenge),
@@ -310,15 +314,17 @@ async def upsert_agent_best(
     updated_at: str,
     trajectory_id: str | None = None,
     track_scores: str | None = None,
+    kernel_code: str | None = None,
 ) -> None:
     await conn.execute(
         """INSERT INTO agent_bests
-           (agent_id, challenge, experiment_id, algorithm_code, score, feasible,
+           (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
             num_vehicles, total_distance, solution_data, track_scores, updated_at, trajectory_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
+             kernel_code = excluded.kernel_code,
              score = excluded.score,
              feasible = excluded.feasible,
              num_vehicles = excluded.num_vehicles,
@@ -327,7 +333,7 @@ async def upsert_agent_best(
              track_scores = excluded.track_scores,
              updated_at = excluded.updated_at,
              trajectory_id = excluded.trajectory_id""",
-        (agent_id, challenge, experiment_id, algorithm_code, score,
+        (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score,
          1 if feasible else 0, num_vehicles, total_distance,
          solution_data, track_scores, updated_at, trajectory_id),
     )
@@ -364,7 +370,7 @@ async def list_agent_bests(
         params.append(inactive_cutoff)
     query = (
         "SELECT ab.agent_id, ab.challenge, ab.experiment_id as id, ab.experiment_id, "
-        "       ab.algorithm_code, ab.score, ab.feasible, ab.num_vehicles, "
+        "       ab.algorithm_code, ab.kernel_code, ab.score, ab.feasible, ab.num_vehicles, "
         "       ab.total_distance, ab.solution_data, ab.updated_at "
         f"FROM agent_bests ab{join_clause} WHERE " + " AND ".join(where) +
         f" ORDER BY ab.score {order}"
@@ -561,7 +567,7 @@ async def get_challenge_config(
     conn: aiosqlite.Connection, challenge: str
 ) -> dict | None:
     cursor = await conn.execute(
-        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code "
+        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code, initial_kernel_code "
         "FROM challenge_configs WHERE challenge = ?",
         (challenge,),
     )
@@ -571,7 +577,7 @@ async def get_challenge_config(
 
 async def list_challenge_configs(conn: aiosqlite.Connection) -> list[dict]:
     cursor = await conn.execute(
-        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code "
+        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code, initial_kernel_code "
         "FROM challenge_configs ORDER BY challenge"
     )
     return [dict(row) for row in await cursor.fetchall()]
@@ -585,6 +591,7 @@ async def upsert_challenge_config(
     timeout: int | None = None,
     scoring_direction: str | None = None,
     initial_algorithm_code: str | None = None,
+    initial_kernel_code: str | None = None,
     strategy_tags: str | None = None,
 ) -> None:
     """Partial upsert — only writes the fields the caller passes. Lets
@@ -608,6 +615,9 @@ async def upsert_challenge_config(
     if initial_algorithm_code is not None:
         sets.append("initial_algorithm_code = ?")
         params.append(initial_algorithm_code)
+    if initial_kernel_code is not None:
+        sets.append("initial_kernel_code = ?")
+        params.append(initial_kernel_code)
     if strategy_tags is not None:
         sets.append("strategy_tags = ?")
         params.append(strategy_tags)
@@ -648,12 +658,13 @@ async def deposit_inactive(
     deposited_at: str,
     trajectory_id: str | None = None,
     program_id: str | None = None,
+    kernel_code: str | None = None,
 ) -> int:
     cursor = await conn.execute(
         "INSERT INTO inactive_algorithms "
-        "  (agent_id, challenge, algorithm_code, score, deposited_at, trajectory_id, program_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (agent_id, challenge, algorithm_code, score, deposited_at, trajectory_id, program_id),
+        "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id),
     )
     return cursor.lastrowid
 
@@ -673,7 +684,7 @@ async def pick_random_inactive(
     # "fresh start" cannot be handed code from a different challenge that
     # won't compile against its types.
     cursor = await conn.execute(
-        "SELECT id, agent_id, challenge, algorithm_code, score, trajectory_id, program_id "
+        "SELECT id, agent_id, challenge, algorithm_code, kernel_code, score, trajectory_id, program_id "
         "FROM inactive_algorithms WHERE challenge = ? ORDER BY RANDOM() LIMIT 1",
         (challenge,),
     )
@@ -701,7 +712,7 @@ async def get_inactive_with_deactivations(
     conn: aiosqlite.Connection, challenge: str
 ) -> list[dict]:
     cursor = await conn.execute(
-        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.score, "
+        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, ia.score, "
         "  ia.trajectory_id, ia.program_id, "
         "  COALESCE(t.num_deactivations, 1) as num_deactivations "
         "FROM inactive_algorithms ia "

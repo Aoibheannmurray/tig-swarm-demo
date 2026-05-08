@@ -67,6 +67,8 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent.parent
 
+_INSIDE_DOCKER = Path("/.dockerenv").exists() or os.environ.get("TIG_IN_DOCKER") == "1"
+
 # Mirrors `QUALITY_PRECISION` in src/lib.rs and the upstream tig-monorepo.
 # All vendored evaluators clamp their (baseline-relative) quality to
 # ±10 × QUALITY_PRECISION before scaling, so the final per-instance score
@@ -114,7 +116,12 @@ def load_swarm_config() -> dict:
     if SERVER:
         try:
             with urllib.request.urlopen(f"{SERVER}/api/swarm_config", timeout=4) as r:
-                return json.load(r)
+                data = json.load(r)
+            ch = data.get("challenge") or data.get("active_challenge")
+            avail = data.get("available_challenges", {})
+            if ch and ch in avail:
+                data.setdefault("is_gpu", avail[ch].get("is_gpu", False))
+            return data
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
             print(f"warning: couldn't reach {SERVER}/api/swarm_config ({e})", file=sys.stderr)
     cfg_path = ROOT_DIR / "swarm.config.json"
@@ -125,9 +132,18 @@ def load_swarm_config() -> dict:
             "tracks": local.get("tracks", {}),
             "timeout": local.get("timeout", 30),
             "scoring_direction": local.get("scoring_direction", "min"),
+            "is_gpu": local.get("is_gpu", False),
         }
     print("error: no swarm config available (server unreachable, no swarm.config.json)", file=sys.stderr)
     sys.exit(1)
+
+
+# ── GPU challenge detection ────────────────────────────────────────
+
+
+def is_gpu_challenge(cfg: dict) -> bool:
+    """Check if the active challenge requires GPU based on swarm config."""
+    return bool(cfg.get("is_gpu"))
 
 
 # ── Build & instance generation ────────────────────────────────────
@@ -257,6 +273,127 @@ def run_instance(
     finally:
         if os.path.exists(sol_path):
             os.unlink(sol_path)
+
+
+# ── Docker re-exec ────────────────────────────────────────────────
+
+
+def _docker_image_for(cfg: dict) -> tuple[str, str]:
+    """Return (image_name, dockerfile) for the active challenge."""
+    if is_gpu_challenge(cfg):
+        return "tig-swarm-gpu", "Dockerfile.gpu"
+    return "tig-swarm-cpu", "Dockerfile.cpu"
+
+
+def _check_docker_image(image: str, dockerfile: str) -> None:
+    """Verify a Docker image exists locally, or exit with a clear message."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"error: Docker image '{image}' not found.\n"
+            f"Build it first:\n\n"
+            f"  docker build -f {dockerfile} -t {image} .\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _reexec_in_docker(cfg: dict) -> int:
+    """Re-launch benchmark.py inside the appropriate Docker container."""
+    image, dockerfile = _docker_image_for(cfg)
+    _check_docker_image(image, dockerfile)
+
+    gpu_flags = ["--gpus", "all"] if is_gpu_challenge(cfg) else []
+    env_flags = ["-e", "TIG_IN_DOCKER=1"]
+    server = os.environ.get("TIG_SWARM_SERVER")
+    if server:
+        env_flags += ["-e", f"TIG_SWARM_SERVER={server}"]
+
+    cmd = [
+        "docker", "run", "--rm",
+        *gpu_flags,
+        "-v", f"{ROOT_DIR}:/app",
+        "-v", "tig-cargo-cache:/app/target",
+        "-v", "tig-cargo-registry:/root/.cargo/registry",
+        *env_flags,
+        image,
+        "python3", "/app/scripts/benchmark.py",
+    ]
+    return subprocess.run(cmd).returncode
+
+
+# ── GPU build & run (native — always called from inside Docker) ──
+
+
+def build_gpu(challenge: str) -> tuple[str, str]:
+    """Compile PTX and build the combined GPU benchmark binary.
+    Returns (binary_path, ptx_path)."""
+    ptx_result = subprocess.run(
+        ["python3", str(ROOT_DIR / "scripts" / "build_ptx.py"), challenge,
+         "--outdir", str(ROOT_DIR / "target" / "ptx")],
+        capture_output=True, text=True,
+    )
+    if ptx_result.returncode != 0:
+        print(f"PTX build failed:\n{ptx_result.stderr}", file=sys.stderr)
+        raise subprocess.CalledProcessError(ptx_result.returncode, "build_ptx.py")
+
+    cargo_result = subprocess.run(
+        ["cargo", "build", "-r",
+         "--bin", "tig_gpu_benchmark",
+         "--features", f"gpu_benchmark,{challenge}"],
+        cwd=ROOT_DIR, capture_output=True, text=True,
+    )
+    if cargo_result.returncode != 0:
+        print(f"GPU binary build failed:\n{cargo_result.stderr}", file=sys.stderr)
+        raise subprocess.CalledProcessError(cargo_result.returncode, "cargo build gpu")
+
+    return (
+        str(ROOT_DIR / "target/release/tig_gpu_benchmark"),
+        str(ROOT_DIR / "target/ptx" / f"{challenge}.ptx"),
+    )
+
+
+def run_gpu_instance(
+    challenge: str, track_key: str, instance_index: int,
+    binary: str, ptx: str, seed: str, timeout: int,
+) -> dict:
+    """Run one GPU instance. Returns same shape as run_instance()."""
+    try:
+        result = subprocess.run(
+            [binary, challenge, track_key,
+             "--seed", seed, "--index", str(instance_index),
+             "--timeout", str(timeout), "--ptx", ptx],
+            capture_output=True, text=True,
+            timeout=timeout + 30,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "instance": f"{track_key}/{instance_index}",
+            "track": track_key,
+            "error": "gpu benchmark timeout",
+            "feasible": False,
+        }
+    if result.returncode != 0:
+        return {
+            "instance": f"{track_key}/{instance_index}",
+            "track": track_key,
+            "error": (result.stderr or result.stdout or "gpu benchmark failed").splitlines()[0],
+            "feasible": False,
+        }
+    try:
+        data = json.loads(result.stdout)
+        data["track"] = track_key
+        return data
+    except json.JSONDecodeError:
+        return {
+            "instance": f"{track_key}/{instance_index}",
+            "track": track_key,
+            "error": f"invalid GPU benchmark JSON: {(result.stdout or '')[:80]}",
+            "feasible": False,
+        }
 
 
 # ── VRP-specific extras (route_data + num_vehicles) ───────────────
@@ -801,6 +938,10 @@ def aggregate(results: list[dict]) -> dict:
 def main() -> int:
     print("Loading swarm config…", file=sys.stderr)
     cfg = load_swarm_config()
+
+    if not _INSIDE_DOCKER:
+        return _reexec_in_docker(cfg)
+
     challenge = cfg["challenge"]
     timeout = int(cfg.get("timeout", 30))
     # Direction is no longer used by aggregation — every challenge's
@@ -808,31 +949,53 @@ def main() -> int:
     # with downstream callers that still read it.
     _direction = cfg.get("scoring_direction", "max")  # noqa: F841
     tracks = cfg.get("tracks") or {}
+    seed = str(tracks.get("seed", "test"))
 
-    print(f"Building tig binaries for {challenge}…", file=sys.stderr)
-    solver, evaluator, generator = build(challenge)
-
-    print(f"Materialising instances under datasets/{challenge}/generated/…", file=sys.stderr)
-    instances = materialize_instances(challenge, tracks, generator)
-    if not instances:
-        print(
-            "error: no instances to run. Run `python setup.py create` (owner) or "
-            "`python setup.py join <url>` (contributor) to fetch swarm config, "
-            "or check datasets/<challenge>/test.json.",
-            file=sys.stderr,
-        )
-        return 2
-    print(f"  {len(instances)} instance(s) total", file=sys.stderr)
-
-    workers = min(len(instances), min(4, os.cpu_count() or 1))
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(run_instance, challenge, tk, iid, ipath, solver, evaluator, timeout): iid
-            for tk, iid, ipath in instances
-        }
-        for fut in as_completed(futures):
-            results.append(fut.result())
+
+    if is_gpu_challenge(cfg):
+        print(f"Building GPU binary + PTX for {challenge}…", file=sys.stderr)
+        binary, ptx = build_gpu(challenge)
+
+        instance_list = []
+        for track_key, count in tracks.items():
+            if track_key == "seed" or not isinstance(count, int) or count <= 0:
+                continue
+            for i in range(count):
+                instance_list.append((track_key, i))
+
+        if not instance_list:
+            print("error: no instances configured.", file=sys.stderr)
+            return 2
+        print(f"  {len(instance_list)} GPU instance(s) total (sequential)", file=sys.stderr)
+
+        for track_key, idx in instance_list:
+            r = run_gpu_instance(challenge, track_key, idx, binary, ptx, seed, timeout)
+            results.append(r)
+    else:
+        print(f"Building tig binaries for {challenge}…", file=sys.stderr)
+        solver, evaluator, generator = build(challenge)
+
+        print(f"Materialising instances under datasets/{challenge}/generated/…", file=sys.stderr)
+        instances = materialize_instances(challenge, tracks, generator)
+        if not instances:
+            print(
+                "error: no instances to run. Run `python setup.py create` (owner) or "
+                "`python setup.py join <url>` (contributor) to fetch swarm config, "
+                "or check datasets/<challenge>/test.json.",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"  {len(instances)} instance(s) total", file=sys.stderr)
+
+        workers = min(len(instances), min(4, os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(run_instance, challenge, tk, iid, ipath, solver, evaluator, timeout): iid
+                for tk, iid, ipath in instances
+            }
+            for fut in as_completed(futures):
+                results.append(fut.result())
 
     agg = aggregate(results)
     out: dict = {

@@ -5,6 +5,17 @@ pub const BUILD_TIME_PATH: &str = env!("CARGO_MANIFEST_DIR");
 #[allow(dead_code)]
 pub(crate) const QUALITY_PRECISION: i32 = 1_000_000;
 
+// Deterministic hasher + type aliases used by algorithm templates.
+pub fn seeded_hasher(seed: &[u8; 32]) -> ahash::RandomState {
+    let seed1 = u64::from_be_bytes(seed[0..8].try_into().unwrap());
+    let seed2 = u64::from_be_bytes(seed[8..16].try_into().unwrap());
+    let seed3 = u64::from_be_bytes(seed[16..24].try_into().unwrap());
+    let seed4 = u64::from_be_bytes(seed[24..32].try_into().unwrap());
+    ahash::RandomState::with_seeds(seed1, seed2, seed3, seed4)
+}
+pub type HashMap<K, V> = std::collections::HashMap<K, V, ahash::RandomState>;
+pub type HashSet<T> = std::collections::HashSet<T, ahash::RandomState>;
+
 // In the upstream tig-challenges crate, conditional_pub! gates verification
 // fns on the `hide_verification` feature so contest binaries can hide them.
 // The swarm demo always needs the verification path (agents evaluate
@@ -204,6 +215,10 @@ pub mod knapsack;
 pub mod job_scheduling;
 #[cfg(feature = "energy_arbitrage")]
 pub mod energy_arbitrage;
+#[cfg(feature = "hypergraph")]
+pub mod hypergraph;
+#[cfg(feature = "neuralnet_optimizer")]
+pub mod neuralnet_optimizer;
 
 // ── Per-challenge dispatch macro ──
 //
@@ -239,6 +254,22 @@ macro_rules! enabled_challenge_arms {
             "energy_arbitrage" => $dispatch!(energy_arbitrage),
             _ => anyhow::bail!(
                 "Unknown or disabled challenge: {}. Enable its crate feature when building.",
+                $challenge
+            ),
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! enabled_gpu_challenge_arms {
+    ($challenge:expr, $dispatch:ident) => {
+        match $challenge {
+            #[cfg(feature = "hypergraph")]
+            "hypergraph" => $dispatch!(hypergraph),
+            #[cfg(feature = "neuralnet_optimizer")]
+            "neuralnet_optimizer" => $dispatch!(neuralnet_optimizer),
+            _ => anyhow::bail!(
+                "Unknown or disabled GPU challenge: {}. Enable its crate feature when building.",
                 $challenge
             ),
         }

@@ -33,6 +33,7 @@ class ChallengeDef:
     track_keys: tuple[str, ...]
     strategy_tags: tuple[str, ...]
     default_timeout: int = 30
+    is_gpu: bool = False
 
 
 CHALLENGES: dict[str, ChallengeDef] = {
@@ -112,6 +113,39 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "dp", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
+    ),
+    "hypergraph": ChallengeDef(
+        name="hypergraph",
+        scoring_direction="max",
+        track_keys=(
+            "n_h_edges=10000",
+            "n_h_edges=20000",
+            "n_h_edges=50000",
+            "n_h_edges=100000",
+            "n_h_edges=200000",
+        ),
+        strategy_tags=(
+            "greedy", "construction", "local_search", "metaheuristic",
+            "decomposition", "hybrid", "data_structure", "other",
+        ),
+        default_timeout=60,
+        is_gpu=True,
+    ),
+    "neuralnet_optimizer": ChallengeDef(
+        name="neuralnet_optimizer",
+        scoring_direction="max",
+        track_keys=(
+            "n_hidden=4",
+            "n_hidden=6",
+            "n_hidden=8",
+            "n_hidden=10",
+            "n_hidden=12",
+        ),
+        strategy_tags=(
+            "greedy", "metaheuristic", "hybrid", "data_structure", "other",
+        ),
+        default_timeout=120,
+        is_gpu=True,
     ),
 }
 
