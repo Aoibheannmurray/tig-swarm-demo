@@ -870,11 +870,13 @@ _PER_INSTANCE_EXTRAS = {
 # `solution_data` (the universal wire field — no longer aliased to
 # `route_data`, which only made sense for VRP).
 _AGG_EXTRAS = {
-    "vehicle" "_routing":  "route_data",
-    "job" "_scheduling":   "gantt_data",
-    "knap" "sack":         "knapsack_data",
-    "energy" "_arbitrage": "energy_data",
-    "satisfia" "bility":   "sat_data",
+    "vehicle" "_routing":       "route_data",
+    "job" "_scheduling":        "gantt_data",
+    "knap" "sack":              "knapsack_data",
+    "energy" "_arbitrage":      "energy_data",
+    "satisfia" "bility":        "sat_data",
+    "hyper" "graph":            "hypergraph_data",
+    "neuralnet" "_optimizer":   "neuralnet_data",
 }
 
 

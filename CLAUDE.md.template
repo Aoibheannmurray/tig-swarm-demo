@@ -1,6 +1,6 @@
 # Swarm Agent — Automated Discovery at Scale
 
-> **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file and `scripts/`.
+> **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file.
 
 > **Active challenge:** this swarm is configured for **${CHALLENGE_NAME}**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
 
