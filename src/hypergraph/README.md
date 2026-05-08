@@ -37,8 +37,6 @@ pub struct Solution {
 - *Hyperedge-to-nodes*: for hyperedge `i`, the nodes are `d_hyperedge_nodes[d_hyperedge_offsets[i] .. d_hyperedge_offsets[i+1]]`.
 - *Node-to-hyperedges*: for node `j`, the hyperedges containing it are `d_node_hyperedges[d_node_offsets[j] .. d_node_offsets[j+1]]`.
 
-Instances are parameterised by `Track { n_h_edges }` (number of hyperedges). The number of nodes is approximately equal to `n_h_edges` (around 8% fewer after pruning).
-
 ## Connectivity Metric
 
 For each hyperedge, count the number of distinct partitions its nodes span, minus one. Sum over all hyperedges:
@@ -147,18 +145,6 @@ pub fn evaluate_connectivity_metric(
 ```
 
 No other public helper methods are available on `Challenge`. You have direct access to all fields listed in the Types section.
-
-### `Solution` construction
-
-```rust
-pub struct Solution {
-    pub partition: Vec<u32>,  // partition assignment per node
-}
-
-impl Solution {
-    pub fn new() -> Self  // creates empty Solution with no partition
-}
-```
 
 ### Available crates
 

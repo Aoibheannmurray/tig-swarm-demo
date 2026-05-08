@@ -121,6 +121,7 @@ class SwarmConfigUpdate(AdminAuth):
     challenges: Optional[dict[ChallengeName, ChallengeSubConfig]] = None
     swarm_name: Optional[str] = None
     owner_name: Optional[str] = None
+    swarm_type: Optional[Literal["cpu", "gpu"]] = None
     stagnation_threshold: Optional[int] = None
     stagnation_limit: Optional[int] = None
     hypothesis_recall_threshold: Optional[int] = None

@@ -348,6 +348,12 @@ async def register_agent(req: RegisterRequest):
     # kept as an alias for back-compat with older clients that read
     # `config.challenge`. Per-track counts / timeout live in
     # /api/swarm_config — the agent polls that on every iteration.
+    swarm_type = config.get("swarm_type", "cpu")
+    available = [
+        ch for ch in challenges.CHALLENGE_NAMES
+        if challenges.CHALLENGES[ch].is_gpu == (swarm_type == "gpu")
+    ]
+
     return AgentResponse(
         agent_id=agent_id,
         agent_name=agent_name,
@@ -356,7 +362,8 @@ async def register_agent(req: RegisterRequest):
             "heartbeat_interval_seconds": 30,
             "active_challenge": active_challenge,
             "challenge": active_challenge,
-            "available_challenges": list(challenges.CHALLENGE_NAMES),
+            "swarm_type": swarm_type,
+            "available_challenges": available,
         },
     )
 
@@ -1427,6 +1434,7 @@ async def get_swarm_config():
         # Global keys.
         "swarm_name": config.get("swarm_name", ""),
         "owner_name": config.get("owner_name", ""),
+        "swarm_type": config.get("swarm_type", "cpu"),
         "stagnation_threshold": stagnation_threshold,
         "stagnation_limit": stagnation_limit,
         "hypothesis_recall_threshold": hypothesis_recall_threshold,
@@ -1481,6 +1489,7 @@ async def update_swarm_config(req: SwarmConfigUpdate):
         for key, value in (
             ("swarm_name", req.swarm_name),
             ("owner_name", req.owner_name),
+            ("swarm_type", req.swarm_type),
             ("stagnation_threshold", str(req.stagnation_threshold) if req.stagnation_threshold is not None else None),
             ("stagnation_limit", str(req.stagnation_limit) if req.stagnation_limit is not None else None),
             ("hypothesis_recall_threshold", str(req.hypothesis_recall_threshold) if req.hypothesis_recall_threshold is not None else None),

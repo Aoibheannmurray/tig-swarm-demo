@@ -2,6 +2,7 @@ import type { Panel, WSMessage } from "../types";
 import { counterTween, pulseGlow } from "../lib/animate";
 import { formatScore } from "../lib/format";
 import { getViewedChallenge, onViewedChallengeChange } from "../lib/viewedChallenge";
+import { getSwarmType, onSwarmConfigChange } from "../lib/swarmConfig";
 
 
 // Resolve API base URL the same way other panels do (chart.ts, gantt.ts).
@@ -98,6 +99,7 @@ export class StatsPanel implements Panel {
             <span class="stats-subtitle">AI Driven Discovery of Algorithms</span>
           </span>
           <span id="ws-status" class="ws-status connected">LIVE</span>
+          <span id="swarm-type-badge" class="swarm-type-badge"></span>
           <a href="/ideas.html" class="stats-nav-link">Ideas &rarr;</a>
           <a href="/diversity.html" class="stats-nav-link">Diversity &rarr;</a>
           <a href="/benchmark.html" class="stats-nav-link">Benchmark &rarr;</a>
@@ -120,6 +122,9 @@ export class StatsPanel implements Panel {
     this.agentsEl = document.getElementById("stat-agents-val")!;
     this.experimentsEl = document.getElementById("stat-experiments-val")!;
     this.heroEl = document.getElementById("stat-hero")!;
+
+    this.updateSwarmTypeBadge();
+    onSwarmConfigChange(() => this.updateSwarmTypeBadge());
 
     this.apiUrl = resolveApiUrl();
     this.viewedChallenge = resolveViewedChallenge();
@@ -246,6 +251,14 @@ export class StatsPanel implements Panel {
       <span class="track-breakdown-label">BEST · TRACKS</span>
       ${chips}
     `;
+  }
+
+  private updateSwarmTypeBadge() {
+    const el = document.getElementById("swarm-type-badge");
+    if (!el) return;
+    const t = getSwarmType();
+    el.textContent = t.toUpperCase();
+    el.className = `swarm-type-badge swarm-type-${t}`;
   }
 
   handleMessage(msg: WSMessage) {

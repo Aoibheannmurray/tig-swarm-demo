@@ -18,12 +18,6 @@ pub struct Solution {
 }
 ```
 
-Instances are parameterised by `Track { n_vars, ratio }`. The number of clauses is `floor(n_vars × ratio / 1000)`. The phase-transition ratio for random 3-SAT is approximately 4267 (i.e., `clauses ~ 4.267 × variables`). Lower ratios are mostly satisfiable; higher ratios are mostly unsatisfiable.
-
-## Instance Generation
-
-Each clause contains 3 literals. Variables are drawn uniformly from `[1, n_vars]` and each is independently negated with probability 0.5. Clauses may contain duplicate variables.
-
 ## Feasibility Constraints
 
 - `variables.len()` must equal `num_variables`.
@@ -62,26 +56,6 @@ There are no public helper methods on `Challenge` beyond what the evaluator uses
 challenge.seed           // [u8; 32] — use for reproducible randomness
 challenge.num_variables  // usize
 challenge.clauses        // Vec<Vec<i32>> — each clause has 3 literals; 1-indexed, negative = negated
-```
-
-### `Solution` construction
-
-```rust
-pub struct Solution {
-    pub variables: Vec<bool>,  // length must equal num_variables
-}
-
-impl Solution {
-    pub fn new() -> Self  // creates empty Solution
-}
-```
-
-### Clause evaluation (for your own use)
-
-A clause is satisfied if at least one literal evaluates to true:
-```rust
-// literal > 0: variables[literal.abs() - 1] must be true
-// literal < 0: variables[literal.abs() - 1] must be false
 ```
 
 ### Available crates

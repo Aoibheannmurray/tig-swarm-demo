@@ -152,21 +152,6 @@ The baseline is the better of:
 Quality > 0 means you beat the baseline. The score is a fixed-point integer with 6 decimal places.
 
 
-## Scenario Parameters
-
-The `Track` passed to `generate_instance` determines the scenario. All scenarios use the same API.
-
-| Track | Nodes | Lines | Batteries | Steps | Flow limits | Price volatility |
-|-------|-------|-------|-----------|-------|-------------|-----------------|
-| BASELINE | 20 | 30 | 10 | 96 | nominal | low |
-| CONGESTED | 40 | 60 | 20 | 96 | tight (×0.80) | medium |
-| MULTIDAY | 80 | 120 | 40 | 192 | tighter (×0.60) | medium-high |
-| DENSE | 100 | 200 | 60 | 192 | tight (×0.50) | high |
-| CAPSTONE | 150 | 300 | 100 | 192 | very tight (×0.40) | high |
-
-In harder scenarios, flow constraints become more binding and price spikes are more frequent (higher jump probability, heavier Pareto tails). Fleet heterogeneity also increases — batteries vary widely in size.
-
-
 ## Exact Method Signatures
 
 These are the actual Rust signatures — use the exact return types shown.
@@ -237,13 +222,3 @@ pub day_ahead_prices: Vec<Vec<f64>>    // [num_steps][num_nodes]
 ### Available crates
 
 `anyhow`, `serde`, `serde_json`, `rand` (SmallRng, SeedableRng, Rng), `rand_distr`, `ndarray`, `statrs`, `std::*` (collections, time, etc.).
-
-
-## Practical Tips
-
-- **Day-ahead prices are your best forecast.** `challenge.market.day_ahead_prices[t][node]` gives the DA price at each node and step. RT prices are noisy deviations around DA prices.
-- **Check flow feasibility before returning actions.** A single flow violation terminates the rollout. When in doubt, scale actions toward zero.
-- **Node 0 is the slack bus.** Its injection is set automatically to balance the system; you don't control it directly.
-- **Battery heterogeneity matters.** In harder scenarios batteries span a 3× size range. Larger batteries have lower degradation cost per unit energy but the same efficiency losses.
-- **The action bounds already account for SOC and power limits.** You do not need to recompute them — just stay within `state.action_bounds[b]`.
-- **Zeros are always safe.** `vec![0.0; num_batteries]` is a valid action at every step if you need a fallback.

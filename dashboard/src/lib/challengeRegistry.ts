@@ -17,6 +17,8 @@ import { GanttPanel } from "../panels/gantt";
 import { KnapsackPanel } from "../panels/knapsack";
 import { EnergyPanel } from "../panels/energy";
 import { SatPanel } from "../panels/sat";
+import { HypergraphPanel } from "../panels/hypergraph";
+import { NeuralnetPanel } from "../panels/neuralnet";
 
 export type ScoringDirection = "min" | "max";
 
@@ -83,6 +85,18 @@ export const CHALLENGES = {
     pretty: "Energy Arbitrage",
     scoreLabel: "PROFIT",
     panelFactory: (id: string) => new EnergyPanel(id),
+    fallback: { ...FALLBACK_SUB },
+  },
+  hypergraph: {
+    pretty: "Hypergraph",
+    scoreLabel: "QUALITY",
+    panelFactory: (id: string) => new HypergraphPanel(id),
+    fallback: { ...FALLBACK_SUB },
+  },
+  neuralnet_optimizer: {
+    pretty: "Neural Net Optimizer",
+    scoreLabel: "QUALITY",
+    panelFactory: (id: string) => new NeuralnetPanel(id),
     fallback: { ...FALLBACK_SUB },
   },
 } as const satisfies Record<string, ChallengeEntry>;

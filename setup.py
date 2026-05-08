@@ -84,9 +84,13 @@ CHALLENGES: dict[str, dict] = {
         "scoring_direction": d.scoring_direction,
         "track_keys": list(d.track_keys),
         "strategy_tags": list(d.strategy_tags),
+        "is_gpu": d.is_gpu,
     }
     for name, d in _CHALLENGE_REGISTRY.items()
 }
+
+CPU_CHALLENGES = {k: v for k, v in CHALLENGES.items() if not v["is_gpu"]}
+GPU_CHALLENGES = {k: v for k, v in CHALLENGES.items() if v["is_gpu"]}
 
 DEFAULT_TIMEOUT = 30
 DEFAULT_INSTANCES_PER_TRACK = 2
@@ -249,6 +253,7 @@ def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
         "challenges": cfg["challenges"],
         "swarm_name": cfg.get("swarm_name", ""),
         "owner_name": cfg.get("owner_name", ""),
+        "swarm_type": cfg.get("swarm_type", "cpu"),
         "stagnation_threshold": cfg.get("stagnation_threshold", 2),
         "stagnation_limit": cfg.get("stagnation_limit", 10),
         "hypothesis_recall_threshold": cfg.get("hypothesis_recall_threshold", 3),
@@ -315,12 +320,18 @@ def collect_per_challenge_configs(
     initial_algorithms: dict[str, dict[str, str]],
     *,
     use_defaults: bool,
+    challenge_set: dict[str, dict] | None = None,
 ) -> dict[str, dict]:
     """Build the `challenges` payload for POST /api/swarm_config, either by
     accepting defaults across all challenges (use_defaults=True, no prompts)
-    or by asking the host for tracks/timeout per challenge."""
+    or by asking the host for tracks/timeout per challenge.
+
+    `challenge_set` restricts which challenges are configured (defaults to
+    all). Used to only configure CPU or GPU challenges based on swarm type.
+    """
     challenges: dict[str, dict] = {}
-    for ch, meta in CHALLENGES.items():
+    target = challenge_set if challenge_set is not None else CHALLENGES
+    for ch, meta in target.items():
         ch_def = _CHALLENGE_REGISTRY[ch]
         tracks: dict = {"seed": "test"}
         if use_defaults:
@@ -677,13 +688,24 @@ def run_create() -> int:
     print(f"  authed as Railway user: {who}\n")
     workspace = _pick_workspace(user)
 
+    swarm_type = prompt_choice(
+        "\nWhat type of swarm is this?",
+        ["cpu", "gpu"],
+        default="cpu",
+    )
+    is_gpu_swarm = swarm_type == "gpu"
+    challenge_set = GPU_CHALLENGES if is_gpu_swarm else CPU_CHALLENGES
+    n_challenges = len(challenge_set)
+    type_label = "GPU" if is_gpu_swarm else "CPU"
+    print(f"  -> {type_label} swarm ({n_challenges} challenges available)")
+
     swarm_name = prompt(
-        "Swarm name (used as Railway project + service name; lowercase + dashes)",
+        "\nSwarm name (used as Railway project + service name; lowercase + dashes)",
         default="my-tig-swarm",
     )
 
     print(
-        "\nThis swarm hosts ALL TIG challenges in parallel (5 CPU + 2 GPU).\n"
+        f"\nThis swarm hosts all {n_challenges} {type_label} challenges in parallel.\n"
         "The host picks ONE active challenge that contributors automatically\n"
         "work on; you can flip between challenges later via `python setup.py\n"
         "switch` and per-challenge state is preserved on the server (so\n"
@@ -691,7 +713,7 @@ def run_create() -> int:
     )
 
     use_defaults_ans = prompt(
-        f"Use defaults for all {len(CHALLENGES)} challenges? "
+        f"Use defaults for all {n_challenges} challenges? "
         f"({DEFAULT_INSTANCES_PER_TRACK} instances per track, "
         f"default timeout per challenge, empty initial algorithm) [Y/n]",
         default="Y",
@@ -699,14 +721,18 @@ def run_create() -> int:
     use_defaults = use_defaults_ans.strip().lower() not in ("n", "no")
 
     initial_algorithms = read_initial_algorithms()
-    challenges_cfg = collect_per_challenge_configs(initial_algorithms, use_defaults=use_defaults)
+    challenges_cfg = collect_per_challenge_configs(
+        initial_algorithms, use_defaults=use_defaults, challenge_set=challenge_set,
+    )
 
+    challenge_names = list(challenge_set.keys())
+    default_active = challenge_names[0]
     active_challenge = prompt_choice(
         "\nWhich challenge should this swarm START with as the active challenge?",
-        list(CHALLENGES.keys()),
-        default="vehicle_routing",
+        challenge_names,
+        default=default_active,
     )
-    challenge_meta = CHALLENGES[active_challenge]
+    challenge_meta = challenge_set[active_challenge]
     print(f"  -> active = {active_challenge} (contributors auto-follow this)")
 
     if use_defaults:
@@ -784,6 +810,7 @@ def run_create() -> int:
         "server_url": server_url,
         "admin_key": admin_key,
         "role": "owner",
+        "swarm_type": swarm_type,
         "active_challenge": active_challenge,
         # Active challenge mirrored as `challenge` for back-compat with
         # tooling that still reads the flat key.
@@ -831,11 +858,12 @@ def run_create() -> int:
     )
 
     print("\n" + "=" * 48)
-    print("SWARM IS LIVE")
+    print(f"{type_label} SWARM IS LIVE")
     print("=" * 48)
     print(f"\n  Dashboard:  {server_url}/")
+    print(f"  Swarm type:  {type_label}")
     print(f"  Active challenge:  {active_challenge}")
-    print(f"  All {len(CHALLENGES)} challenges configured and ready (switch via `setup.py switch <name>`).")
+    print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
     print("\n  Share this with anyone who wants to join:\n")
     print(f"    git clone {repo_url}")
     print(f"    cd {repo_dir_hint}")
@@ -856,7 +884,10 @@ def run_switch(challenge: str) -> int:
     POSTs the new active_challenge to /api/swarm_config (admin-key gated),
     re-templates the owner's local files so they can also work on the new
     challenge, and updates swarm.config.json. Contributors auto-follow on
-    their next iteration via `setup.py sync` (Step 0 of the agent loop)."""
+    their next iteration via `setup.py sync` (Step 0 of the agent loop).
+
+    Switching is restricted to challenges of the same type (CPU/GPU) as
+    the swarm was created with."""
     if challenge not in CHALLENGES:
         print(f"unknown challenge: {challenge}")
         print(f"choose from: {', '.join(CHALLENGES)}")
@@ -865,6 +896,16 @@ def run_switch(challenge: str) -> int:
     if not prior:
         print("no swarm.config.json found — run `python setup.py create` (host) "
               "or `python setup.py join <URL>` (contributor) first.")
+        return 1
+    swarm_type = prior.get("swarm_type", "cpu")
+    is_gpu_swarm = swarm_type == "gpu"
+    target_is_gpu = _CHALLENGE_REGISTRY[challenge].is_gpu
+    if target_is_gpu != is_gpu_swarm:
+        allowed = GPU_CHALLENGES if is_gpu_swarm else CPU_CHALLENGES
+        label = "GPU" if is_gpu_swarm else "CPU"
+        print(f"This is a {label} swarm — cannot switch to "
+              f"{'GPU' if target_is_gpu else 'CPU'} challenge '{challenge}'.")
+        print(f"Available challenges: {', '.join(allowed)}")
         return 1
     if prior.get("role") != "owner":
         print("Only the swarm owner can change the active challenge.")
@@ -975,14 +1016,15 @@ def run_sync() -> int:
     cfg["active_challenge"] = new_challenge
     cfg["challenge"] = new_challenge
     cfg["algorithm_path"] = new_algo_path
+    live_swarm_type = live.get("swarm_type")
+    if live_swarm_type:
+        cfg["swarm_type"] = live_swarm_type
     if ch_def and ch_def.is_gpu:
         cfg["kernel_path"] = f"src/{new_challenge}/algorithm/kernels.cu"
         cfg["is_gpu"] = True
     else:
         cfg.pop("kernel_path", None)
         cfg.pop("is_gpu", None)
-    # Mirror the new challenge's sub-config to top-level so benchmark.py's
-    # offline fallback uses the right tracks/timeout.
     sub = fetch_challenge_sub_config(server_url, new_challenge)
     if sub:
         cfg["tracks"] = sub.get("tracks", {})
@@ -1000,22 +1042,24 @@ def run_join(server_url: str) -> int:
     print("=" * 48)
 
     prior = read_prior_swarm_config()
-    # Pull live swarm config from the owner's server so we know which
-    # active challenge / algorithm path to template into the local files.
     challenge = None
     algorithm_path = None
     stagnation_threshold = 2
+    swarm_type = "cpu"
     try:
         with urllib.request.urlopen(f"{server_url.rstrip('/')}/api/swarm_config", timeout=4) as r:
             swarm = json.load(r)
-        # New shape: prefer `active_challenge`. Fall back to legacy `challenge`.
         challenge = swarm.get("active_challenge") or swarm.get("challenge")
         stagnation_threshold = swarm.get("stagnation_threshold", 2)
+        swarm_type = swarm.get("swarm_type", "cpu")
         if challenge:
             algorithm_path = f"src/{challenge}/algorithm/mod.rs"
     except Exception as e:
         print(f"  couldn't fetch swarm config from {server_url}: {e}")
         print("  CLAUDE.md / CHALLENGE.md will only have the URL templated; rerun this command once the server is up.")
+
+    type_label = "GPU" if swarm_type == "gpu" else "CPU"
+    print(f"  swarm type: {type_label}")
 
     template_files(
         server_url,
@@ -1033,6 +1077,7 @@ def run_join(server_url: str) -> int:
     cfg_out = {
         "server_url": server_url,
         "role": "contributor",
+        "swarm_type": swarm_type,
         "active_challenge": challenge or (prior or {}).get("active_challenge"),
         "challenge": challenge or (prior or {}).get("challenge"),
         "algorithm_path": algorithm_path or (prior or {}).get("algorithm_path"),

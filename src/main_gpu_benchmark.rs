@@ -34,6 +34,73 @@ fn cli() -> Command {
         )
 }
 
+macro_rules! append_viz_data {
+    ($json:expr, $challenge_name:expr, $instance:expr, $solution:expr,
+     $module:expr, $stream:expr, $prop:expr, $quality:expr) => {
+        match $challenge_name {
+            #[cfg(feature = "hypergraph")]
+            "hypergraph" => {
+                let inst: &challenges::hypergraph::Challenge = &$instance;
+                let sol: &challenges::hypergraph::Solution = &$solution;
+                let num_parts = inst.num_parts as usize;
+                let mut partition_sizes = vec![0u32; num_parts];
+                for &p in &sol.partition {
+                    if (p as usize) < num_parts {
+                        partition_sizes[p as usize] += 1;
+                    }
+                }
+                let connectivity_metric = inst.evaluate_connectivity_metric(
+                    sol, $module.clone(), $stream.clone(), $prop,
+                ).ok();
+                $json["hypergraph_data"] = serde_json::json!({
+                    "num_nodes": inst.num_nodes,
+                    "num_parts": inst.num_parts,
+                    "max_part_size": inst.max_part_size,
+                    "partition_sizes": partition_sizes,
+                    "connectivity_metric": connectivity_metric,
+                    "baseline_connectivity_metric": inst.greedy_baseline_connectivity_metric,
+                });
+            }
+            #[cfg(feature = "neuralnet_optimizer")]
+            "neuralnet_optimizer" => {
+                let inst: &challenges::neuralnet_optimizer::Challenge = &$instance;
+                let sol: &challenges::neuralnet_optimizer::Solution = &$solution;
+                let total_params: usize = sol.weights.iter()
+                    .map(|layer| layer.iter().map(|row| row.len()).sum::<usize>())
+                    .sum::<usize>()
+                    + sol.biases.iter().map(|b| b.len()).sum::<usize>();
+
+                // Compute noise floor from dataset (no model needed)
+                let noise_floor: Option<f64> = (|| -> Option<f64> {
+                    let y_h = $stream.memcpy_dtov(&inst.dataset.test_targets_noisy()).ok()?;
+                    let f_h = $stream.memcpy_dtov(&inst.dataset.test_targets_true_f()).ok()?;
+                    let _ = $stream.synchronize();
+                    let sum_sq: f32 = y_h.iter().zip(f_h.iter())
+                        .map(|(y, f)| (*y - *f).powi(2))
+                        .sum();
+                    Some((4.0f64 / inst.dataset.test_size as f64) * sum_sq as f64)
+                })();
+
+                // Derive model test loss from quality and noise floor
+                let model_loss: Option<f64> = noise_floor.map(|nf| {
+                    let quality_ratio = $quality as f64 / 1_000_000.0;
+                    nf * (1.0 - quality_ratio)
+                });
+
+                $json["neuralnet_data"] = serde_json::json!({
+                    "epochs_used": sol.epochs_used,
+                    "max_epochs": inst.max_epochs,
+                    "num_hidden_layers": inst.num_hidden_layers,
+                    "total_params": total_params,
+                    "noise_floor": noise_floor,
+                    "model_loss": model_loss,
+                });
+            }
+            _ => {}
+        }
+    };
+}
+
 fn run_instance(
     challenge_name: &str,
     track_id: &str,
@@ -115,12 +182,14 @@ fn run_instance(
                         &prop,
                     ) {
                         Ok(quality) => {
-                            let json = serde_json::json!({
+                            let mut json = serde_json::json!({
                                 "score": quality,
                                 "feasible": true,
                                 "instance": format!("{}/{}", track_id, index),
                                 "elapsed": elapsed,
                             });
+                            append_viz_data!(json, challenge_name, instance, solution,
+                                            module, stream, prop, quality);
                             println!("{}", json);
                         }
                         Err(e) => {

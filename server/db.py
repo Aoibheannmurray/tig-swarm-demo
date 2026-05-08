@@ -198,6 +198,7 @@ DEFAULT_CONFIG = {
     "active_challenge": "vehicle_routing",
     "swarm_name": "",
     "owner_name": "",
+    "swarm_type": "cpu",
     "hypothesis_recall_threshold": "3",
 }
 

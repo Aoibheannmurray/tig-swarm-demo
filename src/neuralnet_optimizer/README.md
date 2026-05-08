@@ -43,8 +43,6 @@ pub struct Solution {
 }
 ```
 
-Instances are parameterised by `Track { n_hidden }`, which controls the number of hidden layers in the MLP.
-
 ## MLP Architecture
 
 The model is a fully-connected MLP with the following layer structure:
@@ -58,14 +56,6 @@ Input (1) -> [Linear -> ReLU -> BatchNorm1d] x n_hidden -> Linear (2) -> Output
 - The final layer is a plain Linear (no activation, no batch norm).
 - Weights are initialized via Kaiming/He initialization on GPU.
 - The last `num_frozen_layers` layers (counted from the output) have `requires_grad = false` and receive zero gradients.
-
-## Data Generation
-
-Each instance generates a synthetic regression dataset using Random Fourier Features (RFF):
-- 1 input dimension, 2 output dimensions.
-- 1000 training samples, 200 validation samples, 250 test samples.
-- Inputs are uniform in [-1, 1]; targets are RFF-based functions plus Gaussian noise (std = 0.2).
-- All data lives on GPU as `CudaSlice<f32>`.
 
 ## What You Implement
 

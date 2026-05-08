@@ -222,16 +222,7 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
 {challenge_md}
 
-The code must compile as valid Rust.
-
-Rules:
-- Do NOT change the `solve_challenge` function signature.
-- `use super::*;` must remain as the first import.
-- You may add, remove, or change any `use` statements, helper functions, \
-structs, or code within `solve_challenge`.
-- Return the complete file.
-
-No explanation, no markdown fences — just the complete Rust source file."""
+`use super::*;` must remain as the first import. Return the complete Rust source file — no explanation, no markdown fences."""
 
 
 def build_code_user_prompt(state: dict, hypothesis: dict) -> str:

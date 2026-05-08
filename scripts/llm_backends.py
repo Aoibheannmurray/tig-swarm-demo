@@ -40,7 +40,13 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> str:
         {
             "model": model,
             "max_tokens": _MAX_TOKENS,
-            "system": system,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
             "messages": [{"role": "user", "content": prompt}],
         },
         {
