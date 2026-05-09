@@ -44,6 +44,15 @@ python scripts/run_loop.py --provider anthropic
 ```
 Run `python scripts/run_loop.py --help` for other providers, OpenAI-compatible endpoints, and resuming an existing agent.
 
+To run each benchmark on C3 GPU compute instead of local Docker:
+```bash
+export ANTHROPIC_API_KEY=sk-...
+export C3_API_KEY=c3_key_...
+python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+```
+In C3 mode the LLM loop stays local. Each candidate algorithm submits one C3 Docker benchmark job, waits for the benchmark JSON, then publishes back to the swarm server.
+If you already ran `c3 login`, `C3_API_KEY` is optional.
+
 > One clone = one swarm. To join a second swarm, clone again into a separate directory.
 
 ## Dashboard
