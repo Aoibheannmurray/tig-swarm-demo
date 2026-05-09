@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import urllib.error
 import urllib.request
 
@@ -91,6 +92,20 @@ def call_openai(
     return data["choices"][0]["message"]["content"]
 
 
+def call_claude_code(
+    system: str, prompt: str, model: str | None = None,
+) -> str:
+    cmd = ["claude", "--bare", "-p", "--system-prompt", system, "--max-output-tokens", str(_MAX_TOKENS)]
+    if model:
+        cmd += ["--model", model]
+    result = subprocess.run(
+        cmd, input=prompt, capture_output=True, text=True, timeout=_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"claude -p failed (exit {result.returncode}): {result.stderr[:800]}")
+    return result.stdout
+
+
 def call_google(system: str, prompt: str, model: str, api_key: str) -> str:
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/"
@@ -114,6 +129,8 @@ def call_llm(
     api_base: str | None = None,
 ) -> str:
     """Dispatch to the appropriate provider. Returns raw text response."""
+    if provider == "claude-code":
+        return call_claude_code(system, prompt, model)
     if provider == "anthropic":
         return call_anthropic(system, prompt, model, api_key)
     if provider == "openai":

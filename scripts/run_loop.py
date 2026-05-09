@@ -424,8 +424,9 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     p.add_argument(
-        "--provider", required=True, choices=["anthropic", "openai", "google"],
-        help="LLM provider",
+        "--provider", required=True,
+        choices=["anthropic", "openai", "google", "claude-code"],
+        help="LLM provider (claude-code uses 'claude -p' headless mode, no API key needed)",
     )
     p.add_argument("--model", help="Model ID (default: per-provider sensible default)")
     p.add_argument("--api-key", help="API key (default: from env var)")
@@ -437,6 +438,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_api_key(args: argparse.Namespace) -> str:
+    if args.provider == "claude-code":
+        return ""
     if args.api_key:
         return args.api_key
     env_map = {
