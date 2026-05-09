@@ -18,6 +18,12 @@ export class DiversityPanel implements Panel {
   // than letting the previous matrix linger until the next fetch.
   private renderedChallenge = "";
   private static THROTTLE_MS = 30_000;
+  // Above this many trajectories, stop shrinking cells to fit and let the
+  // grid overflow horizontally/vertically inside its scroll container.
+  private static SCROLL_THRESHOLD = 20;
+  private static FIXED_CELL_PX = 24;
+  private static ROW_HDR_PX = 56;
+  private static COL_HDR_PX = 20;
 
   init(container: HTMLElement) {
     this.container = container;
@@ -111,8 +117,23 @@ export class DiversityPanel implements Panel {
     const n = agents.length;
     const grid = document.createElement("div");
     grid.className = "dv-grid";
-    grid.style.gridTemplateColumns = `56px repeat(${n}, 1fr)`;
-    grid.style.gridTemplateRows = `20px repeat(${n}, 1fr)`;
+    const scrollMode = n > DiversityPanel.SCROLL_THRESHOLD;
+    if (scrollMode) {
+      // Past the threshold, freeze each cell at FIXED_CELL_PX and let the
+      // grid grow beyond its container so the .diversity-grid scroll
+      // container shows a horizontal (and vertical) scrollbar.
+      const cell = `${DiversityPanel.FIXED_CELL_PX}px`;
+      grid.style.gridTemplateColumns = `${DiversityPanel.ROW_HDR_PX}px repeat(${n}, ${cell})`;
+      grid.style.gridTemplateRows = `${DiversityPanel.COL_HDR_PX}px repeat(${n}, ${cell})`;
+      grid.style.width = "max-content";
+      grid.style.maxWidth = "none";
+      grid.style.height = "max-content";
+      grid.style.maxHeight = "none";
+    } else {
+      grid.style.gridTemplateColumns = `${DiversityPanel.ROW_HDR_PX}px repeat(${n}, 1fr)`;
+      grid.style.gridTemplateRows = `${DiversityPanel.COL_HDR_PX}px repeat(${n}, 1fr)`;
+    }
+    this.inner.classList.toggle("diversity-grid--scroll", scrollMode);
 
     // Column headers
     grid.appendChild(this.corner());

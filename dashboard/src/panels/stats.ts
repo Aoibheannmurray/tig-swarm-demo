@@ -30,7 +30,6 @@ export class StatsPanel implements Panel {
   private experimentsEl!: HTMLElement;
   private agentsTotalEl!: HTMLElement;
   private trajectoriesEl!: HTMLElement;
-  private heroEl!: HTMLElement;
   // Latest track_scores for the global best of the viewed challenge. Rendered
   // on demand into the solution panel's `.solution-score` block when the user
   // clicks the score; nothing is shown in the stats bar itself.
@@ -77,7 +76,6 @@ export class StatsPanel implements Panel {
             <span class="stat-label">TRAJECTORIES</span>
             <span class="stat-value" id="stat-trajectories-val">0</span>
           </div>
-          <div class="stat-hero" id="stat-hero"></div>
         </div>
       </div>
     `;
@@ -86,7 +84,6 @@ export class StatsPanel implements Panel {
     this.experimentsEl = document.getElementById("stat-experiments-val")!;
     this.agentsTotalEl = document.getElementById("stat-agents-total-val")!;
     this.trajectoriesEl = document.getElementById("stat-trajectories-val")!;
-    this.heroEl = document.getElementById("stat-hero")!;
 
     this.updateSwarmTypeBadge();
     onSwarmConfigChange(() => this.updateSwarmTypeBadge());
@@ -232,9 +229,6 @@ export class StatsPanel implements Panel {
       this.experimentsEl.textContent = "0";
       this.agentsTotalEl.textContent = "0";
       this.trajectoriesEl.textContent = "0";
-      this.heroEl.textContent = "";
-      this.heroEl.style.opacity = "0";
-      this.heroEl.classList.remove("is-not-started");
       this.trackScores = null;
       this.renderTrackBreakdown();
       // main.ts dispatches `reset` to every panel AFTER it has rebuilt
@@ -258,23 +252,6 @@ export class StatsPanel implements Panel {
       counterTween(this.experimentsEl, msg.total_experiments ?? 0);
       counterTween(this.agentsTotalEl, (msg as any).total_agents_in_challenge ?? 0);
       counterTween(this.trajectoriesEl, (msg as any).total_trajectories ?? 0);
-
-      // "Not started" hero overlay when the viewed challenge has no data.
-      // Cleared as soon as anything lands.
-      const notStarted =
-        (msg.total_experiments ?? 0) === 0 &&
-        (msg.best_score === null || msg.best_score === undefined);
-      if (notStarted) {
-        this.heroEl.textContent = "Not started";
-        this.heroEl.classList.add("is-not-started");
-        this.heroEl.style.opacity = "1";
-      } else if (this.heroEl.classList.contains("is-not-started")) {
-        // First non-empty update — clear the placeholder so live hero
-        // names from new_global_best events can render.
-        this.heroEl.classList.remove("is-not-started");
-        this.heroEl.textContent = "";
-        this.heroEl.style.opacity = "0";
-      }
     }
 
     if (msg.type === "agent_joined") {
@@ -286,12 +263,6 @@ export class StatsPanel implements Panel {
     }
 
     if (msg.type === "new_global_best") {
-      this.heroEl.classList.remove("is-not-started");
-      this.heroEl.textContent = msg.agent_name;
-      this.heroEl.style.opacity = "1";
-      setTimeout(() => {
-        this.heroEl.style.opacity = "0";
-      }, 5000);
       this.trackScores = (msg as any).track_scores ?? null;
       this.renderTrackBreakdown();
       this.attachScoreClick();

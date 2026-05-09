@@ -19,11 +19,11 @@ const VB_H = 1000;
 const CHART_W = VB_W - MARGIN.left - MARGIN.right;
 const CHART_H = VB_H - MARGIN.top - MARGIN.bottom;
 
-// Single-hue opacity ramp on the brand terracotta. Weakest cells nearly fade
+// Single-hue opacity ramp on olive. Weakest cells nearly fade
 // into the cream surface; strongest cells reach full saturation. Using opacity
 // instead of categorical bins makes the highest-value cells unmistakable even
-// at K=200 where each cell is only a few pixels wide.
-const HEAT_HUE = "184, 84, 31"; // #B8541F terracotta as rgb triplet
+// at K=50 where each cell is only a few pixels wide.
+const HEAT_HUE = "107, 127, 78"; // #6B7F4E olive as rgb triplet
 const OPACITY_LOW = 0.08;
 const OPACITY_HIGH = 1.0;
 
@@ -81,7 +81,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         <div class="kn-legend" aria-hidden="true">
           <span class="kn-legend-end" id="knapsack-legend-min">0</span>
           <div class="kn-legend-swatches">
-            <span style="background: linear-gradient(to right, rgba(184,84,31,0.08), rgba(184,84,31,1));"></span>
+            <span style="background: linear-gradient(to right, rgba(107,127,78,0.08), rgba(107,127,78,1));"></span>
           </div>
           <span class="kn-legend-end" id="knapsack-legend-max">+</span>
         </div>

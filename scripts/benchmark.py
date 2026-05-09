@@ -601,7 +601,7 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
     The matrix sent to the dashboard is K×K where K = len(selected items),
     capped at MAX_VIZ_ITEMS to keep the payload and rendering tractable.
     """
-    MAX_VIZ_ITEMS = 200
+    MAX_VIZ_ITEMS = 50
 
     items = _knapsack_parse_solution(sol_path)
     if items is None:

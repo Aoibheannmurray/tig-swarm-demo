@@ -22,10 +22,22 @@ docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 docker build -f Dockerfile.gpu -t tig-swarm-gpu .
 <!-- END_GPU -->
 
-# 2. Register with the swarm
+# 2. Register with the swarm. Pulls the name + LLM you chose during
+# `setup.py join` out of swarm.config.json and forwards them, so the
+# dashboard shows your chosen name instead of an auto-generated codename.
+BODY=$(python3 -c "
+import json
+cfg = json.load(open('swarm.config.json'))
+body = {'client_version': '1.0'}
+if cfg.get('contributor_name'):
+    body['agent_name'] = cfg['contributor_name']
+if cfg.get('contributor_llm'):
+    body['contributor_llm'] = cfg['contributor_llm']
+print(json.dumps(body))
+")
 curl -s -X POST ${SERVER_URL}/api/agents/register \
   -H "Content-Type: application/json" \
-  -d '{"client_version":"1.0"}'
+  -d "$BODY"
 ```
 
 Save the `agent_id` and `agent_name` from the response. You'll need them for all subsequent requests.
@@ -186,7 +198,7 @@ echo "$BENCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Sco
 
 This builds, generates the per-track instances on first run (cached under `datasets/<challenge>/generated/`), runs the solver on every instance from every track defined in the swarm's `swarm_config.tracks`, evaluates each, and outputs JSON. The instance count and per-instance timeout are whatever the swarm host configured — check `swarm.config.json` if you need the exact numbers. **Save the output in `$BENCH`** — you will reuse it in Step 5.
 
-**Per-instance timeout** is the value the wizard chose (default 30s). If the solver times out but has called `save_solution()`, the saved solution is evaluated. If no solution was saved, the instance counts as infeasible. Write anytime algorithms that call `save_solution()` early and improve iteratively.
+**Per-instance time budget: ${TIMEOUT} seconds.** Your solver process is killed after this hard deadline. The solver will keep running for the full ${TIMEOUT}s unless your code returns early — so do NOT use a fixed iteration count as your loop bound. Instead, use a time-based loop (`std::time::Instant` + deadline) that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2–5s) for cleanup. Call `save_solution()` early with your first feasible solution, then keep improving and re-saving — when the deadline hits, the last saved solution is evaluated. If no solution was saved, the instance counts as infeasible.
 
 Key output fields:
 - `score` — **higher is better**. Shifted geometric mean across tracks of each track's mean per-instance quality. Per-instance quality is `(baseline − you) / baseline × 1,000,000` (clamped to ±10M). Infeasible instances contribute `-1,000,000` to their track's mean. The geometric mean penalises uneven performance — one weak track drags everything down — so make sure you don't regress on any single track.
