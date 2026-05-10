@@ -10,25 +10,32 @@ Usage:
     python scripts/run_loop.py --provider openai --model gpt-4o
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
+    python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
 
     # Resume a previous agent
     python scripts/run_loop.py --provider anthropic --agent-id <id> --agent-name <name>
 
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
-GOOGLE_API_KEY (or pass --api-key directly).
+GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
+--c3-api-key, or existing `c3 login` credentials.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+from contextlib import contextmanager
 import difflib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import re
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -358,7 +365,7 @@ def validate_code(original: str, modified: str) -> str | None:
 # ── Benchmark & publish ─────────────────────────────────────────────
 
 
-def run_benchmark() -> tuple[dict | None, str]:
+def _run_benchmark_local() -> tuple[dict | None, str]:
     """Run benchmark. Returns (result_dict, error_text).
 
     On success, result_dict is the parsed JSON and error_text is empty.
@@ -378,10 +385,221 @@ def run_benchmark() -> tuple[dict | None, str]:
         return None, "Benchmark output was not valid JSON"
 
 
+def _yaml_quote(value: str) -> str:
+    return json.dumps(value)
+
+
+def _read_optional(path: Path | None) -> str:
+    if path and path.exists():
+        return path.read_text()
+    return ""
+
+
+def _script_write_file_b64(path: str, content: str) -> str:
+    encoded = base64.b64encode(content.encode()).decode()
+    return f"""\
+python3 - <<'PY'
+import base64
+from pathlib import Path
+
+path = Path({path!r})
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_bytes(base64.b64decode({encoded!r}))
+PY
+"""
+
+
+@contextmanager
+def _temporary_c3_files(config: dict, server: str, c3_time: str):
+    """Create the transient .c3 project + runner script C3 needs.
+
+    C3 expects `.c3` to live at the project root, so we write it only for
+    the duration of `c3 deploy` and restore any pre-existing file exactly.
+    The runner script embeds the current candidate code directly so the
+    remote job does not depend on whether gitignored algorithm files are
+    included in C3's uploaded workspace.
+    """
+    run_id = uuid.uuid4().hex[:10]
+    challenge = config.get("challenge", "unknown")
+    is_gpu = bool(config.get("is_gpu"))
+    dockerfile = "./scripts/c3/docker/Dockerfile.gpu" if is_gpu else "./scripts/c3/docker/Dockerfile.cpu"
+    c3_path = ROOT / ".c3"
+    script_name = f".c3-run-benchmark-{run_id}.sh"
+    script_path = ROOT / script_name
+    artifacts_dir = ROOT / "c3-artifacts"
+
+    algo_path = ROOT / config.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
+    kernel_cfg = config.get("kernel_path")
+    kernel_path = ROOT / kernel_cfg if kernel_cfg else None
+
+    old_c3 = c3_path.read_text() if c3_path.exists() else None
+
+    c3_config = f"""\
+project: tig-swarm-benchmark
+script: {_yaml_quote(script_name)}
+gpu: {_yaml_quote(config.get("c3_hardware", "l40"))}
+time: {_yaml_quote(c3_time)}
+job_name: {_yaml_quote(f"tig-{challenge}-{run_id}")}
+
+docker:
+  dockerfile: {dockerfile}
+  context: ./scripts/c3/docker
+
+output:
+  - ./c3-artifacts
+"""
+
+    algorithm_code = _read_optional(algo_path)
+    kernel_code = _read_optional(kernel_path)
+
+    runner = f"""\
+#!/bin/bash
+set -u
+
+cd "${{C3_JOB_WORKDIR:-/workspace}}"
+mkdir -p "${{C3_ARTIFACTS_DIR}}" c3-artifacts
+
+export TIG_IN_DOCKER=1
+export TIG_SWARM_SERVER={_yaml_quote(server)}
+
+{_script_write_file_b64(config.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs"), algorithm_code)}
+"""
+    if kernel_cfg:
+        runner += _script_write_file_b64(kernel_cfg, kernel_code)
+    runner += f"""\
+
+cat > swarm.config.json <<'JSON'
+{json.dumps(config, indent=2, sort_keys=True)}
+JSON
+
+status=0
+python3 scripts/benchmark.py \
+  > "${{C3_ARTIFACTS_DIR}}/benchmark.json" \
+  2> "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" || status=$?
+
+exit "$status"
+"""
+
+    try:
+        artifacts_dir.mkdir(exist_ok=True)
+        c3_path.write_text(c3_config)
+        script_path.write_text(runner)
+        script_path.chmod(0o755)
+        yield
+    finally:
+        if old_c3 is None:
+            try:
+                c3_path.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            c3_path.write_text(old_c3)
+        try:
+            script_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _parse_job_id(text: str) -> str | None:
+    m = re.search(r"(job_\S+)", text)
+    return m.group(1) if m else None
+
+
+def _poll_c3_job(job_id: str, env: dict, poll_interval: int = 10) -> str:
+    """Poll c3 squeue until the job reaches a terminal state. Returns status."""
+    while True:
+        result = subprocess.run(
+            ["c3", "squeue"], capture_output=True, text=True, cwd=ROOT, env=env,
+        )
+        for line in result.stdout.splitlines():
+            if job_id in line:
+                upper = line.upper()
+                if "COMPLETED" in upper or "SYNCED" in upper:
+                    return "completed"
+                if "FAILED" in upper or "CANCELLED" in upper:
+                    return "failed"
+                break
+        time.sleep(poll_interval)
+
+
+def _run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tuple[dict | None, str]:
+    if shutil.which("c3") is None:
+        return None, "c3 CLI not found. Install it from https://docs.cthree.cloud/."
+
+    c3_key = args.c3_api_key or os.environ.get("C3_API_KEY", "")
+
+    cfg = dict(config)
+    cfg["server_url"] = server
+    cfg["c3_hardware"] = args.hardware.lower()
+
+    env = os.environ.copy()
+    if c3_key:
+        env["C3_API_KEY"] = c3_key
+
+    with _temporary_c3_files(cfg, server, args.c3_time):
+        cmd = ["c3", "deploy"]
+        if args.c3_cloud_provider:
+            cmd.extend(["-p", args.c3_cloud_provider])
+        if args.c3_no_build:
+            cmd.append("--no-build")
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=ROOT, env=env,
+        )
+
+    combined = (result.stdout or "") + "\n" + (result.stderr or "")
+    job_id = _parse_job_id(combined)
+    if not job_id:
+        return None, f"Could not parse job ID from c3 deploy output:\n{combined[-2000:]}"
+
+    print(f"  C3 job submitted: {job_id} — polling for completion ...")
+    status = _poll_c3_job(job_id, env)
+    if status != "completed":
+        logs = subprocess.run(
+            ["c3", "logs", job_id], capture_output=True, text=True, cwd=ROOT, env=env,
+        )
+        return None, f"C3 job {job_id} {status}:\n{(logs.stdout or '')[-4000:]}"
+
+    subprocess.run(
+        ["c3", "pull", job_id], capture_output=True, text=True, cwd=ROOT, env=env,
+    )
+
+    artifact_json = ROOT / job_id / "artifacts" / "benchmark.json"
+    if artifact_json.exists() and artifact_json.stat().st_size > 0:
+        try:
+            bench = json.loads(artifact_json.read_text())
+            return bench, ""
+        except json.JSONDecodeError:
+            return None, f"C3 artifact JSON was invalid: {artifact_json}"
+
+    # Fallback: try the c3-artifacts copy
+    alt = ROOT / job_id / "c3-artifacts" / "benchmark.json"
+    if alt.exists() and alt.stat().st_size > 0:
+        try:
+            bench = json.loads(alt.read_text())
+            return bench, ""
+        except json.JSONDecodeError:
+            pass
+
+    return None, f"C3 job {job_id} completed but no benchmark.json found in pulled artifacts"
+
+
+def run_benchmark(args: argparse.Namespace, config: dict, server: str) -> tuple[dict | None, str]:
+    if args.compute == "local":
+        return _run_benchmark_local()
+    if args.compute == "c3":
+        return _run_benchmark_c3(args, config, server)
+    return None, f"Unknown compute provider: {args.compute}"
+
+
 def publish_results(
     server: str, agent_id: str, bench: dict, mutation: dict, config: dict,
 ) -> dict:
     code = read_algorithm(config)
+    kernel_code = ""
+    kernel_path = config.get("kernel_path")
+    if kernel_path:
+        kernel_code = _read_optional(ROOT / kernel_path)
     payload = {
         "agent_id": agent_id,
         "title": mutation.get("title", ""),
@@ -395,6 +613,8 @@ def publish_results(
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
     }
+    if kernel_code:
+        payload["kernel_code"] = kernel_code
     # VRP-only fields; forward only when benchmark.py actually populated
     # them (i.e. challenge is vehicle_routing).
     if bench.get("num_vehicles") is not None:
@@ -431,6 +651,33 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", help="Model ID (default: per-provider sensible default)")
     p.add_argument("--api-key", help="API key (default: from env var)")
     p.add_argument("--api-base", help="Base URL for OpenAI-compatible endpoints")
+    p.add_argument(
+        "--compute", choices=["local", "c3"], default="local",
+        help="Where to run each benchmark job (default: local)",
+    )
+    p.add_argument(
+        "--hardware", default="l40",
+        help="C3 GPU profile for --compute c3 (default: l40)",
+    )
+    p.add_argument(
+        "--c3-api-key",
+        help=(
+            "C3 API key for --compute c3. Defaults to C3_API_KEY when set; "
+            "otherwise the c3 CLI can use existing `c3 login` credentials."
+        ),
+    )
+    p.add_argument(
+        "--c3-time", default="02:00:00",
+        help="C3 job walltime for each benchmark job (default: 02:00:00)",
+    )
+    p.add_argument(
+        "--c3-cloud-provider",
+        help="Optional C3 CLI cloud provider passed as `c3 deploy -p ...`",
+    )
+    p.add_argument(
+        "--c3-no-build", action="store_true",
+        help="Pass --no-build to c3 deploy, requiring a cached Docker image",
+    )
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument("--agent-id", help="Resume with an existing agent ID")
     p.add_argument("--agent-name", help="Agent name (used with --agent-id)")
@@ -465,6 +712,9 @@ def main() -> int:
     server = config.get("server_url", "").rstrip("/")
     if not server:
         sys.exit("No server_url in swarm.config.json. Run setup.py first.")
+    if args.compute == "c3":
+        if shutil.which("c3") is None:
+            sys.exit("c3 CLI not found. Install it from https://docs.cthree.cloud/.")
 
     # Register or resume
     if args.agent_id:
@@ -478,6 +728,10 @@ def main() -> int:
     challenge_md = read_challenge_md()
 
     print(f"Provider: {args.provider}  Model: {model}")
+    compute_desc = args.compute
+    if args.compute == "c3":
+        compute_desc = f"c3/{args.hardware.lower()}"
+    print(f"Compute: {compute_desc}")
     print(f"Challenge: {config.get('challenge', '?')}")
     print(f"Server: {server}")
     print()
@@ -626,7 +880,7 @@ def main() -> int:
         bench = None
         code_changed_by_fix = False
         for build_attempt in range(1 + max_build_retries):
-            bench, build_err = run_benchmark()
+            bench, build_err = run_benchmark(args, config, server)
             if bench is not None:
                 break
             if build_attempt >= max_build_retries:
@@ -706,7 +960,7 @@ def main() -> int:
 
                 print("  Re-running benchmark ...")
                 send_heartbeat(server, agent_id)
-                bench, build_err = run_benchmark()
+                bench, build_err = run_benchmark(args, config, server)
                 if bench is None:
                     # Runtime fix introduced a compile error — one retry
                     print(f"  Runtime fix caused compile error — asking LLM to fix ...")
@@ -734,7 +988,7 @@ def main() -> int:
                             write_algorithm(best_code, config)
                         break
                     write_algorithm(compile_fixed, config)
-                    bench, build_err = run_benchmark()
+                    bench, build_err = run_benchmark(args, config, server)
                     if bench is None:
                         print("  Still won't compile — restoring and continuing")
                         if best_code:

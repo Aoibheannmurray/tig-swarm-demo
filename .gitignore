@@ -6,6 +6,10 @@ __pycache__/
 *.pyc
 *.db
 .railway/
+.c3
+.c3.local
+c3-artifacts/
+job_*/
 fly.toml
 Procfile
 runtime.txt
