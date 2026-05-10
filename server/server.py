@@ -498,36 +498,31 @@ async def get_state(
                 new_traj_id = None
                 new_program_id = None
 
-                if not inactive_pool:
+                # Fresh start if N² < D (number of trajectories² < total
+                # deactivations). This lets the trajectory count grow as
+                # √(total_work), while average trajectory length also grows
+                # as √(total_work) — both increase without bound.
+                n_traj, total_deact = await db.trajectory_counts(conn, challenge)
+                go_fresh = not inactive_pool or n_traj * n_traj < total_deact
+
+                if go_fresh:
                     new_code, new_kernel_code = await load_initial_algorithm(challenge)
                     new_program_id = new_id()
                     trajectory_reset = {"type": "fresh_start"}
                 else:
-                    # Weighted sampling: p_fresh = max(0, 1 - kappa / mean(n_i))
-                    # where mean(n_i) is over ALL trajectories (active + inactive).
-                    # If not fresh, sample inactive trajectory j with weight 1/n_j.
-                    kappa = float(config.get("restart_kappa", "2"))
-                    mean_deact = await db.mean_trajectory_deactivations(conn, challenge)
-                    p_fresh = max(0.0, 1.0 - kappa / mean_deact) if mean_deact > 0 else 0.0
-
-                    if random.random() < p_fresh:
-                        new_code, new_kernel_code = await load_initial_algorithm(challenge)
-                        new_program_id = new_id()
-                        trajectory_reset = {"type": "fresh_start"}
-                    else:
-                        picked = random.choice(inactive_pool)
-                        new_code = picked["algorithm_code"]
-                        new_kernel_code = picked.get("kernel_code")
-                        new_program_id = picked.get("program_id") or new_id()
-                        await db.remove_inactive(conn, picked["id"])
-                        trajectory_reset = {
-                            "type": "adopted_inactive",
-                            "prior_score": picked["score"],
-                        }
-                        if picked.get("trajectory_id"):
-                            new_traj_id = picked["trajectory_id"]
-                            await db.reactivate_trajectory(conn, new_traj_id)
-                            await db.increment_trajectory_agents(conn, new_traj_id)
+                    picked = random.choice(inactive_pool)
+                    new_code = picked["algorithm_code"]
+                    new_kernel_code = picked.get("kernel_code")
+                    new_program_id = picked.get("program_id") or new_id()
+                    await db.remove_inactive(conn, picked["id"])
+                    trajectory_reset = {
+                        "type": "adopted_inactive",
+                        "prior_score": picked["score"],
+                    }
+                    if picked.get("trajectory_id"):
+                        new_traj_id = picked["trajectory_id"]
+                        await db.reactivate_trajectory(conn, new_traj_id)
+                        await db.increment_trajectory_agents(conn, new_traj_id)
 
                 # Now deposit the stagnated code into the per-challenge pool.
                 await db.deposit_inactive(

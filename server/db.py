@@ -775,14 +775,16 @@ async def remove_inactive(conn: aiosqlite.Connection, inactive_id: int) -> None:
     )
 
 
-async def mean_trajectory_deactivations(
+async def trajectory_counts(
     conn: aiosqlite.Connection, challenge: str
-) -> float:
+) -> tuple[int, int]:
+    """Return (n_trajectories, total_deactivations) for a challenge."""
     row = await (await conn.execute(
-        "SELECT AVG(num_deactivations) as avg_d FROM trajectories WHERE challenge = ?",
+        "SELECT COUNT(*) as n, COALESCE(SUM(num_deactivations), 0) as total_d "
+        "FROM trajectories WHERE challenge = ?",
         (challenge,),
     )).fetchone()
-    return row["avg_d"] if row and row["avg_d"] is not None else 0.0
+    return (row["n"], row["total_d"]) if row else (0, 0)
 
 
 async def get_inactive_with_deactivations(
