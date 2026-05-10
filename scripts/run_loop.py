@@ -107,15 +107,34 @@ def algo_path(config: dict) -> Path:
     return ROOT / config.get("algorithm_path", "src/knapsack/algorithm/mod.rs")
 
 
+def kernel_path(config: dict) -> Path | None:
+    kp = config.get("kernel_path")
+    return ROOT / kp if kp else None
+
+
 def write_algorithm(code: str, config: dict) -> None:
     p = algo_path(config)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(code)
 
 
+def write_kernel(code: str, config: dict) -> None:
+    p = kernel_path(config)
+    if p:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(code)
+
+
 def read_algorithm(config: dict) -> str:
     p = algo_path(config)
     return p.read_text() if p.exists() else ""
+
+
+def read_kernel(config: dict) -> str:
+    p = kernel_path(config)
+    if p and p.exists():
+        return p.read_text()
+    return ""
 
 
 def read_challenge_md() -> str:
@@ -174,8 +193,9 @@ STRATEGY_TAG: <one of: {tags}>
 NOTES: <brief interpretation of your approach>"""
 
 
-def build_hypothesis_user_prompt(state: dict) -> str:
+def build_hypothesis_user_prompt(state: dict, config: dict | None = None) -> str:
     parts: list[str] = []
+    is_gpu = bool((config or {}).get("is_gpu"))
 
     code = state.get("best_algorithm_code") or ""
     if is_stub_code(code):
@@ -184,7 +204,11 @@ def build_hypothesis_user_prompt(state: dict) -> str:
             "Propose an initial implementation strategy from scratch."
         )
     else:
-        parts.append(f"Current algorithm:\n```rust\n{code}\n```")
+        parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
+        if is_gpu:
+            kernel_code = state.get("best_kernel_code") or ""
+            if kernel_code:
+                parts.append(f"\nCurrent CUDA kernels (kernels.cu):\n```cuda\n{kernel_code}\n```")
 
     prior = state.get("prior_hypotheses") or []
     if prior:
@@ -203,6 +227,10 @@ def build_hypothesis_user_prompt(state: dict) -> str:
                 f"\nStudy this approach for ideas "
                 f"(adapt ideas, do NOT copy wholesale):\n```rust\n{insp}\n```"
             )
+            if is_gpu:
+                insp_kernel = state.get("inspiration_kernel_code", "")
+                if insp_kernel:
+                    parts.append(f"\nInspiration CUDA kernels:\n```cuda\n{insp_kernel}\n```")
     elif hint == "tacit_knowledge":
         tk = read_tacit_knowledge().strip()
         if tk:
@@ -213,6 +241,10 @@ def build_hypothesis_user_prompt(state: dict) -> str:
                 parts.append(
                     f"\nStudy this approach for ideas:\n```rust\n{insp}\n```"
                 )
+                if is_gpu:
+                    insp_kernel = state.get("inspiration_kernel_code", "")
+                    if insp_kernel:
+                        parts.append(f"\nInspiration CUDA kernels:\n```cuda\n{insp_kernel}\n```")
 
     reset = state.get("trajectory_reset")
     if reset:
@@ -234,6 +266,21 @@ def build_hypothesis_user_prompt(state: dict) -> str:
 
 def build_code_system_prompt(challenge_md: str, config: dict) -> str:
     challenge = config.get("challenge", "unknown")
+    is_gpu = bool(config.get("is_gpu"))
+    if is_gpu:
+        return f"""\
+You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
+
+{challenge_md}
+
+IMPORTANT RULES:
+- `use super::*;` must remain as the first import in the Rust file.
+- `fn solve_challenge(` MUST appear in your Rust output — do NOT omit it.
+- Return BOTH files: the complete Rust source AND the complete CUDA kernel source.
+- Separate them with a line containing exactly: // --- kernels.cu ---
+- The Rust file comes FIRST, then the separator, then the CUDA file.
+- No explanation, no markdown fences — just the two raw source files with the separator.
+- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu."""
     return f"""\
 You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
@@ -242,8 +289,9 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge.
 `use super::*;` must remain as the first import. Return the complete Rust source file — no explanation, no markdown fences."""
 
 
-def build_code_user_prompt(state: dict, hypothesis: dict) -> str:
+def build_code_user_prompt(state: dict, hypothesis: dict, config: dict | None = None) -> str:
     parts: list[str] = []
+    is_gpu = bool((config or {}).get("is_gpu"))
 
     code = state.get("best_algorithm_code") or ""
     if is_stub_code(code):
@@ -253,7 +301,20 @@ def build_code_user_prompt(state: dict, hypothesis: dict) -> str:
             "find an improved solution."
         )
     else:
-        parts.append(f"Current algorithm:\n```rust\n{code}\n```")
+        parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
+
+    if is_gpu:
+        kernel_code = state.get("best_kernel_code") or ""
+        if kernel_code:
+            parts.append(f"\nCurrent CUDA kernels (kernels.cu):\n```cuda\n{kernel_code}\n```")
+        else:
+            parts.append(
+                "\nNo CUDA kernel file yet — write any custom GPU kernels you need."
+            )
+        parts.append(
+            "\nReturn BOTH files separated by: // --- kernels.cu ---"
+            "\nThe Rust file (with fn solve_challenge) comes first, then the separator, then the CUDA file."
+        )
 
     title = hypothesis.get("title", "")
     description = hypothesis.get("description", "")
@@ -265,7 +326,7 @@ def build_code_user_prompt(state: dict, hypothesis: dict) -> str:
     return "\n".join(parts)
 
 
-def build_runtime_fix_prompt(code: str, bench: dict) -> str:
+def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "") -> str:
     """Build a prompt that feeds runtime errors back to the LLM for fixing."""
     errors = bench.get("errors") or []
     error_lines = "\n".join(f"  - {e}" for e in errors)
@@ -275,8 +336,10 @@ def build_runtime_fix_prompt(code: str, bench: dict) -> str:
     track_summary = "\n".join(
         f"  - {track}: {s:.0f}" for track, s in track_scores.items()
     )
-    return (
-        f"Current algorithm:\n```rust\n{code}\n```\n\n"
+    parts = [f"Current algorithm (mod.rs):\n```rust\n{code}\n```\n"]
+    if kernel_code:
+        parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{kernel_code}\n```\n")
+    parts.append(
         f"This code compiled successfully but failed at runtime.\n\n"
         f"Score: {score}  Feasible: {feasible}\n"
         f"Per-track scores:\n{track_summary}\n"
@@ -289,8 +352,14 @@ def build_runtime_fix_prompt(code: str, bench: dict) -> str:
         "- Any other error = the code saved a solution but the evaluator "
         "rejected it (constraint violation). Fix: check that your solution "
         "satisfies all feasibility constraints described in the challenge.\n\n"
-        "Fix the runtime errors and return the complete Rust source file."
+        "Fix the runtime errors and return the complete source."
     )
+    if kernel_code:
+        parts.append(
+            "\nReturn BOTH files separated by: // --- kernels.cu ---"
+            "\nEnsure kernel function names match between mod.rs and kernels.cu."
+        )
+    return "\n".join(parts)
 
 
 def build_redescribe_hypothesis_prompt(
@@ -344,8 +413,8 @@ def parse_hypothesis(text: str) -> dict:
     return meta
 
 
-def parse_code(text: str) -> str:
-    """Extract Rust code from the code LLM response."""
+def _strip_fences(text: str) -> str:
+    """Remove optional markdown fences from a code block."""
     text = text.strip()
     if text.startswith("```"):
         first_nl = text.find("\n")
@@ -354,6 +423,41 @@ def parse_code(text: str) -> str:
     if text.endswith("```"):
         text = text[: text.rfind("```")]
     return text.strip()
+
+
+_KERNEL_SEPARATOR = "// --- kernels.cu ---"
+
+
+def parse_code(text: str) -> str:
+    """Extract Rust code from the code LLM response (non-GPU)."""
+    return _strip_fences(text)
+
+
+def parse_gpu_code(text: str) -> tuple[str, str]:
+    """Extract Rust + CUDA code from a GPU two-file LLM response.
+
+    Returns (rust_code, cuda_code). If the separator is missing,
+    returns the whole text as rust_code and empty cuda_code.
+    """
+    text = _strip_fences(text)
+    sep_idx = text.find(_KERNEL_SEPARATOR)
+    if sep_idx == -1:
+        # Try alternate separators the LLM might use
+        for alt in ["// --- kernels.cu", "// ---kernels.cu---", "// -- kernels.cu --",
+                     "/* --- kernels.cu --- */", "// ===== kernels.cu =====",
+                     "// kernels.cu"]:
+            idx = text.find(alt)
+            if idx != -1:
+                sep_idx = idx
+                # Find end of separator line
+                nl = text.find("\n", sep_idx)
+                rust = text[:sep_idx].strip()
+                cuda = text[nl + 1:].strip() if nl != -1 else ""
+                return _strip_fences(rust), _strip_fences(cuda)
+        return text.strip(), ""
+    rust = text[:sep_idx].strip()
+    cuda = text[sep_idx + len(_KERNEL_SEPARATOR):].strip()
+    return _strip_fences(rust), _strip_fences(cuda)
 
 
 def validate_code(original: str, modified: str) -> str | None:
@@ -510,41 +614,65 @@ exit "$status"
             pass
 
 
-def _parse_job_id(text: str) -> str | None:
-    m = re.search(r"(job_\S+)", text)
-    return m.group(1) if m else None
+def _parse_c3_id(text: str) -> str | None:
+    """Extract instance/job ID from c3 instances launch output."""
+    for pat in [
+        r'"id"\s*:\s*"([^"]+)"',
+        r"(inst_[a-zA-Z0-9_-]+)",
+        r"(job_[a-zA-Z0-9_-]+)",
+        r"([a-f0-9]{8,})",
+    ]:
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+    return None
 
 
-def _poll_c3_job(job_id: str, env: dict, poll_interval: int = 10) -> str:
-    """Poll c3 squeue until the job reaches a terminal state. Returns status."""
-    while True:
+def _poll_c3_job(job_id: str, env: dict, poll_interval: int = 15, max_polls: int = 480) -> str:
+    """Poll `c3 squeue` until the job reaches a terminal state."""
+    for i in range(max_polls):
         result = subprocess.run(
             ["c3", "squeue"], capture_output=True, text=True, cwd=ROOT, env=env,
         )
-        for line in result.stdout.splitlines():
+        out = result.stdout or ""
+        for line in out.splitlines():
             if job_id in line:
                 upper = line.upper()
-                if "COMPLETED" in upper or "SYNCED" in upper:
+                if "COMPLETED" in upper or "SYNCED" in upper or "SUCCEEDED" in upper:
                     return "completed"
-                if "FAILED" in upper or "CANCELLED" in upper:
+                if "FAILED" in upper or "CANCELLED" in upper or "ERROR" in upper:
                     return "failed"
+                # Job found but still running
+                if i % 4 == 0:
+                    # Show the status from the squeue line
+                    print(f"    [C3] {job_id}: {line.strip()}")
                 break
+        else:
+            # Job not in squeue at all — might have completed and dropped off
+            if i > 2:
+                return "completed"
+        if i % 4 == 0 and job_id not in out:
+            print(f"    [C3] Still waiting on {job_id} (poll {i + 1})…")
         time.sleep(poll_interval)
+    return "timeout"
 
 
 def _run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tuple[dict | None, str]:
     if shutil.which("c3") is None:
-        return None, "c3 CLI not found. Install it from https://docs.cthree.cloud/."
+        return None, "[C3] c3 CLI not found. Install from https://cthree.cloud/install.sh"
 
     c3_key = args.c3_api_key or os.environ.get("C3_API_KEY", "")
+    challenge = config.get("challenge", "unknown")
 
     cfg = dict(config)
     cfg["server_url"] = server
     cfg["c3_hardware"] = args.hardware.lower()
 
     env = os.environ.copy()
-    if c3_key:
+    if c3_key and not c3_key.startswith("your_"):
         env["C3_API_KEY"] = c3_key
+
+    print(f"    [C3] Bundling project for {challenge}…")
 
     with _temporary_c3_files(cfg, server, args.c3_time):
         cmd = ["c3", "deploy"]
@@ -553,45 +681,80 @@ def _run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tu
         if args.c3_no_build:
             cmd.append("--no-build")
 
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=ROOT, env=env,
-        )
+        print(f"    [C3] Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, env=env)
 
     combined = (result.stdout or "") + "\n" + (result.stderr or "")
-    job_id = _parse_job_id(combined)
+    print(f"    [C3] Deploy output: {combined[:300]}")
+
+    job_id = _parse_c3_id(combined)
     if not job_id:
-        return None, f"Could not parse job ID from c3 deploy output:\n{combined[-2000:]}"
+        err = f"[C3] Could not parse job ID from c3 deploy output:\n{combined[-2000:]}"
+        print(f"    {err}")
+        return None, err
 
-    print(f"  C3 job submitted: {job_id} — polling for completion ...")
+    print(f"    [C3] Job submitted: {job_id} — polling for completion…")
     status = _poll_c3_job(job_id, env)
-    if status != "completed":
-        logs = subprocess.run(
-            ["c3", "logs", job_id], capture_output=True, text=True, cwd=ROOT, env=env,
-        )
-        return None, f"C3 job {job_id} {status}:\n{(logs.stdout or '')[-4000:]}"
 
+    # Fetch logs
+    logs_result = subprocess.run(
+        ["c3", "logs", job_id],
+        capture_output=True, text=True, cwd=ROOT, env=env,
+    )
+    logs_out = logs_result.stdout or ""
+
+    if status != "completed":
+        err = f"[C3] Job {job_id} {status}"
+        print(f"    {err}")
+        if logs_out:
+            print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
+        return None, f"{err}:\n{logs_out[-4000:]}"
+
+    print(f"    [C3] Job {job_id} completed — pulling results…")
+
+    # Pull artifacts
     subprocess.run(
         ["c3", "pull", job_id], capture_output=True, text=True, cwd=ROOT, env=env,
     )
 
-    artifact_json = ROOT / job_id / "artifacts" / "benchmark.json"
-    if artifact_json.exists() and artifact_json.stat().st_size > 0:
-        try:
-            bench = json.loads(artifact_json.read_text())
-            return bench, ""
-        except json.JSONDecodeError:
-            return None, f"C3 artifact JSON was invalid: {artifact_json}"
+    # Check pulled artifacts first
+    for artifact_dir in [ROOT / job_id / "artifacts", ROOT / job_id / "c3-artifacts",
+                         ROOT / "c3-artifacts"]:
+        artifact_json = artifact_dir / "benchmark.json"
+        if artifact_json.exists() and artifact_json.stat().st_size > 0:
+            try:
+                bench = json.loads(artifact_json.read_text())
+                print(f"    [C3] Results extracted from {artifact_json}")
+                return bench, ""
+            except json.JSONDecodeError:
+                continue
 
-    # Fallback: try the c3-artifacts copy
-    alt = ROOT / job_id / "c3-artifacts" / "benchmark.json"
-    if alt.exists() and alt.stat().st_size > 0:
+    # Fallback: parse from logs
+    for line in reversed(logs_out.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                bench = json.loads(line)
+                if "score" in bench or "challenge" in bench:
+                    print(f"    [C3] Results extracted from logs")
+                    return bench, ""
+            except json.JSONDecodeError:
+                continue
+
+    json_blocks = re.findall(r'\{[^{}]*"score"[^{}]*\}', logs_out)
+    if json_blocks:
         try:
-            bench = json.loads(alt.read_text())
+            bench = json.loads(json_blocks[-1])
+            print(f"    [C3] Results extracted via regex fallback")
             return bench, ""
         except json.JSONDecodeError:
             pass
 
-    return None, f"C3 job {job_id} completed but no benchmark.json found in pulled artifacts"
+    err = f"[C3] Job {job_id} completed but could not parse benchmark JSON"
+    print(f"    {err}")
+    if logs_out:
+        print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
+    return None, err
 
 
 def run_benchmark(args: argparse.Namespace, config: dict, server: str) -> tuple[dict | None, str]:
@@ -749,14 +912,17 @@ def main() -> int:
     iteration = 0
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
-        print(f"{'=' * 60}")
-        print(f"  Iteration {iteration}")
+        t_start = time.time()
+        print(f"\n{'=' * 60}")
+        print(f"  Iteration {iteration}  ({time.strftime('%H:%M:%S')})")
         print(f"{'=' * 60}")
 
         # ── Step 0: sync challenge ──────────────────────────────
+        print("  [SYNC] Syncing challenge with server…")
         sync_challenge()
         config = load_config()
         challenge_md = read_challenge_md()
+        print(f"  [SYNC] Challenge: {config.get('challenge', '?')}  GPU: {config.get('is_gpu', False)}")
 
         # Fetch server-side swarm config for dynamic fields (strategy_tags).
         try:
@@ -766,48 +932,66 @@ def main() -> int:
             pass
 
         # ── Step 1: get state ───────────────────────────────────
+        print("  [STATE] Fetching agent state…")
         try:
             state = get_state(server, agent_id)
         except Exception as e:
-            print(f"  Failed to get state: {e}", file=sys.stderr)
+            print(f"  [STATE] FAILED: {e}")
             time.sleep(5)
             continue
 
         my_score = state.get("my_best_score")
         global_best = state.get("best_score")
         stagnation = state.get("my_runs_since_improvement", 0)
-        print(f"  My best: {my_score}  Global best: {global_best}  Stagnation: {stagnation}")
+        runs = state.get("my_runs", 0)
+        improvements = state.get("my_improvements", 0)
+        print(f"  [STATE] My best: {my_score}  Global best: {global_best}")
+        print(f"  [STATE] Runs: {runs}  Improvements: {improvements}  Stagnation: {stagnation}")
+
+        prior = state.get("prior_hypotheses") or []
+        if prior:
+            print(f"  [STATE] {len(prior)} prior failed hypotheses on this program")
 
         reset = state.get("trajectory_reset")
         if reset:
-            print(f"  ** TRAJECTORY RESET — {reset.get('type')} **")
+            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')} **")
             post_message(server, agent_name, agent_id,
                          f"Trajectory reset: {reset.get('type')}")
 
-        # ── Step 2: write current best to mod.rs ────────────────
+        # ── Step 2: write current best to mod.rs (+ kernels.cu) ─
         best_code = state.get("best_algorithm_code") or ""
+        best_kernel = state.get("best_kernel_code") or ""
+        is_gpu = bool(config.get("is_gpu"))
         bootstrap = is_stub_code(best_code)
         if best_code and not bootstrap:
             write_algorithm(best_code, config)
+            print(f"  [FILES] Wrote mod.rs ({len(best_code)} chars)")
+        if is_gpu and best_kernel:
+            write_kernel(best_kernel, config)
+            print(f"  [FILES] Wrote kernels.cu ({len(best_kernel)} chars)")
+        elif is_gpu:
+            print(f"  [FILES] No kernel code from server — using local kernels.cu")
 
         if bootstrap:
-            print("  Starting from stub — will ask LLM to write initial implementation")
+            print("  [FILES] Starting from stub — will ask LLM to write initial implementation")
 
         # ── Step 3a: LLM hypothesis ────────────────────────────
         hint = state.get("stagnation_hint")
         if hint:
-            print(f"  Stagnation hint: {hint}")
+            print(f"  [LLM] Stagnation hint: {hint}")
+        if state.get("inspiration_code"):
+            print(f"  [LLM] Inspiration available from {state.get('inspiration_agent_name', '?')}")
 
-        print(f"  Generating hypothesis via {args.provider}/{model} ...")
+        print(f"  [LLM] Generating hypothesis via {args.provider}/{model}…")
         try:
             hyp_response = call_llm(
                 args.provider, model, api_key,
                 build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
-                build_hypothesis_user_prompt(state),
+                build_hypothesis_user_prompt(state, config),
                 args.api_base,
             )
         except Exception as e:
-            print(f"  Hypothesis LLM call failed: {e}", file=sys.stderr)
+            print(f"  [LLM] HYPOTHESIS FAILED: {e}")
             post_message(server, agent_name, agent_id,
                          f"LLM call failed: {type(e).__name__}")
             time.sleep(5)
@@ -816,22 +1000,31 @@ def main() -> int:
         hypothesis = parse_hypothesis(hyp_response)
         tag = hypothesis.get("strategy_tag", "?")
         title = hypothesis.get("title", "?")
-        print(f"  Hypothesis: [{tag}] {title}")
+        desc = hypothesis.get("description", "")
+        print(f"  [LLM] Hypothesis: [{tag}] {title}")
+        if desc:
+            print(f"         {desc[:120]}")
 
         # ── Step 3b: LLM code (with retry on validation failure) ─
         original_code = best_code
+        original_kernel = best_kernel if is_gpu else ""
         code = None
+        new_kernel = None
         max_code_attempts = 3
+        retry_suffix = (
+            "\nReturn BOTH files separated by: // --- kernels.cu ---"
+            if is_gpu else ""
+        )
         for attempt in range(max_code_attempts):
             if attempt == 0:
-                print(f"  Generating code via {args.provider}/{model} ...")
-                user_prompt = build_code_user_prompt(state, hypothesis)
+                print(f"  [LLM] Generating code via {args.provider}/{model}…")
+                user_prompt = build_code_user_prompt(state, hypothesis, config)
             else:
-                print(f"  Retry {attempt}/{max_code_attempts - 1}: {violation}")
+                print(f"  [LLM] Code retry {attempt}/{max_code_attempts - 1}: {violation}")
                 user_prompt = (
-                    build_code_user_prompt(state, hypothesis)
+                    build_code_user_prompt(state, hypothesis, config)
                     + f"\n\nYour previous response was rejected: {violation}\n"
-                    "Fix the issue and return the complete Rust source file."
+                    "Fix the issue and return the complete source." + retry_suffix
                 )
             try:
                 code_response = call_llm(
@@ -841,24 +1034,36 @@ def main() -> int:
                     args.api_base,
                 )
             except Exception as e:
-                print(f"  Code LLM call failed: {e}", file=sys.stderr)
+                print(f"  [LLM] CODE GENERATION FAILED: {e}")
                 post_message(server, agent_name, agent_id,
                              f"LLM call failed: {type(e).__name__}")
                 time.sleep(5)
                 break
 
-            parsed = parse_code(code_response)
+            if is_gpu:
+                parsed, parsed_kernel = parse_gpu_code(code_response)
+                if parsed_kernel:
+                    print(f"  [LLM] Got two-file response (rust: {len(parsed)} chars, cuda: {len(parsed_kernel)} chars)")
+                else:
+                    print(f"  [LLM] WARNING: No kernel separator found — got rust only ({len(parsed)} chars)")
+            else:
+                parsed = parse_code(code_response)
+                parsed_kernel = ""
             if not parsed:
-                print("  Empty code response — skipping iteration")
+                print("  [LLM] Empty code response — skipping iteration")
                 break
 
             violation = validate_code(original_code, parsed)
             if violation:
+                print(f"  [LLM] Validation failed: {violation}")
                 continue
             code = parsed
+            new_kernel = parsed_kernel
+            print(f"  [LLM] Code validated OK")
             break
 
         if not code:
+            print(f"  [SKIP] No valid code produced — skipping to next iteration")
             continue
 
         # ── Code similarity check ──────────────────────────────
@@ -873,14 +1078,20 @@ def main() -> int:
                 label = "moderate edit"
             else:
                 label = "incremental edit"
-            print(f"  Code similarity: {pct:.0f}% ({label})")
+            print(f"  [FILES] Code similarity: {pct:.0f}% ({label})")
         else:
-            print("  Code similarity: N/A (first algorithm)")
+            print("  [FILES] First algorithm (no prior code)")
 
         write_algorithm(code, config)
+        if is_gpu and new_kernel:
+            write_kernel(new_kernel, config)
+            print(f"  [FILES] Wrote both mod.rs + kernels.cu")
+        elif is_gpu:
+            print(f"  [FILES] Wrote mod.rs only (no kernel changes)")
 
         # ── Step 4: benchmark (with build-error retry) ─────────
-        print("  Running benchmark ...")
+        compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
+        print(f"  [BENCH] Running benchmark on {compute_label}…")
         post_message(server, agent_name, agent_id,
                      f"Trying [{tag}] {title}")
 
@@ -893,16 +1104,35 @@ def main() -> int:
             bench, build_err = run_benchmark(args, config, server)
             if bench is not None:
                 break
+            # Check if this is an infrastructure error (C3 auth, Docker, etc.)
+            # vs a code compilation error — only retry code fixes for the latter
+            infra_markers = ["401", "API Error", "c3 CLI not found", "Docker image",
+                             "Could not parse job ID", "timeout", "403", "500"]
+            is_infra_error = any(m in build_err for m in infra_markers)
+            if is_infra_error:
+                print(f"  [BENCH] INFRASTRUCTURE ERROR (not a code problem):")
+                print(f"          {build_err[:300]}")
+                break
             if build_attempt >= max_build_retries:
                 break
             # Feed compiler errors back to the LLM for a fix
-            print(f"  Build retry {build_attempt + 1}/{max_build_retries} — asking LLM to fix ...")
+            print(f"  [BENCH] Build retry {build_attempt + 1}/{max_build_retries} — asking LLM to fix…")
             compiler_errors = build_err[-1500:]
-            fix_prompt = (
-                f"Current algorithm:\n```rust\n{read_algorithm(config)}\n```\n\n"
+            fix_parts = [f"Current algorithm (mod.rs):\n```rust\n{read_algorithm(config)}\n```\n"]
+            if is_gpu:
+                cur_kernel = read_kernel(config)
+                if cur_kernel:
+                    fix_parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{cur_kernel}\n```\n")
+            fix_parts.append(
                 f"This code failed to compile. Here are the errors:\n```\n{compiler_errors}\n```\n\n"
-                "Fix the compile errors and return the complete Rust source file."
+                "Fix the compile errors and return the complete source."
             )
+            if is_gpu:
+                fix_parts.append(
+                    "\nReturn BOTH files separated by: // --- kernels.cu ---"
+                    "\nEnsure kernel function names match between mod.rs and kernels.cu."
+                )
+            fix_prompt = "\n".join(fix_parts)
             try:
                 fix_response = call_llm(
                     args.provider, model, api_key,
@@ -913,7 +1143,11 @@ def main() -> int:
             except Exception as e:
                 print(f"  Fix LLM call failed: {e}", file=sys.stderr)
                 break
-            fixed = parse_code(fix_response)
+            if is_gpu:
+                fixed, fixed_kernel = parse_gpu_code(fix_response)
+            else:
+                fixed = parse_code(fix_response)
+                fixed_kernel = ""
             if not fixed:
                 print("  Empty fix response — giving up")
                 break
@@ -925,17 +1159,31 @@ def main() -> int:
             fix_sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
             print(f"  Fix similarity to broken code: {fix_sim * 100:.0f}%")
             write_algorithm(fixed, config)
+            if is_gpu and fixed_kernel:
+                write_kernel(fixed_kernel, config)
             code_changed_by_fix = True
 
         if bench is None:
-            print("  Benchmark failed — restoring previous code and continuing")
+            print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
+            print(f"  [BENCH] Restoring previous code and continuing")
             if best_code:
                 write_algorithm(best_code, config)
+            if is_gpu and best_kernel:
+                write_kernel(best_kernel, config)
             post_message(server, agent_name, agent_id,
                          f"[{tag}] {title} — benchmark failed (build error?)")
             continue
 
-        print(f"  Score: {bench['score']}  Feasible: {bench['feasible']}")
+        track_scores = bench.get("track_scores", {})
+        errors = bench.get("errors") or []
+        print(f"  [BENCH] Score: {bench['score']:.0f}  Feasible: {bench['feasible']}")
+        if track_scores:
+            for tk, ts in track_scores.items():
+                print(f"          Track {tk}: {ts:.0f}")
+        if errors:
+            print(f"  [BENCH] Errors ({len(errors)}):")
+            for e in errors[:5]:
+                print(f"          {e}")
 
         # ── Step 4b: runtime error retry ───────────────────────
         max_runtime_retries = 2
@@ -945,17 +1193,22 @@ def main() -> int:
                 print(f"  Runtime retry {rt_attempt + 1}/{max_runtime_retries} — asking LLM to fix ...")
                 print(f"  Errors: {runtime_errors}")
                 current_code = read_algorithm(config)
+                current_kernel = read_kernel(config) if is_gpu else ""
                 try:
                     fix_response = call_llm(
                         args.provider, model, api_key,
                         build_code_system_prompt(challenge_md, config),
-                        build_runtime_fix_prompt(current_code, bench),
+                        build_runtime_fix_prompt(current_code, bench, current_kernel),
                         args.api_base,
                     )
                 except Exception as e:
                     print(f"  Runtime fix LLM call failed: {e}", file=sys.stderr)
                     break
-                fixed = parse_code(fix_response)
+                if is_gpu:
+                    fixed, fixed_kernel = parse_gpu_code(fix_response)
+                else:
+                    fixed = parse_code(fix_response)
+                    fixed_kernel = ""
                 if not fixed:
                     print("  Empty fix response — giving up")
                     break
@@ -966,6 +1219,8 @@ def main() -> int:
                 fix_sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
                 print(f"  Fix similarity: {fix_sim * 100:.0f}%")
                 write_algorithm(fixed, config)
+                if is_gpu and fixed_kernel:
+                    write_kernel(fixed_kernel, config)
                 code_changed_by_fix = True
 
                 print("  Re-running benchmark ...")
@@ -974,11 +1229,18 @@ def main() -> int:
                 if bench is None:
                     # Runtime fix introduced a compile error — one retry
                     print(f"  Runtime fix caused compile error — asking LLM to fix ...")
-                    compile_fix_prompt = (
-                        f"Current algorithm:\n```rust\n{read_algorithm(config)}\n```\n\n"
+                    cfp_parts = [f"Current algorithm (mod.rs):\n```rust\n{read_algorithm(config)}\n```\n"]
+                    if is_gpu:
+                        ck = read_kernel(config)
+                        if ck:
+                            cfp_parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{ck}\n```\n")
+                    cfp_parts.append(
                         f"This code failed to compile. Here are the errors:\n```\n{build_err[-1500:]}\n```\n\n"
-                        "Fix the compile errors and return the complete Rust source file."
+                        "Fix the compile errors and return the complete source."
                     )
+                    if is_gpu:
+                        cfp_parts.append("\nReturn BOTH files separated by: // --- kernels.cu ---")
+                    compile_fix_prompt = "\n".join(cfp_parts)
                     try:
                         compile_fix_resp = call_llm(
                             args.provider, model, api_key,
@@ -990,19 +1252,31 @@ def main() -> int:
                         print(f"  Compile fix LLM call failed: {e}", file=sys.stderr)
                         if best_code:
                             write_algorithm(best_code, config)
+                        if is_gpu and best_kernel:
+                            write_kernel(best_kernel, config)
                         break
-                    compile_fixed = parse_code(compile_fix_resp)
+                    if is_gpu:
+                        compile_fixed, compile_fixed_kernel = parse_gpu_code(compile_fix_resp)
+                    else:
+                        compile_fixed = parse_code(compile_fix_resp)
+                        compile_fixed_kernel = ""
                     if not compile_fixed or validate_code(original_code, compile_fixed):
                         print("  Compile fix failed validation — restoring and continuing")
                         if best_code:
                             write_algorithm(best_code, config)
+                        if is_gpu and best_kernel:
+                            write_kernel(best_kernel, config)
                         break
                     write_algorithm(compile_fixed, config)
+                    if is_gpu and compile_fixed_kernel:
+                        write_kernel(compile_fixed_kernel, config)
                     bench, build_err = run_benchmark(args, config, server)
                     if bench is None:
                         print("  Still won't compile — restoring and continuing")
                         if best_code:
                             write_algorithm(best_code, config)
+                        if is_gpu and best_kernel:
+                            write_kernel(best_kernel, config)
                         break
                 print(f"  Score: {bench['score']}  Feasible: {bench['feasible']}")
                 runtime_errors = bench.get("errors") or []
@@ -1036,14 +1310,17 @@ def main() -> int:
                 print(f"  Re-describe failed: {e} — using original hypothesis", file=sys.stderr)
 
         # ── Step 5: publish ─────────────────────────────────────
+        print(f"  [PUBLISH] Publishing results to server…")
         is_new_best = False
         try:
             result = publish_results(server, agent_id, bench, hypothesis, config)
             is_new_best = result.get("is_new_best", False)
             if is_new_best:
-                print("  ** NEW PERSONAL BEST! **")
+                print("  [PUBLISH] ** NEW PERSONAL BEST! **")
+            else:
+                print(f"  [PUBLISH] Recorded (not a new best)")
         except Exception as e:
-            print(f"  Publish failed: {e}", file=sys.stderr)
+            print(f"  [PUBLISH] FAILED: {e}")
 
         # ── chat + heartbeat ────────────────────────────────────
         status = "NEW BEST!" if is_new_best else f"score {bench['score']:.0f}"
@@ -1051,6 +1328,9 @@ def main() -> int:
         post_message(server, agent_name, agent_id,
                      f"[{tag}] {title} → {status}{feasible_str}")
         send_heartbeat(server, agent_id)
+
+        elapsed = time.time() - t_start
+        print(f"  [DONE] Iteration {iteration} finished in {elapsed:.0f}s")
         print()
 
     print("Loop complete.")
