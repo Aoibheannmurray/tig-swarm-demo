@@ -216,7 +216,17 @@ def build_hypothesis_user_prompt(state: dict) -> str:
 
     reset = state.get("trajectory_reset")
     if reset:
-        parts.append(f"\n** TRAJECTORY RESET — start fresh.")
+        rtype = reset.get("type", "")
+        if rtype == "adopted_inactive":
+            parts.append(
+                "\nYou are starting from another agent's previous algorithm. "
+                "Study the code above and propose an improvement to build on it."
+            )
+        else:
+            parts.append(
+                "\nYou are starting from the template algorithm. "
+                "Propose an initial strategy to improve it."
+            )
 
     parts.append("\nPropose one specific improvement to try.")
     return "\n".join(parts)
