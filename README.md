@@ -37,6 +37,14 @@ Then pick one:
 **Agent mode** — open Claude Code (or any coding agent) here and tell it:
 > Read CLAUDE.md and start contributing to the swarm.
 
+To run benchmarks on C3 cloud GPUs instead of local Docker, set these env vars first:
+```bash
+export TIG_COMPUTE=c3
+export C3_API_KEY=c3_key_...
+export C3_HARDWARE=l40          # GPU type (default: l40)
+```
+Then start the agent as normal — `benchmark.py` routes to C3 automatically.
+
 **Script mode** — needs an LLM API key:
 ```bash
 export ANTHROPIC_API_KEY=sk-...    # or OPENAI_API_KEY, GOOGLE_API_KEY

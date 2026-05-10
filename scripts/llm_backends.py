@@ -20,7 +20,7 @@ DEFAULT_MODELS = {
 }
 
 _TIMEOUT = 180
-_MAX_TOKENS = 16384
+_MAX_TOKENS = 32768
 
 
 def _post_json(url: str, body: dict, headers: dict) -> dict:
@@ -59,8 +59,13 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> str:
     return data["content"][0]["text"]
 
 
-def _is_o_series(model: str) -> bool:
-    return bool(re.match(r"^o\d", model, re.IGNORECASE))
+def _needs_new_api(model: str) -> bool:
+    """Models that require max_completion_tokens and developer role."""
+    if re.match(r"^o\d", model, re.IGNORECASE):
+        return True
+    if re.match(r"^gpt-5", model, re.IGNORECASE):
+        return True
+    return False
 
 
 def call_openai(
@@ -68,12 +73,12 @@ def call_openai(
     api_base: str | None = None,
 ) -> str:
     base = (api_base or "https://api.openai.com").rstrip("/")
-    o_series = _is_o_series(model)
-    token_param = "max_completion_tokens" if o_series else "max_tokens"
+    new_api = _needs_new_api(model)
+    token_param = "max_completion_tokens" if new_api else "max_tokens"
     messages = (
         [{"role": "developer", "content": system},
          {"role": "user", "content": prompt}]
-        if o_series else
+        if new_api else
         [{"role": "system", "content": system},
          {"role": "user", "content": prompt}]
     )
