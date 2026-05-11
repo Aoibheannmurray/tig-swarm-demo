@@ -2,7 +2,6 @@ pub const BUILD_TIME_PATH: &str = env!("CARGO_MANIFEST_DIR");
 
 // Per-challenge quality scaling factor used by the upstream evaluators.
 // Kept here so vendored challenge modules compile unchanged.
-#[allow(dead_code)]
 pub(crate) const QUALITY_PRECISION: i32 = 1_000_000;
 
 // Deterministic hasher + type aliases used by algorithm templates.
@@ -19,7 +18,10 @@ pub type HashSet<T> = std::collections::HashSet<T, ahash::RandomState>;
 // In the upstream tig-challenges crate, conditional_pub! gates verification
 // fns on the `hide_verification` feature so contest binaries can hide them.
 // The swarm demo always needs the verification path (agents evaluate
-// locally), so this is unconditionally `pub`.
+// locally), so this is unconditionally `pub`. The `unused_macros` allow
+// is load-bearing — vehicle_routing and energy_arbitrage don't invoke it,
+// so single-feature builds for those would otherwise warn.
+#[allow(unused_macros)]
 macro_rules! conditional_pub {
     (fn $name:ident $($rest:tt)*) => {
         pub fn $name $($rest)*
@@ -103,7 +105,9 @@ macro_rules! impl_kv_string_serde {
 // Compressed-binary serde used by upstream challenges that ship large
 // instance data (SAT clause arrays, energy market histories, etc.).
 // Bincode + gzip + base64; identical behavior to upstream so vendored
-// challenge code compiles unchanged.
+// challenge code compiles unchanged. The `unused_macros` allow is
+// load-bearing: not every challenge feature uses this macro (vehicle_routing
+// in particular doesn't), so single-feature builds would warn without it.
 #[allow(unused_macros)]
 macro_rules! impl_base64_serde {
     ($name:ident { $( $field:ident : $ty:ty ),* $(,)? }) => {

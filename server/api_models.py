@@ -68,23 +68,23 @@ class ReplayCompactRow(_ResponseBase):
 # ── /api/diversity ───────────────────────────────────────────────────────
 
 
-class DiversityAgent(BaseModel):
+class DiversityTrajectory(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    agent_id: str
-    agent_name: str
+    trajectory_id: str
+    display_name: str
 
 
 class DiversityResponse(BaseModel):
-    """N×N matrix of pairwise code-diversity ratios.
+    """N×N matrix of pairwise code-diversity ratios across trajectories.
 
     ``matrix[i][j]`` semantics:
-      - ``i == j``: fraction of agent i's lines that are unique to them
-        (no other agent has those lines).
-      - ``i != j``: fraction of agent i's lines that also appear in
-        agent j's program.
+      - ``i == j``: fraction of trajectory i's lines that are unique to it
+        (no other trajectory has those lines).
+      - ``i != j``: fraction of trajectory i's lines that also appear in
+        trajectory j's program.
     """
     model_config = ConfigDict(extra="forbid")
-    agents: list[DiversityAgent]
+    trajectories: list[DiversityTrajectory]
     matrix: list[list[float]]
 
 

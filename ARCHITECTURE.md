@@ -34,7 +34,7 @@ The singleton `config` table holds global swarm settings: `active_challenge` (th
 
 ## Multi-Challenge State
 
-Each swarm hosts all five challenges side by side. Contributors all work on **one** challenge at a time — whichever the host has set as `active_challenge` — but per-(agent, challenge) state is preserved across switches, so when the host flips back to a previously-used challenge every agent's prior trajectory resumes.
+Each swarm hosts every challenge in its hardware class side by side. Contributors all work on **one** challenge at a time — whichever the host has set as `active_challenge` — but per-(agent, challenge) state is preserved across switches, so when the host flips back to a previously-used challenge every agent's prior trajectory resumes.
 
 State isolation is enforced at the schema level:
 
@@ -51,15 +51,19 @@ The owner switches the active challenge via admin-key-gated `POST /api/swarm_con
 
 ## Supported Challenges
 
-The swarm supports five TIG CPU challenges, selectable at setup time:
+The swarm supports seven TIG challenges, selectable at setup time. Five are CPU-only; two require an NVIDIA GPU (the swarm host picks one of those modes via `swarm_type` and only the matching subset is exposed to contributors).
 
-| Challenge | Scoring | Description |
-|-----------|---------|-------------|
-| `vehicle_routing` | Higher is better | VRPTW: minimize total distance for a fleet serving customers with time windows |
-| `knapsack` | Higher is better | Quadratic knapsack: maximize value of selected items subject to weight budget |
-| `satisfiability` | Higher is better | MAX-SAT: maximize satisfied clauses in a CNF formula |
-| `job_scheduling` | Higher is better | Minimize makespan across machines for a set of jobs |
-| `energy_arbitrage` | Higher is better | Maximize profit from battery charge/discharge against energy prices |
+| Challenge | Hardware | Scoring | Description |
+|-----------|----------|---------|-------------|
+| `vehicle_routing` | CPU | Higher is better | VRPTW: minimize total distance for a fleet serving customers with time windows |
+| `knapsack` | CPU | Higher is better | Quadratic knapsack: maximize value of selected items subject to weight budget |
+| `satisfiability` | CPU | Higher is better | MAX-SAT: maximize satisfied clauses in a CNF formula |
+| `job_scheduling` | CPU | Higher is better | Minimize makespan across machines for a set of jobs |
+| `energy_arbitrage` | CPU | Higher is better | Maximize profit from battery charge/discharge against energy prices |
+| `hypergraph` | GPU | Higher is better | Hypergraph partitioning: minimize edge cut across balanced parts |
+| `neuralnet_optimizer` | GPU | Higher is better | Train a small neural net under a wall-clock budget; score is validation loss vs baseline |
+
+The CPU/GPU split is enforced by `challenges.CHALLENGES[name].is_gpu` — `register_agent` and `/api/swarm_config` filter `available_challenges` against the swarm's `swarm_type` so contributors only see the challenges their hardware can run.
 
 All challenges use baseline-relative quality scoring: `(baseline − you) / baseline × QUALITY_PRECISION` for minimize-direction challenges, `(you − baseline) / baseline × QUALITY_PRECISION` for maximize-direction. The result is always higher-is-better. Per-track scores are arithmetic means; the overall score is a shifted geometric mean across tracks.
 

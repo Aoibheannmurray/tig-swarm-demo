@@ -241,12 +241,12 @@ export interface ReplayRow {
 }
 
 // /api/diversity response.
-export interface DiversityAgent {
-  agent_id: string;
-  agent_name: string;
+export interface DiversityTrajectory {
+  trajectory_id: string;
+  display_name: string;
 }
 export interface DiversityResponse {
-  agents: DiversityAgent[];
+  trajectories: DiversityTrajectory[];
   matrix: number[][];
 }
 

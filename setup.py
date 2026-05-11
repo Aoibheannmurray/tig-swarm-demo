@@ -306,17 +306,7 @@ def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
     except Exception:
         return None
     available = (data.get("available_challenges") or {})
-    sub = available.get(challenge)
-    if sub:
-        return sub
-    # Legacy fallback — server still returning flat shape.
-    if data.get("challenge") == challenge:
-        return {
-            "tracks": data.get("tracks") or {},
-            "timeout": data.get("timeout") or 5,
-            "scoring_direction": data.get("scoring_direction") or "max",
-        }
-    return None
+    return available.get(challenge)
 
 
 def collect_per_challenge_configs(

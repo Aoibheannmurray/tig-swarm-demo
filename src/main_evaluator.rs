@@ -9,7 +9,7 @@ fn cli() -> Command {
     Command::new("tig-challenges-evaluator")
         .about("TIG challenge evaluation")
         .arg(
-            arg!(<CHALLENGE> "Challenge name (satisfiability, vehicle_routing, knapsack, job_scheduling, energy_arbitrage)")
+            arg!(<CHALLENGE> "Challenge name (any feature-enabled challenge)")
                 .value_parser(value_parser!(String)),
         )
         .arg(arg!(<INSTANCE_FILE> "Path to the instance file").value_parser(value_parser!(PathBuf)))
@@ -41,18 +41,8 @@ fn run_evaluate(challenge: &str, instance_file: &Path, solution_file: &Path) -> 
     }
 
     let out: f64 = challenges::enabled_challenge_arms!(challenge, dispatch_evaluate);
-    // The dispatch returns each challenge's native score type; print it
-    // as a generic `score` field so downstream tooling can stay challenge-
-    // agnostic. (We keep the legacy "distance" key as a fallback for
-    // existing benchmark.py parsing of vehicle_routing output.)
     let score_value = serde_json::to_value(&out).unwrap_or(serde_json::Value::Null);
-    println!(
-        "{}",
-        json!({
-            "score": score_value.clone(),
-            "distance": score_value,
-        })
-    );
+    println!("{}", json!({ "score": score_value }));
     Ok(())
 }
 

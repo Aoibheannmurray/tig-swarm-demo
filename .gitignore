@@ -13,7 +13,6 @@ job_*/
 fly.toml
 Procfile
 runtime.txt
-Dockerfile.bak
 server/static/
 
 # Per-deploy / per-contributor state — never committed

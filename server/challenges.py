@@ -152,6 +152,12 @@ CHALLENGES: dict[str, ChallengeDef] = {
 
 CHALLENGE_NAMES: tuple[str, ...] = tuple(CHALLENGES.keys())
 
+# Fallback when a request omits `challenge` AND the swarm has no
+# `active_challenge` set in the singleton config table (i.e. brand-new DB
+# before the wizard's first POST /api/swarm_config). Picks the registry's
+# first entry so dropping a challenge means one edit here, not five.
+DEFAULT_CHALLENGE: str = CHALLENGE_NAMES[0]
+
 
 def is_known_challenge(name: str) -> bool:
     return name in CHALLENGES

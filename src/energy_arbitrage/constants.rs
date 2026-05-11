@@ -67,6 +67,22 @@ pub const EPS_FLOW: f64 = 1e-6;
 /// SOC feasibility tolerance (MWh)
 pub const EPS_SOC: f64 = 1e-9;
 
+// ── Baseline-shared tunables ──
+// Used by every baseline solver under `baselines/`. Centralised here so a
+// numerical retune doesn't have to track down N copies; agent-side
+// `algorithm/mod.rs` files (gitignored, per-agent) may re-declare their
+// own values if they're tuning more aggressively.
+
+/// Generic flow-comparison tolerance used inside baseline iteration loops.
+pub const EPS_BASELINE: f64 = 1e-12;
+
+/// Max iterations of `enforce_flow_feasibility` in baseline policies.
+pub const MAX_FLOW_ADJUST_ITERS: usize = 64;
+
+/// Bisection iterations for the global-action-scale fallback when
+/// per-line softening can't find a feasible point.
+pub const GLOBAL_SCALE_BSEARCH_ITERS: usize = 32;
+
 /// Nominal battery capacity (MWh)
 pub const NOMINAL_CAPACITY: f64 = 100.0;
 
