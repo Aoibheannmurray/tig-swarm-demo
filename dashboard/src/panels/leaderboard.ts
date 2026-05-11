@@ -9,20 +9,6 @@ function escapeHTML(s: string): string {
     .replace(/>/g, "&gt;");
 }
 
-function formatCost(usd: number): string {
-  if (usd <= 0) return "—";
-  if (usd < 0.01) return "<$0.01";
-  if (usd < 10) return "$" + usd.toFixed(2);
-  return "$" + usd.toFixed(1);
-}
-
-function formatTokens(n: number): string {
-  if (n <= 0) return "0";
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return (n / 1000).toFixed(1) + "K";
-  return (n / 1_000_000).toFixed(2) + "M";
-}
-
 type SortKey =
   | "current_score"
   | "best_ever_score"
@@ -31,8 +17,7 @@ type SortKey =
   | "runs_since_improvement"
   | "num_trajectories"
   | "tacit_knowledge_count"
-  | "inspiration_count"
-  | "estimated_cost_usd";
+  | "inspiration_count";
 type SortDir = "asc" | "desc";
 
 const DEFAULT_DIR: Record<SortKey, SortDir> = {
@@ -44,7 +29,6 @@ const DEFAULT_DIR: Record<SortKey, SortDir> = {
   num_trajectories: "desc",
   tacit_knowledge_count: "desc",
   inspiration_count: "desc",
-  estimated_cost_usd: "desc",
 };
 
 export class LeaderboardPanel implements Panel {
@@ -69,7 +53,6 @@ export class LeaderboardPanel implements Panel {
           <button type="button" class="lb-col-sm lb-sortable" data-sort="num_trajectories">Traj<span class="lb-arrow"></span></button>
           <button type="button" class="lb-col-sm lb-sortable" data-sort="tacit_knowledge_count" title="Tacit knowledge reads">TK<span class="lb-arrow"></span></button>
           <button type="button" class="lb-col-sm lb-sortable" data-sort="inspiration_count" title="Inspiration reads">Insp<span class="lb-arrow"></span></button>
-          <button type="button" class="lb-score lb-sortable" data-sort="estimated_cost_usd" title="Estimated API cost">Cost<span class="lb-arrow"></span></button>
         </div>
         <div class="leaderboard-list" id="leaderboard-list"></div>
       </div>
@@ -169,8 +152,6 @@ export class LeaderboardPanel implements Panel {
       const scoreImproved = improved && (this.sortKey === "current_score" || this.sortKey === "best_ever_score");
 
       const llmText = entry.llm_type ? escapeHTML(entry.llm_type) : "";
-      const costText = formatCost(entry.estimated_cost_usd ?? 0);
-      const tokensText = formatTokens(entry.total_tokens ?? 0);
       row.innerHTML = `
         <span class="lb-rank">${rank}</span>
         <span class="lb-name">
@@ -186,7 +167,6 @@ export class LeaderboardPanel implements Panel {
         <span class="lb-col-sm">${entry.num_trajectories}</span>
         <span class="lb-col-sm">${entry.tacit_knowledge_count}</span>
         <span class="lb-col-sm">${entry.inspiration_count}</span>
-        <span class="lb-score" title="${tokensText} tokens">${costText}</span>
       `;
 
       this.list.appendChild(row);
