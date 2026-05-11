@@ -1,8 +1,6 @@
 # Files irrelevant to the agent optimization loop
 # (dashboard, server, infra, inactive challenges, build artifacts)
 
-dashboard/
-server/
 docs/
 tig-monorepo/
 target/
@@ -19,9 +17,6 @@ ARCHITECTURE.md
 README.md
 CLAUDE.md.template
 Cargo.lock
-Dockerfile
-Dockerfile.cpu
-Dockerfile.gpu
 setup.py
 
 src/energy_arbitrage/

@@ -1,9 +1,0 @@
-target/
-datasets/
-.git/
-.railway/
-src/
-initial_algorithms/
-docs/
-c3-artifacts/
-*.cu
