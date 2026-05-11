@@ -333,11 +333,21 @@ def build_hypothesis_user_prompt(state: dict, config: dict | None = None) -> str
 def build_code_system_prompt(challenge_md: str, config: dict) -> str:
     challenge = config.get("challenge", "unknown")
     is_gpu = bool(config.get("is_gpu"))
+    timeout = config.get("timeout", 30)
+    time_guidance = (
+        f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
+        f"after this hard deadline. Use a time-based loop (std::time::Instant + deadline) "
+        f"that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2-5s) "
+        f"for cleanup. Call save_solution() early with your first feasible solution, then "
+        f"keep improving and re-saving — the last saved solution is evaluated. If no "
+        f"solution was saved when the deadline hits, the instance counts as infeasible."
+    )
     if is_gpu:
         return f"""\
 You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
 
 {challenge_md}
+{time_guidance}
 
 IMPORTANT RULES:
 - `use super::*;` must remain as the first import in the Rust file.
@@ -351,6 +361,7 @@ IMPORTANT RULES:
 You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
 {challenge_md}
+{time_guidance}
 
 `use super::*;` must remain as the first import. Return the complete Rust source file — no explanation, no markdown fences."""
 
@@ -392,7 +403,7 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict | None = 
     return "\n".join(parts)
 
 
-def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "") -> str:
+def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", timeout: int = 30) -> str:
     """Build a prompt that feeds runtime errors back to the LLM for fixing."""
     errors = bench.get("errors") or []
     error_lines = "\n".join(f"  - {e}" for e in errors)
@@ -410,11 +421,13 @@ def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "") -> s
         f"Score: {score}  Feasible: {feasible}\n"
         f"Per-track scores:\n{track_summary}\n"
         f"Errors:\n{error_lines}\n\n"
+        f"Per-instance time budget: {timeout} seconds. The solver is killed after this deadline.\n\n"
         "How to interpret the errors:\n"
         "- 'no solution saved' = the code crashed, panicked, or returned Err() "
-        "before ever calling save_solution(). Fix: save_solution() MUST be "
-        "called before any fallible operation. Build a partial solution and "
-        "save it first, then try to improve.\n"
+        "before ever calling save_solution(), OR the solver ran out of time "
+        "without saving. Fix: use a time-based loop (std::time::Instant + deadline "
+        f"at {timeout}s minus a few seconds margin) and call save_solution() EARLY "
+        "with your first feasible solution, then keep improving and re-saving.\n"
         "- Any other error = the code saved a solution but the evaluator "
         "rejected it (constraint violation). Fix: check that your solution "
         "satisfies all feasibility constraints described in the challenge.\n\n"
@@ -1236,7 +1249,7 @@ def main() -> int:
                     fix_response = call_llm(
                         args.provider, model, api_key,
                         build_code_system_prompt(challenge_md, config),
-                        build_runtime_fix_prompt(current_code, bench, current_kernel),
+                        build_runtime_fix_prompt(current_code, bench, current_kernel, config.get("timeout", 30)),
                         args.api_base,
                     )
                 except Exception as e:
