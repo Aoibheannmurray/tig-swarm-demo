@@ -32,7 +32,7 @@ body = {'client_version': '1.0'}
 if cfg.get('contributor_name'):
     body['agent_name'] = cfg['contributor_name']
 if cfg.get('contributor_llm'):
-    body['contributor_llm'] = cfg['contributor_llm']
+    body['llm_type'] = cfg['contributor_llm']
 print(json.dumps(body))
 ")
 curl -s -X POST ${SERVER_URL}/api/agents/register \

@@ -80,8 +80,14 @@ def server_get(url: str, timeout: int = 10) -> dict:
         return json.load(resp)
 
 
-def register_agent(server: str) -> tuple[str, str]:
-    data = server_post(f"{server}/api/agents/register", {"client_version": "1.0"})
+def register_agent(server: str, config: dict | None = None) -> tuple[str, str]:
+    body: dict = {"client_version": "1.0"}
+    if config:
+        if config.get("contributor_name"):
+            body["agent_name"] = config["contributor_name"]
+        if config.get("contributor_llm"):
+            body["llm_type"] = config["contributor_llm"]
+    data = server_post(f"{server}/api/agents/register", body)
     return data["agent_id"], data["agent_name"]
 
 
@@ -1007,7 +1013,7 @@ def main() -> int:
         agent_name = args.agent_name or f"script-{agent_id[:8]}"
         print(f"Resuming agent: {agent_name} ({agent_id})")
     else:
-        agent_id, agent_name = register_agent(server)
+        agent_id, agent_name = register_agent(server, config)
         print(f"Registered as: {agent_name} ({agent_id})")
 
     challenge_md = read_challenge_md()

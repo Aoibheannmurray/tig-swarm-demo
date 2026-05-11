@@ -1069,6 +1069,8 @@ def _prompt_contributor_identity(prior: dict | None) -> tuple[str | None, str | 
     llm = prompt_choice(
         "Which LLM drives this agent?", _LLM_CHOICES, default=prior_llm,
     )
+    if llm == "other":
+        llm = input("Model name (shown on the dashboard): ").strip() or "other"
     return chosen_name, llm
 
 
