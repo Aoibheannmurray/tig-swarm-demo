@@ -11,22 +11,12 @@
 // to localStorage so a user's choice sticks across page loads (and across
 // pages, since each entry-point HTML loads this same module).
 
-import {
-  getActiveChallenge,
-  getAvailableChallenges,
-  onSwarmConfigChange,
-} from "./swarmConfig";
+import { getActiveChallenge, getAvailableChallenges } from "./swarmConfig";
 import type { Challenge } from "./challengeRegistry";
 
 const STORAGE_KEY = "viewedChallenge";
 
 let current: Challenge | null = null;
-// True when `current` was set from localStorage or an explicit user pick.
-// False when it was derived from the active challenge — in that case we
-// should re-derive if the swarm config loads/changes (the early fallback
-// active_challenge can otherwise stick on entry-points that init panels
-// before loadSwarmConfig() resolves).
-let currentFromStorage = false;
 let listeners: Array<(c: Challenge) => void> = [];
 
 function readStored(): Challenge | null {
@@ -47,15 +37,20 @@ export function getViewedChallenge(): Challenge {
   const available = getAvailableChallenges();
   if (stored && available.includes(stored)) {
     current = stored;
-    currentFromStorage = true;
     return current;
   }
   current = getActiveChallenge();
-  currentFromStorage = false;
   return current;
 }
 
-function notifyListeners(c: Challenge): void {
+export function setViewedChallenge(c: Challenge): void {
+  if (current === c) return;
+  current = c;
+  try {
+    localStorage.setItem(STORAGE_KEY, c);
+  } catch {
+    // localStorage may be disabled in some embedded contexts; non-fatal.
+  }
   for (const l of listeners) {
     try {
       l(c);
@@ -64,36 +59,6 @@ function notifyListeners(c: Challenge): void {
     }
   }
 }
-
-export function setViewedChallenge(c: Challenge): void {
-  if (current === c) return;
-  current = c;
-  currentFromStorage = true;
-  try {
-    localStorage.setItem(STORAGE_KEY, c);
-  } catch {
-    // localStorage may be disabled in some embedded contexts; non-fatal.
-  }
-  notifyListeners(c);
-}
-
-// When swarm config loads (or the host switches the active challenge), if
-// `current` was derived from the active challenge — not an explicit user
-// pick — re-derive it. Without this, entry points that init panels at
-// module scope (benchmark/ideas/diversity/trajectories) latch onto the
-// fallback active_challenge (first registry entry, "satisfiability") and
-// ignore the real one the server reports moments later. We deliberately
-// do NOT flip `currentFromStorage` or write localStorage here — the view
-// keeps tracking the swarm's active challenge until the user picks one
-// explicitly via setViewedChallenge().
-onSwarmConfigChange(() => {
-  if (current === null) return;
-  if (currentFromStorage) return;
-  const next = getActiveChallenge();
-  if (next === current) return;
-  current = next;
-  notifyListeners(next);
-});
 
 export function onViewedChallengeChange(fn: (c: Challenge) => void): () => void {
   listeners.push(fn);

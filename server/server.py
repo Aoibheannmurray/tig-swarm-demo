@@ -733,15 +733,6 @@ async def get_state(
         )
         recent_hypotheses = [dict(row) for row in await cursor.fetchall()]
 
-        # Recent agent registrations. Global (not challenge-scoped) since
-        # `agent_joined` events themselves carry no challenge field. The
-        # dashboard uses this to replay join lines on reload / reset.
-        cursor = await conn.execute(
-            "SELECT id, name, registered_at FROM agents "
-            "ORDER BY registered_at DESC LIMIT 20"
-        )
-        recent_agents = [dict(row) for row in await cursor.fetchall()]
-
         served = global_best
         best_solution_data = served["solution_data"] if served else None
         num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
@@ -805,10 +796,6 @@ async def get_state(
              "agent_id": h.get("agent_id", ""),
              "created_at": h.get("created_at")}
             for h in recent_hypotheses
-        ],
-        "recent_agents": [
-            {"id": a["id"], "name": a["name"], "registered_at": a["registered_at"]}
-            for a in recent_agents
         ],
         "leaderboard": leaderboard,
     }

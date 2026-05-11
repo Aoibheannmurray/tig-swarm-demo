@@ -282,10 +282,6 @@ export interface StateResponse {
   total_trajectories?: number;
   recent_experiments?: unknown[];
   recent_hypotheses?: unknown[];
-  // Recent agent registrations (global). Used to replay `agent_joined`
-  // feed lines on reload / panel reset, since WS-only delivery means
-  // they'd otherwise disappear permanently after any reset.
-  recent_agents?: Array<{ id: string; name: string; registered_at: string }>;
 
   leaderboard?: LeaderboardEntry[];
 }
