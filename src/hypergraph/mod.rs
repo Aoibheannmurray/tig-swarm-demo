@@ -44,10 +44,7 @@ pub struct Challenge {
     pub d_node_degrees: CudaSlice<i32>,
     pub d_node_offsets: CudaSlice<i32>,
     pub d_node_hyperedges: CudaSlice<i32>,
-    #[cfg(not(feature = "hide_verification"))]
     pub greedy_baseline_connectivity_metric: u32,
-    #[cfg(feature = "hide_verification")]
-    greedy_baseline_connectivity_metric: u32,
 }
 
 pub const MAX_THREADS_PER_BLOCK: u32 = 1024;

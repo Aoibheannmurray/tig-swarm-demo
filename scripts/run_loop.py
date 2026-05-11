@@ -869,12 +869,10 @@ def publish_results(
     }
     if kernel_code:
         payload["kernel_code"] = kernel_code
-    # VRP-only fields; forward only when benchmark.py actually populated
-    # them (i.e. challenge is vehicle_routing).
-    if bench.get("num_vehicles") is not None:
-        payload["num_vehicles"] = bench["num_vehicles"]
-    if bench.get("total_distance") is not None:
-        payload["total_distance"] = bench["total_distance"]
+    # Opaque per-challenge roll-up; forward only when benchmark.py emitted
+    # one (only set when the active challenge has registered an aggregator).
+    if bench.get("challenge_metrics") is not None:
+        payload["challenge_metrics"] = bench["challenge_metrics"]
     return server_post(f"{server}/api/iterations", payload)
 
 

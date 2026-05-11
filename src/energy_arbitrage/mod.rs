@@ -23,10 +23,7 @@ use scenarios::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(not(feature = "hide_verification"))]
 pub static CALLED_GRID_OPTIMIZE: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "hide_verification")]
-static CALLED_GRID_OPTIMIZE: AtomicBool = AtomicBool::new(false);
 
 impl_kv_string_serde! {
     Track {

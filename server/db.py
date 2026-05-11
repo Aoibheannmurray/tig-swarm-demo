@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import os
+
+from challenges import DEFAULT_CHALLENGE
 # Use /data for Railway persistent volume, fallback to local for dev
 _data_dir = Path(os.environ.get("DATA_DIR", str(Path(__file__).parent)))
 DB_PATH = _data_dir / "swarm.db"
@@ -42,8 +44,10 @@ CREATE TABLE IF NOT EXISTS agent_bests (
     kernel_code TEXT,
     score REAL NOT NULL,
     feasible INTEGER NOT NULL DEFAULT 1,
-    num_vehicles INTEGER DEFAULT 0,
-    total_distance REAL DEFAULT 0.0,
+    -- Opaque per-challenge roll-up JSON. The server stores it verbatim and
+    -- never inspects its keys; the dashboard pulls challenge-specific
+    -- fields out of it (e.g. VRP reads num_vehicles / total_distance).
+    challenge_metrics TEXT,
     solution_data TEXT,
     track_scores TEXT,
     updated_at TEXT NOT NULL,
@@ -61,8 +65,8 @@ CREATE TABLE IF NOT EXISTS experiments (
     kernel_code TEXT,
     score REAL NOT NULL,
     feasible INTEGER DEFAULT 1,
-    num_vehicles INTEGER DEFAULT 0,
-    total_distance REAL DEFAULT 0.0,
+    -- See agent_bests.challenge_metrics — same opaque per-challenge dict.
+    challenge_metrics TEXT,
     runtime_seconds REAL DEFAULT 0.0,
     notes TEXT DEFAULT '',
     solution_data TEXT,
@@ -207,7 +211,7 @@ DEFAULT_CONFIG = {
     # `active_challenge` is the swarm-wide challenge the owner has chosen;
     # contributors auto-follow it via `python setup.py sync`. Only the
     # owner (admin_key holder) can change it via POST /api/swarm_config.
-    "active_challenge": "vehicle_routing",
+    "active_challenge": DEFAULT_CHALLENGE,
     "swarm_name": "",
     "owner_name": "",
     "swarm_type": "cpu",
@@ -215,45 +219,14 @@ DEFAULT_CONFIG = {
 }
 
 
-async def _add_column_if_missing(
-    db: aiosqlite.Connection, table: str, column: str, ddl: str
-) -> None:
-    """Idempotent ALTER TABLE ... ADD COLUMN. Lets us evolve the schema in
-    place for the few columns that have been added after a deploy went out
-    (llm_type on agents, received_hint on experiments, pending_hint on
-    agent_challenge_state). For larger schema changes we still wipe the
-    persistent volume on redeploy."""
-    cur = await db.execute(f"PRAGMA table_info({table})")
-    existing = {row[1] for row in await cur.fetchall()}
-    if column in existing:
-        return
-    await db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
-
-
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
-        # Tables, then indexes. All DDL is IF NOT EXISTS, so calling
-        # init_db() against an existing DB is a no-op — the schema only
-        # ever moves forward via deliberate edits to SCHEMA / SCHEMA_INDEXES.
-        # Small column additions are handled below via _add_column_if_missing
-        # so existing deploys pick them up without wiping the volume; bigger
-        # changes still imply a wipe.
+        # All DDL is IF NOT EXISTS, so calling init_db() against an existing
+        # DB is a no-op — the schema only moves forward via deliberate edits
+        # to SCHEMA / SCHEMA_INDEXES. Schema changes require dropping the
+        # persistent volume on redeploy; we don't carry an in-place migration
+        # path because the swarm is reset between deploys.
         await db.executescript(SCHEMA)
-        await _add_column_if_missing(db, "agents", "llm_type", "llm_type TEXT")
-        await _add_column_if_missing(
-            db, "experiments", "received_hint", "received_hint TEXT"
-        )
-        await _add_column_if_missing(
-            db, "agent_challenge_state", "pending_hint", "pending_hint TEXT"
-        )
-        await _add_column_if_missing(
-            db, "agent_challenge_state", "pending_inspiration_source",
-            "pending_inspiration_source TEXT"
-        )
-        await _add_column_if_missing(
-            db, "experiments", "inspiration_source_id",
-            "inspiration_source_id TEXT"
-        )
         await db.executescript(SCHEMA_INDEXES)
         await db.commit()
 
@@ -312,6 +285,13 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
     return candidate > prior if direction == "max" else candidate < prior
 
 
+_AGENT_BESTS_COLS = (
+    "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
+    "kernel_code, score, feasible, challenge_metrics, solution_data, "
+    "track_scores, updated_at"
+)
+
+
 async def get_global_best(
     conn: aiosqlite.Connection, challenge: str, direction: str = "min"
 ) -> dict | None:
@@ -321,9 +301,8 @@ async def get_global_best(
     # expect the old experiments shape keep working.
     order = _direction_order(direction)
     cursor = await conn.execute(
-        f"SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, kernel_code, "
-        f"       score, feasible, num_vehicles, total_distance, solution_data, track_scores, updated_at "
-        f"FROM agent_bests WHERE feasible = 1 AND challenge = ? "
+        f"SELECT {_AGENT_BESTS_COLS} FROM agent_bests "
+        f"WHERE feasible = 1 AND challenge = ? "
         f"ORDER BY score {order} LIMIT 1",
         (challenge,),
     )
@@ -335,9 +314,8 @@ async def get_agent_best(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> dict | None:
     cursor = await conn.execute(
-        "SELECT agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, kernel_code, "
-        "       score, feasible, num_vehicles, total_distance, solution_data, track_scores, updated_at "
-        "FROM agent_bests WHERE agent_id = ? AND challenge = ?",
+        f"SELECT {_AGENT_BESTS_COLS} FROM agent_bests "
+        "WHERE agent_id = ? AND challenge = ?",
         (agent_id, challenge),
     )
     row = await cursor.fetchone()
@@ -352,8 +330,7 @@ async def upsert_agent_best(
     algorithm_code: str,
     score: float,
     feasible: bool,
-    num_vehicles: int | None,
-    total_distance: float | None,
+    challenge_metrics: str | None,
     solution_data: str | None,
     updated_at: str,
     trajectory_id: str | None = None,
@@ -363,22 +340,21 @@ async def upsert_agent_best(
     await conn.execute(
         """INSERT INTO agent_bests
            (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
-            num_vehicles, total_distance, solution_data, track_scores, updated_at, trajectory_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            challenge_metrics, solution_data, track_scores, updated_at, trajectory_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
              kernel_code = excluded.kernel_code,
              score = excluded.score,
              feasible = excluded.feasible,
-             num_vehicles = excluded.num_vehicles,
-             total_distance = excluded.total_distance,
+             challenge_metrics = excluded.challenge_metrics,
              solution_data = excluded.solution_data,
              track_scores = excluded.track_scores,
              updated_at = excluded.updated_at,
              trajectory_id = excluded.trajectory_id""",
         (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score,
-         1 if feasible else 0, num_vehicles, total_distance,
+         1 if feasible else 0, challenge_metrics,
          solution_data, track_scores, updated_at, trajectory_id),
     )
 
@@ -414,8 +390,8 @@ async def list_agent_bests(
         params.append(inactive_cutoff)
     query = (
         "SELECT ab.agent_id, ab.challenge, ab.experiment_id as id, ab.experiment_id, "
-        "       ab.algorithm_code, ab.kernel_code, ab.score, ab.feasible, ab.num_vehicles, "
-        "       ab.total_distance, ab.solution_data, ab.updated_at "
+        "       ab.algorithm_code, ab.kernel_code, ab.score, ab.feasible, "
+        "       ab.challenge_metrics, ab.solution_data, ab.updated_at "
         f"FROM agent_bests ab{join_clause} WHERE " + " AND ".join(where) +
         f" ORDER BY ab.score {order}"
     )
@@ -716,7 +692,7 @@ async def get_active_challenge(conn: aiosqlite.Connection) -> str:
         "SELECT value FROM config WHERE key = 'active_challenge'"
     )
     row = await cursor.fetchone()
-    return row["value"] if row else "vehicle_routing"
+    return row["value"] if row else DEFAULT_CHALLENGE
 
 
 async def set_active_challenge(conn: aiosqlite.Connection, challenge: str) -> None:

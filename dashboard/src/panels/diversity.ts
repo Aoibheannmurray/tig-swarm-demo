@@ -3,7 +3,7 @@ import type { Panel, WSMessage } from "../types";
 import { getViewedChallenge } from "../lib/viewedChallenge";
 
 interface DiversityData {
-  agents: { agent_id: string; agent_name: string }[];
+  trajectories: { trajectory_id: string; display_name: string }[];
   matrix: number[][];
 }
 
@@ -108,13 +108,13 @@ export class DiversityPanel implements Panel {
   }
 
   private render(data: DiversityData) {
-    const { agents, matrix } = data;
-    if (!agents.length) {
-      this.inner.innerHTML = `<span style="color:var(--text-dim);font-size:11px">No agents yet</span>`;
+    const { trajectories, matrix } = data;
+    if (!trajectories.length) {
+      this.inner.innerHTML = `<span style="color:var(--text-dim);font-size:11px">No trajectories yet</span>`;
       return;
     }
 
-    const n = agents.length;
+    const n = trajectories.length;
     const grid = document.createElement("div");
     grid.className = "dv-grid";
     const scrollMode = n > DiversityPanel.SCROLL_THRESHOLD;
@@ -140,9 +140,9 @@ export class DiversityPanel implements Panel {
     for (let j = 0; j < n; j++) {
       const hdr = document.createElement("div");
       hdr.className = "dv-col-hdr";
-      hdr.style.color = getAgentColor(agents[j].agent_id);
-      hdr.textContent = this.shortName(agents[j].agent_name);
-      hdr.title = agents[j].agent_name;
+      hdr.style.color = getAgentColor(trajectories[j].trajectory_id);
+      hdr.textContent = this.shortName(trajectories[j].display_name);
+      hdr.title = trajectories[j].display_name;
       grid.appendChild(hdr);
     }
 
@@ -151,9 +151,9 @@ export class DiversityPanel implements Panel {
       // Row header
       const rh = document.createElement("div");
       rh.className = "dv-row-hdr";
-      rh.style.color = getAgentColor(agents[i].agent_id);
-      rh.textContent = this.shortName(agents[i].agent_name);
-      rh.title = agents[i].agent_name;
+      rh.style.color = getAgentColor(trajectories[i].trajectory_id);
+      rh.textContent = this.shortName(trajectories[i].display_name);
+      rh.title = trajectories[i].display_name;
       grid.appendChild(rh);
 
       for (let j = 0; j < n; j++) {
@@ -165,8 +165,8 @@ export class DiversityPanel implements Panel {
           : this.cellColor(val);
         cell.textContent = (val * 100).toFixed(0);
         cell.title = i === j
-          ? `${agents[i].agent_name}: ${(val * 100).toFixed(1)}% unique lines`
-          : `${(val * 100).toFixed(1)}% of ${agents[i].agent_name}'s lines found in ${agents[j].agent_name}`;
+          ? `${trajectories[i].display_name}: ${(val * 100).toFixed(1)}% unique lines`
+          : `${(val * 100).toFixed(1)}% of ${trajectories[i].display_name}'s lines found in ${trajectories[j].display_name}`;
         grid.appendChild(cell);
       }
     }
