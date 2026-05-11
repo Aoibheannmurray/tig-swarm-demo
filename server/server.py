@@ -821,6 +821,24 @@ async def create_iteration(req: IterationCreate):
     async with db.connect() as conn:
         await conn.execute("BEGIN IMMEDIATE")
 
+        # SQLite FKs aren't enforced (no PRAGMA), so /api/iterations would
+        # otherwise accept any client-supplied agent_id and silently create
+        # orphan rows in experiments/hypotheses/agent_bests/best_history.
+        # Those rows then get dropped from the dashboard's INNER JOINs on
+        # agents — leaderboard/recent_experiments go blank even though the
+        # data is "there." Reject up front instead.
+        cursor = await conn.execute(
+            "SELECT 1 FROM agents WHERE id = ?", (req.agent_id,)
+        )
+        if await cursor.fetchone() is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Agent {req.agent_id} is not registered. "
+                    "Call POST /api/agents/register first."
+                ),
+            )
+
         await db.ensure_agent_challenge_state(conn, req.agent_id, challenge, timestamp)
 
         prev_best = await db.get_global_best(conn, challenge, direction=direction)
@@ -1076,6 +1094,20 @@ async def create_message(req: MessageCreate):
     msg_id = new_id()
     timestamp = now()
     async with db.connect() as conn:
+        # Same reasoning as /api/iterations — without this check the chat
+        # feed can attribute messages to an agent_id that the leaderboard
+        # has no row for, making the dashboard look inconsistent.
+        cursor = await conn.execute(
+            "SELECT 1 FROM agents WHERE id = ?", (req.agent_id,)
+        )
+        if await cursor.fetchone() is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Agent {req.agent_id} is not registered. "
+                    "Call POST /api/agents/register first."
+                ),
+            )
         await conn.execute(
             "INSERT INTO messages (id, agent_id, challenge, agent_name, content, msg_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (msg_id, req.agent_id, challenge, req.agent_name, req.content, req.msg_type, timestamp),
