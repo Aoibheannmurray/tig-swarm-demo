@@ -137,6 +137,72 @@ def read_kernel(config: dict) -> str:
     return ""
 
 
+class ChallengeFiles:
+    """Encapsulates file I/O differences between CPU and GPU challenges."""
+
+    def __init__(self, config: dict):
+        self._config = config
+        self.is_gpu = bool(config.get("is_gpu"))
+
+    def parse_response(self, text: str) -> tuple[str, str]:
+        """Parse LLM code response. Returns (rust_code, kernel_code)."""
+        if self.is_gpu:
+            return parse_gpu_code(text)
+        return parse_code(text), ""
+
+    def write(self, code: str, kernel: str = "") -> None:
+        """Write algorithm and, for GPU challenges, the kernel file."""
+        write_algorithm(code, self._config)
+        if self.is_gpu and kernel:
+            write_kernel(kernel, self._config)
+
+    def read(self) -> tuple[str, str]:
+        """Read current algorithm (and kernel if GPU). Returns (code, kernel)."""
+        code = read_algorithm(self._config)
+        kernel = read_kernel(self._config) if self.is_gpu else ""
+        return code, kernel
+
+    def separator_suffix(self) -> str:
+        """Prompt suffix instructing the LLM to return two files."""
+        if self.is_gpu:
+            return (
+                "\nReturn BOTH files separated by: // --- kernels.cu ---"
+                "\nEnsure kernel function names match between mod.rs and kernels.cu."
+            )
+        return ""
+
+    def describe_write(self, code: str, kernel: str) -> str:
+        """Human-readable summary of what was written."""
+        if self.is_gpu and kernel:
+            return f"Wrote both mod.rs + kernels.cu"
+        if self.is_gpu:
+            return f"Wrote mod.rs only (no kernel changes)"
+        return f"Wrote mod.rs ({len(code)} chars)"
+
+    def describe_parse(self, code: str, kernel: str) -> str:
+        """Human-readable summary of what was parsed from LLM response."""
+        if self.is_gpu:
+            if kernel:
+                return f"Got two-file response (rust: {len(code)} chars, cuda: {len(kernel)} chars)"
+            return f"WARNING: No kernel separator found — got rust only ({len(code)} chars)"
+        return f"Got code ({len(code)} chars)"
+
+    def build_compile_fix_prompt(self, compiler_errors: str) -> str:
+        """Build a prompt that feeds compiler errors back to the LLM."""
+        code, kernel = self.read()
+        parts = [f"Current algorithm (mod.rs):\n```rust\n{code}\n```\n"]
+        if kernel:
+            parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{kernel}\n```\n")
+        parts.append(
+            f"This code failed to compile. Here are the errors:\n```\n{compiler_errors}\n```\n\n"
+            "Fix the compile errors and return the complete source."
+        )
+        suffix = self.separator_suffix()
+        if suffix:
+            parts.append(suffix)
+        return "\n".join(parts)
+
+
 def read_challenge_md() -> str:
     p = ROOT / "CHALLENGE.md"
     return p.read_text() if p.exists() else ""
@@ -972,16 +1038,13 @@ def main() -> int:
         # ── Step 2: write current best to mod.rs (+ kernels.cu) ─
         best_code = state.get("best_algorithm_code") or ""
         best_kernel = state.get("best_kernel_code") or ""
-        is_gpu = bool(config.get("is_gpu"))
+        files = ChallengeFiles(config)
         bootstrap = is_stub_code(best_code)
         if best_code and not bootstrap:
-            write_algorithm(best_code, config)
-            print(f"  [FILES] Wrote mod.rs ({len(best_code)} chars)")
-        if is_gpu and best_kernel:
-            write_kernel(best_kernel, config)
-            print(f"  [FILES] Wrote kernels.cu ({len(best_kernel)} chars)")
-        elif is_gpu:
-            print(f"  [FILES] No kernel code from server — using local kernels.cu")
+            files.write(best_code, best_kernel)
+            print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
+            if files.is_gpu and not best_kernel:
+                print(f"  [FILES] No kernel code from server — using local kernels.cu")
 
         if bootstrap:
             print("  [FILES] Starting from stub — will ask LLM to write initial implementation")
@@ -1022,14 +1085,10 @@ def main() -> int:
 
         # ── Step 3b: LLM code (with retry on validation failure) ─
         original_code = best_code
-        original_kernel = best_kernel if is_gpu else ""
+        original_kernel = best_kernel
         code = None
         new_kernel = None
         max_code_attempts = 3
-        retry_suffix = (
-            "\nReturn BOTH files separated by: // --- kernels.cu ---"
-            if is_gpu else ""
-        )
         for attempt in range(max_code_attempts):
             if attempt == 0:
                 print(f"  [LLM] Generating code via {args.provider}/{model}…")
@@ -1039,7 +1098,8 @@ def main() -> int:
                 user_prompt = (
                     build_code_user_prompt(state, hypothesis, config)
                     + f"\n\nYour previous response was rejected: {violation}\n"
-                    "Fix the issue and return the complete source." + retry_suffix
+                    "Fix the issue and return the complete source."
+                    + files.separator_suffix()
                 )
             try:
                 code_response = call_llm(
@@ -1055,15 +1115,8 @@ def main() -> int:
                 time.sleep(5)
                 break
 
-            if is_gpu:
-                parsed, parsed_kernel = parse_gpu_code(code_response)
-                if parsed_kernel:
-                    print(f"  [LLM] Got two-file response (rust: {len(parsed)} chars, cuda: {len(parsed_kernel)} chars)")
-                else:
-                    print(f"  [LLM] WARNING: No kernel separator found — got rust only ({len(parsed)} chars)")
-            else:
-                parsed = parse_code(code_response)
-                parsed_kernel = ""
+            parsed, parsed_kernel = files.parse_response(code_response)
+            print(f"  [LLM] {files.describe_parse(parsed, parsed_kernel)}")
             if not parsed:
                 print("  [LLM] Empty code response — skipping iteration")
                 break
@@ -1097,12 +1150,8 @@ def main() -> int:
         else:
             print("  [FILES] First algorithm (no prior code)")
 
-        write_algorithm(code, config)
-        if is_gpu and new_kernel:
-            write_kernel(new_kernel, config)
-            print(f"  [FILES] Wrote both mod.rs + kernels.cu")
-        elif is_gpu:
-            print(f"  [FILES] Wrote mod.rs only (no kernel changes)")
+        files.write(code, new_kernel)
+        print(f"  [FILES] {files.describe_write(code, new_kernel)}")
 
         # ── Step 4: benchmark (with build-error retry) ─────────
         compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
@@ -1132,22 +1181,7 @@ def main() -> int:
                 break
             # Feed compiler errors back to the LLM for a fix
             print(f"  [BENCH] Build retry {build_attempt + 1}/{max_build_retries} — asking LLM to fix…")
-            compiler_errors = build_err[-1500:]
-            fix_parts = [f"Current algorithm (mod.rs):\n```rust\n{read_algorithm(config)}\n```\n"]
-            if is_gpu:
-                cur_kernel = read_kernel(config)
-                if cur_kernel:
-                    fix_parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{cur_kernel}\n```\n")
-            fix_parts.append(
-                f"This code failed to compile. Here are the errors:\n```\n{compiler_errors}\n```\n\n"
-                "Fix the compile errors and return the complete source."
-            )
-            if is_gpu:
-                fix_parts.append(
-                    "\nReturn BOTH files separated by: // --- kernels.cu ---"
-                    "\nEnsure kernel function names match between mod.rs and kernels.cu."
-                )
-            fix_prompt = "\n".join(fix_parts)
+            fix_prompt = files.build_compile_fix_prompt(build_err[-1500:])
             try:
                 fix_response = call_llm(
                     args.provider, model, api_key,
@@ -1158,11 +1192,7 @@ def main() -> int:
             except Exception as e:
                 print(f"  Fix LLM call failed: {e}", file=sys.stderr)
                 break
-            if is_gpu:
-                fixed, fixed_kernel = parse_gpu_code(fix_response)
-            else:
-                fixed = parse_code(fix_response)
-                fixed_kernel = ""
+            fixed, fixed_kernel = files.parse_response(fix_response)
             if not fixed:
                 print("  Empty fix response — giving up")
                 break
@@ -1170,21 +1200,17 @@ def main() -> int:
             if fix_violation:
                 print(f"  Fix failed validation: {fix_violation}")
                 break
-            before_fix = read_algorithm(config)
+            before_fix, _ = files.read()
             fix_sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
             print(f"  Fix similarity to broken code: {fix_sim * 100:.0f}%")
-            write_algorithm(fixed, config)
-            if is_gpu and fixed_kernel:
-                write_kernel(fixed_kernel, config)
+            files.write(fixed, fixed_kernel)
             code_changed_by_fix = True
 
         if bench is None:
             print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
             print(f"  [BENCH] Restoring previous code and continuing")
             if best_code:
-                write_algorithm(best_code, config)
-            if is_gpu and best_kernel:
-                write_kernel(best_kernel, config)
+                files.write(best_code, best_kernel)
             post_message(server, agent_name, agent_id,
                          f"[{tag}] {title} — benchmark failed (build error?)")
             continue
@@ -1207,8 +1233,7 @@ def main() -> int:
             for rt_attempt in range(max_runtime_retries):
                 print(f"  Runtime retry {rt_attempt + 1}/{max_runtime_retries} — asking LLM to fix ...")
                 print(f"  Errors: {runtime_errors}")
-                current_code = read_algorithm(config)
-                current_kernel = read_kernel(config) if is_gpu else ""
+                current_code, current_kernel = files.read()
                 try:
                     fix_response = call_llm(
                         args.provider, model, api_key,
@@ -1219,11 +1244,7 @@ def main() -> int:
                 except Exception as e:
                     print(f"  Runtime fix LLM call failed: {e}", file=sys.stderr)
                     break
-                if is_gpu:
-                    fixed, fixed_kernel = parse_gpu_code(fix_response)
-                else:
-                    fixed = parse_code(fix_response)
-                    fixed_kernel = ""
+                fixed, fixed_kernel = files.parse_response(fix_response)
                 if not fixed:
                     print("  Empty fix response — giving up")
                     break
@@ -1233,29 +1254,15 @@ def main() -> int:
                     break
                 fix_sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
                 print(f"  Fix similarity: {fix_sim * 100:.0f}%")
-                write_algorithm(fixed, config)
-                if is_gpu and fixed_kernel:
-                    write_kernel(fixed_kernel, config)
+                files.write(fixed, fixed_kernel)
                 code_changed_by_fix = True
 
                 print("  Re-running benchmark ...")
                 send_heartbeat(server, agent_id)
                 bench, build_err = run_benchmark(args, config, server)
                 if bench is None:
-                    # Runtime fix introduced a compile error — one retry
                     print(f"  Runtime fix caused compile error — asking LLM to fix ...")
-                    cfp_parts = [f"Current algorithm (mod.rs):\n```rust\n{read_algorithm(config)}\n```\n"]
-                    if is_gpu:
-                        ck = read_kernel(config)
-                        if ck:
-                            cfp_parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{ck}\n```\n")
-                    cfp_parts.append(
-                        f"This code failed to compile. Here are the errors:\n```\n{build_err[-1500:]}\n```\n\n"
-                        "Fix the compile errors and return the complete source."
-                    )
-                    if is_gpu:
-                        cfp_parts.append("\nReturn BOTH files separated by: // --- kernels.cu ---")
-                    compile_fix_prompt = "\n".join(cfp_parts)
+                    compile_fix_prompt = files.build_compile_fix_prompt(build_err[-1500:])
                     try:
                         compile_fix_resp = call_llm(
                             args.provider, model, api_key,
@@ -1266,32 +1273,20 @@ def main() -> int:
                     except Exception as e:
                         print(f"  Compile fix LLM call failed: {e}", file=sys.stderr)
                         if best_code:
-                            write_algorithm(best_code, config)
-                        if is_gpu and best_kernel:
-                            write_kernel(best_kernel, config)
+                            files.write(best_code, best_kernel)
                         break
-                    if is_gpu:
-                        compile_fixed, compile_fixed_kernel = parse_gpu_code(compile_fix_resp)
-                    else:
-                        compile_fixed = parse_code(compile_fix_resp)
-                        compile_fixed_kernel = ""
+                    compile_fixed, compile_fixed_kernel = files.parse_response(compile_fix_resp)
                     if not compile_fixed or validate_code(original_code, compile_fixed):
                         print("  Compile fix failed validation — restoring and continuing")
                         if best_code:
-                            write_algorithm(best_code, config)
-                        if is_gpu and best_kernel:
-                            write_kernel(best_kernel, config)
+                            files.write(best_code, best_kernel)
                         break
-                    write_algorithm(compile_fixed, config)
-                    if is_gpu and compile_fixed_kernel:
-                        write_kernel(compile_fixed_kernel, config)
+                    files.write(compile_fixed, compile_fixed_kernel)
                     bench, build_err = run_benchmark(args, config, server)
                     if bench is None:
                         print("  Still won't compile — restoring and continuing")
                         if best_code:
-                            write_algorithm(best_code, config)
-                        if is_gpu and best_kernel:
-                            write_kernel(best_kernel, config)
+                            files.write(best_code, best_kernel)
                         break
                 print(f"  Score: {bench['score']}  Feasible: {bench['feasible']}")
                 runtime_errors = bench.get("errors") or []

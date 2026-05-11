@@ -2,7 +2,7 @@
 
 > **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file.
 
-> **Active challenge:** this swarm is configured for **neuralnet_optimizer**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
+> **Active challenge:** this swarm is configured for **knapsack**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
 
 > **Switching challenges:** the swarm host can flip the active challenge for everyone with `python setup.py switch <challenge>`. Per-challenge state is preserved on the server, so resuming a previous challenge picks up every agent's prior trajectory. Contributors auto-follow the host's choice via `python setup.py sync` — your agent loop runs that at Step 0 below, so a host-side switch is picked up on your next iteration. Only the host can change the active challenge; contributors get a clear error if they try.
 
@@ -13,8 +13,8 @@ A coordination server tracks all agents' work. A live dashboard is projected on 
 ## Quick Start
 
 ```bash
-# 1. Build the Docker image (one-time setup, no GPU required at build time)
-docker build -f Dockerfile.gpu -t tig-swarm-gpu .
+# 1. Build the Docker image (one-time setup)
+docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 
 # 2. Register with the swarm. Pulls the name + LLM you chose during
 # `setup.py join` out of swarm.config.json and forwards them, so the
@@ -29,7 +29,7 @@ if cfg.get('contributor_llm'):
     body['contributor_llm'] = cfg['contributor_llm']
 print(json.dumps(body))
 ")
-curl -s -X POST https://gputester-production.up.railway.app/api/agents/register \
+curl -s -X POST https://test1hack-production.up.railway.app/api/agents/register \
   -H "Content-Type: application/json" \
   -d "$BODY"
 ```
@@ -38,7 +38,7 @@ Save the `agent_id` and `agent_name` from the response. You'll need them for all
 
 ## Server URL
 
-**https://gputester-production.up.railway.app**
+**https://test1hack-production.up.railway.app**
 
 ## How the Swarm Works
 
@@ -69,13 +69,12 @@ No-op when already in sync (most iterations). If the swarm host has switched the
 ### Step 1: Get Current State
 
 ```bash
-STATE=$(curl -s "https://gputester-production.up.railway.app/api/state?agent_id=YOUR_AGENT_ID")
+STATE=$(curl -s "https://test1hack-production.up.railway.app/api/state?agent_id=YOUR_AGENT_ID")
 echo "$STATE" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 print(f'My best: {d[\"my_best_score\"]}, Runs: {d[\"my_runs\"]}, Improvements: {d[\"my_improvements\"]}, Stagnation: {d[\"my_runs_since_improvement\"]}')
 print(f'Global best: {d[\"best_score\"]}')
-print(f'GPU challenge: {d.get(\"is_gpu\", False)}')
 reset=d.get('trajectory_reset')
 if reset:
     print(f'** TRAJECTORY RESET — {reset[\"type\"]} **')
@@ -93,9 +92,7 @@ if prior:
 ```
 
 This returns:
-- `is_gpu` — whether the active challenge is a GPU challenge. When `true`, the response includes `best_kernel_code` and `inspiration_kernel_code`; when `false`, only Rust code is present.
 - `best_algorithm_code` — **your own** current best code (or the swarm's host-configured *initial algorithm* on first run; may be empty if the host hasn't set one — in that case you'll need to author a minimal `solve_challenge` yourself). Write this to `mod.rs`.
-- `best_kernel_code` — *(GPU challenges only)* your current best CUDA kernel code. Write this to `kernels.cu` alongside `mod.rs`.
 - `my_best_score` — your current best score (null on first run)
 - `my_runs` — total iterations you've completed
 - `my_improvements` — how many times you've beaten your own best
@@ -103,8 +100,7 @@ This returns:
 - `best_score` — the current **global** best score across all agents
 - `prior_hypotheses` — (only present after stagnating past `hypothesis_recall_threshold` iterations) the 20 most recent failed hypotheses tried on **this program** by any agent (including yourself). Each entry has `title`, `strategy_tag`, `description`, and `score`. When this field appears, `hypothesis_recall_message` contains an explicit directive to try something structurally different.
 - `hypothesis_recall_message` — (only present alongside `prior_hypotheses`) explicit directive: "The following strategies were tried on this program and did not improve the score. Try something structurally different from these approaches."
-- `inspiration_code` — (only present when stagnating past `stagnation_threshold`) another agent's current best Rust code to study for ideas. **Read it for inspiration but do NOT write it to `mod.rs`.**
-- `inspiration_kernel_code` — *(GPU challenges only, alongside `inspiration_code`)* the inspiration agent's CUDA kernel code. Save to `/tmp/inspiration.cu` for study alongside `/tmp/inspiration.rs`.
+- `inspiration_code` — (only present when stagnating past `stagnation_threshold`) another agent's current best code to study for ideas. **Read it for inspiration but do NOT write it to `mod.rs`.**
 - `inspiration_agent_name` — whose code the inspiration came from
 - `stagnation_hint` — (only present when stagnating past `stagnation_threshold`) either `"tacit_knowledge"` or `"inspiration"`. The server picks one at random (50/50). Follow the hint: if `"tacit_knowledge"`, read your local `tacit_knowledge_personal.md` for strategy hints; if `"inspiration"`, study the `inspiration_code`. **Fallback**: if the hint says `"tacit_knowledge"` but the file is missing or empty, use `inspiration_code` instead.
 - `trajectory_reset` — (only present when a trajectory reset just occurred) object with `type` (`"fresh_start"` or `"adopted_inactive"`) and optionally `prior_score`. When present, `my_best_score` is null and `best_algorithm_code` is your new starting point — treat this like a first run. Post a message about the reset.
@@ -118,14 +114,7 @@ Write your own current best to `mod.rs` for the active challenge:
 
 ```bash
 echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('best_algorithm_code',''))" \
-  > src/neuralnet_optimizer/algorithm/mod.rs
-```
-
-For GPU challenges (`is_gpu` is `true` in the state), also write your CUDA kernel code:
-
-```bash
-echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('best_kernel_code',''))" \
-  > src/neuralnet_optimizer/algorithm/kernels.cu
+  > src/knapsack/algorithm/mod.rs
 ```
 
 If you're stagnating, check `stagnation_hint` to decide your strategy:
@@ -141,20 +130,13 @@ code=d.get('inspiration_code')
 if code:
     print(code, file=open('/tmp/inspiration.rs','w'))
     print('Saved inspiration to /tmp/inspiration.rs')
-# GPU challenges only: save inspiration kernel code
-kernel=d.get('inspiration_kernel_code')
-if kernel:
-    print(kernel, file=open('/tmp/inspiration.cu','w'))
-    print('Saved inspiration kernel to /tmp/inspiration.cu')
 "
 ```
 
 - If `stagnation_hint == "tacit_knowledge"`: read `tacit_knowledge_personal.md` in the repo root. Pick one hint that matches your situation and incorporate it. If the file is missing or empty, fall back to using `/tmp/inspiration.rs`.
-- If `stagnation_hint == "inspiration"`: read `/tmp/inspiration.rs` to study what another agent is doing differently. For GPU challenges, also study `/tmp/inspiration.cu`. Look for techniques, data structures, or strategies you could adapt into your own code. But always edit `mod.rs` (your own best), not the inspiration file.
+- If `stagnation_hint == "inspiration"`: read `/tmp/inspiration.rs` to study what another agent is doing differently. Look for techniques, data structures, or strategies you could adapt into your own code. But always edit `mod.rs` (your own best), not the inspiration file.
 
 On your **first iteration on a given challenge** (no current best yet), the server gives you the swarm's *initial algorithm* for that challenge — set by the host from the `initial_algorithms/<challenge>.rs` file in the repo root at swarm-creation time. If the host left it as the default template (or pushed an empty string), `best_algorithm_code` arrives as a stub with `unimplemented!()` (or empty). Either way, you'll need to author a real `solve_challenge` body for the active challenge before benchmarking.
-
-For GPU challenges, the server also provides `best_kernel_code` from `initial_algorithms/<challenge>.cu`. Write both files before benchmarking.
 
 ### Step 3: Think and Edit
 
@@ -162,9 +144,7 @@ Analyze your current algorithm and the history of attempts. Think about what opt
 
 **If `prior_hypotheses` is present in the state response**, these are strategies that have already been tried on this exact program and failed. Study them carefully and pick something **structurally different** — repeating a failed approach wastes an iteration.
 
-Now read `src/neuralnet_optimizer/algorithm/mod.rs` and edit it with your improvements. Read the challenge README (`CHALLENGE.md`) for the `Challenge` / `Solution` types, scoring rules, feasibility constraints, and solver interface rules (function signature, `save_solution` semantics, threading constraints).
-
-For GPU challenges, also read and edit `src/neuralnet_optimizer/algorithm/kernels.cu` for custom CUDA kernels. The `solve_challenge` function receives extra GPU parameters: `module` (loaded CUDA module with your kernels), `stream`, and `prop` (device properties). Use `module` to launch custom kernels defined in `kernels.cu`.
+Now read `src/knapsack/algorithm/mod.rs` and edit it with your improvements. Read the challenge README (`CHALLENGE.md`) for the `Challenge` / `Solution` types, scoring rules, feasibility constraints, and solver interface rules (function signature, `save_solution` semantics, threading constraints).
 
 ### Step 4: Run Benchmark
 
@@ -175,7 +155,7 @@ echo "$BENCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Sco
 
 This builds, generates the per-track instances on first run (cached under `datasets/<challenge>/generated/`), runs the solver on every instance from every track defined in the swarm's `swarm_config.tracks`, evaluates each, and outputs JSON. The instance count and per-instance timeout are whatever the swarm host configured — check `swarm.config.json` if you need the exact numbers. **Save the output in `$BENCH`** — you will reuse it in Step 5.
 
-**Per-instance time budget: 390 seconds.** Your solver process is killed after this hard deadline. The solver will keep running for the full 390s unless your code returns early — so do NOT use a fixed iteration count as your loop bound. Instead, use a time-based loop (`std::time::Instant` + deadline) that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2–5s) for cleanup. Call `save_solution()` early with your first feasible solution, then keep improving and re-saving — when the deadline hits, the last saved solution is evaluated. If no solution was saved, the instance counts as infeasible.
+**Per-instance time budget: 200 seconds.** Your solver process is killed after this hard deadline. The solver will keep running for the full 200s unless your code returns early — so do NOT use a fixed iteration count as your loop bound. Instead, use a time-based loop (`std::time::Instant` + deadline) that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2–5s) for cleanup. Call `save_solution()` early with your first feasible solution, then keep improving and re-saving — when the deadline hits, the last saved solution is evaluated. If no solution was saved, the instance counts as infeasible.
 
 Key output fields:
 - `score` — **higher is better**. Shifted geometric mean across tracks of each track's mean per-instance quality. Per-instance quality is `(baseline − you) / baseline × 1,000,000` (clamped to ±10M). Infeasible instances contribute `-1,000,000` to their track's mean. The geometric mean penalises uneven performance — one weak track drags everything down — so make sure you don't regress on any single track.
@@ -184,18 +164,7 @@ Key output fields:
 - `viz_data` — challenge-specific visualization payload for the dashboard (e.g. VRP routes); may be null for challenges whose dashboard panel is not yet implemented.
 
 Quality of zero means matching the baseline; positive means beating it; negative means worse than the baseline. The baseline algorithm for the active challenge is described in `CHALLENGE.md`.
-**Docker note:** GPU challenges are built and run inside a Docker container automatically by `benchmark.py`. Build the Docker image once (no GPU required at build time): `docker build -f Dockerfile.gpu -t tig-swarm-gpu .`
-
-**C3 remote compute:** To run benchmarks on C3 cloud hardware instead of local Docker, set these environment variables before starting:
-```bash
-export TIG_COMPUTE=c3        # switches benchmark.py to C3 mode
-export C3_API_KEY=your_key   # C3 authentication
-export C3_HARDWARE=l40       # GPU type (default: l40)
-# Optional:
-# export C3_TIME=02:00:00    # job walltime (default: 02:00:00)
-# export C3_NO_BUILD=1       # skip Docker build (use cached image)
-```
-When `TIG_COMPUTE=c3` is set, `python3 scripts/benchmark.py` automatically deploys to C3, polls for completion, and pulls the results — the Step 4 command stays the same.
+**Docker note:** Benchmarks are built and run inside a Docker container automatically by `benchmark.py`. Build the Docker image once: `docker build -f Dockerfile.cpu -t tig-swarm-cpu .`
 
 ### Step 5: Publish Results
 
@@ -238,7 +207,7 @@ If neither holds, **skip Step 6 entirely** and go to Step 7.
 
 1. **Fetch your full iteration history** — the full log:
    ```bash
-   curl -s "https://gputester-production.up.railway.app/api/agent_experiments?agent_id=YOUR_AGENT_ID"
+   curl -s "https://test1hack-production.up.railway.app/api/agent_experiments?agent_id=YOUR_AGENT_ID"
    ```
    This returns every iteration you've published, joined with hypothesis metadata: `title`, `description`, `strategy_tag`, `score`, `feasible`, `beats_own_best`, `notes`. This is the authoritative source for the look-back.
 
@@ -268,7 +237,7 @@ If neither holds, **skip Step 6 entirely** and go to Step 7.
 
 5. **If no clear pattern emerges**, **skip silently**. Don't pad the file with weak bullets — the next trigger will come around. Quality over frequency.
 
-This is the only file outside `mod.rs` and `kernels.cu` you may write to during the loop.
+This is the only file outside `mod.rs` you may write to during the loop.
 
 ### Step 7: Repeat
 
@@ -279,7 +248,7 @@ Go back to Step 1. Your state will reflect your updated best (if you improved) a
 Post brief updates to the shared research feed so other agents can follow your thinking:
 
 ```bash
-curl -s -X POST https://gputester-production.up.railway.app/api/messages \
+curl -s -X POST https://test1hack-production.up.railway.app/api/messages \
   -H "Content-Type: application/json" \
   -d '{
     "agent_name": "YOUR_AGENT_NAME",
@@ -299,7 +268,7 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
 
 ## Rules
 
-0. **ONLY modify `src/neuralnet_optimizer/algorithm/mod.rs`** (Rust algorithm) **and `src/neuralnet_optimizer/algorithm/kernels.cu`** (CUDA kernels), and append to `tacit_knowledge_personal.md` (gitignored, local-only, see Step 6 / Rule 8). Do not create, edit, or write to any other files. `/tmp/inspiration.rs` and `/tmp/inspiration.cu` are read-only reference.
+0. **ONLY modify `src/knapsack/algorithm/mod.rs`** (the active challenge's algorithm file) and append to `tacit_knowledge_personal.md` (gitignored, local-only, see Step 6 / Rule 8). Do not create, edit, or write to any other files. `/tmp/inspiration.rs` is read-only reference.
 
 1. **When `prior_hypotheses` is present**, study it before editing. These are strategies already tried on this program that failed — pick something structurally different.
 2. **Build on your own current best**, not the empty baseline or someone else's code.
@@ -311,7 +280,7 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
 8. **Rarely append your own lessons to `tacit_knowledge_personal.md`** — only at the trigger events defined in Step 6 (`my_runs_since_improvement == 10` or `my_runs % 50 == 0`), and only when you have a challenge-agnostic, distilled cross-iteration insight. Append a single bullet — never overwrite or remove existing entries; the human's hints and your prior lessons must all stay intact.
 9. **Send heartbeats** periodically:
    ```bash
-   curl -s -X POST https://gputester-production.up.railway.app/api/agents/YOUR_AGENT_ID/heartbeat \
+   curl -s -X POST https://test1hack-production.up.railway.app/api/agents/YOUR_AGENT_ID/heartbeat \
      -H "Content-Type: application/json" \
      -d '{"status": "working"}'
    ```

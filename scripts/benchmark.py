@@ -319,12 +319,13 @@ def _reexec_in_docker(cfg: dict) -> int:
     if server:
         env_flags += ["-e", f"TIG_SWARM_SERVER={server}"]
 
+    suffix = "gpu" if is_gpu_challenge(cfg) else "cpu"
     cmd = [
         "docker", "run", "--rm",
         *gpu_flags,
         "-v", f"{ROOT_DIR}:/app",
-        "-v", "tig-cargo-cache:/app/target",
-        "-v", "tig-cargo-registry:/root/.cargo/registry",
+        "-v", f"tig-cargo-cache-{suffix}:/app/target",
+        "-v", f"tig-cargo-registry-{suffix}:/root/.cargo/registry",
         *env_flags,
         image,
         "python3", "/app/scripts/benchmark.py",
