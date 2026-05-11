@@ -116,6 +116,12 @@ class StateRecentHypothesis(_ResponseBase):
     created_at: Optional[str] = None
 
 
+class StateRecentAgent(_ResponseBase):
+    id: str
+    name: str
+    registered_at: str
+
+
 class StateLeaderboardEntry(_ResponseBase):
     rank: int
     agent_id: str
@@ -180,6 +186,10 @@ class StateResponse(_ResponseBase):
     total_trajectories: Optional[int] = None
     recent_experiments: Optional[list[StateRecentExperiment]] = None
     recent_hypotheses: Optional[list[StateRecentHypothesis]] = None
+    # Recent agent registrations (global — not challenge-scoped). Lets
+    # the dashboard replay "X joined the swarm" feed entries on reload
+    # or after a panel reset, since `agent_joined` is otherwise live-only.
+    recent_agents: Optional[list[StateRecentAgent]] = None
 
     # Both views
     leaderboard: Optional[list[StateLeaderboardEntry]] = None
