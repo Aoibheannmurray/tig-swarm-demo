@@ -12,8 +12,22 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally. See
 
 ### Host a swarm
 
-Need: [Railway](https://railway.com) account, [Railway CLI](https://docs.railway.com/guides/cli), Python 3.
+Need: Python 3, a free [Railway](https://railway.com) account, and the Railway CLI.
 
+**1. Install the Railway CLI** (pick one):
+```bash
+brew install railway          # macOS with Homebrew
+npm i -g @railway/cli         # Node.js
+cargo install railwayapp --locked  # Rust/Cargo
+```
+
+**2. Log in:**
+```bash
+railway login
+```
+This opens a browser — complete the OAuth flow there.
+
+**3. Provision and deploy:**
 ```bash
 git clone <repo>
 cd tig-swarm-demo
