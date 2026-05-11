@@ -256,6 +256,8 @@ export class MockDataGenerator {
           num_trajectories: 1,
           tacit_knowledge_count: 0,
           inspiration_count: 0,
+          total_tokens: 0,
+          estimated_cost_usd: 0,
           active: true,
         }));
 

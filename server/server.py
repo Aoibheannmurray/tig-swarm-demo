@@ -905,21 +905,27 @@ async def create_iteration(req: IterationCreate):
         received_hint = (acs or {}).get("pending_hint")
         inspiration_source_id = (acs or {}).get("pending_inspiration_source")
 
+        iter_input_tokens = req.input_tokens or 0
+        iter_output_tokens = req.output_tokens or 0
+        iter_estimated_cost = req.estimated_cost or 0.0
+
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
                 score, feasible,
                 challenge_metrics, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
-                trajectory_id, received_hint, inspiration_source_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                trajectory_id, received_hint, inspiration_source_id,
+                input_tokens, output_tokens, estimated_cost, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
              req.score,
              1 if req.feasible else 0, challenge_metrics_json,
              req.notes, solution_data_json, track_scores_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
              1 if beats_own_best else 0,
-             trajectory_id, received_hint, inspiration_source_id, timestamp),
+             trajectory_id, received_hint, inspiration_source_id,
+             iter_input_tokens, iter_output_tokens, iter_estimated_cost, timestamp),
         )
 
         if received_hint is not None:
@@ -945,6 +951,9 @@ async def create_iteration(req: IterationCreate):
                 runs_since_improvement_reset=True,
                 best_ever_score=req.score,
                 direction=direction,
+                input_tokens=iter_input_tokens,
+                output_tokens=iter_output_tokens,
+                estimated_cost=iter_estimated_cost,
             )
             await db.update_agent_challenge_state(
                 conn, req.agent_id, challenge,
@@ -966,6 +975,9 @@ async def create_iteration(req: IterationCreate):
                 conn, req.agent_id, challenge,
                 runs=1,
                 runs_since_improvement_inc=1,
+                input_tokens=iter_input_tokens,
+                output_tokens=iter_output_tokens,
+                estimated_cost=iter_estimated_cost,
             )
 
         agent_name = await get_agent_name(conn, req.agent_id)

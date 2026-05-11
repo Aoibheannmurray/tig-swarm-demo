@@ -54,7 +54,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from llm_backends import DEFAULT_MODELS, call_llm
+from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
 # ── Config & server helpers ─────────────────────────────────────────
 
@@ -880,6 +880,8 @@ def run_benchmark(args: argparse.Namespace, config: dict, server: str) -> tuple[
 
 def publish_results(
     server: str, agent_id: str, bench: dict, mutation: dict, config: dict,
+    *, input_tokens: int = 0, output_tokens: int = 0,
+    estimated_cost: float = 0.0,
 ) -> dict:
     code = read_algorithm(config)
     kernel_code = ""
@@ -898,11 +900,12 @@ def publish_results(
         "solution_data": bench.get("viz_data"),
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated_cost": estimated_cost,
     }
     if kernel_code:
         payload["kernel_code"] = kernel_code
-    # Opaque per-challenge roll-up; forward only when benchmark.py emitted
-    # one (only set when the active challenge has registered an aggregator).
     if bench.get("challenge_metrics") is not None:
         payload["challenge_metrics"] = bench["challenge_metrics"]
     return server_post(f"{server}/api/iterations", payload)
@@ -1031,6 +1034,8 @@ def main() -> int:
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
         t_start = time.time()
+        iter_input_tokens = 0
+        iter_output_tokens = 0
         print(f"\n{'=' * 60}")
         print(f"  Iteration {iteration}  ({time.strftime('%H:%M:%S')})")
         print(f"{'=' * 60}")
@@ -1099,12 +1104,14 @@ def main() -> int:
 
         print(f"  [LLM] Generating hypothesis via {args.provider}/{model}…")
         try:
-            hyp_response = call_llm(
+            hyp_response, hyp_usage = call_llm(
                 args.provider, model, api_key,
                 build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
                 build_hypothesis_user_prompt(state, config),
                 args.api_base,
             )
+            iter_input_tokens += hyp_usage["input_tokens"]
+            iter_output_tokens += hyp_usage["output_tokens"]
         except Exception as e:
             print(f"  [LLM] HYPOTHESIS FAILED: {e}")
             post_message(server, agent_name, agent_id,
@@ -1139,12 +1146,14 @@ def main() -> int:
                     + files.separator_suffix()
                 )
             try:
-                code_response = call_llm(
+                code_response, code_usage = call_llm(
                     args.provider, model, api_key,
                     build_code_system_prompt(challenge_md, config),
                     user_prompt,
                     args.api_base,
                 )
+                iter_input_tokens += code_usage["input_tokens"]
+                iter_output_tokens += code_usage["output_tokens"]
             except Exception as e:
                 print(f"  [LLM] CODE GENERATION FAILED: {e}")
                 post_message(server, agent_name, agent_id,
@@ -1220,12 +1229,14 @@ def main() -> int:
             print(f"  [BENCH] Build retry {build_attempt + 1}/{max_build_retries} — asking LLM to fix…")
             fix_prompt = files.build_compile_fix_prompt(build_err[-1500:])
             try:
-                fix_response = call_llm(
+                fix_response, fix_usage = call_llm(
                     args.provider, model, api_key,
                     build_code_system_prompt(challenge_md, config),
                     fix_prompt,
                     args.api_base,
                 )
+                iter_input_tokens += fix_usage["input_tokens"]
+                iter_output_tokens += fix_usage["output_tokens"]
             except Exception as e:
                 print(f"  Fix LLM call failed: {e}", file=sys.stderr)
                 break
@@ -1272,12 +1283,14 @@ def main() -> int:
                 print(f"  Errors: {runtime_errors}")
                 current_code, current_kernel = files.read()
                 try:
-                    fix_response = call_llm(
+                    fix_response, fix_usage = call_llm(
                         args.provider, model, api_key,
                         build_code_system_prompt(challenge_md, config),
                         build_runtime_fix_prompt(current_code, bench, current_kernel, config.get("timeout", 30)),
                         args.api_base,
                     )
+                    iter_input_tokens += fix_usage["input_tokens"]
+                    iter_output_tokens += fix_usage["output_tokens"]
                 except Exception as e:
                     print(f"  Runtime fix LLM call failed: {e}", file=sys.stderr)
                     break
@@ -1301,12 +1314,14 @@ def main() -> int:
                     print(f"  Runtime fix caused compile error — asking LLM to fix ...")
                     compile_fix_prompt = files.build_compile_fix_prompt(build_err[-1500:])
                     try:
-                        compile_fix_resp = call_llm(
+                        compile_fix_resp, cfix_usage = call_llm(
                             args.provider, model, api_key,
                             build_code_system_prompt(challenge_md, config),
                             compile_fix_prompt,
                             args.api_base,
                         )
+                        iter_input_tokens += cfix_usage["input_tokens"]
+                        iter_output_tokens += cfix_usage["output_tokens"]
                     except Exception as e:
                         print(f"  Compile fix LLM call failed: {e}", file=sys.stderr)
                         if best_code:
@@ -1340,7 +1355,7 @@ def main() -> int:
             print("  Code changed during error recovery — re-describing hypothesis ...")
             final_code = read_algorithm(config)
             try:
-                redesc_response = call_llm(
+                redesc_response, redesc_usage = call_llm(
                     args.provider, model, api_key,
                     build_hypothesis_system_prompt(challenge_md, config),
                     build_redescribe_hypothesis_prompt(
@@ -1348,6 +1363,8 @@ def main() -> int:
                     ),
                     args.api_base,
                 )
+                iter_input_tokens += redesc_usage["input_tokens"]
+                iter_output_tokens += redesc_usage["output_tokens"]
                 updated = parse_hypothesis(redesc_response)
                 print(f"  Updated hypothesis: [{updated.get('strategy_tag', '?')}] {updated.get('title', '?')}")
                 hypothesis = updated
@@ -1357,10 +1374,20 @@ def main() -> int:
                 print(f"  Re-describe failed: {e} — using original hypothesis", file=sys.stderr)
 
         # ── Step 5: publish ─────────────────────────────────────
+        iter_cost = estimate_cost(model, {
+            "input_tokens": iter_input_tokens,
+            "output_tokens": iter_output_tokens,
+        })
+        print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
         print(f"  [PUBLISH] Publishing results to server…")
         is_new_best = False
         try:
-            result = publish_results(server, agent_id, bench, hypothesis, config)
+            result = publish_results(
+                server, agent_id, bench, hypothesis, config,
+                input_tokens=iter_input_tokens,
+                output_tokens=iter_output_tokens,
+                estimated_cost=iter_cost,
+            )
             is_new_best = result.get("is_new_best", False)
             if is_new_best:
                 print("  [PUBLISH] ** NEW PERSONAL BEST! **")

@@ -60,17 +60,12 @@ class IterationCreate(BaseModel):
     feasible: bool = True
     notes: str = ""
     solution_data: Optional[dict] = None
-    # Per-track mean quality (e.g. {"n_nodes=200": 4.2e6, "n_nodes=600": 3.1e6}).
-    # Used by the dashboard to show how the best program scores on each track
-    # before they're combined into the overall geometric mean.
     track_scores: Optional[dict] = None
     challenge: Optional["ChallengeName"] = None
-    # Opaque per-challenge roll-up dict (e.g. VRP publishes
-    # {"num_vehicles": ..., "total_distance": ...}). Stored verbatim as
-    # JSON in the experiments / agent_bests rows; the dashboard reads
-    # challenge-specific keys out of it. Absent for challenges that don't
-    # register an aggregator on the client side.
     challenge_metrics: Optional[dict] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    estimated_cost: Optional[float] = None
 
 
 class AdminAuth(BaseModel):

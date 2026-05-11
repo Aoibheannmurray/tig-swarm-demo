@@ -80,6 +80,9 @@ CREATE TABLE IF NOT EXISTS experiments (
     -- Lets the dashboard mark hint events on per-agent progress plots.
     received_hint TEXT,
     inspiration_source_id TEXT,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    estimated_cost REAL DEFAULT 0.0,
     created_at TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
@@ -160,6 +163,9 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
     -- experiments.received_hint absorbs the value).
     pending_hint TEXT,
     pending_inspiration_source TEXT,
+    total_input_tokens INTEGER DEFAULT 0,
+    total_output_tokens INTEGER DEFAULT 0,
+    total_estimated_cost REAL DEFAULT 0.0,
     last_active_at TEXT,
     PRIMARY KEY (agent_id, challenge),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
@@ -219,15 +225,26 @@ DEFAULT_CONFIG = {
 }
 
 
+async def _add_column(db, table: str, column: str, typedef: str) -> None:
+    try:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
+    except Exception:
+        pass  # column already exists
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
-        # All DDL is IF NOT EXISTS, so calling init_db() against an existing
-        # DB is a no-op — the schema only moves forward via deliberate edits
-        # to SCHEMA / SCHEMA_INDEXES. Schema changes require dropping the
-        # persistent volume on redeploy; we don't carry an in-place migration
-        # path because the swarm is reset between deploys.
         await db.executescript(SCHEMA)
         await db.executescript(SCHEMA_INDEXES)
+        await db.commit()
+
+        # Migrations for token tracking columns on existing databases.
+        await _add_column(db, "experiments", "input_tokens", "INTEGER DEFAULT 0")
+        await _add_column(db, "experiments", "output_tokens", "INTEGER DEFAULT 0")
+        await _add_column(db, "experiments", "estimated_cost", "REAL DEFAULT 0.0")
+        await _add_column(db, "agent_challenge_state", "total_input_tokens", "INTEGER DEFAULT 0")
+        await _add_column(db, "agent_challenge_state", "total_output_tokens", "INTEGER DEFAULT 0")
+        await _add_column(db, "agent_challenge_state", "total_estimated_cost", "REAL DEFAULT 0.0")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -451,6 +468,9 @@ async def compute_leaderboard(
             acs.num_trajectories as num_trajectories,
             acs.tacit_knowledge_count as tacit_knowledge_count,
             acs.inspiration_count as inspiration_count,
+            acs.total_input_tokens as total_input_tokens,
+            acs.total_output_tokens as total_output_tokens,
+            acs.total_estimated_cost as total_estimated_cost,
             ab.score as current_score
         FROM agent_challenge_state acs
         JOIN agents a ON a.id = acs.agent_id
@@ -477,6 +497,8 @@ async def compute_leaderboard(
             "num_trajectories": row["num_trajectories"] or 0,
             "tacit_knowledge_count": row["tacit_knowledge_count"] or 0,
             "inspiration_count": row["inspiration_count"] or 0,
+            "total_tokens": (row["total_input_tokens"] or 0) + (row["total_output_tokens"] or 0),
+            "estimated_cost_usd": round(row["total_estimated_cost"] or 0, 4),
             "active": row["last_active_at"] >= inactive_cutoff if inactive_cutoff and row["last_active_at"] else False,
         }
         for i, row in enumerate(rows)
@@ -579,6 +601,9 @@ async def increment_agent_challenge_counters(
     inspiration_inc: int = 0,
     best_ever_score: float | None = None,
     direction: str = "max",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    estimated_cost: float = 0.0,
 ) -> None:
     """Bump the counters on agent_challenge_state. Mirrors the legacy
     per-agents counter bumps, but scoped to (agent, challenge)."""
@@ -602,11 +627,15 @@ async def increment_agent_challenge_counters(
                 {rsi_clause},
                 num_trajectories = num_trajectories + ?,
                 tacit_knowledge_count = tacit_knowledge_count + ?,
-                inspiration_count = inspiration_count + ?
+                inspiration_count = inspiration_count + ?,
+                total_input_tokens = total_input_tokens + ?,
+                total_output_tokens = total_output_tokens + ?,
+                total_estimated_cost = total_estimated_cost + ?
                 {best_clause}
               WHERE agent_id = ? AND challenge = ?"""
     params: list = [runs, improvements, num_trajectories_inc,
-                    tacit_knowledge_inc, inspiration_inc]
+                    tacit_knowledge_inc, inspiration_inc,
+                    input_tokens, output_tokens, estimated_cost]
     if best_ever_score is not None:
         params.extend([best_ever_score, best_ever_score, best_ever_score])
     params.extend([agent_id, challenge])

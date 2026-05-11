@@ -134,6 +134,8 @@ class StateLeaderboardEntry(_ResponseBase):
     num_trajectories: int
     tacit_knowledge_count: int
     inspiration_count: int
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
     active: bool
 
 

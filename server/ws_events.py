@@ -89,8 +89,6 @@ class _LeaderboardEntry(BaseModel):
     rank: int
     agent_id: str
     agent_name: str
-    # Free-form label identifying which LLM is running this agent's loop.
-    # Empty string when the contributor didn't supply one at register time.
     llm_type: str = ""
     runs: int
     improvements: int
@@ -100,6 +98,8 @@ class _LeaderboardEntry(BaseModel):
     num_trajectories: int
     tacit_knowledge_count: int
     inspiration_count: int
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
     active: bool
 
 

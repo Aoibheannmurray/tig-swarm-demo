@@ -21,9 +21,6 @@ export interface LeaderboardEntry {
   rank: number;
   agent_id: string;
   agent_name: string;
-  // Free-form label identifying which LLM is driving this agent (e.g.
-  // "claude_code", "gemini_api"). Empty string when not supplied at
-  // register time.
   llm_type?: string;
   runs: number;
   improvements: number;
@@ -33,6 +30,8 @@ export interface LeaderboardEntry {
   num_trajectories: number;
   tacit_knowledge_count: number;
   inspiration_count: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
   active: boolean;
 }
 
