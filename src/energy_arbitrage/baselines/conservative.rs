@@ -1,11 +1,11 @@
+use crate::energy_arbitrage::constants::{
+    EPS_BASELINE as EPS, GLOBAL_SCALE_BSEARCH_ITERS, MAX_FLOW_ADJUST_ITERS,
+};
 use crate::energy_arbitrage::{constants, Challenge, State};
 use anyhow::{anyhow, Result};
 
 const CHARGE_THRESHOLD: f64 = 0.95;
 const DISCHARGE_THRESHOLD: f64 = 1.05;
-const MAX_FLOW_ADJUST_ITERS: usize = 64;
-const GLOBAL_SCALE_BSEARCH_ITERS: usize = 32;
-const EPS: f64 = 1e-12;
 
 #[derive(Clone, Copy)]
 struct Violation {

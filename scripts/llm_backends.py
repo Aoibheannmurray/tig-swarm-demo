@@ -20,7 +20,39 @@ DEFAULT_MODELS = {
 }
 
 _TIMEOUT = 180
-_MAX_TOKENS = 32768
+_DEFAULT_MAX_TOKENS = 16384
+
+_MODEL_MAX_TOKENS: list[tuple[str, int]] = [
+    # Anthropic
+    ("claude-opus-4", 32768),
+    ("claude-sonnet-4", 16384),
+    ("claude-haiku-4", 8192),
+    ("claude-3-5-sonnet", 8192),
+    ("claude-3-5-haiku", 8192),
+    ("claude-3-opus", 4096),
+    ("claude-3-sonnet", 4096),
+    ("claude-3-haiku", 4096),
+    # OpenAI
+    ("o1", 100000),
+    ("o3", 100000),
+    ("o4-mini", 100000),
+    ("gpt-5", 100000),
+    ("gpt-4o", 16384),
+    ("gpt-4-turbo", 4096),
+    ("gpt-4", 8192),
+    # Google
+    ("gemini-2.5", 65536),
+    ("gemini-2.0", 8192),
+    ("gemini-1.5", 8192),
+]
+
+
+def _max_tokens_for_model(model: str) -> int:
+    m = model.lower()
+    for prefix, limit in _MODEL_MAX_TOKENS:
+        if m.startswith(prefix):
+            return limit
+    return _DEFAULT_MAX_TOKENS
 
 
 def _post_json(url: str, body: dict, headers: dict) -> dict:
@@ -40,7 +72,7 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> str:
         "https://api.anthropic.com/v1/messages",
         {
             "model": model,
-            "max_tokens": _MAX_TOKENS,
+            "max_tokens": _max_tokens_for_model(model),
             "system": [
                 {
                     "type": "text",
@@ -87,7 +119,7 @@ def call_openai(
         {
             "model": model,
             "messages": messages,
-            token_param: _MAX_TOKENS,
+            token_param: _max_tokens_for_model(model),
         },
         {
             "Content-Type": "application/json",
@@ -100,7 +132,7 @@ def call_openai(
 def call_claude_code(
     system: str, prompt: str, model: str | None = None,
 ) -> str:
-    cmd = ["claude", "--bare", "-p", "--system-prompt", system, "--max-output-tokens", str(_MAX_TOKENS)]
+    cmd = ["claude", "--bare", "-p", "--system-prompt", system, "--max-output-tokens", str(_max_tokens_for_model(model or ""))]
     if model:
         cmd += ["--model", model]
     result = subprocess.run(
@@ -121,7 +153,7 @@ def call_google(system: str, prompt: str, model: str, api_key: str) -> str:
         {
             "system_instruction": {"parts": [{"text": system}]},
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": _MAX_TOKENS},
+            "generationConfig": {"maxOutputTokens": _max_tokens_for_model(model)},
         },
         {"Content-Type": "application/json"},
     )

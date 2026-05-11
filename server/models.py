@@ -65,10 +65,12 @@ class IterationCreate(BaseModel):
     # before they're combined into the overall geometric mean.
     track_scores: Optional[dict] = None
     challenge: Optional["ChallengeName"] = None
-    # VRP-only: vehicles used and total tour distance. Stored as NULL for
-    # every other challenge — these have no meaning for SAT, knapsack, etc.
-    num_vehicles: Optional[int] = None
-    total_distance: Optional[float] = None
+    # Opaque per-challenge roll-up dict (e.g. VRP publishes
+    # {"num_vehicles": ..., "total_distance": ...}). Stored verbatim as
+    # JSON in the experiments / agent_bests rows; the dashboard reads
+    # challenge-specific keys out of it. Absent for challenges that don't
+    # register an aggregator on the client side.
+    challenge_metrics: Optional[dict] = None
 
 
 class AdminAuth(BaseModel):

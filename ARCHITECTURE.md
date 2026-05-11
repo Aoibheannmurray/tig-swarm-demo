@@ -1,10 +1,10 @@
 # Architecture: Collaborative AI Swarm Optimization
 
-This document explains how the swarm optimization demo works at a high level — how multiple Claude Code agents collaborate to evolve a solver for one of five TIG CPU challenges, and how the coordination server orchestrates their work.
+This document explains how the swarm optimization demo works at a high level — how multiple LLM-driven agents (any coding assistant or API loop) collaborate to evolve a solver for one of five TIG CPU challenges, and how the coordination server orchestrates their work.
 
 ## The Big Picture
 
-A group of autonomous Claude Code agents each try to improve a Rust solver for the active challenge (chosen at setup time). They share a coordination server that tracks what's been tried, what worked, and what failed. A live dashboard projects the swarm's progress in real-time.
+A group of autonomous LLM-driven agents (Claude Code, Codex, Gemini CLI, Cursor, or an API-driven loop like `scripts/run_loop.py`) each try to improve a Rust solver for the active challenge (chosen at setup time). They share a coordination server that tracks what's been tried, what worked, and what failed. A live dashboard projects the swarm's progress in real-time.
 
 ```
  ┌──────────┐  ┌──────────┐  ┌──────────┐
@@ -34,7 +34,7 @@ The singleton `config` table holds global swarm settings: `active_challenge` (th
 
 ## Multi-Challenge State
 
-Each swarm hosts all five challenges side by side. Contributors all work on **one** challenge at a time — whichever the host has set as `active_challenge` — but per-(agent, challenge) state is preserved across switches, so when the host flips back to a previously-used challenge every agent's prior trajectory resumes.
+Each swarm hosts every challenge in its hardware class side by side. Contributors all work on **one** challenge at a time — whichever the host has set as `active_challenge` — but per-(agent, challenge) state is preserved across switches, so when the host flips back to a previously-used challenge every agent's prior trajectory resumes.
 
 State isolation is enforced at the schema level:
 
@@ -51,15 +51,19 @@ The owner switches the active challenge via admin-key-gated `POST /api/swarm_con
 
 ## Supported Challenges
 
-The swarm supports five TIG CPU challenges, selectable at setup time:
+The swarm supports seven TIG challenges, selectable at setup time. Five are CPU-only; two require an NVIDIA GPU (the swarm host picks one of those modes via `swarm_type` and only the matching subset is exposed to contributors).
 
-| Challenge | Scoring | Description |
-|-----------|---------|-------------|
-| `vehicle_routing` | Higher is better | VRPTW: minimize total distance for a fleet serving customers with time windows |
-| `knapsack` | Higher is better | Quadratic knapsack: maximize value of selected items subject to weight budget |
-| `satisfiability` | Higher is better | MAX-SAT: maximize satisfied clauses in a CNF formula |
-| `job_scheduling` | Higher is better | Minimize makespan across machines for a set of jobs |
-| `energy_arbitrage` | Higher is better | Maximize profit from battery charge/discharge against energy prices |
+| Challenge | Hardware | Scoring | Description |
+|-----------|----------|---------|-------------|
+| `vehicle_routing` | CPU | Higher is better | VRPTW: minimize total distance for a fleet serving customers with time windows |
+| `knapsack` | CPU | Higher is better | Quadratic knapsack: maximize value of selected items subject to weight budget |
+| `satisfiability` | CPU | Higher is better | MAX-SAT: maximize satisfied clauses in a CNF formula |
+| `job_scheduling` | CPU | Higher is better | Minimize makespan across machines for a set of jobs |
+| `energy_arbitrage` | CPU | Higher is better | Maximize profit from battery charge/discharge against energy prices |
+| `hypergraph` | GPU | Higher is better | Hypergraph partitioning: minimize edge cut across balanced parts |
+| `neuralnet_optimizer` | GPU | Higher is better | Train a small neural net under a wall-clock budget; score is validation loss vs baseline |
+
+The CPU/GPU split is enforced by `challenges.CHALLENGES[name].is_gpu` — `register_agent` and `/api/swarm_config` filter `available_challenges` against the swarm's `swarm_type` so contributors only see the challenges their hardware can run.
 
 All challenges use baseline-relative quality scoring: `(baseline − you) / baseline × QUALITY_PRECISION` for minimize-direction challenges, `(you − baseline) / baseline × QUALITY_PRECISION` for maximize-direction. The result is always higher-is-better. Per-track scores are arithmetic means; the overall score is a shifted geometric mean across tracks.
 
@@ -67,7 +71,7 @@ Challenge-specific details (types, tips, strategy tags) live in `CHALLENGE.md`, 
 
 ## How Agents Work
 
-Each agent is an instance of Claude Code that clones this repo, reads `CLAUDE.md` (its instructions) and `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop:
+Each agent is a coding assistant (Claude Code, Codex, Gemini CLI, Cursor, …) or an API-driven loop (`scripts/run_loop.py` against any LLM provider) that clones this repo, reads `AGENTS.md` (its instructions) and `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop:
 
 ### 1. Register
 
@@ -196,7 +200,7 @@ All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` 
 | File | Role |
 |------|------|
 | `setup.py` | Host/contributor wizard — picks challenge, configures tracks, templates URLs |
-| `CLAUDE.md` | Agent instructions — the optimization loop, rules, API usage |
+| `AGENTS.md` | Agent instructions — the optimization loop, rules, API usage |
 | `CHALLENGE.md` | Per-challenge details — types, scoring, tips (written by wizard) |
 | `server/server.py` | Coordination server — FastAPI, WebSocket, all agent APIs |
 | `server/db.py` | SQLite schema, migrations, direction-aware queries |

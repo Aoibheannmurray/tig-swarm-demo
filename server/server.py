@@ -24,8 +24,35 @@ import db
 import ws_events
 import api_models
 import challenges
+from challenges import DEFAULT_CHALLENGE
 
 logger = logging.getLogger("swarm")
+
+
+# ── Swarm-wide defaults ──
+#
+# Single source of truth for the integer thresholds the swarm tunes most
+# often. Stored as strings in the `config` key/value table (set via the
+# wizard's POST /api/swarm_config); these are the fall-throughs when a key
+# is missing or unparseable. Add new tunables here so call sites stay
+# consistent — never inline an `int(config.get(KEY, "N"))` again.
+SWARM_DEFAULTS: dict[str, int] = {
+    "inactive_minutes": 20,
+    "stagnation_threshold": 2,
+    "stagnation_limit": 5,
+    "hypothesis_recall_threshold": 3,
+}
+
+
+def swarm_setting(config: dict, key: str) -> int:
+    default = SWARM_DEFAULTS[key]
+    raw = config.get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 # ── Config resolution ──
@@ -38,8 +65,7 @@ logger = logging.getLogger("swarm")
 #
 # `resolve_challenge` accepts an explicit value (typically from a request
 # query param or body field) and falls back to the swarm's active challenge
-# when none is provided — preserving back-compat with old clients during
-# the rollout window.
+# when none is provided.
 
 # Cached configs — refreshed on admin config update.
 _config_cache: dict | None = None
@@ -56,7 +82,7 @@ async def get_config_cached() -> dict:
 
 async def get_active_challenge() -> str:
     cfg = await get_config_cached()
-    return cfg.get("active_challenge") or cfg.get("challenge") or "vehicle_routing"
+    return cfg.get("active_challenge") or DEFAULT_CHALLENGE
 
 
 async def resolve_challenge(challenge: str | None) -> str:
@@ -241,7 +267,9 @@ def now() -> str:
 
 
 def inactive_cutoff() -> str:
-    return (datetime.now(timezone.utc) - timedelta(minutes=INACTIVE_MINUTES)).isoformat()
+    cfg = _config_cache or {}
+    minutes = swarm_setting(cfg, "inactive_minutes")
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
 
 
 # ── Periodic stats ──
@@ -356,17 +384,12 @@ async def register_agent(req: RegisterRequest):
         timestamp=timestamp,
     ))
 
-    active_challenge = (
-        config.get("active_challenge")
-        or config.get("challenge")
-        or "vehicle_routing"
-    )
+    active_challenge = config.get("active_challenge") or DEFAULT_CHALLENGE
 
     # `active_challenge` is the swarm-wide challenge the contributor should
-    # auto-follow (set by the owner via `setup.py switch`). `challenge` is
-    # kept as an alias for back-compat with older clients that read
-    # `config.challenge`. Per-track counts / timeout live in
-    # /api/swarm_config — the agent polls that on every iteration.
+    # auto-follow (set by the owner via `setup.py switch`). Per-track counts
+    # / timeout live in /api/swarm_config — the agent polls that on every
+    # iteration.
     swarm_type = config.get("swarm_type", "cpu")
     available = [
         ch for ch in challenges.CHALLENGE_NAMES
@@ -380,7 +403,6 @@ async def register_agent(req: RegisterRequest):
         config={
             "heartbeat_interval_seconds": 30,
             "active_challenge": active_challenge,
-            "challenge": active_challenge,
             "swarm_type": swarm_type,
             "available_challenges": available,
         },
@@ -400,8 +422,6 @@ async def heartbeat(agent_id: str, req: HeartbeatRequest):
 
 
 # ── State endpoint ──
-
-INACTIVE_MINUTES = 20
 
 
 @app.get("/api/state")
@@ -425,8 +445,7 @@ async def get_state(
     When `agent_id` is omitted, returns a global dashboard view (filtered
     by the requested or active challenge).
 
-    `challenge` defaults to the swarm's `active_challenge` for back-compat
-    with old clients that don't pass it.
+    `challenge` defaults to the swarm's `active_challenge` when omitted.
     """
     config = await get_config_cached()
     challenge = await resolve_challenge(challenge)
@@ -483,7 +502,7 @@ async def get_state(
 
             # ── Trajectory reset on stagnation_limit ──
             trajectory_reset = None
-            stagnation_limit = int(config.get("stagnation_limit", "5"))
+            stagnation_limit = swarm_setting(config, "stagnation_limit")
             if stagnation_limit > 0 and runs_since >= stagnation_limit and my_best is not None:
                 timestamp = now()
                 # Deactivate the current trajectory.
@@ -580,7 +599,7 @@ async def get_state(
                 await conn.commit()
 
             # ── Prior hypotheses (program-scoped, shown only after threshold) ──
-            hypothesis_recall_threshold = int(config.get("hypothesis_recall_threshold", "3"))
+            hypothesis_recall_threshold = swarm_setting(config, "hypothesis_recall_threshold")
             prior_hypotheses: list[dict] = []
             hypothesis_recall_message: str | None = None
             if runs_since >= hypothesis_recall_threshold:
@@ -609,7 +628,7 @@ async def get_state(
             inspiration_kernel_code = None
             inspiration_agent_name = None
             stagnation_hint = None
-            n_stagnation = int(config.get("stagnation_threshold", "2"))
+            n_stagnation = swarm_setting(config, "stagnation_threshold")
             if trajectory_reset is None and runs_since >= n_stagnation:
                 stagnation_hint = random.choice(["tacit_knowledge", "inspiration"])
                 if stagnation_hint == "tacit_knowledge":
@@ -714,6 +733,15 @@ async def get_state(
         )
         recent_hypotheses = [dict(row) for row in await cursor.fetchall()]
 
+        # Recent agent registrations. Global (not challenge-scoped) since
+        # `agent_joined` events themselves carry no challenge field. The
+        # dashboard uses this to replay join lines on reload / reset.
+        cursor = await conn.execute(
+            "SELECT id, name, registered_at FROM agents "
+            "ORDER BY registered_at DESC LIMIT 20"
+        )
+        recent_agents = [dict(row) for row in await cursor.fetchall()]
+
         served = global_best
         best_solution_data = served["solution_data"] if served else None
         num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
@@ -778,6 +806,10 @@ async def get_state(
              "created_at": h.get("created_at")}
             for h in recent_hypotheses
         ],
+        "recent_agents": [
+            {"id": a["id"], "name": a["name"], "registered_at": a["registered_at"]}
+            for a in recent_agents
+        ],
         "leaderboard": leaderboard,
     }
 
@@ -794,6 +826,9 @@ async def create_iteration(req: IterationCreate):
     timestamp = now()
     solution_data_json = json.dumps(req.solution_data) if req.solution_data else None
     track_scores_json = json.dumps(req.track_scores) if req.track_scores else None
+    challenge_metrics_json = (
+        json.dumps(req.challenge_metrics) if req.challenge_metrics else None
+    )
     fp = fingerprint(req.title, req.strategy_tag)
 
     async with db.connect() as conn:
@@ -874,13 +909,13 @@ async def create_iteration(req: IterationCreate):
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
                 score, feasible,
-                num_vehicles, total_distance, notes, solution_data, track_scores,
+                challenge_metrics, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
                 trajectory_id, received_hint, inspiration_source_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
              req.score,
-             1 if req.feasible else 0, req.num_vehicles, req.total_distance,
+             1 if req.feasible else 0, challenge_metrics_json,
              req.notes, solution_data_json, track_scores_json,
              delta_vs_best_pct, delta_vs_own_best_pct,
              1 if beats_own_best else 0,
@@ -919,8 +954,9 @@ async def create_iteration(req: IterationCreate):
                 conn, agent_id=req.agent_id, challenge=challenge,
                 experiment_id=exp_id,
                 algorithm_code=req.algorithm_code, score=req.score,
-                feasible=req.feasible, num_vehicles=req.num_vehicles,
-                total_distance=req.total_distance, solution_data=solution_data_json,
+                feasible=req.feasible,
+                challenge_metrics=challenge_metrics_json,
+                solution_data=solution_data_json,
                 updated_at=timestamp, trajectory_id=trajectory_id,
                 track_scores=track_scores_json,
                 kernel_code=req.kernel_code,
@@ -1087,10 +1123,9 @@ async def get_diversity(challenge: str | None = None):
       - Inactive trajectories → the algorithm_code stored in
         inactive_algorithms when the trajectory was deposited.
 
-    The response keeps the legacy `agents` field name for wire-compat with
-    the existing dashboard panel (which renders an N×N matrix); each entry
-    represents one trajectory. The `agent_name` field carries a human-
-    readable trajectory label like "traj abcdef · alice".
+    Response shape: `{"trajectories": [...], "matrix": [[...]]}`. Each
+    trajectory entry has `trajectory_id` and a human-readable
+    `display_name` like "traj abcdef · alice".
     """
     challenge = await resolve_challenge(challenge)
     direction = await get_direction(challenge)
@@ -1142,8 +1177,8 @@ async def get_diversity(challenge: str | None = None):
             continue
         seen.add(tid)
         entries.append({
-            "agent_id": tid,
-            "agent_name": _traj_label(tid, r.get("agent_name"), "active"),
+            "trajectory_id": tid,
+            "display_name": _traj_label(tid, r.get("agent_name"), "active"),
             "algorithm_code": r["algorithm_code"] or "",
         })
     for r in inactive_raw:
@@ -1152,13 +1187,13 @@ async def get_diversity(challenge: str | None = None):
             continue
         seen.add(tid)
         entries.append({
-            "agent_id": tid,
-            "agent_name": _traj_label(tid, r.get("agent_name"), "inactive"),
+            "trajectory_id": tid,
+            "display_name": _traj_label(tid, r.get("agent_name"), "inactive"),
             "algorithm_code": r["algorithm_code"] or "",
         })
 
     if not entries:
-        return {"agents": [], "matrix": []}
+        return {"trajectories": [], "matrix": []}
 
     line_sets = []
     for e in entries:
@@ -1185,8 +1220,11 @@ async def get_diversity(challenge: str | None = None):
                 row.append(round(len(shared) / total, 3))
         matrix.append(row)
 
-    agents = [{"agent_id": e["agent_id"], "agent_name": e["agent_name"]} for e in entries]
-    return {"agents": agents, "matrix": matrix}
+    trajectories = [
+        {"trajectory_id": e["trajectory_id"], "display_name": e["display_name"]}
+        for e in entries
+    ]
+    return {"trajectories": trajectories, "matrix": matrix}
 
 
 def _traj_label(traj_id: str, agent_name: str | None, status: str) -> str:
@@ -1600,34 +1638,14 @@ async def admin_config(req: AdminAuth, key: str = "", value: str = ""):
 async def get_swarm_config():
     """Return the swarm-wide settings every clone needs to run.
 
-    Multi-challenge model: the swarm hosts all five challenges in parallel.
-    `active_challenge` is the swarm-wide challenge contributors auto-follow
-    (set by the owner via POST /api/swarm_config). `available_challenges` is
-    the per-challenge sub-config map (tracks, timeout, scoring_direction,
-    initial_algorithm_code).
-
-    For back-compat with old clients that still expect a flat shape, the
-    active challenge's sub-config is also flattened to the top level
-    (`challenge`, `tracks`, `timeout`, `scoring_direction`).
+    `active_challenge` is the challenge contributors auto-follow (set by
+    the owner via POST /api/swarm_config). `available_challenges` is the
+    per-challenge sub-config map (tracks, timeout, scoring_direction,
+    initial_algorithm_code) — the agent looks up its active sub-config in
+    here on every iteration.
     """
     config = await get_config_cached()
-    active_challenge = (
-        config.get("active_challenge")
-        or config.get("challenge")
-        or "vehicle_routing"
-    )
-    try:
-        stagnation_threshold = int(config.get("stagnation_threshold", "2"))
-    except Exception:
-        stagnation_threshold = 2
-    try:
-        stagnation_limit = int(config.get("stagnation_limit", "10"))
-    except Exception:
-        stagnation_limit = 10
-    try:
-        hypothesis_recall_threshold = int(config.get("hypothesis_recall_threshold", "3"))
-    except Exception:
-        hypothesis_recall_threshold = 3
+    active_challenge = config.get("active_challenge") or DEFAULT_CHALLENGE
 
     # Per-challenge sub-configs.
     available: dict[str, dict] = {}
@@ -1656,22 +1674,18 @@ async def get_swarm_config():
             "strategy_tags": strategy_tags,
         }
 
-    active_cfg = available.get(active_challenge, {})
     return {
         "active_challenge": active_challenge,
         "available_challenges": available,
-        # Flat back-compat fields — populated from the active challenge.
-        "challenge": active_challenge,
-        "tracks": active_cfg.get("tracks", {}),
-        "timeout": active_cfg.get("timeout", 5),
-        "scoring_direction": active_cfg.get("scoring_direction", "max"),
         # Global keys.
         "swarm_name": config.get("swarm_name", ""),
         "owner_name": config.get("owner_name", ""),
         "swarm_type": config.get("swarm_type", "cpu"),
-        "stagnation_threshold": stagnation_threshold,
-        "stagnation_limit": stagnation_limit,
-        "hypothesis_recall_threshold": hypothesis_recall_threshold,
+        "stagnation_threshold": swarm_setting(config, "stagnation_threshold"),
+        "stagnation_limit": swarm_setting(config, "stagnation_limit"),
+        "hypothesis_recall_threshold": swarm_setting(
+            config, "hypothesis_recall_threshold",
+        ),
     }
 
 
@@ -1738,13 +1752,16 @@ async def update_swarm_config(req: SwarmConfigUpdate):
     _invalidate_caches()
 
     config_after = await get_swarm_config()
+    active_sub = config_after["available_challenges"].get(
+        config_after["active_challenge"], {}
+    )
 
     # Tell connected dashboards to refetch swarm_config so labels and the
     # active visualization swap to the new challenge without a page reload.
     await manager.broadcast(ws_events.SwarmConfigUpdated(
         active_challenge=config_after["active_challenge"],
         available_challenges=config_after["available_challenges"],
-        scoring_direction=config_after["scoring_direction"],
+        scoring_direction=active_sub.get("scoring_direction", "max"),
         swarm_name=config_after["swarm_name"],
         timestamp=now(),
     ))

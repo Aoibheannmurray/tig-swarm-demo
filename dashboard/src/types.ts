@@ -241,12 +241,12 @@ export interface ReplayRow {
 }
 
 // /api/diversity response.
-export interface DiversityAgent {
-  agent_id: string;
-  agent_name: string;
+export interface DiversityTrajectory {
+  trajectory_id: string;
+  display_name: string;
 }
 export interface DiversityResponse {
-  agents: DiversityAgent[];
+  trajectories: DiversityTrajectory[];
   matrix: number[][];
 }
 
@@ -283,6 +283,10 @@ export interface StateResponse {
   total_trajectories?: number;
   recent_experiments?: unknown[];
   recent_hypotheses?: unknown[];
+  // Recent agent registrations (global). Used to replay `agent_joined`
+  // feed lines on reload / panel reset, since WS-only delivery means
+  // they'd otherwise disappear permanently after any reset.
+  recent_agents?: Array<{ id: string; name: string; registered_at: string }>;
 
   leaderboard?: LeaderboardEntry[];
 }

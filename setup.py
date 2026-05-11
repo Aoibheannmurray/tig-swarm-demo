@@ -11,7 +11,7 @@ Two modes:
                               for contributors.
 
   python setup.py join URL    Contributor: point this clone at an existing
-                              swarm URL. Templates the URL into CLAUDE.md /
+                              swarm URL. Templates the URL into AGENTS.md /
                               scripts and creates a stub tacit_knowledge_personal.md
                               for the agent's private hints.
 
@@ -20,7 +20,7 @@ Railway project (overwriting the local `.railway/` link), and `join`
 overwrites the same set of templated files.
 
 Files this script reads / writes:
-  - CLAUDE.md, README.md, scripts/publish.py
+  - AGENTS.md, README.md, scripts/publish.py
     (templated: ${SERVER_URL} -> the chosen URL)
   - swarm.config.json (owner-only mirror of what's stored on the server)
   - CHALLENGE.md (per-challenge docs, from src/<challenge>/README.md)
@@ -53,8 +53,8 @@ ROOT = Path(__file__).parent
 TEMPLATED_FILES = [
     ROOT / "README.md",
 ]
-CLAUDE_TEMPLATE = ROOT / "CLAUDE.md.template"
-CLAUDE_OUTPUT = ROOT / "CLAUDE.md"
+AGENTS_TEMPLATE = ROOT / "AGENTS.md.template"
+AGENTS_OUTPUT = ROOT / "AGENTS.md"
 
 # Heuristic URL patterns that the wizard treats as "the swarm URL" and
 # replaces with the new one. Catches the canonical Railway domain and raw
@@ -188,7 +188,7 @@ def template_files(
     timeout: int | None = None,
 ) -> None:
     """Substitute swarm-specific placeholders into every tracked file that
-    contains them. CLAUDE.md is regenerated from CLAUDE.md.template each
+    contains them. AGENTS.md is regenerated from AGENTS.md.template each
     time (with GPU/CPU conditional blocks resolved); other files are
     updated in-place using prior values from swarm.config.json.
     """
@@ -200,15 +200,15 @@ def template_files(
     ch_def = _CHALLENGE_REGISTRY.get(challenge) if challenge else None
     is_gpu = ch_def.is_gpu if ch_def else False
 
-    if CLAUDE_TEMPLATE.exists():
-        text = CLAUDE_TEMPLATE.read_text()
+    if AGENTS_TEMPLATE.exists():
+        text = AGENTS_TEMPLATE.read_text()
         text = text.replace(PLACEHOLDER_URL, server_url)
         if challenge:
             text = text.replace(PLACEHOLDER_CHALLENGE, challenge)
         text = text.replace(PLACEHOLDER_TIMEOUT, str(timeout or DEFAULT_TIMEOUT))
         text = _strip_conditional_blocks(text, is_gpu)
-        CLAUDE_OUTPUT.write_text(text)
-        print(f"  generated {CLAUDE_OUTPUT.relative_to(ROOT)}")
+        AGENTS_OUTPUT.write_text(text)
+        print(f"  generated {AGENTS_OUTPUT.relative_to(ROOT)}")
 
     for path in TEMPLATED_FILES:
         if not path.exists():
@@ -306,17 +306,7 @@ def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
     except Exception:
         return None
     available = (data.get("available_challenges") or {})
-    sub = available.get(challenge)
-    if sub:
-        return sub
-    # Legacy fallback — server still returning flat shape.
-    if data.get("challenge") == challenge:
-        return {
-            "tracks": data.get("tracks") or {},
-            "timeout": data.get("timeout") or 5,
-            "scoring_direction": data.get("scoring_direction") or "max",
-        }
-    return None
+    return available.get(challenge)
 
 
 def collect_per_challenge_configs(
@@ -396,12 +386,12 @@ def tacit_header(stagnation_threshold: int = 2) -> str:
     same swarm.config.json the wizard writes)."""
     return (
         "# Personal tacit knowledge\n\n"
-        "Hints only **your local Claude agent** sees. Never sent to the server.\n"
+        "Hints only **your local agent** sees. Never sent to the server.\n"
         "Other agents in the swarm cannot read this file.\n\n"
         f"Read by your agent when stagnating (`my_runs_since_improvement >= {stagnation_threshold}`)\n"
         "— at that point the server randomly picks (50/50) between this file\n"
         "and the swarm's `inspiration_code` for the iteration's hint.\n\n"
-        "Your local Claude agent occasionally appends its own distilled,\n"
+        "Your local agent occasionally appends its own distilled,\n"
         "challenge-agnostic \"when stuck, try X\" lessons here — specifically\n"
         "when it has stagnated 10 iterations in a row, or every 50 total\n"
         "iterations. These are general algorithmic know-how derived from\n"
@@ -438,7 +428,7 @@ def gather_tacit_knowledge(tk_path: Path, stagnation_threshold: int = 2) -> None
     """
     print(
         "\n── Tacit knowledge (optional) ──\n"
-        "Give your local Claude agent private strategy hints. These are read\n"
+        "Give your local agent private strategy hints. These are read\n"
         f"when the agent stagnates ({stagnation_threshold}+ iterations without improvement) —\n"
         "at which point the server picks 50/50 between consulting this file and\n"
         "the swarm's `inspiration_code` for the iteration's hint. The file is\n"
@@ -973,8 +963,8 @@ def run_switch(challenge: str) -> int:
         print(f"  Prior trajectories on {prior['active_challenge']} are preserved")
         print(f"  server-side and resume on switch-back.")
     print("  All contributors auto-follow on their next iteration.")
-    print("\nTell your running Claude Code agent:")
-    print("  'Re-read CLAUDE.md and continue the loop on the new challenge.'")
+    print("\nTell your running agent (or your driver script):")
+    print("  'Re-read AGENTS.md and continue the loop on the new challenge.'")
     return 0
 
 
@@ -1039,7 +1029,7 @@ def run_sync() -> int:
     write_swarm_config(cfg)
     print(f"\nSynced to {new_challenge} (was {local_challenge}).")
     print("  Your prior trajectory on this challenge (if any) will resume server-side.")
-    print("  Tell your running Claude Code agent: 're-read CLAUDE.md'.")
+    print("  Tell your running agent (or driver script): 're-read AGENTS.md'.")
     return 0
 
 
@@ -1103,7 +1093,7 @@ def run_join(server_url: str) -> int:
             algorithm_path = f"src/{challenge}/algorithm/mod.rs"
     except Exception as e:
         print(f"  couldn't fetch swarm config from {server_url}: {e}")
-        print("  CLAUDE.md / CHALLENGE.md will only have the URL templated; rerun this command once the server is up.")
+        print("  AGENTS.md / CHALLENGE.md will only have the URL templated; rerun this command once the server is up.")
 
     contributor_name, contributor_llm = _prompt_contributor_identity(prior)
 
@@ -1157,12 +1147,23 @@ def run_join(server_url: str) -> int:
     gather_tacit_knowledge(tk_path, stagnation_threshold)
 
     print(
-        "\nDone. Open Claude Code in this directory and have it read\n"
-        "CLAUDE.md to start contributing. Edit tacit_knowledge_personal.md\n"
-        "any time with private hints — they only ever live on your machine.\n"
-        "\nWhen the swarm owner switches the active challenge, your agent\n"
-        "loop's Step 0 (`python setup.py sync`) will pick up the change\n"
-        "automatically on the next iteration.\n"
+        "\nDone — this clone is now wired into the swarm. Pick how you want\n"
+        "to drive the optimization loop:\n"
+        "\n  1. Coding agent (Claude Code, Codex, Gemini CLI, Cursor, Aider, …):\n"
+        "     Open Claude Code in this directory and have it read AGENTS.md\n"
+        "     to start contributing.\n"
+        "\n  2. Direct API calls (Anthropic, OpenAI, Google, OpenAI-compatible, …):\n"
+        "     Export your API key and run this command to start contributing:\n"
+        "\n         export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY, GOOGLE_API_KEY\n"
+        "         python scripts/run_loop.py --provider anthropic\n"
+        "\n     `python scripts/run_loop.py --help` lists the other providers,\n"
+        "     OpenAI-compatible endpoints, and how to resume an existing agent.\n"
+        "     The README has the full rundown.\n"
+        "\nEdit tacit_knowledge_personal.md any time with private hints — they\n"
+        "only ever live on your machine.\n"
+        "\nWhen the swarm owner switches the active challenge, your loop's\n"
+        "Step 0 (`python setup.py sync`) picks up the change automatically on\n"
+        "the next iteration.\n"
     )
     return 0
 

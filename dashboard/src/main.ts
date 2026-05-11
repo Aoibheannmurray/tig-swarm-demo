@@ -113,7 +113,42 @@ const CHALLENGE_SCOPED: Record<string, true> = {
   reset: true,
 };
 
+// Live-event buffer. Starts as [] (= buffering) so any WS message arriving
+// before constructPanels() runs is queued instead of being dropped against
+// an empty `panels` array. When set to null, messages flow straight through.
+// We re-enter buffering during challenge switches and per-challenge admin
+// resets so historical seeds in loadInitialState always land on top of any
+// concurrent live events, preserving chronological feed order.
+let liveBuffer: WSMessage[] | null = [];
+
+function beginBuffering(): void {
+  if (liveBuffer === null) liveBuffer = [];
+}
+
+function flushBuffer(): void {
+  if (liveBuffer === null) return;
+  const queued = liveBuffer;
+  liveBuffer = null;
+  // Dispatch oldest-first so the newest live event ends up on top of the
+  // feed (which prepends). This matches the order loadInitialState used
+  // for its historical seeds.
+  queued.sort((a, b) => {
+    const at = (a as any).timestamp ?? "";
+    const bt = (b as any).timestamp ?? "";
+    return String(at).localeCompare(String(bt));
+  });
+  for (const m of queued) dispatchMessage(m);
+}
+
 function handleMessage(msg: WSMessage) {
+  if (liveBuffer !== null) {
+    liveBuffer.push(msg);
+    return;
+  }
+  dispatchMessage(msg);
+}
+
+function dispatchMessage(msg: WSMessage) {
   // Drop challenge-scoped events that don't belong to the viewed challenge.
   // `agent_joined`, `swarm_config_updated`, `admin_broadcast`, and the
   // global slice of `stats_update` don't get filtered.
@@ -161,9 +196,12 @@ function handleMessage(msg: WSMessage) {
   // Per-challenge admin reset: panels have already cleared their state
   // above. Re-hydrate from /api/state + /api/replay so counters and
   // baselines are correct without requiring a full page reload. Without
-  // this, panels sit blank until the next live event arrives.
+  // this, panels sit blank until the next live event arrives. Buffer
+  // concurrent live events until the seed completes so they don't get
+  // overwritten by the historical replay.
   if (msg.type === "reset" && msg.challenge === getViewedChallenge()) {
-    void loadInitialState(getApiUrl(), getViewedChallenge());
+    beginBuffering();
+    void loadInitialState(getApiUrl(), getViewedChallenge()).then(flushBuffer);
   }
 }
 
@@ -198,7 +236,7 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       .then((r) => (r.ok ? r.json() : []))
       .catch(() => []);
 
-    handleMessage({
+    dispatchMessage({
       type: "stats_update",
       active_agents: state.active_agents,
       total_agents: state.total_agents ?? state.active_agents,
@@ -224,7 +262,7 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       // Use what we know from /api/state for agent name/id; the replay
       // result (if it lands) doesn't change this.
       const recentBest = (state.recent_experiments || []).find((e: any) => e.is_new_best);
-      handleMessage({
+      dispatchMessage({
         type: "new_global_best",
         experiment_id: state.best_experiment_id || "",
         agent_name: recentBest?.agent_name || "swarm",
@@ -240,21 +278,26 @@ async function loadInitialState(apiUrl: string, challenge: string) {
     }
 
     if (state.leaderboard?.length) {
-      handleMessage({
+      dispatchMessage({
         type: "leaderboard_update",
         entries: state.leaderboard,
         timestamp: new Date().toISOString(),
       } as any);
     }
 
-    // Merge experiments + hypotheses into a single chronologically-sorted
-    // stream and dispatch oldest-first. feed.ts prepends each event, so
-    // the last-dispatched lands at the top — meaning the newest event
-    // (across both kinds) ends up at the top of the feed regardless of
-    // which list it came from. Sort uses full ISO timestamps including
-    // date, so cross-day events order correctly.
-    type FeedSeed = { kind: "experiment"; ts: string; data: any }
-                  | { kind: "hypothesis"; ts: string; data: any };
+    // Merge experiments + hypotheses + agent registrations into a single
+    // chronologically-sorted stream and dispatch oldest-first. feed.ts
+    // prepends each event, so the last-dispatched lands at the top —
+    // meaning the newest event (across all kinds) ends up at the top of
+    // the feed regardless of which list it came from. Sort uses full ISO
+    // timestamps including date, so cross-day events order correctly.
+    // `agent_joined` is global (not challenge-scoped) and is replayed
+    // here so panel resets don't permanently lose "X joined the swarm"
+    // lines — WS delivery is otherwise the only path that surfaces them.
+    type FeedSeed =
+      | { kind: "experiment"; ts: string; data: any }
+      | { kind: "hypothesis"; ts: string; data: any }
+      | { kind: "agent"; ts: string; data: any };
     const seeds: FeedSeed[] = [];
     for (const exp of (state.recent_experiments || [])) {
       seeds.push({
@@ -270,11 +313,18 @@ async function loadInitialState(apiUrl: string, challenge: string) {
         data: hyp,
       });
     }
+    for (const ag of (state.recent_agents || [])) {
+      seeds.push({
+        kind: "agent",
+        ts: ag.registered_at || new Date().toISOString(),
+        data: ag,
+      });
+    }
     seeds.sort((a, b) => a.ts.localeCompare(b.ts));
     for (const seed of seeds) {
       if (seed.kind === "experiment") {
         const exp = seed.data;
-        handleMessage({
+        dispatchMessage({
           type: "experiment_published",
           experiment_id: exp.id || "",
           agent_name: exp.agent_name,
@@ -291,9 +341,9 @@ async function loadInitialState(apiUrl: string, challenge: string) {
           notes: exp.notes || "",
           timestamp: seed.ts,
         } as any);
-      } else {
+      } else if (seed.kind === "hypothesis") {
         const hyp = seed.data;
-        handleMessage({
+        dispatchMessage({
           type: "hypothesis_proposed",
           hypothesis_id: hyp.id || "",
           agent_name: hyp.agent_name,
@@ -304,6 +354,14 @@ async function loadInitialState(apiUrl: string, challenge: string) {
           parent_hypothesis_id: hyp.parent_hypothesis_id || null,
           // Original created_at preserves timestamps across challenge
           // switches; otherwise everything would re-stamp to "just now".
+          timestamp: seed.ts,
+        } as any);
+      } else {
+        const ag = seed.data;
+        dispatchMessage({
+          type: "agent_joined",
+          agent_id: ag.id,
+          agent_name: ag.name,
           timestamp: seed.ts,
         } as any);
       }
@@ -325,8 +383,11 @@ async function loadInitialState(apiUrl: string, challenge: string) {
 // React to user picking a different challenge in the selector. Reconstruct
 // the display panel (its component class differs per challenge), clear
 // challenge-scoped state on every other panel via the existing `reset`
-// handler, then re-hydrate from REST with `?challenge=`.
+// handler, then re-hydrate from REST with `?challenge=`. Buffer live WS
+// events during the re-hydrate so they can't beat the historical seeds
+// to the panels and get visually overwritten.
 onViewedChallengeChange((c) => {
+  beginBuffering();
   constructDisplayPanel();
   // Use the `reset` event the panels already handle to clear their
   // challenge-scoped state (chart history, leaderboard rows, feed items).
@@ -334,7 +395,7 @@ onViewedChallengeChange((c) => {
     p.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
     p.setChallenge?.(c);
   });
-  void loadInitialState(getApiUrl(), c);
+  void loadInitialState(getApiUrl(), c).then(flushBuffer);
 });
 
 // ── Welcome overlay ──
@@ -347,7 +408,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "4") window.location.href = "/benchmark.html";
   if (e.key === "5") window.location.href = "/trajectories.html";
   if (e.key === "j" || e.key === "J") toggleWelcome();
-  if (e.key === "r" || e.key === "R") startReplay(getApiUrl(), handleMessage);
+  if (e.key === "r" || e.key === "R") startReplay(getApiUrl(), dispatchMessage);
 });
 
 // ── Connect ──
@@ -355,6 +416,9 @@ if (isMock) {
   console.log("[Dashboard] Running in MOCK mode");
   soundEnabled = true;
   constructPanels();
+  // No loadInitialState in mock mode — flush the boot-time buffer now
+  // so mock-generated events dispatch immediately.
+  flushBuffer();
   const mock = new MockDataGenerator();
   mock.onMessage(handleMessage);
   mock.start();
@@ -368,9 +432,14 @@ if (isMock) {
   const apiUrl = getApiUrl();
   console.log(`[Dashboard] Connecting to ${wsUrl}, API: ${apiUrl}`);
 
+  // Live events flow into the boot-time buffer (declared at module scope)
+  // until constructPanels + loadInitialState finish. Without this, a WS
+  // event arriving before constructPanels would dispatch against an empty
+  // `panels` array and silently disappear; one arriving mid-load would be
+  // visually overrun by historical seeds prepended on top of it.
   void loadSwarmConfig(apiUrl).then(() => {
     constructPanels();
-    void loadInitialState(apiUrl, getViewedChallenge());
+    void loadInitialState(apiUrl, getViewedChallenge()).then(flushBuffer);
   });
 
   const ws = new SwarmWebSocket(wsUrl);

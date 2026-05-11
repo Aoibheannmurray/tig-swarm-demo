@@ -2,7 +2,7 @@
 
 > **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file.
 
-> **Active challenge:** this swarm is configured for **${CHALLENGE_NAME}**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of CLAUDE.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
+> **Active challenge:** this swarm is configured for **${CHALLENGE_NAME}**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of AGENTS.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
 
 > **Switching challenges:** the swarm host can flip the active challenge for everyone with `python setup.py switch <challenge>`. Per-challenge state is preserved on the server, so resuming a previous challenge picks up every agent's prior trajectory. Contributors auto-follow the host's choice via `python setup.py sync` — your agent loop runs that at Step 0 below, so a host-side switch is picked up on your next iteration. Only the host can change the active challenge; contributors get a clear error if they try.
 

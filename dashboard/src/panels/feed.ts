@@ -52,16 +52,13 @@ export class FeedPanel implements Panel {
         //   1. beats own best AND new global best → show both %s
         //   2. beats own best only → show own-best %
         //   3. no improvement → just the score
-        // Server deltas are improvement-positive (positive = score dropped);
-        // we render them with the score-change sign convention ("-5%" green
-        // for improvement, "+5%" red for regression) so the sign matches the
-        // direction the score moved.
+        // Server deltas are improvement-positive (positive = better score).
+        // Show "+" green for improvement, "-" red for regression.
         const fmtDelta = (d: number | null | undefined): string => {
           if (d == null) return "";
-          const scoreChange = -d;
-          const sign = scoreChange >= 0 ? "+" : "";
+          const sign = d > 0 ? "+" : "";
           const color = d > 0 ? "var(--green)" : d < 0 ? "var(--red)" : "var(--text-dim)";
-          return `<span style="color:${color}">${sign}${scoreChange.toFixed(4)}%</span>`;
+          return `<span style="color:${color}">${sign}${d.toFixed(4)}%</span>`;
         };
 
         const ownDelta = msg.delta_vs_own_best_pct;

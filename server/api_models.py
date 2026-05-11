@@ -3,7 +3,7 @@
 Before this module, ``/api/state``, ``/api/replay``, and ``/api/diversity``
 returned ad-hoc dicts assembled inline in server.py — the dashboard's
 ``types.ts`` redeclared them by hand and the agent loop dict-poked them
-with ``python3 -c`` snippets in CLAUDE.md. The contract was implicit,
+with ``python3 -c`` snippets in AGENTS.md. The contract was implicit,
 documented only in field comments scattered across server.py.
 
 This module makes those contracts explicit. Each endpoint that has a
@@ -68,23 +68,23 @@ class ReplayCompactRow(_ResponseBase):
 # ── /api/diversity ───────────────────────────────────────────────────────
 
 
-class DiversityAgent(BaseModel):
+class DiversityTrajectory(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    agent_id: str
-    agent_name: str
+    trajectory_id: str
+    display_name: str
 
 
 class DiversityResponse(BaseModel):
-    """N×N matrix of pairwise code-diversity ratios.
+    """N×N matrix of pairwise code-diversity ratios across trajectories.
 
     ``matrix[i][j]`` semantics:
-      - ``i == j``: fraction of agent i's lines that are unique to them
-        (no other agent has those lines).
-      - ``i != j``: fraction of agent i's lines that also appear in
-        agent j's program.
+      - ``i == j``: fraction of trajectory i's lines that are unique to it
+        (no other trajectory has those lines).
+      - ``i != j``: fraction of trajectory i's lines that also appear in
+        trajectory j's program.
     """
     model_config = ConfigDict(extra="forbid")
-    agents: list[DiversityAgent]
+    trajectories: list[DiversityTrajectory]
     matrix: list[list[float]]
 
 
@@ -116,6 +116,12 @@ class StateRecentHypothesis(_ResponseBase):
     created_at: Optional[str] = None
 
 
+class StateRecentAgent(_ResponseBase):
+    id: str
+    name: str
+    registered_at: str
+
+
 class StateLeaderboardEntry(_ResponseBase):
     rank: int
     agent_id: str
@@ -136,7 +142,7 @@ class StateResponse(_ResponseBase):
 
     NOT YET enforced as a FastAPI ``response_model``. The endpoint still
     returns hand-built dicts in server.py; this model captures the wire
-    form so the dashboard's ``types.ts`` and CLAUDE.md's agent-loop
+    form so the dashboard's ``types.ts`` and AGENTS.md's agent-loop
     snippets have a single named contract to reference.
 
     Agent-loop view (``?agent_id=…``) and dashboard view (no agent_id)
@@ -180,6 +186,10 @@ class StateResponse(_ResponseBase):
     total_trajectories: Optional[int] = None
     recent_experiments: Optional[list[StateRecentExperiment]] = None
     recent_hypotheses: Optional[list[StateRecentHypothesis]] = None
+    # Recent agent registrations (global — not challenge-scoped). Lets
+    # the dashboard replay "X joined the swarm" feed entries on reload
+    # or after a panel reset, since `agent_joined` is otherwise live-only.
+    recent_agents: Optional[list[StateRecentAgent]] = None
 
     # Both views
     leaderboard: Optional[list[StateLeaderboardEntry]] = None

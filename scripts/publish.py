@@ -88,13 +88,11 @@ def main():
     }
     if kernel_path and kernel_path.exists():
         payload["kernel_code"] = kernel_path.read_text()
-    # VRP-only fields. benchmark.py omits these for non-VRP challenges; we
-    # forward them only when present so SAT / knapsack / etc. payloads
-    # don't carry meaningless num_vehicles=0 / total_distance=score.
-    if bench.get("num_vehicles") is not None:
-        payload["num_vehicles"] = bench["num_vehicles"]
-    if bench.get("total_distance") is not None:
-        payload["total_distance"] = bench["total_distance"]
+    # Opaque per-challenge roll-up. Only present for challenges whose
+    # benchmark.py registered an aggregator (e.g. VRP emits num_vehicles +
+    # total_distance here). Absent for everyone else.
+    if bench.get("challenge_metrics") is not None:
+        payload["challenge_metrics"] = bench["challenge_metrics"]
 
     # Pre-POST: surface what we're sending so a silent drop is visible at
     # publish time (the proxy / size class of bug we hit earlier was

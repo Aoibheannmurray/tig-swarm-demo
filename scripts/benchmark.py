@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
-Reads swarm-wide config from `https://t2-production-905b.up.railway.app////api/swarm_config` (or from
-`./swarm.config.json` as a fallback for offline use) to pick the challenge,
-the per-track instance counts, and the per-instance solver timeout. Builds
-the right cargo binary, generates instances on first run (cached under
-`datasets/<challenge>/generated/`), then runs solver + evaluator on each
-instance in parallel.
+Pulls swarm-wide config live from the server's `/api/swarm_config` (the
+server URL is whatever `swarm.config.json:server_url` was templated to by
+`setup.py join`). Falls back to the local `swarm.config.json` snapshot when
+the server is unreachable, so `python scripts/benchmark.py` works for
+offline iteration on `algorithm/mod.rs` edits. The config tells us the
+active challenge, per-track instance counts, and the per-instance solver
+timeout. We then build the right cargo binary, generate instances on first
+run (cached under `datasets/<challenge>/generated/`), and run
+solver + evaluator on each instance in parallel.
 
 # Scoring
 
@@ -45,9 +48,12 @@ Output JSON shape:
       "instances_infeasible": 0,
       "track_scores": {"track_key": <mean quality>, ...},
       "viz_data": { ... per-challenge or null ... },
-      # VRP-only roll-ups, only meaningful when the challenge is VRP:
-      "num_vehicles": 96,
-      "total_distance": 12345.6,
+      # Optional, opaque per-challenge roll-up. Only emitted when the active
+      # challenge has registered an aggregator in `_AGG_METRICS` — e.g. VRP
+      # publishes {"num_vehicles": ..., "total_distance": ...} here. The
+      # server stores it verbatim as JSON; the dashboard reads challenge-
+      # specific keys out of it.
+      "challenge_metrics": { ... per-challenge or absent ... },
     }
 """
 
@@ -124,10 +130,19 @@ def load_swarm_config() -> dict:
         try:
             with urllib.request.urlopen(f"{SERVER}/api/swarm_config", timeout=4) as r:
                 data = json.load(r)
-            ch = data.get("challenge") or data.get("active_challenge")
+            ch = data.get("active_challenge")
             avail = data.get("available_challenges", {})
-            if ch and ch in avail:
-                data.setdefault("is_gpu", avail[ch].get("is_gpu", False))
+            sub = avail.get(ch) if ch else None
+            if sub is not None:
+                # The agent-loop call sites (lines 1149+) read these as
+                # top-level keys. Flatten the active challenge's sub-config
+                # in once, here, instead of plumbing the nested shape
+                # through the rest of benchmark.py.
+                data["challenge"] = ch
+                data["tracks"] = sub.get("tracks") or {}
+                data["timeout"] = sub.get("timeout") or 5
+                data["scoring_direction"] = sub.get("scoring_direction") or "max"
+                data["is_gpu"] = sub.get("is_gpu", False)
             return data
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
             print(f"warning: couldn't reach {SERVER}/api/swarm_config ({e})", file=sys.stderr)
@@ -235,7 +250,7 @@ def parse_evaluator_score(eval_result: subprocess.CompletedProcess) -> tuple[flo
         payload = json.loads(stdout)
     except json.JSONDecodeError:
         return None, f"invalid evaluator JSON: {stdout[:80]}"
-    score = payload.get("score", payload.get("distance"))
+    score = payload.get("score")
     if not isinstance(score, (int, float)):
         return None, "evaluator JSON missing numeric score"
     return float(score), None
@@ -319,12 +334,13 @@ def _reexec_in_docker(cfg: dict) -> int:
     if server:
         env_flags += ["-e", f"TIG_SWARM_SERVER={server}"]
 
+    suffix = "gpu" if is_gpu_challenge(cfg) else "cpu"
     cmd = [
         "docker", "run", "--rm",
         *gpu_flags,
         "-v", f"{ROOT_DIR}:/app",
-        "-v", "tig-cargo-cache:/app/target",
-        "-v", "tig-cargo-registry:/root/.cargo/registry",
+        "-v", f"tig-cargo-cache-{suffix}:/app/target",
+        "-v", f"tig-cargo-registry-{suffix}:/root/.cargo/registry",
         *env_flags,
         image,
         "python3", "/app/scripts/benchmark.py",
@@ -447,8 +463,9 @@ def _vrp_parse_routes(sol_path: str) -> list:
 def _vrp_extras(inst_path: str, sol_path: str) -> dict:
     positions = _vrp_parse_positions(inst_path)
     routes = _vrp_parse_routes(sol_path)
+    n_vehicles = len(routes)
     if not positions or not routes:
-        return {"num_vehicles": len(routes), "route_data": None}
+        return {"num_vehicles": n_vehicles, "route_data": None}
     depot = positions.get(0, (500, 500))
     route_data = {
         "depot": {"x": depot[0], "y": depot[1]},
@@ -464,7 +481,21 @@ def _vrp_extras(inst_path: str, sol_path: str) -> dict:
             for i, route_nodes in enumerate(routes)
         ],
     }
-    return {"num_vehicles": len(routes), "route_data": route_data}
+    return {"num_vehicles": n_vehicles, "route_data": route_data}
+
+
+def _vrp_aggregate_metrics(results: list[dict]) -> dict:
+    """Roll-up summary across all VRP instances. Lives in challenge_metrics
+    on the published payload — the dashboard's VRP panel reads it for the
+    headline numbers (total vehicles, total tour length)."""
+    return {
+        "num_vehicles": sum(
+            r.get("num_vehicles", 0) for r in results if r.get("feasible")
+        ),
+        "total_distance": sum(
+            r["score"] for r in results if r.get("feasible")
+        ),
+    }
 
 
 # ── Job-scheduling-specific extras (Gantt viz_data) ──────────────
@@ -886,6 +917,15 @@ _AGG_EXTRAS = {
     "neuralnet" "_optimizer":   "neuralnet_data",
 }
 
+# Optional per-challenge aggregate metrics — emitted to the publish payload
+# under `challenge_metrics`. Each entry is a callable `(results) -> dict`
+# (the same `results` list passed to `aggregate()`). Challenges with no
+# entry emit no `challenge_metrics` field. Same adjacent-string-literal
+# convention as `_PER_INSTANCE_EXTRAS` for setup.py-rewrite safety.
+_AGG_METRICS = {
+    "vehicle" "_routing": _vrp_aggregate_metrics,
+}
+
 
 # ── C3 remote benchmark ──────────────────────────────────────────
 
@@ -1222,17 +1262,13 @@ def main() -> int:
         } or None
         out["viz_data"] = viz
 
-    # VRP-only roll-ups for the routes panel's headline numbers. Omitted
-    # entirely for other challenges so the wire payload doesn't carry
-    # num_vehicles=0 / total_distance=<score> placeholders that mean
-    # nothing for SAT, knapsack, scheduling, or energy.
-    if challenge == "vehicle" "_routing":
-        out["num_vehicles"] = sum(
-            r.get("num_vehicles", 0) for r in results if r.get("feasible")
-        )
-        out["total_distance"] = sum(
-            r["score"] for r in results if r.get("feasible")
-        )
+    # Per-challenge aggregate metrics, dispatched from `_AGG_METRICS`.
+    # Surfaced on the published payload under `challenge_metrics` (a generic
+    # JSON dict) — challenges that don't register an aggregator simply omit
+    # the field, so the wire payload stays clean.
+    metrics_fn = _AGG_METRICS.get(challenge)
+    if metrics_fn is not None:
+        out["challenge_metrics"] = metrics_fn(results)
 
     print(json.dumps(out, indent=2))
     return 0
