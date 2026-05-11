@@ -47,8 +47,12 @@ _MODEL_MAX_TOKENS: list[tuple[str, int]] = [
 ]
 
 
+def _base_model_name(model: str) -> str:
+    return model.rsplit("/", 1)[-1]
+
+
 def _max_tokens_for_model(model: str) -> int:
-    m = model.lower()
+    m = _base_model_name(model).lower()
     for prefix, limit in _MODEL_MAX_TOKENS:
         if m.startswith(prefix):
             return limit
@@ -93,11 +97,41 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> str:
 
 def _needs_new_api(model: str) -> bool:
     """Models that require max_completion_tokens and developer role."""
-    if re.match(r"^o\d", model, re.IGNORECASE):
+    base_model = _base_model_name(model)
+    if re.match(r"^o\d", base_model, re.IGNORECASE):
         return True
-    if re.match(r"^gpt-5", model, re.IGNORECASE):
+    if re.match(r"^gpt-5", base_model, re.IGNORECASE):
         return True
     return False
+
+
+def _is_max_tokens_unsupported(error: str) -> bool:
+    return (
+        "Unsupported parameter" in error
+        and "'max_tokens'" in error
+        and "max_completion_tokens" in error
+    )
+
+
+def _openai_chat_body(
+    system: str,
+    prompt: str,
+    model: str,
+    token_param: str,
+    new_api: bool,
+) -> dict:
+    messages = (
+        [{"role": "developer", "content": system},
+         {"role": "user", "content": prompt}]
+        if new_api else
+        [{"role": "system", "content": system},
+         {"role": "user", "content": prompt}]
+    )
+    return {
+        "model": model,
+        "messages": messages,
+        token_param: _max_tokens_for_model(model),
+    }
 
 
 def call_openai(
@@ -107,25 +141,25 @@ def call_openai(
     base = (api_base or "https://api.openai.com").rstrip("/")
     new_api = _needs_new_api(model)
     token_param = "max_completion_tokens" if new_api else "max_tokens"
-    messages = (
-        [{"role": "developer", "content": system},
-         {"role": "user", "content": prompt}]
-        if new_api else
-        [{"role": "system", "content": system},
-         {"role": "user", "content": prompt}]
-    )
-    data = _post_json(
-        f"{base}/v1/chat/completions",
-        {
-            "model": model,
-            "messages": messages,
-            token_param: _max_tokens_for_model(model),
-        },
-        {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
+    url = f"{base}/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        data = _post_json(
+            url,
+            _openai_chat_body(system, prompt, model, token_param, new_api),
+            headers,
+        )
+    except RuntimeError as e:
+        if token_param != "max_tokens" or not _is_max_tokens_unsupported(str(e)):
+            raise
+        data = _post_json(
+            url,
+            _openai_chat_body(system, prompt, model, "max_completion_tokens", new_api),
+            headers,
+        )
     return data["choices"][0]["message"]["content"]
 
 
