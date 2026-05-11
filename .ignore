@@ -1,5 +1,9 @@
 # Files irrelevant to the agent optimization loop
-# (dashboard, server, infra, inactive challenges, build artifacts)
+# (infra, inactive challenges, build artifacts)
+#
+# WARNING: Do NOT add Dockerfile*, dashboard/, or server/ here.
+# Railway CLI respects .ignore when building its upload snapshot,
+# so excluding them breaks `railway up` deploys.
 
 docs/
 tig-monorepo/
