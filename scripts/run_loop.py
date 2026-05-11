@@ -15,6 +15,19 @@ Usage:
     # Resume a previous agent
     python scripts/run_loop.py --provider anthropic --agent-id <id> --agent-name <name>
 
+Picking a model (--model):
+    anthropic   claude-opus-4-7, claude-sonnet-4-6 (default),
+                claude-haiku-4-5-20251001
+    openai      gpt-4o (default), gpt-5, gpt-5-mini, o1, o3-mini
+                (gpt-5* and o-series auto-switch to the Responses API)
+    google      gemini-2.5-flash (default), gemini-2.5-pro
+    claude-code uses your local `claude -p` session — pass any model ID that
+                your Claude Code install accepts, or omit for its default
+
+    --api-base lets you point --provider openai at any OpenAI-compatible
+    endpoint (Together, Groq, DeepSeek, Ollama, vLLM, …); pass the host's
+    model ID via --model.
+
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
 --c3-api-key, or existing `c3 login` credentials.
@@ -821,7 +834,14 @@ def parse_args() -> argparse.Namespace:
         choices=["anthropic", "openai", "google", "claude-code"],
         help="LLM provider (claude-code uses 'claude -p' headless mode, no API key needed)",
     )
-    p.add_argument("--model", help="Model ID (default: per-provider sensible default)")
+    default_hint = ", ".join(f"{prov}={mid}" for prov, mid in DEFAULT_MODELS.items())
+    p.add_argument(
+        "--model",
+        help=(
+            f"Model ID. Defaults: {default_hint}. "
+            "See the examples below for common alternatives per provider."
+        ),
+    )
     p.add_argument("--api-key", help="API key (default: from env var)")
     p.add_argument("--api-base", help="Base URL for OpenAI-compatible endpoints")
     p.add_argument(
