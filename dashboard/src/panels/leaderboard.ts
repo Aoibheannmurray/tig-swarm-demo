@@ -44,6 +44,7 @@ export class LeaderboardPanel implements Panel {
         <div class="leaderboard-header">
           <span class="lb-rank">#</span>
           <span class="lb-name">Agent</span>
+          <span class="lb-model">Model</span>
           <button type="button" class="lb-col-sm lb-sortable" data-sort="runs">Runs<span class="lb-arrow"></span></button>
           <button type="button" class="lb-col-sm lb-sortable" data-sort="improvements">Imp<span class="lb-arrow"></span></button>
           <button type="button" class="lb-col-sm lb-sortable" data-sort="runs_since_improvement">Stag<span class="lb-arrow"></span></button>
@@ -150,15 +151,14 @@ export class LeaderboardPanel implements Panel {
       const bestText = formatScore(entry.best_ever_score);
       const scoreImproved = improved && (this.sortKey === "current_score" || this.sortKey === "best_ever_score");
 
-      const llmBadge = entry.llm_type
-        ? `<span class="lb-llm" title="LLM: ${escapeHTML(entry.llm_type)}">${escapeHTML(entry.llm_type)}</span>`
-        : "";
+      const llmText = entry.llm_type ? escapeHTML(entry.llm_type) : "";
       row.innerHTML = `
         <span class="lb-rank">${rank}</span>
         <span class="lb-name">
           <span class="lb-dot" style="background:${color}"></span>
-          ${entry.agent_name}${llmBadge}
+          ${entry.agent_name}
         </span>
+        <span class="lb-model" title="${llmText}">${llmText}</span>
         <span class="lb-col-sm">${entry.runs}</span>
         <span class="lb-col-sm">${entry.improvements}</span>
         <span class="lb-col-sm${entry.runs_since_improvement >= 2 ? " lb-stag--alert" : ""}">${entry.runs_since_improvement}</span>

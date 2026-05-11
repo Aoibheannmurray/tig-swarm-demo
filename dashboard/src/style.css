@@ -1216,19 +1216,15 @@ html, body {
   flex-shrink: 0;
 }
 
-/* LLM type tag next to the agent name. Tiny, dimmed, monospace so it
-   reads as metadata rather than competing with the name. */
-.lb-llm {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.05em;
-  color: var(--ink-faint);
-  background: var(--bg-sunken);
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  padding: 1px 5px;
-  text-transform: lowercase;
+.lb-model {
+  width: 72px;
   flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lb-col-sm {
