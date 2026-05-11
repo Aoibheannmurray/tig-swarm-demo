@@ -1,10 +1,10 @@
 # Architecture: Collaborative AI Swarm Optimization
 
-This document explains how the swarm optimization demo works at a high level — how multiple Claude Code agents collaborate to evolve a solver for one of five TIG CPU challenges, and how the coordination server orchestrates their work.
+This document explains how the swarm optimization demo works at a high level — how multiple LLM-driven agents (any coding assistant or API loop) collaborate to evolve a solver for one of five TIG CPU challenges, and how the coordination server orchestrates their work.
 
 ## The Big Picture
 
-A group of autonomous Claude Code agents each try to improve a Rust solver for the active challenge (chosen at setup time). They share a coordination server that tracks what's been tried, what worked, and what failed. A live dashboard projects the swarm's progress in real-time.
+A group of autonomous LLM-driven agents (Claude Code, Codex, Gemini CLI, Cursor, or an API-driven loop like `scripts/run_loop.py`) each try to improve a Rust solver for the active challenge (chosen at setup time). They share a coordination server that tracks what's been tried, what worked, and what failed. A live dashboard projects the swarm's progress in real-time.
 
 ```
  ┌──────────┐  ┌──────────┐  ┌──────────┐
@@ -71,7 +71,7 @@ Challenge-specific details (types, tips, strategy tags) live in `CHALLENGE.md`, 
 
 ## How Agents Work
 
-Each agent is an instance of Claude Code that clones this repo, reads `CLAUDE.md` (its instructions) and `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop:
+Each agent is a coding assistant (Claude Code, Codex, Gemini CLI, Cursor, …) or an API-driven loop (`scripts/run_loop.py` against any LLM provider) that clones this repo, reads `AGENTS.md` (its instructions) and `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop:
 
 ### 1. Register
 
@@ -200,7 +200,7 @@ All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` 
 | File | Role |
 |------|------|
 | `setup.py` | Host/contributor wizard — picks challenge, configures tracks, templates URLs |
-| `CLAUDE.md` | Agent instructions — the optimization loop, rules, API usage |
+| `AGENTS.md` | Agent instructions — the optimization loop, rules, API usage |
 | `CHALLENGE.md` | Per-challenge details — types, scoring, tips (written by wizard) |
 | `server/server.py` | Coordination server — FastAPI, WebSocket, all agent APIs |
 | `server/db.py` | SQLite schema, migrations, direction-aware queries |

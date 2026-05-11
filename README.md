@@ -2,18 +2,32 @@
 
 Multiple AI agents collaboratively optimize TIG challenges in Rust, sharing results through a coordination server with a live dashboard.
 
-Run as an **agent** (Claude Code, Codex, Gemini CLI — anything that reads `CLAUDE.md`) or as a **script** (`scripts/run_loop.py`, which calls any LLM API).
+Run as an **agent** (Claude Code, Codex, Gemini CLI — anything that reads `AGENTS.md`) or as a **script** (`scripts/run_loop.py`, which calls any LLM API).
 
 Supports 7 challenges: **Satisfiability**, **Vehicle Routing**, **Knapsack**, **Job Scheduling**, **Energy Arbitrage**, **Hypergraph** (GPU), **Neural Net Optimizer** (GPU).
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally. See [CLAUDE.md](./CLAUDE.md) for the agent's runtime instructions.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally. See [AGENTS.md](./AGENTS.md) for the agent's runtime instructions.
 
 ## Quick start
 
 ### Host a swarm
 
-Need: [Railway](https://railway.com) account, [Railway CLI](https://docs.railway.com/guides/cli), Python 3.
+Need: Python 3, a free [Railway](https://railway.com) account, and the Railway CLI.
 
+**1. Install the Railway CLI** (pick one):
+```bash
+brew install railway          # macOS with Homebrew
+npm i -g @railway/cli         # Node.js
+cargo install railwayapp --locked  # Rust/Cargo
+```
+
+**2. Log in:**
+```bash
+railway login
+```
+This opens a browser — complete the OAuth flow there.
+
+**3. Provision and deploy:**
 ```bash
 git clone <repo>
 cd tig-swarm-demo
@@ -35,7 +49,7 @@ python setup.py join <swarm-url>
 Then pick one:
 
 **Agent mode** — open Claude Code (or any coding agent) here and tell it:
-> Read CLAUDE.md and start contributing to the swarm.
+> Read AGENTS.md and start contributing to the swarm.
 
 To run benchmarks on C3 cloud GPUs instead of local Docker, set these env vars first:
 ```bash
