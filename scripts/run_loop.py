@@ -682,7 +682,22 @@ def _run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tu
             cmd.append("--no-build")
 
         print(f"    [C3] Running: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, env=env)
+        print(f"    [C3] (streaming deploy output — first run uploads ~10GB Docker image)")
+        # Stream output so user can see progress (docker build/save/upload)
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, cwd=ROOT, env=env,
+        )
+        deploy_output_lines = []
+        for line in proc.stdout:
+            line = line.rstrip()
+            deploy_output_lines.append(line)
+            print(f"    [C3]   {line}")
+        proc.wait()
+        result = subprocess.CompletedProcess(
+            cmd, proc.returncode,
+            stdout="\n".join(deploy_output_lines), stderr="",
+        )
 
     combined = (result.stdout or "") + "\n" + (result.stderr or "")
     print(f"    [C3] Deploy output: {combined[:300]}")
