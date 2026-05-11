@@ -16,7 +16,7 @@ export function initQROverlay() {
         <canvas id="qr-canvas" width="200" height="200"></canvas>
       </div>
       <div class="qr-url">${REPO_URL.replace("https://", "")}</div>
-      <div class="qr-instructions">Clone this repo, read CLAUDE.md, start contributing</div>
+      <div class="qr-instructions">Clone this repo, read AGENTS.md, start contributing</div>
       <div class="qr-hint">Press Q to close</div>
     </div>
   `;

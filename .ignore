@@ -19,7 +19,7 @@ scripts/dump_trajectories.py
 
 ARCHITECTURE.md
 README.md
-CLAUDE.md.template
+AGENTS.md.template
 Cargo.lock
 setup.py
 

@@ -3,7 +3,7 @@
 Before this module, ``/api/state``, ``/api/replay``, and ``/api/diversity``
 returned ad-hoc dicts assembled inline in server.py — the dashboard's
 ``types.ts`` redeclared them by hand and the agent loop dict-poked them
-with ``python3 -c`` snippets in CLAUDE.md. The contract was implicit,
+with ``python3 -c`` snippets in AGENTS.md. The contract was implicit,
 documented only in field comments scattered across server.py.
 
 This module makes those contracts explicit. Each endpoint that has a
@@ -136,7 +136,7 @@ class StateResponse(_ResponseBase):
 
     NOT YET enforced as a FastAPI ``response_model``. The endpoint still
     returns hand-built dicts in server.py; this model captures the wire
-    form so the dashboard's ``types.ts`` and CLAUDE.md's agent-loop
+    form so the dashboard's ``types.ts`` and AGENTS.md's agent-loop
     snippets have a single named contract to reference.
 
     Agent-loop view (``?agent_id=…``) and dashboard view (no agent_id)

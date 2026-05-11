@@ -3,7 +3,7 @@
 
 Pulls experiments grouped by trajectory (not by agent) and writes each
 trajectory's code evolution with unified diffs between consecutive iterations.
-Point Claude Code at the output file for LLM analysis.
+Point any coding agent (Claude Code, Codex, …) or an LLM directly at the output file for analysis.
 
 Usage:
     # Dump all trajectories on the active challenge
