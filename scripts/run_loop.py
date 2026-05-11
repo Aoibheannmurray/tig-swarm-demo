@@ -948,10 +948,6 @@ def main() -> int:
         print(f"  [STATE] My best: {my_score}  Global best: {global_best}")
         print(f"  [STATE] Runs: {runs}  Improvements: {improvements}  Stagnation: {stagnation}")
 
-        prior = state.get("prior_hypotheses") or []
-        if prior:
-            print(f"  [STATE] {len(prior)} prior failed hypotheses on this program")
-
         reset = state.get("trajectory_reset")
         if reset:
             print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')} **")
@@ -981,6 +977,10 @@ def main() -> int:
             print(f"  [LLM] Stagnation hint: {hint}")
         if state.get("inspiration_code"):
             print(f"  [LLM] Inspiration available from {state.get('inspiration_agent_name', '?')}")
+
+        prior = state.get("prior_hypotheses") or []
+        if prior:
+            print(f"  [LLM] {len(prior)} prior failed hypotheses on this program")
 
         print(f"  [LLM] Generating hypothesis via {args.provider}/{model}…")
         try:

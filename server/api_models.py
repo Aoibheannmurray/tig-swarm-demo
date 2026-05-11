@@ -156,7 +156,9 @@ class StateResponse(_ResponseBase):
     hypotheses_count: int
 
     # Agent-loop view fields
+    is_gpu: Optional[bool] = None
     best_algorithm_code: Optional[str] = None
+    best_kernel_code: Optional[str] = None
     best_experiment_id: Optional[str] = None
     my_best_score: Optional[float] = None
     my_runs: Optional[int] = None
@@ -165,6 +167,7 @@ class StateResponse(_ResponseBase):
     prior_hypotheses: Optional[list[dict]] = None
     hypothesis_recall_message: Optional[str] = None
     inspiration_code: Optional[str] = None
+    inspiration_kernel_code: Optional[str] = None
     inspiration_agent_name: Optional[str] = None
     stagnation_hint: Optional[str] = None
     trajectory_reset: Optional[dict] = None

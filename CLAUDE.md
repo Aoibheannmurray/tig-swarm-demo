@@ -75,6 +75,7 @@ import sys,json
 d=json.load(sys.stdin)
 print(f'My best: {d[\"my_best_score\"]}, Runs: {d[\"my_runs\"]}, Improvements: {d[\"my_improvements\"]}, Stagnation: {d[\"my_runs_since_improvement\"]}')
 print(f'Global best: {d[\"best_score\"]}')
+print(f'GPU challenge: {d.get(\"is_gpu\", False)}')
 reset=d.get('trajectory_reset')
 if reset:
     print(f'** TRAJECTORY RESET — {reset[\"type\"]} **')
@@ -92,8 +93,9 @@ if prior:
 ```
 
 This returns:
+- `is_gpu` — whether the active challenge is a GPU challenge. When `true`, the response includes `best_kernel_code` and `inspiration_kernel_code`; when `false`, only Rust code is present.
 - `best_algorithm_code` — **your own** current best code (or the swarm's host-configured *initial algorithm* on first run; may be empty if the host hasn't set one — in that case you'll need to author a minimal `solve_challenge` yourself). Write this to `mod.rs`.
-- `best_kernel_code` — your current best CUDA kernel code. Write this to `kernels.cu` alongside `mod.rs`.
+- `best_kernel_code` — *(GPU challenges only)* your current best CUDA kernel code. Write this to `kernels.cu` alongside `mod.rs`.
 - `my_best_score` — your current best score (null on first run)
 - `my_runs` — total iterations you've completed
 - `my_improvements` — how many times you've beaten your own best
@@ -101,8 +103,8 @@ This returns:
 - `best_score` — the current **global** best score across all agents
 - `prior_hypotheses` — (only present after stagnating past `hypothesis_recall_threshold` iterations) the 20 most recent failed hypotheses tried on **this program** by any agent (including yourself). Each entry has `title`, `strategy_tag`, `description`, and `score`. When this field appears, `hypothesis_recall_message` contains an explicit directive to try something structurally different.
 - `hypothesis_recall_message` — (only present alongside `prior_hypotheses`) explicit directive: "The following strategies were tried on this program and did not improve the score. Try something structurally different from these approaches."
-- `inspiration_code` — (only present when stagnating past `stagnation_threshold`) another agent's current best code to study for ideas. **Read it for inspiration but do NOT write it to `mod.rs`.**
-- `inspiration_kernel_code` — (only present alongside `inspiration_code`) the inspiration agent's CUDA kernel code. Save to `/tmp/inspiration.cu` for study alongside `/tmp/inspiration.rs`.
+- `inspiration_code` — (only present when stagnating past `stagnation_threshold`) another agent's current best Rust code to study for ideas. **Read it for inspiration but do NOT write it to `mod.rs`.**
+- `inspiration_kernel_code` — *(GPU challenges only, alongside `inspiration_code`)* the inspiration agent's CUDA kernel code. Save to `/tmp/inspiration.cu` for study alongside `/tmp/inspiration.rs`.
 - `inspiration_agent_name` — whose code the inspiration came from
 - `stagnation_hint` — (only present when stagnating past `stagnation_threshold`) either `"tacit_knowledge"` or `"inspiration"`. The server picks one at random (50/50). Follow the hint: if `"tacit_knowledge"`, read your local `tacit_knowledge_personal.md` for strategy hints; if `"inspiration"`, study the `inspiration_code`. **Fallback**: if the hint says `"tacit_knowledge"` but the file is missing or empty, use `inspiration_code` instead.
 - `trajectory_reset` — (only present when a trajectory reset just occurred) object with `type` (`"fresh_start"` or `"adopted_inactive"`) and optionally `prior_score`. When present, `my_best_score` is null and `best_algorithm_code` is your new starting point — treat this like a first run. Post a message about the reset.
@@ -119,7 +121,7 @@ echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('bes
   > src/neuralnet_optimizer/algorithm/mod.rs
 ```
 
-Also write your CUDA kernel code:
+For GPU challenges (`is_gpu` is `true` in the state), also write your CUDA kernel code:
 
 ```bash
 echo "$STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('best_kernel_code',''))" \
@@ -139,27 +141,20 @@ code=d.get('inspiration_code')
 if code:
     print(code, file=open('/tmp/inspiration.rs','w'))
     print('Saved inspiration to /tmp/inspiration.rs')
-"
-```
-
-For GPU challenges, also save the inspiration kernel code:
-
-```bash
-echo "$STATE" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
+# GPU challenges only: save inspiration kernel code
 kernel=d.get('inspiration_kernel_code')
 if kernel:
     print(kernel, file=open('/tmp/inspiration.cu','w'))
+    print('Saved inspiration kernel to /tmp/inspiration.cu')
 "
 ```
 
 - If `stagnation_hint == "tacit_knowledge"`: read `tacit_knowledge_personal.md` in the repo root. Pick one hint that matches your situation and incorporate it. If the file is missing or empty, fall back to using `/tmp/inspiration.rs`.
-- If `stagnation_hint == "inspiration"`: read `/tmp/inspiration.rs` to study what another agent is doing differently. Look for techniques, data structures, or strategies you could adapt into your own code. But always edit `mod.rs` (your own best), not the inspiration file.
+- If `stagnation_hint == "inspiration"`: read `/tmp/inspiration.rs` to study what another agent is doing differently. For GPU challenges, also study `/tmp/inspiration.cu`. Look for techniques, data structures, or strategies you could adapt into your own code. But always edit `mod.rs` (your own best), not the inspiration file.
 
 On your **first iteration on a given challenge** (no current best yet), the server gives you the swarm's *initial algorithm* for that challenge — set by the host from the `initial_algorithms/<challenge>.rs` file in the repo root at swarm-creation time. If the host left it as the default template (or pushed an empty string), `best_algorithm_code` arrives as a stub with `unimplemented!()` (or empty). Either way, you'll need to author a real `solve_challenge` body for the active challenge before benchmarking.
 
-On first iteration, the server also provides `best_kernel_code` from `initial_algorithms/<challenge>.cu`. Write both files before benchmarking.
+For GPU challenges, the server also provides `best_kernel_code` from `initial_algorithms/<challenge>.cu`. Write both files before benchmarking.
 
 ### Step 3: Think and Edit
 
@@ -169,7 +164,7 @@ Analyze your current algorithm and the history of attempts. Think about what opt
 
 Now read `src/neuralnet_optimizer/algorithm/mod.rs` and edit it with your improvements. Read the challenge README (`CHALLENGE.md`) for the `Challenge` / `Solution` types, scoring rules, feasibility constraints, and solver interface rules (function signature, `save_solution` semantics, threading constraints).
 
-Also read and edit `src/neuralnet_optimizer/algorithm/kernels.cu` for custom CUDA kernels. The `solve_challenge` function receives extra GPU parameters: `module` (loaded CUDA module with your kernels), `stream`, and `prop` (device properties). Use `module` to launch custom kernels defined in `kernels.cu`.
+For GPU challenges, also read and edit `src/neuralnet_optimizer/algorithm/kernels.cu` for custom CUDA kernels. The `solve_challenge` function receives extra GPU parameters: `module` (loaded CUDA module with your kernels), `stream`, and `prop` (device properties). Use `module` to launch custom kernels defined in `kernels.cu`.
 
 ### Step 4: Run Benchmark
 

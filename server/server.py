@@ -418,7 +418,9 @@ async def get_state(
     directive to try something different. When stagnating past
     `stagnation_threshold`, a stagnation_hint field (50/50 "tacit_knowledge"
     or "inspiration") and inspiration_code are included — both filtered by
-    the same challenge so per-challenge state stays disjoint.
+    the same challenge so per-challenge state stays disjoint. For GPU
+    challenges, kernel code fields are included; for CPU challenges they
+    are omitted.
 
     When `agent_id` is omitted, returns a global dashboard view (filtered
     by the requested or active challenge).
@@ -481,7 +483,7 @@ async def get_state(
 
             # ── Trajectory reset on stagnation_limit ──
             trajectory_reset = None
-            stagnation_limit = int(config.get("stagnation_limit", "10"))
+            stagnation_limit = int(config.get("stagnation_limit", "5"))
             if stagnation_limit > 0 and runs_since >= stagnation_limit and my_best is not None:
                 timestamp = now()
                 # Deactivate the current trajectory.
@@ -658,11 +660,14 @@ async def get_state(
             )
             global_best_score = global_best["score"] if global_best else None
 
-            return {
+            ch_def = challenges.CHALLENGES.get(challenge)
+            is_gpu = ch_def.is_gpu if ch_def else False
+
+            resp = {
                 "challenge": challenge,
+                "is_gpu": is_gpu,
                 "best_score": global_best_score,
                 "best_algorithm_code": my_best_code,
-                "best_kernel_code": my_best_kernel_code or None,
                 "best_experiment_id": my_best_experiment_id,
                 "my_best_score": my_best_score,
                 "my_runs": (acs or {}).get("experiments_completed") if acs else 0,
@@ -676,12 +681,15 @@ async def get_state(
                 "prior_hypotheses": prior_hypotheses,
                 "hypothesis_recall_message": hypothesis_recall_message,
                 "inspiration_code": inspiration_code,
-                "inspiration_kernel_code": inspiration_kernel_code or None,
                 "inspiration_agent_name": inspiration_agent_name,
                 "stagnation_hint": stagnation_hint,
                 "trajectory_reset": trajectory_reset,
                 "leaderboard": leaderboard,
             }
+            if is_gpu:
+                resp["best_kernel_code"] = my_best_kernel_code or None
+                resp["inspiration_kernel_code"] = inspiration_kernel_code or None
+            return resp
 
         # ── Dashboard view (no agent_id) ──
         cursor = await conn.execute(
