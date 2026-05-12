@@ -17,6 +17,7 @@ server/static/
 
 # Per-deploy / per-contributor state — never committed
 swarm.config.json
+agent.config.json
 AGENTS.md
 CHALLENGE.md
 data/
