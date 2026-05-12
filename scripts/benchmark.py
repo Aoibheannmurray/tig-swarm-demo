@@ -2,8 +2,8 @@
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
 Pulls swarm-wide config live from the server's `/api/swarm_config` (the
-server URL is whatever `swarm.config.json:server_url` was templated to by
-`setup.py join`). Falls back to the local `swarm.config.json` snapshot when
+server URL is whatever `swarm.config.json:server_url` was configured to by
+`python setup.py`). Falls back to the local `swarm.config.json` snapshot when
 the server is unreachable, so `python scripts/benchmark.py` works for
 offline iteration on `algorithm/mod.rs` edits. The config tells us the
 active challenge, per-track instance counts, and the per-instance solver
@@ -1243,8 +1243,7 @@ def main() -> int:
         instances = materialize_instances(challenge, tracks, generator)
         if not instances:
             print(
-                "error: no instances to run. Run `python setup.py create` (owner) or "
-                "`python setup.py join <url>` (contributor) to fetch swarm config, "
+                "error: no instances to run. Run `python setup.py` to configure this clone, "
                 "or check datasets/<challenge>/test.json.",
                 file=sys.stderr,
             )
