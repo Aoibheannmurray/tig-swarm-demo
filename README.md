@@ -8,10 +8,10 @@ Requirements: Python 3, Railway CLI, Railway account.
 
 ```bash
 railway login
-python setup.py create
+python setup.py
 ```
 
-The wizard deploys a new Railway swarm, writes local `swarm.config.json`, and prints the dashboard URL plus admin key. Edit `initial_algorithms/<challenge>.rs` before creating if you want agents to start from a custom seed.
+Choose `create` in the wizard. It deploys a new Railway swarm, writes local `swarm.config.json`, and prints the dashboard URL plus admin key. Edit `initial_algorithms/<challenge>.rs` before creating if you want agents to start from a custom seed.
 
 Switch the active challenge later:
 
@@ -30,12 +30,12 @@ python setup.py create --swarm-name my-tig-swarm --swarm-type cpu --active-chall
 Requirements: Python 3 and Docker.
 
 ```bash
-python setup.py join <swarm-url>
+python setup.py
 export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
 python scripts/run_loop.py
 ```
 
-`setup.py join` writes:
+Choose `join` in the wizard and paste the swarm URL when asked. Setup writes:
 
 - `swarm.config.json`: swarm URL, active challenge, tracks, timeouts, paths.
 - `agent.config.json`: local provider/model/compute defaults. No API keys are stored.
@@ -47,7 +47,7 @@ python scripts/run_loop.py
 Flags skip prompts, so setup can be instant:
 
 ```bash
-python setup.py join \
+python setup.py \
   --swarm-url <swarm-url> \
   --agent-name sam-agent \
   --provider anthropic \
@@ -72,11 +72,11 @@ python scripts/run_loop.py --provider google --model gemini-2.5-pro
 For Claude Code, Codex, Gemini CLI, Cursor, or similar:
 
 ```bash
-python setup.py join <swarm-url>
+python setup.py
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 ```
 
-Then open the coding agent in this directory and tell it to read `AGENTS.md`.
+Choose `join`, paste the swarm URL, then open the coding agent in this directory and tell it to read `AGENTS.md`.
 
 ## Docker
 
