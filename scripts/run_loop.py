@@ -36,8 +36,6 @@ GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
 from __future__ import annotations
 
 import argparse
-import base64
-from contextlib import contextmanager
 import difflib
 import json
 import os
@@ -45,10 +43,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
-import re
-import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,7 +50,42 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
-# ── Config & server helpers ─────────────────────────────────────────
+from challenge_files import (
+    ChallengeFiles,
+    is_stub_code,
+    read_challenge_md,
+    validate_code,
+)
+from server import (
+    get_state,
+    post_message,
+    publish_results,
+    register_agent,
+    send_heartbeat,
+    server_get,
+)
+from prompts import (
+    build_code_system_prompt,
+    build_code_user_prompt,
+    build_compile_fix_prompt,
+    build_hypothesis_system_prompt,
+    build_hypothesis_user_prompt,
+    build_redescribe_hypothesis_prompt,
+    build_redescribe_system_prompt,
+    build_runtime_fix_prompt,
+    parse_hypothesis,
+)
+from c3_compute import run_benchmark_c3
+
+# Backoff after a recoverable iteration-level failure (state fetch, LLM error).
+_ITERATION_BACKOFF_SECS = 5
+# Skip the LLM re-describe call when the post-fix code is this similar to
+# the pre-fix code — the fix was almost certainly cosmetic (bounds checks,
+# error wrappers) and not worth a round-trip to confirm "no change".
+_REDESCRIBE_SIMILARITY_THRESHOLD = 0.95
+
+
+# ── Config & sync ──────────────────────────────────────────────────
 
 
 def load_config() -> dict:
@@ -66,522 +95,20 @@ def load_config() -> dict:
     return json.loads(cfg_path.read_text())
 
 
-def server_post(url: str, payload: dict, timeout: int = 10) -> dict:
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+def sync_challenge() -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "setup.py"), "sync"],
+        cwd=ROOT, capture_output=True, text=True,
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()[-500:]
+        print(f"  [SYNC] WARNING: setup.py sync failed ({result.returncode}): {err}", file=sys.stderr)
 
 
-def server_get(url: str, timeout: int = 10) -> dict:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        return json.load(resp)
-
-
-def register_agent(server: str, config: dict | None = None) -> tuple[str, str]:
-    body: dict = {"client_version": "1.0"}
-    if config:
-        if config.get("contributor_name"):
-            body["agent_name"] = config["contributor_name"]
-        if config.get("contributor_llm"):
-            body["llm_type"] = config["contributor_llm"]
-    data = server_post(f"{server}/api/agents/register", body)
-    return data["agent_id"], data["agent_name"]
-
-
-def get_state(server: str, agent_id: str) -> dict:
-    return server_get(f"{server}/api/state?agent_id={agent_id}")
-
-
-def send_heartbeat(server: str, agent_id: str) -> None:
-    try:
-        server_post(f"{server}/api/agents/{agent_id}/heartbeat", {"status": "working"}, timeout=5)
-    except Exception:
-        pass
-
-
-def post_message(server: str, agent_name: str, agent_id: str, content: str) -> None:
-    try:
-        server_post(f"{server}/api/messages", {
-            "agent_name": agent_name, "agent_id": agent_id,
-            "content": content, "msg_type": "agent",
-        }, timeout=5)
-    except Exception:
-        pass
-
-
-# ── File I/O ────────────────────────────────────────────────────────
-
-
-def is_stub_code(code: str) -> bool:
-    """True when the algorithm is a placeholder that can't produce solutions."""
-    if not code or not code.strip():
-        return True
-    return "unimplemented!" in code or "todo!" in code
-
-
-def algo_path(config: dict) -> Path:
-    return ROOT / config.get("algorithm_path", "src/knapsack/algorithm/mod.rs")
-
-
-def kernel_path(config: dict) -> Path | None:
-    kp = config.get("kernel_path")
-    return ROOT / kp if kp else None
-
-
-def write_algorithm(code: str, config: dict) -> None:
-    p = algo_path(config)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(code)
-
-
-def write_kernel(code: str, config: dict) -> None:
-    p = kernel_path(config)
-    if p:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(code)
-
-
-def read_algorithm(config: dict) -> str:
-    p = algo_path(config)
-    return p.read_text() if p.exists() else ""
-
-
-def read_kernel(config: dict) -> str:
-    p = kernel_path(config)
-    if p and p.exists():
-        return p.read_text()
-    return ""
-
-
-class ChallengeFiles:
-    """Encapsulates file I/O differences between CPU and GPU challenges."""
-
-    def __init__(self, config: dict):
-        self._config = config
-        self.is_gpu = bool(config.get("is_gpu"))
-
-    def parse_response(self, text: str) -> tuple[str, str]:
-        """Parse LLM code response. Returns (rust_code, kernel_code)."""
-        if self.is_gpu:
-            return parse_gpu_code(text)
-        return parse_code(text), ""
-
-    def write(self, code: str, kernel: str = "") -> None:
-        """Write algorithm and, for GPU challenges, the kernel file."""
-        write_algorithm(code, self._config)
-        if self.is_gpu and kernel:
-            write_kernel(kernel, self._config)
-
-    def read(self) -> tuple[str, str]:
-        """Read current algorithm (and kernel if GPU). Returns (code, kernel)."""
-        code = read_algorithm(self._config)
-        kernel = read_kernel(self._config) if self.is_gpu else ""
-        return code, kernel
-
-    def separator_suffix(self) -> str:
-        """Prompt suffix instructing the LLM to return two files."""
-        if self.is_gpu:
-            return (
-                "\nReturn BOTH files separated by: // --- kernels.cu ---"
-                "\nEnsure kernel function names match between mod.rs and kernels.cu."
-            )
-        return ""
-
-    def describe_write(self, code: str, kernel: str) -> str:
-        """Human-readable summary of what was written."""
-        if self.is_gpu and kernel:
-            return f"Wrote both mod.rs + kernels.cu"
-        if self.is_gpu:
-            return f"Wrote mod.rs only (no kernel changes)"
-        return f"Wrote mod.rs ({len(code)} chars)"
-
-    def describe_parse(self, code: str, kernel: str) -> str:
-        """Human-readable summary of what was parsed from LLM response."""
-        if self.is_gpu:
-            if kernel:
-                return f"Got two-file response (rust: {len(code)} chars, cuda: {len(kernel)} chars)"
-            return f"WARNING: No kernel separator found — got rust only ({len(code)} chars)"
-        return f"Got code ({len(code)} chars)"
-
-    def build_compile_fix_prompt(self, compiler_errors: str) -> str:
-        """Build a prompt that feeds compiler errors back to the LLM."""
-        code, kernel = self.read()
-        parts = [f"Current algorithm (mod.rs):\n```rust\n{code}\n```\n"]
-        if kernel:
-            parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{kernel}\n```\n")
-        parts.append(
-            f"This code failed to compile. Here are the errors:\n```\n{compiler_errors}\n```\n\n"
-            "Fix the compile errors and return the complete source."
-        )
-        suffix = self.separator_suffix()
-        if suffix:
-            parts.append(suffix)
-        return "\n".join(parts)
-
-
-def read_challenge_md() -> str:
-    p = ROOT / "CHALLENGE.md"
-    return p.read_text() if p.exists() else ""
-
-
-def read_tacit_knowledge() -> str:
-    p = ROOT / "tacit_knowledge_personal.md"
-    return p.read_text() if p.exists() else ""
-
-
-# ── Prompt construction ─────────────────────────────────────────────
-
-
-DEFAULT_STRATEGY_TAGS = [
-    "construction", "local_search", "metaheuristic",
-    "constraint_relaxation", "decomposition", "hybrid",
-    "data_structure", "other",
-]
-
-
-def get_strategy_tags(config: dict) -> list[str]:
-    """Resolve strategy tags from swarm config, falling back to defaults."""
-    challenge = config.get("challenge", "")
-    available = config.get("available_challenges") or {}
-    sub = available.get(challenge) or {}
-    tags = sub.get("strategy_tags") or []
-    return tags if tags else DEFAULT_STRATEGY_TAGS
-
-
-def build_hypothesis_system_prompt(
-    challenge_md: str, config: dict, *, is_bootstrap: bool = False,
-) -> str:
-    challenge = config.get("challenge", "unknown")
-    tags = ", ".join(get_strategy_tags(config))
-    if is_bootstrap:
-        job = (
-            "propose an initial algorithm strategy. The current code is a "
-            "stub — you need a complete working approach, not a tweak."
-        )
-    else:
-        job = "propose ONE specific change to try."
-    return f"""\
-You are planning an improvement to a Rust algorithm for the "{challenge}" challenge.
-
-{challenge_md}
-
-Your job: {job} Do NOT write code — just describe the idea.
-
-Respond in EXACTLY this format (4 lines, nothing else):
-
-TITLE: <short title of what to change, under 80 chars>
-DESCRIPTION: <2-3 sentence description of the change and reasoning>
-STRATEGY_TAG: <one of: {tags}>
-NOTES: <brief interpretation of your approach>"""
-
-
-def build_hypothesis_user_prompt(state: dict, config: dict | None = None) -> str:
-    parts: list[str] = []
-    is_gpu = bool((config or {}).get("is_gpu"))
-
-    code = state.get("best_algorithm_code") or ""
-    if is_stub_code(code):
-        parts.append(
-            "No working algorithm yet — the current code is a stub. "
-            "Propose an initial implementation strategy from scratch."
-        )
-    else:
-        parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
-        if is_gpu:
-            kernel_code = state.get("best_kernel_code") or ""
-            if kernel_code:
-                parts.append(f"\nCurrent CUDA kernels (kernels.cu):\n```cuda\n{kernel_code}\n```")
-
-    prior = state.get("prior_hypotheses") or []
-    if prior:
-        lines = [f"\n{len(prior)} strategies already tried on this code — try something STRUCTURALLY DIFFERENT:"]
-        for h in prior:
-            tag = h.get("strategy_tag", "?")
-            title = h.get("title", "?")
-            lines.append(f"  - [{tag}] {title}")
-        parts.append("\n".join(lines))
-
-    hint = state.get("stagnation_hint")
-    if hint == "inspiration":
-        insp = state.get("inspiration_code", "")
-        if insp:
-            parts.append(
-                f"\nStudy this approach for ideas "
-                f"(adapt ideas, do NOT copy wholesale):\n```rust\n{insp}\n```"
-            )
-            if is_gpu:
-                insp_kernel = state.get("inspiration_kernel_code", "")
-                if insp_kernel:
-                    parts.append(f"\nInspiration CUDA kernels:\n```cuda\n{insp_kernel}\n```")
-    elif hint == "tacit_knowledge":
-        tk = read_tacit_knowledge().strip()
-        if tk:
-            parts.append(f"\nPersonal strategy hints:\n{tk}")
-        else:
-            insp = state.get("inspiration_code", "")
-            if insp:
-                parts.append(
-                    f"\nStudy this approach for ideas:\n```rust\n{insp}\n```"
-                )
-                if is_gpu:
-                    insp_kernel = state.get("inspiration_kernel_code", "")
-                    if insp_kernel:
-                        parts.append(f"\nInspiration CUDA kernels:\n```cuda\n{insp_kernel}\n```")
-
-    reset = state.get("trajectory_reset")
-    if reset:
-        rtype = reset.get("type", "")
-        if rtype == "adopted_inactive":
-            parts.append(
-                "\nYou are starting from another agent's previous algorithm. "
-                "Study the code above and propose an improvement to build on it."
-            )
-        else:
-            parts.append(
-                "\nYou are starting from the template algorithm. "
-                "Propose an initial strategy to improve it."
-            )
-
-    parts.append("\nPropose one specific improvement to try.")
-    return "\n".join(parts)
-
-
-def build_code_system_prompt(challenge_md: str, config: dict) -> str:
-    challenge = config.get("challenge", "unknown")
-    is_gpu = bool(config.get("is_gpu"))
-    timeout = config.get("timeout", 30)
-    time_guidance = (
-        f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
-        f"after this hard deadline. Use a time-based loop (std::time::Instant + deadline) "
-        f"that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2-5s) "
-        f"for cleanup. Call save_solution() early with your first feasible solution, then "
-        f"keep improving and re-saving — the last saved solution is evaluated. If no "
-        f"solution was saved when the deadline hits, the instance counts as infeasible."
-    )
-    if is_gpu:
-        return f"""\
-You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
-
-{challenge_md}
-{time_guidance}
-
-IMPORTANT RULES:
-- `use super::*;` must remain as the first import in the Rust file.
-- `fn solve_challenge(` MUST appear in your Rust output — do NOT omit it.
-- Return BOTH files: the complete Rust source AND the complete CUDA kernel source.
-- Separate them with a line containing exactly: // --- kernels.cu ---
-- The Rust file comes FIRST, then the separator, then the CUDA file.
-- No explanation, no markdown fences — just the two raw source files with the separator.
-- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu."""
-    return f"""\
-You are optimizing a Rust algorithm for the "{challenge}" challenge.
-
-{challenge_md}
-{time_guidance}
-
-`use super::*;` must remain as the first import. Return the complete Rust source file — no explanation, no markdown fences."""
-
-
-def build_code_user_prompt(state: dict, hypothesis: dict, config: dict | None = None) -> str:
-    parts: list[str] = []
-    is_gpu = bool((config or {}).get("is_gpu"))
-
-    code = state.get("best_algorithm_code") or ""
-    if is_stub_code(code):
-        parts.append(
-            "No working algorithm yet — write a complete solve_challenge "
-            "implementation from scratch. Call save_solution() whenever you "
-            "find an improved solution."
-        )
-    else:
-        parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
-
-    if is_gpu:
-        kernel_code = state.get("best_kernel_code") or ""
-        if kernel_code:
-            parts.append(f"\nCurrent CUDA kernels (kernels.cu):\n```cuda\n{kernel_code}\n```")
-        else:
-            parts.append(
-                "\nNo CUDA kernel file yet — write any custom GPU kernels you need."
-            )
-        parts.append(
-            "\nReturn BOTH files separated by: // --- kernels.cu ---"
-            "\nThe Rust file (with fn solve_challenge) comes first, then the separator, then the CUDA file."
-        )
-
-    title = hypothesis.get("title", "")
-    description = hypothesis.get("description", "")
-    if is_stub_code(code):
-        parts.append(f"\nImplement this strategy:\n{title}\n{description}")
-    else:
-        parts.append(f"\nApply this change:\n{title}\n{description}")
-
-    return "\n".join(parts)
-
-
-def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", timeout: int = 30) -> str:
-    """Build a prompt that feeds runtime errors back to the LLM for fixing."""
-    errors = bench.get("errors") or []
-    error_lines = "\n".join(f"  - {e}" for e in errors)
-    score = bench.get("score", 0)
-    feasible = bench.get("feasible", False)
-    track_scores = bench.get("track_scores", {})
-    track_summary = "\n".join(
-        f"  - {track}: {s:.0f}" for track, s in track_scores.items()
-    )
-    parts = [f"Current algorithm (mod.rs):\n```rust\n{code}\n```\n"]
-    if kernel_code:
-        parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{kernel_code}\n```\n")
-    parts.append(
-        f"This code compiled successfully but failed at runtime.\n\n"
-        f"Score: {score}  Feasible: {feasible}\n"
-        f"Per-track scores:\n{track_summary}\n"
-        f"Errors:\n{error_lines}\n\n"
-        f"Per-instance time budget: {timeout} seconds. The solver is killed after this deadline.\n\n"
-        "How to interpret the errors:\n"
-        "- 'no solution saved' = the code crashed, panicked, or returned Err() "
-        "before ever calling save_solution(), OR the solver ran out of time "
-        "without saving. Fix: use a time-based loop (std::time::Instant + deadline "
-        f"at {timeout}s minus a few seconds margin) and call save_solution() EARLY "
-        "with your first feasible solution, then keep improving and re-saving.\n"
-        "- Any other error = the code saved a solution but the evaluator "
-        "rejected it (constraint violation). Fix: check that your solution "
-        "satisfies all feasibility constraints described in the challenge.\n\n"
-        "Fix the runtime errors and return the complete source."
-    )
-    if kernel_code:
-        parts.append(
-            "\nReturn BOTH files separated by: // --- kernels.cu ---"
-            "\nEnsure kernel function names match between mod.rs and kernels.cu."
-        )
-    return "\n".join(parts)
-
-
-def build_redescribe_hypothesis_prompt(
-    original_code: str, final_code: str, original_hypothesis: dict,
-) -> str:
-    """Ask the LLM to re-describe what the final code actually does,
-    since error recovery may have changed it from the original plan."""
-    orig_title = original_hypothesis.get("title", "")
-    orig_desc = original_hypothesis.get("description", "")
-    orig_tag = original_hypothesis.get("strategy_tag", "other")
-    return (
-        f"The original hypothesis was:\n"
-        f"  TITLE: {orig_title}\n"
-        f"  DESCRIPTION: {orig_desc}\n"
-        f"  STRATEGY_TAG: {orig_tag}\n\n"
-        f"Original code (before):\n```rust\n{original_code}\n```\n\n"
-        f"Final code (after fixing runtime errors):\n```rust\n{final_code}\n```\n\n"
-        "The code was modified to fix runtime errors. Compare the original "
-        "hypothesis against the final code. If the error recovery changed the "
-        "core approach (e.g. replaced the construction heuristic, added a "
-        "fundamentally different fallback strategy, restructured the solver), "
-        "update the TITLE, DESCRIPTION, and STRATEGY_TAG to accurately reflect "
-        "what the final code actually does. If the fixes were minor (e.g. "
-        "bounds checks, error handling wrappers) and the core approach is "
-        "unchanged, keep the original hypothesis as-is.\n\n"
-        "Respond with the corrected hypothesis."
-    )
-
-
-# ── Response parsing ────────────────────────────────────────────────
-
-
-_META_DEFAULTS = {
-    "title": "LLM mutation",
-    "description": "Automated code improvement",
-    "strategy_tag": "other",
-    "notes": "",
-}
-
-
-def parse_hypothesis(text: str) -> dict:
-    """Extract metadata fields from the hypothesis LLM response."""
-    meta = dict(_META_DEFAULTS)
-    for line in text.strip().splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            key = key.strip().lower().replace(" ", "_")
-            value = value.strip()
-            if key in meta and value:
-                meta[key] = value
-    return meta
-
-
-def _strip_fences(text: str) -> str:
-    """Remove optional markdown fences from a code block."""
-    text = text.strip()
-    if text.startswith("```"):
-        first_nl = text.find("\n")
-        if first_nl != -1:
-            text = text[first_nl + 1:]
-    if text.endswith("```"):
-        text = text[: text.rfind("```")]
-    return text.strip()
-
-
-_KERNEL_SEPARATOR = "// --- kernels.cu ---"
-
-
-def parse_code(text: str) -> str:
-    """Extract Rust code from the code LLM response (non-GPU)."""
-    return _strip_fences(text)
-
-
-def parse_gpu_code(text: str) -> tuple[str, str]:
-    """Extract Rust + CUDA code from a GPU two-file LLM response.
-
-    Returns (rust_code, cuda_code). If the separator is missing,
-    returns the whole text as rust_code and empty cuda_code.
-    """
-    text = _strip_fences(text)
-    sep_idx = text.find(_KERNEL_SEPARATOR)
-    if sep_idx == -1:
-        # Try alternate separators the LLM might use
-        for alt in ["// --- kernels.cu", "// ---kernels.cu---", "// -- kernels.cu --",
-                     "/* --- kernels.cu --- */", "// ===== kernels.cu =====",
-                     "// kernels.cu"]:
-            idx = text.find(alt)
-            if idx != -1:
-                sep_idx = idx
-                # Find end of separator line
-                nl = text.find("\n", sep_idx)
-                rust = text[:sep_idx].strip()
-                cuda = text[nl + 1:].strip() if nl != -1 else ""
-                return _strip_fences(rust), _strip_fences(cuda)
-        return text.strip(), ""
-    rust = text[:sep_idx].strip()
-    cuda = text[sep_idx + len(_KERNEL_SEPARATOR):].strip()
-    return _strip_fences(rust), _strip_fences(cuda)
-
-
-def validate_code(original: str, modified: str) -> str | None:
-    """Basic sanity check on LLM-generated code.
-
-    Returns None if valid, or an error description."""
-    if "use super::*;" not in modified:
-        return "`use super::*;` is missing — it must remain as the first import."
-    if "fn solve_challenge(" not in modified:
-        return "`fn solve_challenge(` not found — the function signature must not change."
-    if "unimplemented!" in modified or "todo!" in modified:
-        return (
-            "Code still contains `unimplemented!()` or `todo!()` — "
-            "you must provide a complete working implementation."
-        )
-    return None
-
-
-# ── Benchmark & publish ─────────────────────────────────────────────
+# ── Benchmark dispatch ─────────────────────────────────────────────
 
 
 def _run_benchmark_local() -> tuple[dict | None, str]:
-    """Run benchmark. Returns (result_dict, error_text).
-
-    On success, result_dict is the parsed JSON and error_text is empty.
-    On failure, result_dict is None and error_text contains the stderr."""
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "benchmark.py")],
         capture_output=True, text=True, cwd=ROOT,
@@ -597,331 +124,241 @@ def _run_benchmark_local() -> tuple[dict | None, str]:
         return None, "Benchmark output was not valid JSON"
 
 
-def _yaml_quote(value: str) -> str:
-    return json.dumps(value)
-
-
-def _read_optional(path: Path | None) -> str:
-    if path and path.exists():
-        return path.read_text()
-    return ""
-
-
-def _script_write_file_b64(path: str, content: str) -> str:
-    encoded = base64.b64encode(content.encode()).decode()
-    return f"""\
-python3 - <<'PY'
-import base64
-from pathlib import Path
-
-path = Path({path!r})
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_bytes(base64.b64decode({encoded!r}))
-PY
-"""
-
-
-@contextmanager
-def _temporary_c3_files(config: dict, server: str, c3_time: str):
-    """Create the transient .c3 project + runner script C3 needs.
-
-    C3 expects `.c3` to live at the project root, so we write it only for
-    the duration of `c3 deploy` and restore any pre-existing file exactly.
-    The runner script embeds the current candidate code directly so the
-    remote job does not depend on whether gitignored algorithm files are
-    included in C3's uploaded workspace.
-    """
-    run_id = uuid.uuid4().hex[:10]
-    challenge = config.get("challenge", "unknown")
-    is_gpu = bool(config.get("is_gpu"))
-    dockerfile = "./scripts/c3/docker/Dockerfile.gpu" if is_gpu else "./scripts/c3/docker/Dockerfile.cpu"
-    c3_path = ROOT / ".c3"
-    script_name = f".c3-run-benchmark-{run_id}.sh"
-    script_path = ROOT / script_name
-    artifacts_dir = ROOT / "c3-artifacts"
-
-    algo_path = ROOT / config.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
-    kernel_cfg = config.get("kernel_path")
-    kernel_path = ROOT / kernel_cfg if kernel_cfg else None
-
-    old_c3 = c3_path.read_text() if c3_path.exists() else None
-
-    c3_config = f"""\
-project: tig-swarm-benchmark
-script: {_yaml_quote(script_name)}
-gpu: {_yaml_quote(config.get("c3_hardware", "l40"))}
-time: {_yaml_quote(c3_time)}
-job_name: {_yaml_quote(f"tig-{challenge}-{run_id}")}
-
-docker:
-  dockerfile: {dockerfile}
-  context: ./scripts/c3/docker
-
-output:
-  - ./c3-artifacts
-"""
-
-    algorithm_code = _read_optional(algo_path)
-    kernel_code = _read_optional(kernel_path)
-
-    runner = f"""\
-#!/bin/bash
-set -u
-
-cd "${{C3_JOB_WORKDIR:-/workspace}}"
-mkdir -p "${{C3_ARTIFACTS_DIR}}" c3-artifacts
-
-export TIG_IN_DOCKER=1
-export TIG_SWARM_SERVER={_yaml_quote(server)}
-
-{_script_write_file_b64(config.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs"), algorithm_code)}
-"""
-    if kernel_cfg:
-        runner += _script_write_file_b64(kernel_cfg, kernel_code)
-    runner += f"""\
-
-cat > swarm.config.json <<'JSON'
-{json.dumps(config, indent=2, sort_keys=True)}
-JSON
-
-status=0
-python3 scripts/benchmark.py \
-  > "${{C3_ARTIFACTS_DIR}}/benchmark.json" \
-  2> "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" || status=$?
-
-exit "$status"
-"""
-
-    try:
-        artifacts_dir.mkdir(exist_ok=True)
-        c3_path.write_text(c3_config)
-        script_path.write_text(runner)
-        script_path.chmod(0o755)
-        yield
-    finally:
-        if old_c3 is None:
-            try:
-                c3_path.unlink()
-            except FileNotFoundError:
-                pass
-        else:
-            c3_path.write_text(old_c3)
-        try:
-            script_path.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _parse_c3_id(text: str) -> str | None:
-    """Extract instance/job ID from c3 instances launch output."""
-    for pat in [
-        r'"id"\s*:\s*"([^"]+)"',
-        r"(inst_[a-zA-Z0-9_-]+)",
-        r"(job_[a-zA-Z0-9_-]+)",
-        r"([a-f0-9]{8,})",
-    ]:
-        m = re.search(pat, text)
-        if m:
-            return m.group(1)
-    return None
-
-
-def _poll_c3_job(job_id: str, env: dict, poll_interval: int = 15, max_polls: int = 480) -> str:
-    """Poll `c3 squeue` until the job reaches a terminal state."""
-    for i in range(max_polls):
-        result = subprocess.run(
-            ["c3", "squeue"], capture_output=True, text=True, cwd=ROOT, env=env,
-        )
-        out = result.stdout or ""
-        for line in out.splitlines():
-            if job_id in line:
-                upper = line.upper()
-                if "COMPLETED" in upper or "SYNCED" in upper or "SUCCEEDED" in upper:
-                    return "completed"
-                if "FAILED" in upper or "CANCELLED" in upper or "ERROR" in upper:
-                    return "failed"
-                # Job found but still running
-                if i % 4 == 0:
-                    # Show the status from the squeue line
-                    print(f"    [C3] {job_id}: {line.strip()}")
-                break
-        else:
-            # Job not in squeue at all — might have completed and dropped off
-            if i > 2:
-                return "completed"
-        if i % 4 == 0 and job_id not in out:
-            print(f"    [C3] Still waiting on {job_id} (poll {i + 1})…")
-        time.sleep(poll_interval)
-    return "timeout"
-
-
-def _run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tuple[dict | None, str]:
-    if shutil.which("c3") is None:
-        return None, "[C3] c3 CLI not found. Install from https://cthree.cloud/install.sh"
-
-    c3_key = args.c3_api_key or os.environ.get("C3_API_KEY", "")
-    challenge = config.get("challenge", "unknown")
-
-    cfg = dict(config)
-    cfg["server_url"] = server
-    cfg["c3_hardware"] = args.hardware.lower()
-
-    env = os.environ.copy()
-    if c3_key and not c3_key.startswith("your_"):
-        env["C3_API_KEY"] = c3_key
-
-    print(f"    [C3] Bundling project for {challenge}…")
-
-    with _temporary_c3_files(cfg, server, args.c3_time):
-        cmd = ["c3", "deploy"]
-        if args.c3_cloud_provider:
-            cmd.extend(["-p", args.c3_cloud_provider])
-        if args.c3_no_build:
-            cmd.append("--no-build")
-
-        print(f"    [C3] Running: {' '.join(cmd)}")
-        print(f"    [C3] (streaming deploy output — first run uploads ~10GB Docker image)")
-        # Stream output so user can see progress (docker build/save/upload)
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, cwd=ROOT, env=env,
-        )
-        deploy_output_lines = []
-        for line in proc.stdout:
-            line = line.rstrip()
-            deploy_output_lines.append(line)
-            print(f"    [C3]   {line}")
-        proc.wait()
-        result = subprocess.CompletedProcess(
-            cmd, proc.returncode,
-            stdout="\n".join(deploy_output_lines), stderr="",
-        )
-
-    combined = (result.stdout or "") + "\n" + (result.stderr or "")
-    print(f"    [C3] Deploy output: {combined[:300]}")
-
-    job_id = _parse_c3_id(combined)
-    if not job_id:
-        err = f"[C3] Could not parse job ID from c3 deploy output:\n{combined[-2000:]}"
-        print(f"    {err}")
-        return None, err
-
-    print(f"    [C3] Job submitted: {job_id} — polling for completion…")
-    status = _poll_c3_job(job_id, env)
-
-    # Fetch logs
-    logs_result = subprocess.run(
-        ["c3", "logs", job_id],
-        capture_output=True, text=True, cwd=ROOT, env=env,
-    )
-    logs_out = logs_result.stdout or ""
-
-    if status != "completed":
-        err = f"[C3] Job {job_id} {status}"
-        print(f"    {err}")
-        if logs_out:
-            print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
-        return None, f"{err}:\n{logs_out[-4000:]}"
-
-    print(f"    [C3] Job {job_id} completed — pulling results…")
-
-    # Pull artifacts
-    subprocess.run(
-        ["c3", "pull", job_id], capture_output=True, text=True, cwd=ROOT, env=env,
-    )
-
-    # Check pulled artifacts first
-    for artifact_dir in [ROOT / job_id / "artifacts", ROOT / job_id / "c3-artifacts",
-                         ROOT / "c3-artifacts"]:
-        artifact_json = artifact_dir / "benchmark.json"
-        if artifact_json.exists() and artifact_json.stat().st_size > 0:
-            try:
-                bench = json.loads(artifact_json.read_text())
-                print(f"    [C3] Results extracted from {artifact_json}")
-                return bench, ""
-            except json.JSONDecodeError:
-                continue
-
-    # Fallback: parse from logs
-    for line in reversed(logs_out.strip().splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                bench = json.loads(line)
-                if "score" in bench or "challenge" in bench:
-                    print(f"    [C3] Results extracted from logs")
-                    return bench, ""
-            except json.JSONDecodeError:
-                continue
-
-    json_blocks = re.findall(r'\{[^{}]*"score"[^{}]*\}', logs_out)
-    if json_blocks:
-        try:
-            bench = json.loads(json_blocks[-1])
-            print(f"    [C3] Results extracted via regex fallback")
-            return bench, ""
-        except json.JSONDecodeError:
-            pass
-
-    err = f"[C3] Job {job_id} completed but could not parse benchmark JSON"
-    print(f"    {err}")
-    if logs_out:
-        print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
-    return None, err
-
-
 def run_benchmark(args: argparse.Namespace, config: dict, server: str) -> tuple[dict | None, str]:
     if args.compute == "local":
         return _run_benchmark_local()
     if args.compute == "c3":
-        return _run_benchmark_c3(args, config, server)
+        return run_benchmark_c3(args, config, server)
     return None, f"Unknown compute provider: {args.compute}"
 
 
-def publish_results(
-    server: str, agent_id: str, bench: dict, mutation: dict, config: dict,
-    *, input_tokens: int = 0, output_tokens: int = 0,
-    estimated_cost: float = 0.0,
-) -> dict:
-    code = read_algorithm(config)
-    kernel_code = ""
-    kernel_path = config.get("kernel_path")
-    if kernel_path:
-        kernel_code = _read_optional(ROOT / kernel_path)
-    payload = {
-        "agent_id": agent_id,
-        "title": mutation.get("title", ""),
-        "description": mutation.get("description", ""),
-        "strategy_tag": mutation.get("strategy_tag", "other"),
-        "algorithm_code": code,
-        "score": bench["score"],
-        "feasible": bench["feasible"],
-        "notes": mutation.get("notes", ""),
-        "solution_data": bench.get("viz_data"),
-        "track_scores": bench.get("track_scores"),
-        "challenge": bench.get("challenge"),
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "estimated_cost": estimated_cost,
-    }
-    if kernel_code:
-        payload["kernel_code"] = kernel_code
-    if bench.get("challenge_metrics") is not None:
-        payload["challenge_metrics"] = bench["challenge_metrics"]
-    return server_post(f"{server}/api/iterations", payload)
+# ── Extracted iteration helpers ────────────────────────────────────
 
 
-# ── Sync ────────────────────────────────────────────────────────────
+def _generate_code(
+    args: argparse.Namespace, model: str, api_key: str,
+    state: dict, hypothesis: dict, config: dict,
+    challenge_md: str, files: ChallengeFiles,
+) -> tuple[str | None, str | None, int, int]:
+    """LLM code generation with retry on validation failure.
+
+    Returns (code, kernel, input_tokens, output_tokens).
+    """
+    input_tokens = 0
+    output_tokens = 0
+    max_attempts = 3
+    violation = ""
+
+    for attempt in range(max_attempts):
+        if attempt == 0:
+            print(f"  [LLM] Generating code via {args.provider}/{model}…")
+            user_prompt = build_code_user_prompt(state, hypothesis, config)
+        else:
+            print(f"  [LLM] Code retry {attempt}/{max_attempts - 1}: {violation}")
+            user_prompt = (
+                build_code_user_prompt(state, hypothesis, config)
+                + f"\n\nYour previous response was rejected: {violation}\n"
+                "Fix the issue and return the complete source."
+                + files.separator_suffix()
+            )
+        try:
+            code_response, usage = call_llm(
+                args.provider, model, api_key,
+                build_code_system_prompt(challenge_md, config),
+                user_prompt,
+                args.api_base,
+            )
+            input_tokens += usage["input_tokens"]
+            output_tokens += usage["output_tokens"]
+        except Exception as e:
+            print(f"  [LLM] CODE GENERATION FAILED: {e}")
+            break
+
+        parsed, parsed_kernel = files.parse_response(code_response)
+        print(f"  [LLM] {files.describe_parse(parsed, parsed_kernel)}")
+        if not parsed:
+            print("  [LLM] Empty code response — skipping iteration")
+            break
+
+        violation = validate_code(parsed)
+        if violation:
+            print(f"  [LLM] Validation failed: {violation}")
+            continue
+        print(f"  [LLM] Code validated OK")
+        return parsed, parsed_kernel, input_tokens, output_tokens
+
+    return None, None, input_tokens, output_tokens
 
 
-def sync_challenge() -> None:
-    subprocess.run(
-        [sys.executable, str(ROOT / "setup.py"), "sync"],
-        cwd=ROOT, capture_output=True,
-    )
+def _try_compile_fix(
+    args: argparse.Namespace, model: str, api_key: str,
+    config: dict, challenge_md: str,
+    files: ChallengeFiles,
+    build_err: str,
+) -> tuple[bool, int, int]:
+    """Ask the LLM to fix compiler errors, write the result.
+
+    Returns (success, input_tokens, output_tokens).
+    """
+    code, kernel = files.read()
+    fix_prompt = build_compile_fix_prompt(code, kernel, build_err[-1500:], files.is_gpu)
+    try:
+        fix_response, usage = call_llm(
+            args.provider, model, api_key,
+            build_code_system_prompt(challenge_md, config),
+            fix_prompt,
+            args.api_base,
+        )
+    except Exception as e:
+        print(f"  Fix LLM call failed: {e}", file=sys.stderr)
+        return False, 0, 0
+
+    fixed, fixed_kernel = files.parse_response(fix_response)
+    if not fixed:
+        print("  Empty fix response — giving up")
+        return False, usage["input_tokens"], usage["output_tokens"]
+
+    violation = validate_code(fixed)
+    if violation:
+        print(f"  Fix failed validation: {violation}")
+        return False, usage["input_tokens"], usage["output_tokens"]
+
+    before_fix, _ = files.read()
+    sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
+    print(f"  Fix similarity to broken code: {sim * 100:.0f}%")
+    files.write(fixed, fixed_kernel)
+    return True, usage["input_tokens"], usage["output_tokens"]
 
 
-# ── CLI ─────────────────────────────────────────────────────────────
+def _benchmark_with_compile_fix(
+    args: argparse.Namespace, model: str, api_key: str,
+    config: dict, server: str, challenge_md: str,
+    files: ChallengeFiles,
+) -> tuple[dict | None, str, bool, int, int]:
+    """Run benchmark, retrying with LLM compile fixes on failure.
+
+    Returns (bench, build_err, code_changed, input_tokens, output_tokens).
+    """
+    max_retries = 2
+    input_tokens = 0
+    output_tokens = 0
+    code_changed = False
+
+    for attempt in range(1 + max_retries):
+        bench, build_err = run_benchmark(args, config, server)
+        if bench is not None:
+            return bench, "", code_changed, input_tokens, output_tokens
+
+        infra_markers = ["401", "API Error", "c3 CLI not found", "Docker image",
+                         "Could not parse job ID", "timeout", "403", "500"]
+        if any(m in build_err for m in infra_markers):
+            print(f"  [BENCH] INFRASTRUCTURE ERROR (not a code problem):")
+            print(f"          {build_err[:300]}")
+            return None, build_err, code_changed, input_tokens, output_tokens
+
+        if attempt >= max_retries:
+            break
+
+        print(f"  [BENCH] Build retry {attempt + 1}/{max_retries} — asking LLM to fix…")
+        ok, it, ot = _try_compile_fix(
+            args, model, api_key, config, challenge_md,
+            files, build_err,
+        )
+        input_tokens += it
+        output_tokens += ot
+        if not ok:
+            break
+        code_changed = True
+
+    return None, build_err, code_changed, input_tokens, output_tokens
+
+
+def _fix_runtime_errors(
+    args: argparse.Namespace, model: str, api_key: str,
+    config: dict, server: str, agent_id: str, challenge_md: str,
+    files: ChallengeFiles, bench: dict,
+    best_code: str, best_kernel: str,
+) -> tuple[dict | None, bool, int, int]:
+    """Retry runtime errors by asking the LLM to fix and re-benchmarking.
+
+    Returns (bench, code_changed, input_tokens, output_tokens).
+    Returns bench=None when the runtime fix exhausts retries with the bench
+    in a broken state; the previous best is restored to disk so the next
+    iteration starts from a working algorithm.
+    """
+    max_retries = 2
+    input_tokens = 0
+    output_tokens = 0
+    code_changed = False
+
+    def restore_and_fail() -> tuple[dict | None, bool, int, int]:
+        if best_code:
+            files.write(best_code, best_kernel)
+        return None, code_changed, input_tokens, output_tokens
+
+    for rt_attempt in range(max_retries):
+        runtime_errors = bench.get("errors") or []
+        if not runtime_errors or bench.get("feasible"):
+            break
+
+        print(f"  Runtime retry {rt_attempt + 1}/{max_retries} — asking LLM to fix ...")
+        print(f"  Errors: {runtime_errors}")
+        current_code, current_kernel = files.read()
+        try:
+            fix_response, usage = call_llm(
+                args.provider, model, api_key,
+                build_code_system_prompt(challenge_md, config),
+                build_runtime_fix_prompt(current_code, bench, current_kernel, config.get("timeout", 30)),
+                args.api_base,
+            )
+            input_tokens += usage["input_tokens"]
+            output_tokens += usage["output_tokens"]
+        except Exception as e:
+            print(f"  Runtime fix LLM call failed: {e}", file=sys.stderr)
+            return restore_and_fail()
+
+        fixed, fixed_kernel = files.parse_response(fix_response)
+        if not fixed:
+            print("  Empty fix response — giving up")
+            return restore_and_fail()
+
+        violation = validate_code(fixed)
+        if violation:
+            print(f"  Fix failed validation: {violation}")
+            return restore_and_fail()
+
+        sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
+        print(f"  Fix similarity: {sim * 100:.0f}%")
+        files.write(fixed, fixed_kernel)
+        code_changed = True
+
+        print("  Re-running benchmark ...")
+        send_heartbeat(server, agent_id)
+        bench_result, build_err = run_benchmark(args, config, server)
+
+        if bench_result is None:
+            print(f"  Runtime fix caused compile error — asking LLM to fix ...")
+            ok, it, ot = _try_compile_fix(
+                args, model, api_key, config, challenge_md,
+                files, build_err,
+            )
+            input_tokens += it
+            output_tokens += ot
+            if not ok:
+                return restore_and_fail()
+
+            bench_result, build_err = run_benchmark(args, config, server)
+            if bench_result is None:
+                print("  Still won't compile — restoring and continuing")
+                return restore_and_fail()
+
+        bench = bench_result
+        print(f"  Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
+
+    return bench, code_changed, input_tokens, output_tokens
+
+
+# ── CLI ────────────────────────────────────────────────────────────
 
 
 def parse_args() -> argparse.Namespace:
@@ -994,7 +431,7 @@ def resolve_api_key(args: argparse.Namespace) -> str:
     return key
 
 
-# ── Main loop ───────────────────────────────────────────────────────
+# ── Main loop ──────────────────────────────────────────────────────
 
 
 def main() -> int:
@@ -1010,7 +447,6 @@ def main() -> int:
         if shutil.which("c3") is None:
             sys.exit("c3 CLI not found. Install it from https://docs.cthree.cloud/.")
 
-    # Register or resume
     if args.agent_id:
         agent_id = args.agent_id
         agent_name = args.agent_name or f"script-{agent_id[:8]}"
@@ -1022,9 +458,7 @@ def main() -> int:
     challenge_md = read_challenge_md()
 
     print(f"Provider: {args.provider}  Model: {model}")
-    compute_desc = args.compute
-    if args.compute == "c3":
-        compute_desc = f"c3/{args.hardware.lower()}"
+    compute_desc = f"c3/{args.hardware.lower()}" if args.compute == "c3" else args.compute
     print(f"Compute: {compute_desc}")
     print(f"Challenge: {config.get('challenge', '?')}")
     print(f"Server: {server}")
@@ -1040,27 +474,26 @@ def main() -> int:
         print(f"  Iteration {iteration}  ({time.strftime('%H:%M:%S')})")
         print(f"{'=' * 60}")
 
-        # ── Step 0: sync challenge ──────────────────────────────
+        # ── Sync challenge ─────────────────────────────────────
         print("  [SYNC] Syncing challenge with server…")
         sync_challenge()
         config = load_config()
         challenge_md = read_challenge_md()
         print(f"  [SYNC] Challenge: {config.get('challenge', '?')}  GPU: {config.get('is_gpu', False)}")
 
-        # Fetch server-side swarm config for dynamic fields (strategy_tags).
         try:
             swarm_cfg = server_get(f"{server}/api/swarm_config")
             config["available_challenges"] = swarm_cfg.get("available_challenges", {})
         except Exception:
             pass
 
-        # ── Step 1: get state ───────────────────────────────────
+        # ── Get state ──────────────────────────────────────────
         print("  [STATE] Fetching agent state…")
         try:
             state = get_state(server, agent_id)
         except Exception as e:
             print(f"  [STATE] FAILED: {e}")
-            time.sleep(5)
+            time.sleep(_ITERATION_BACKOFF_SECS)
             continue
 
         my_score = state.get("my_best_score")
@@ -1077,7 +510,7 @@ def main() -> int:
             post_message(server, agent_name, agent_id,
                          f"Trajectory reset: {reset.get('type')}")
 
-        # ── Step 2: write current best to mod.rs (+ kernels.cu) ─
+        # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
         best_kernel = state.get("best_kernel_code") or ""
         files = ChallengeFiles(config)
@@ -1091,7 +524,7 @@ def main() -> int:
         if bootstrap:
             print("  [FILES] Starting from stub — will ask LLM to write initial implementation")
 
-        # ── Step 3a: LLM hypothesis ────────────────────────────
+        # ── LLM hypothesis ─────────────────────────────────────
         hint = state.get("stagnation_hint")
         if hint:
             print(f"  [LLM] Stagnation hint: {hint}")
@@ -1116,7 +549,7 @@ def main() -> int:
             print(f"  [LLM] HYPOTHESIS FAILED: {e}")
             post_message(server, agent_name, agent_id,
                          f"LLM call failed: {type(e).__name__}")
-            time.sleep(5)
+            time.sleep(_ITERATION_BACKOFF_SECS)
             continue
 
         hypothesis = parse_hypothesis(hyp_response)
@@ -1127,62 +560,21 @@ def main() -> int:
         if desc:
             print(f"         {desc[:120]}")
 
-        # ── Step 3b: LLM code (with retry on validation failure) ─
-        original_code = best_code
-        original_kernel = best_kernel
-        code = None
-        new_kernel = None
-        max_code_attempts = 3
-        for attempt in range(max_code_attempts):
-            if attempt == 0:
-                print(f"  [LLM] Generating code via {args.provider}/{model}…")
-                user_prompt = build_code_user_prompt(state, hypothesis, config)
-            else:
-                print(f"  [LLM] Code retry {attempt}/{max_code_attempts - 1}: {violation}")
-                user_prompt = (
-                    build_code_user_prompt(state, hypothesis, config)
-                    + f"\n\nYour previous response was rejected: {violation}\n"
-                    "Fix the issue and return the complete source."
-                    + files.separator_suffix()
-                )
-            try:
-                code_response, code_usage = call_llm(
-                    args.provider, model, api_key,
-                    build_code_system_prompt(challenge_md, config),
-                    user_prompt,
-                    args.api_base,
-                )
-                iter_input_tokens += code_usage["input_tokens"]
-                iter_output_tokens += code_usage["output_tokens"]
-            except Exception as e:
-                print(f"  [LLM] CODE GENERATION FAILED: {e}")
-                post_message(server, agent_name, agent_id,
-                             f"LLM call failed: {type(e).__name__}")
-                time.sleep(5)
-                break
-
-            parsed, parsed_kernel = files.parse_response(code_response)
-            print(f"  [LLM] {files.describe_parse(parsed, parsed_kernel)}")
-            if not parsed:
-                print("  [LLM] Empty code response — skipping iteration")
-                break
-
-            violation = validate_code(original_code, parsed)
-            if violation:
-                print(f"  [LLM] Validation failed: {violation}")
-                continue
-            code = parsed
-            new_kernel = parsed_kernel
-            print(f"  [LLM] Code validated OK")
-            break
+        # ── LLM code generation ────────────────────────────────
+        code, new_kernel, gen_in, gen_out = _generate_code(
+            args, model, api_key, state, hypothesis, config,
+            challenge_md, files,
+        )
+        iter_input_tokens += gen_in
+        iter_output_tokens += gen_out
 
         if not code:
             print(f"  [SKIP] No valid code produced — skipping to next iteration")
             continue
 
         # ── Code similarity check ──────────────────────────────
-        if original_code:
-            sim = difflib.SequenceMatcher(None, original_code, code).ratio()
+        if best_code:
+            sim = difflib.SequenceMatcher(None, best_code, code).ratio()
             pct = sim * 100
             if pct < 30:
                 label = "likely full rewrite"
@@ -1199,60 +591,18 @@ def main() -> int:
         files.write(code, new_kernel)
         print(f"  [FILES] {files.describe_write(code, new_kernel)}")
 
-        # ── Step 4: benchmark (with build-error retry) ─────────
+        # ── Benchmark with compile-error retry ─────────────────
         compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
         print(f"  [BENCH] Running benchmark on {compute_label}…")
-        post_message(server, agent_name, agent_id,
-                     f"Trying [{tag}] {title}")
-
+        post_message(server, agent_name, agent_id, f"Trying [{tag}] {title}")
         send_heartbeat(server, agent_id)
 
-        max_build_retries = 2
-        bench = None
-        code_changed_by_fix = False
-        for build_attempt in range(1 + max_build_retries):
-            bench, build_err = run_benchmark(args, config, server)
-            if bench is not None:
-                break
-            # Check if this is an infrastructure error (C3 auth, Docker, etc.)
-            # vs a code compilation error — only retry code fixes for the latter
-            infra_markers = ["401", "API Error", "c3 CLI not found", "Docker image",
-                             "Could not parse job ID", "timeout", "403", "500"]
-            is_infra_error = any(m in build_err for m in infra_markers)
-            if is_infra_error:
-                print(f"  [BENCH] INFRASTRUCTURE ERROR (not a code problem):")
-                print(f"          {build_err[:300]}")
-                break
-            if build_attempt >= max_build_retries:
-                break
-            # Feed compiler errors back to the LLM for a fix
-            print(f"  [BENCH] Build retry {build_attempt + 1}/{max_build_retries} — asking LLM to fix…")
-            fix_prompt = files.build_compile_fix_prompt(build_err[-1500:])
-            try:
-                fix_response, fix_usage = call_llm(
-                    args.provider, model, api_key,
-                    build_code_system_prompt(challenge_md, config),
-                    fix_prompt,
-                    args.api_base,
-                )
-                iter_input_tokens += fix_usage["input_tokens"]
-                iter_output_tokens += fix_usage["output_tokens"]
-            except Exception as e:
-                print(f"  Fix LLM call failed: {e}", file=sys.stderr)
-                break
-            fixed, fixed_kernel = files.parse_response(fix_response)
-            if not fixed:
-                print("  Empty fix response — giving up")
-                break
-            fix_violation = validate_code(original_code, fixed)
-            if fix_violation:
-                print(f"  Fix failed validation: {fix_violation}")
-                break
-            before_fix, _ = files.read()
-            fix_sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
-            print(f"  Fix similarity to broken code: {fix_sim * 100:.0f}%")
-            files.write(fixed, fixed_kernel)
-            code_changed_by_fix = True
+        bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
+            args, model, api_key, config, server, challenge_md,
+            files,
+        )
+        iter_input_tokens += fix_in
+        iter_output_tokens += fix_out
 
         if bench is None:
             print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
@@ -1265,7 +615,7 @@ def main() -> int:
 
         track_scores = bench.get("track_scores", {})
         errors = bench.get("errors") or []
-        print(f"  [BENCH] Score: {bench['score']:.0f}  Feasible: {bench['feasible']}")
+        print(f"  [BENCH] Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
         if track_scores:
             for tk, ts in track_scores.items():
                 print(f"          Track {tk}: {ts:.0f}")
@@ -1274,92 +624,41 @@ def main() -> int:
             for e in errors[:5]:
                 print(f"          {e}")
 
-        # ── Step 4b: runtime error retry ───────────────────────
-        max_runtime_retries = 2
+        # ── Runtime error retry ────────────────────────────────
         runtime_errors = bench.get("errors") or []
-        if runtime_errors and not bench["feasible"]:
-            for rt_attempt in range(max_runtime_retries):
-                print(f"  Runtime retry {rt_attempt + 1}/{max_runtime_retries} — asking LLM to fix ...")
-                print(f"  Errors: {runtime_errors}")
-                current_code, current_kernel = files.read()
-                try:
-                    fix_response, fix_usage = call_llm(
-                        args.provider, model, api_key,
-                        build_code_system_prompt(challenge_md, config),
-                        build_runtime_fix_prompt(current_code, bench, current_kernel, config.get("timeout", 30)),
-                        args.api_base,
-                    )
-                    iter_input_tokens += fix_usage["input_tokens"]
-                    iter_output_tokens += fix_usage["output_tokens"]
-                except Exception as e:
-                    print(f"  Runtime fix LLM call failed: {e}", file=sys.stderr)
-                    break
-                fixed, fixed_kernel = files.parse_response(fix_response)
-                if not fixed:
-                    print("  Empty fix response — giving up")
-                    break
-                fix_violation = validate_code(original_code, fixed)
-                if fix_violation:
-                    print(f"  Fix failed validation: {fix_violation}")
-                    break
-                fix_sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
-                print(f"  Fix similarity: {fix_sim * 100:.0f}%")
-                files.write(fixed, fixed_kernel)
-                code_changed_by_fix = True
-
-                print("  Re-running benchmark ...")
-                send_heartbeat(server, agent_id)
-                bench, build_err = run_benchmark(args, config, server)
-                if bench is None:
-                    print(f"  Runtime fix caused compile error — asking LLM to fix ...")
-                    compile_fix_prompt = files.build_compile_fix_prompt(build_err[-1500:])
-                    try:
-                        compile_fix_resp, cfix_usage = call_llm(
-                            args.provider, model, api_key,
-                            build_code_system_prompt(challenge_md, config),
-                            compile_fix_prompt,
-                            args.api_base,
-                        )
-                        iter_input_tokens += cfix_usage["input_tokens"]
-                        iter_output_tokens += cfix_usage["output_tokens"]
-                    except Exception as e:
-                        print(f"  Compile fix LLM call failed: {e}", file=sys.stderr)
-                        if best_code:
-                            files.write(best_code, best_kernel)
-                        break
-                    compile_fixed, compile_fixed_kernel = files.parse_response(compile_fix_resp)
-                    if not compile_fixed or validate_code(original_code, compile_fixed):
-                        print("  Compile fix failed validation — restoring and continuing")
-                        if best_code:
-                            files.write(best_code, best_kernel)
-                        break
-                    files.write(compile_fixed, compile_fixed_kernel)
-                    bench, build_err = run_benchmark(args, config, server)
-                    if bench is None:
-                        print("  Still won't compile — restoring and continuing")
-                        if best_code:
-                            files.write(best_code, best_kernel)
-                        break
-                print(f"  Score: {bench['score']}  Feasible: {bench['feasible']}")
-                runtime_errors = bench.get("errors") or []
-                if not runtime_errors or bench["feasible"]:
-                    break
+        if runtime_errors and not bench.get("feasible"):
+            bench, rt_changed, rt_in, rt_out = _fix_runtime_errors(
+                args, model, api_key, config, server, agent_id, challenge_md,
+                files, bench, best_code, best_kernel,
+            )
+            iter_input_tokens += rt_in
+            iter_output_tokens += rt_out
+            code_changed = code_changed or rt_changed
 
         if bench is None:
             post_message(server, agent_name, agent_id,
                          f"[{tag}] {title} — benchmark failed after runtime fix")
             continue
 
-        # ── Step 4c: re-describe hypothesis if code changed ────
-        if code_changed_by_fix:
-            print("  Code changed during error recovery — re-describing hypothesis ...")
-            final_code = read_algorithm(config)
+        # ── Re-describe hypothesis if code changed ─────────────
+        # Skip when the post-recovery code is nearly identical to what we
+        # originally proposed — the recovery was almost certainly cosmetic
+        # and not worth a round-trip to confirm "no change".
+        final_code, final_kernel = files.read()
+        post_fix_similarity = difflib.SequenceMatcher(None, code, final_code).ratio()
+        if code_changed and post_fix_similarity < _REDESCRIBE_SIMILARITY_THRESHOLD:
+            print(
+                f"  Code changed during error recovery "
+                f"(post-fix similarity {post_fix_similarity * 100:.0f}%) — re-describing hypothesis ..."
+            )
             try:
                 redesc_response, redesc_usage = call_llm(
                     args.provider, model, api_key,
-                    build_hypothesis_system_prompt(challenge_md, config),
+                    build_redescribe_system_prompt(config),
                     build_redescribe_hypothesis_prompt(
-                        original_code or best_code or "", final_code, hypothesis,
+                        best_code or "", final_code, hypothesis,
+                        original_kernel=best_kernel or "",
+                        final_kernel=final_kernel,
                     ),
                     args.api_base,
                 )
@@ -1373,7 +672,7 @@ def main() -> int:
             except Exception as e:
                 print(f"  Re-describe failed: {e} — using original hypothesis", file=sys.stderr)
 
-        # ── Step 5: publish ─────────────────────────────────────
+        # ── Publish ────────────────────────────────────────────
         iter_cost = estimate_cost(model, {
             "input_tokens": iter_input_tokens,
             "output_tokens": iter_output_tokens,
@@ -1396,9 +695,8 @@ def main() -> int:
         except Exception as e:
             print(f"  [PUBLISH] FAILED: {e}")
 
-        # ── chat + heartbeat ────────────────────────────────────
-        status = "NEW BEST!" if is_new_best else f"score {bench['score']:.0f}"
-        feasible_str = "" if bench["feasible"] else " (INFEASIBLE)"
+        status = "NEW BEST!" if is_new_best else f"score {bench.get('score', 0):.0f}"
+        feasible_str = "" if bench.get("feasible") else " (INFEASIBLE)"
         post_message(server, agent_name, agent_id,
                      f"[{tag}] {title} → {status}{feasible_str}")
         send_heartbeat(server, agent_id)
