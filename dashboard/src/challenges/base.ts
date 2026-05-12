@@ -119,6 +119,10 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
     this.apiUrl = resolveApiUrl();
 
     this.rotationTimer = setInterval(() => {
+      // Skip rotation while the tab is hidden so we're not redrawing SVG
+      // into a non-visible page. Browsers already throttle setInterval to
+      // ~1Hz in hidden tabs, but the guard avoids wasted work either way.
+      if (document.hidden) return;
       if (this.instanceKeys.length > 1) this.navigate(1);
     }, 8000);
 
