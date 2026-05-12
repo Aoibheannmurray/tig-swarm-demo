@@ -8,30 +8,35 @@ interface SatData {
   viz_count: number;     // length of assignment_bits (sub-sampled if num_variables > viz_count)
   viz_stride: number;    // sample step over the full assignment
   assignment_bits: string; // string of "0"/"1", length viz_count
-  clause_bins: number[][]; // 50 bins of [c0, c1, c2, c3]
 }
 
 type AllSatData = Record<string, SatData>;
 
 const VB_W = 1000;
 const VB_H = 1000;
-const HIST_H = 180;             // top strip for clause-satisfaction histogram
-const HIST_GAP = 20;             // gap between histogram and grid
-const GRID_TOP = HIST_H + HIST_GAP;
+const BANNER_H = 200;            // PASS/FAIL banner across the top
+const BANNER_GAP = 20;            // gap between banner and grid
+const GRID_TOP = BANNER_H + BANNER_GAP;
 
-// Stacked-bar colors per "satisfying-literal count" bucket.
-// Earthen progression — danger → umber → olive → forest-green — keeps
-// "more sats is better" reading clear under the cream theme.
-const BIN_COLORS = ["#8B2D2D", "#A66E45", "#6B7F4E", "#4A7C5A"]; // 0,1,2,3 sats
+// SAT is binary: every clause must be satisfied for the instance to PASS.
+// Banner accent colors match the existing palette — dark forest for the
+// "satisfied" bucket from the prior histogram, dark wine for danger.
+const PASS_COLOR = "#4A7C5A";
+const FAIL_COLOR = "#8B2D2D";
+// Variable-assignment grid TRUE-cell color, branched on pass/fail so the
+// pass state reads through to the secondary view.
+const TRUE_PASS = "#4A7C5A";
+const TRUE_FAIL = "#4E6B85";
 
 export class SatPanel extends DisplayPanelBase<AllSatData> {
   protected idPrefix = "sat";
 
   private svg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
-  private histG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private bannerG!: Selection<SVGGElement, unknown, HTMLElement, any>;
   private gridG!: Selection<SVGGElement, unknown, HTMLElement, any>;
 
   private satEl!: HTMLElement;
+  private satLabelEl!: HTMLElement;
   private varsEl!: HTMLElement;
 
   protected scaffoldHtml(): string {
@@ -58,7 +63,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
           </div>
         </div>
         <div class="knapsack-value-box">
-          <div class="solution-sub-label">SATISFIED</div>
+          <div class="solution-sub-label" id="sat-sat-label">CLAUSES</div>
           <div class="solution-sub-value" id="sat-sat">---</div>
         </div>
         <div class="knapsack-items-box">
@@ -78,6 +83,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     this.scoreEl = document.getElementById("sat-score")!;
     this.scoreDeltaEl = document.getElementById("sat-score-delta")!;
     this.satEl = document.getElementById("sat-sat")!;
+    this.satLabelEl = document.getElementById("sat-sat-label")!;
     this.varsEl = document.getElementById("sat-vars")!;
     this.instanceLabelEl = document.getElementById("sat-instance-label")!;
     this.navEl = document.getElementById("sat-nav")!;
@@ -92,7 +98,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
       .attr("viewBox", `0 0 ${VB_W} ${VB_H}`)
       .attr("preserveAspectRatio", "xMidYMid meet");
 
-    this.histG = this.svg.append("g") as any;
+    this.bannerG = this.svg.append("g") as any;
     this.gridG = this.svg.append("g")
       .attr("transform", `translate(0,${GRID_TOP})`) as any;
 
@@ -106,47 +112,48 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
   }
 
   protected onReset(): void {
-    (this.histG.node() as SVGGElement).innerHTML = "";
+    (this.bannerG.node() as SVGGElement).innerHTML = "";
     (this.gridG.node() as SVGGElement).innerHTML = "";
     this.satEl.textContent = "---";
+    this.satLabelEl.textContent = "CLAUSES";
     this.varsEl.textContent = "---";
   }
 
   protected showInstance(data: SatData) {
-    if (!data || !data.assignment_bits || !data.clause_bins) {
-      (this.histG.node() as SVGGElement).innerHTML = "";
+    if (!data || !data.assignment_bits) {
+      (this.bannerG.node() as SVGGElement).innerHTML = "";
       (this.gridG.node() as SVGGElement).innerHTML = "";
       this.satEl.textContent = "---";
+      this.satLabelEl.textContent = "CLAUSES";
       this.varsEl.textContent = "---";
       return;
     }
 
-    // Build SVG via a string buffer and assign once. append per
-    // element triggers a layout pass each call — for thousands of
-    // assignment cells that becomes the dominant cost.
-    let histHtml = "";
-    const bins = data.clause_bins;
-    const numBins = bins.length;
-    const binW = VB_W / numBins;
-    let maxBinTotal = 1;
-    for (const b of bins) {
-      const t = b[0] + b[1] + b[2] + b[3];
-      if (t > maxBinTotal) maxBinTotal = t;
-    }
-    const segWidth = (binW - 0.6).toFixed(2);
-    for (let bi = 0; bi < numBins; bi++) {
-      let yCursor = HIST_H;
-      const bin = bins[bi];
-      const xPos = (bi * binW).toFixed(2);
-      for (let k = 0; k < 4; k++) {
-        const segH = (bin[k] / maxBinTotal) * HIST_H;
-        if (segH <= 0) continue;
-        yCursor -= segH;
-        histHtml += `<rect x="${xPos}" y="${yCursor.toFixed(2)}" width="${segWidth}" height="${segH.toFixed(2)}" fill="${BIN_COLORS[k]}"/>`;
-      }
-    }
-    histHtml += `<line x1="0" x2="${VB_W}" y1="${HIST_H + 1}" y2="${HIST_H + 1}" stroke="rgba(26,26,26,0.18)" stroke-width="1"/>`;
-    (this.histG.node() as SVGGElement).innerHTML = histHtml;
+    const m = data.num_clauses;
+    const pass = m > 0 && data.num_satisfied === m;
+    const unsat = m - data.num_satisfied;
+
+    // PASS/FAIL banner. Solid colored rect across the top with stacked
+    // headline + sub-line in white. Same SVG-string-buffer pattern as the
+    // grid below — one assignment, no per-element layout churn.
+    const bannerColor = pass ? PASS_COLOR : FAIL_COLOR;
+    const headline = pass ? "✓ SATISFIED" : "✗ UNSAT";
+    const subline = pass
+      ? `all ${m.toLocaleString()} clauses satisfied`
+      : `${unsat.toLocaleString()} of ${m.toLocaleString()} clauses unsatisfied`;
+    const cx = VB_W / 2;
+    const headlineY = BANNER_H * 0.50;
+    const sublineY = BANNER_H * 0.78;
+    const bannerHtml =
+      `<rect x="0" y="0" width="${VB_W}" height="${BANNER_H}" fill="${bannerColor}"/>` +
+      `<text x="${cx}" y="${headlineY.toFixed(2)}" text-anchor="middle" ` +
+        `dominant-baseline="central" fill="rgba(255,255,255,0.96)" ` +
+        `font-size="76" font-weight="700" ` +
+        `font-family="'JetBrains Mono', monospace" letter-spacing="2">${headline}</text>` +
+      `<text x="${cx}" y="${sublineY.toFixed(2)}" text-anchor="middle" ` +
+        `dominant-baseline="central" fill="rgba(255,255,255,0.78)" ` +
+        `font-size="26" font-family="'JetBrains Mono', monospace">${subline}</text>`;
+    (this.bannerG.node() as SVGGElement).innerHTML = bannerHtml;
 
     // Variable-assignment grid.
     let gridHtml = "";
@@ -158,7 +165,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
       const rows = Math.ceil(n / cols);
       const cellW = VB_W / cols;
       const cellH = gridH / rows;
-      const trueColor = "#4E6B85";
+      const trueColor = pass ? TRUE_PASS : TRUE_FAIL;
       const falseColor = "rgba(26,26,26,0.06)";
       const bits = data.assignment_bits;
       const w = Math.max(0.5, cellW - 0.4).toFixed(3);
@@ -173,10 +180,16 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     }
     (this.gridG.node() as SVGGElement).innerHTML = gridHtml;
 
-    const satPct = data.num_clauses > 0
-      ? (data.num_satisfied / data.num_clauses) * 100
-      : 0;
-    this.satEl.textContent = `${data.num_satisfied.toLocaleString()} / ${data.num_clauses.toLocaleString()} (${satPct.toFixed(2)}%)`;
+    // Stat box. Label flips PASS↔FAIL to match the banner's headline;
+    // dropped the percentage because 99.9%-of-clauses is still UNSAT and
+    // the percent reading misleads.
+    if (pass) {
+      this.satLabelEl.textContent = "SATISFIED";
+      this.satEl.textContent = `${m.toLocaleString()} / ${m.toLocaleString()}`;
+    } else {
+      this.satLabelEl.textContent = "UNSATISFIED";
+      this.satEl.textContent = `${unsat.toLocaleString()} / ${m.toLocaleString()}`;
+    }
     const sampledNote = data.viz_stride > 1
       ? ` (showing 1/${data.viz_stride})`
       : "";

@@ -813,15 +813,13 @@ def _sat_parse_solution(sol_path: str) -> list[bool] | None:
 def _sat_extras(inst_path: str, sol_path: str) -> dict:
     """Build the SAT viz payload from instance + solution.
 
-    Two complementary views are sent:
-      - assignment_bits: a "0"/"1" string of the variable assignment,
-        sub-sampled to <= MAX_VIZ_VARS so the payload stays tractable
-        even at n_vars=100k.
-      - clause_bins: 50 stacked-bar bins along the clause index axis,
-        each bin a 4-tuple (clauses with 0/1/2/3 satisfying literals).
+    SAT is a binary pass/fail challenge (`evaluate_solution` in
+    `src/satisfiability/mod.rs` returns 1M iff every clause is satisfied,
+    else 0), so we only need the pass/fail aggregate plus the variable
+    assignment to render the panel — `num_satisfied` vs `num_clauses`
+    drives the PASS/UNSAT banner, and `assignment_bits` drives the grid.
     """
     MAX_VIZ_VARS = 10000
-    NUM_BINS = 50
 
     vars_arr = _sat_parse_solution(sol_path)
     if vars_arr is None:
@@ -841,22 +839,16 @@ def _sat_extras(inst_path: str, sol_path: str) -> dict:
         return {"sat_data": None}
 
     m_clauses = len(clauses)
-    bin_size = max(1, m_clauses // NUM_BINS)
-    clause_bins = [[0, 0, 0, 0] for _ in range(NUM_BINS)]
     num_satisfied = 0
-    for ci, clause in enumerate(clauses):
-        bin_idx = min(ci // bin_size, NUM_BINS - 1)
-        sat_count = 0
+    for clause in clauses:
         for lit in clause:
             v_idx = abs(lit) - 1  # literals are 1-indexed
             if v_idx < 0 or v_idx >= n_vars:
                 continue
             val = vars_arr[v_idx]
             if (lit > 0 and val) or (lit < 0 and not val):
-                sat_count += 1
-        clause_bins[bin_idx][min(sat_count, 3)] += 1
-        if sat_count > 0:
-            num_satisfied += 1
+                num_satisfied += 1
+                break
 
     if n_vars <= MAX_VIZ_VARS:
         viz_assignment = vars_arr
@@ -874,7 +866,6 @@ def _sat_extras(inst_path: str, sol_path: str) -> dict:
             "viz_count": len(viz_assignment),
             "viz_stride": viz_stride,
             "assignment_bits": assignment_bits,
-            "clause_bins": clause_bins,
         }
     }
 
