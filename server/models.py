@@ -49,6 +49,10 @@ class HeartbeatRequest(BaseModel):
     current_hypothesis_id: Optional[str] = None
 
 
+class RenameRequest(BaseModel):
+    agent_name: str
+
+
 class IterationCreate(BaseModel):
     agent_id: str
     title: str

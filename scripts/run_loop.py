@@ -496,6 +496,18 @@ def main() -> int:
             time.sleep(_ITERATION_BACKOFF_SECS)
             continue
 
+        # If the local contributor_name (re-)prompted by setup.py join
+        # differs from the server's agents.name, POST a rename. Cheap:
+        # piggybacks on the state we already fetched.
+        try:
+            from sync_identity import sync_identity_with_state
+            renamed = sync_identity_with_state(server, agent_id, state)
+            if renamed:
+                agent_name = renamed
+                print(f"  [IDENT] renamed to {agent_name!r}")
+        except Exception as e:
+            print(f"  [IDENT] sync skipped: {e}")
+
         my_score = state.get("my_best_score")
         global_best = state.get("best_score")
         stagnation = state.get("my_runs_since_improvement", 0)

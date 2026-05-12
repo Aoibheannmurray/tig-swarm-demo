@@ -37,7 +37,17 @@ const { wsUrl, apiUrl } = getDashboardUrls();
 // re-fetches its data via setChallenge().
 const panels: Panel[] = [];
 let chartPanel: ChartPanel;
+let feedPanel: FeedPanel;
 let displayPanel: Panel | undefined;
+
+// agent_id → current agent_name. Authoritative source on the dashboard
+// side; populated from every LeaderboardUpdate (which on the server JOINs
+// agents.name live) and updated in-place on agent_renamed. Read by the
+// feed panel so it can render names from the agent_id rather than relying
+// on whatever snapshot was attached to a given event.
+const agentNameMap = new Map<string, string>();
+const lookupAgentName = (agent_id: string): string | undefined =>
+  agentNameMap.get(agent_id);
 
 function initPanel<T extends Panel>(PanelClass: new () => T, containerId: string): T {
   const panel = new PanelClass();
@@ -74,7 +84,8 @@ function constructPanels() {
   constructDisplayPanel();
   chartPanel = initPanel(ChartPanel, "panel-chart");
   initPanel(DiversityPanel, "panel-diversity");
-  initPanel(FeedPanel, "panel-feed");
+  feedPanel = initPanel(FeedPanel, "panel-feed");
+  feedPanel.setNameLookup(lookupAgentName);
   initPanel(LeaderboardPanel, "panel-leaderboard");
 }
 
@@ -105,6 +116,22 @@ function handleMessage(msg: WSMessage) {
   const m = msg as any;
   if (CHALLENGE_SCOPED[m.type] && m.challenge && m.challenge !== getViewedChallenge()) {
     return;
+  }
+
+  // Keep agent_id → name map in sync. Leaderboard entries are server-JOINed
+  // so they always carry the current name; agent_renamed is the explicit
+  // signal when no leaderboard update follows. agent_joined seeds first-name
+  // entries before any leaderboard fires.
+  if (msg.type === "leaderboard_update") {
+    for (const entry of msg.entries) {
+      if (entry.agent_id && entry.agent_name) {
+        agentNameMap.set(entry.agent_id, entry.agent_name);
+      }
+    }
+  } else if (msg.type === "agent_renamed") {
+    agentNameMap.set(msg.agent_id, msg.new_name);
+  } else if (msg.type === "agent_joined") {
+    agentNameMap.set(msg.agent_id, msg.agent_name);
   }
 
   if (soundEnabled) {
@@ -293,6 +320,47 @@ async function loadInitialState(apiUrl: string, challenge: string) {
         } as any);
       }
     }
+
+    // Backfill the live feed from /api/messages so chat history AND
+    // agent_joined events survive a page reload. Server returns rows for
+    // the viewed challenge plus all msg_type='agent_joined' rows regardless
+    // of challenge (joins are swarm-wide). Dispatched oldest-first so the
+    // newest entries land at the top of the feed alongside synthesised
+    // experiment/hypothesis events above.
+    void fetch(`${apiUrl}/api/messages?limit=200&challenge=${encodeURIComponent(challenge)}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: Array<{
+        id: string;
+        agent_id: string | null;
+        agent_name: string;
+        content: string;
+        msg_type: string;
+        created_at: string;
+      }>) => {
+        if (challenge !== getViewedChallenge()) return;
+        rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+        for (const row of rows) {
+          if (row.msg_type === "agent_joined") {
+            handleMessage({
+              type: "agent_joined",
+              agent_id: row.agent_id || "",
+              agent_name: row.agent_name,
+              timestamp: row.created_at,
+            } as any);
+          } else {
+            handleMessage({
+              type: "chat_message",
+              message_id: row.id,
+              agent_id: row.agent_id,
+              agent_name: row.agent_name,
+              content: row.content,
+              msg_type: row.msg_type === "milestone" ? "milestone" : "agent",
+              timestamp: row.created_at,
+            } as any);
+          }
+        }
+      })
+      .catch((e) => console.warn("[Dashboard] /api/messages backfill failed:", e));
 
     soundEnabled = true;
     console.log("[Dashboard] Loaded initial state for challenge:", challenge);

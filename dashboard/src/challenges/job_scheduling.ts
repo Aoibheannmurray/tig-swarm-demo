@@ -31,11 +31,30 @@ const VB_H = 600;
 const CHART_W = VB_W - MARGIN.left - MARGIN.right;
 const CHART_H = VB_H - MARGIN.top - MARGIN.bottom;
 
+// Fixed palette for job bars. Jobs 0–7 use these literal swatches. Jobs
+// beyond the palette fall through to a procedural generator below, which
+// holds saturation/lightness in the same muted-earth-tone range so
+// generated colors blend with the base palette.
+const JOB_PALETTE_BASE = [
+  "#B8541F",
+  "#C68F3E",
+  "#6B7F4E",
+  "#4E6B85",
+  "#7A4F6E",
+  "#4A8C8A",
+  "#A66E45",
+  "#8B6B8C",
+];
+
 function jobColor(job: number): string {
-  const hue = (job * 137.508) % 360;
-  const sat = 60 + (job % 3) * 10;
-  const lit = 52 + (job % 2) * 8;
-  return `hsl(${hue}, ${sat}%, ${lit}%)`;
+  const i = ((job % 1e6) + 1e6) % 1e6;
+  if (i < JOB_PALETTE_BASE.length) return JOB_PALETTE_BASE[i];
+  // Golden-angle hue walk starting at +100° so the first generated color
+  // lands in the green/cyan band (gap in the base palette). S/L pinned to
+  // the muted range that matches the swatches above.
+  const k = i - JOB_PALETTE_BASE.length;
+  const hue = (k * 137.508 + 100) % 360;
+  return `hsl(${hue.toFixed(1)}, 28%, 44%)`;
 }
 
 export class GanttPanel extends DisplayPanelBase<AllGanttData> {

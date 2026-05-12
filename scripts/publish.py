@@ -66,6 +66,15 @@ def main():
     strategy_tag = sys.argv[4]
     notes = sys.argv[5] if len(sys.argv) > 5 else ""
 
+    # Keep server's agents.name aligned with swarm.config.json before
+    # publishing. Best-effort: if the sync fails (server down, name
+    # collision), publish continues — the user can fix the name later.
+    try:
+        from sync_identity import sync_identity
+        sync_identity(SERVER, agent_id)
+    except Exception as e:
+        print(f"[publish] identity sync skipped: {e}", file=sys.stderr)
+
     bench = json.load(sys.stdin)
 
     algo_path, kernel_path = _resolve_algo_path()

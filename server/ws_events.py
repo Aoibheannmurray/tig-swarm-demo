@@ -40,6 +40,13 @@ class AgentJoined(_EventBase):
     agent_name: str
 
 
+class AgentRenamed(_EventBase):
+    type: Literal["agent_renamed"] = "agent_renamed"
+    agent_id: str
+    old_name: str
+    new_name: str
+
+
 class TrajectoryReset(_EventBase):
     type: Literal["trajectory_reset"] = "trajectory_reset"
     challenge: ChallengeId
@@ -169,6 +176,7 @@ class SwarmConfigUpdated(_EventBase):
 WSEvent = Annotated[
     Union[
         AgentJoined,
+        AgentRenamed,
         TrajectoryReset,
         ExperimentPublished,
         NewGlobalBest,
@@ -204,6 +212,7 @@ def _dump_schema() -> None:
         name: model.model_json_schema()
         for name, model in [
             ("AgentJoined", AgentJoined),
+            ("AgentRenamed", AgentRenamed),
             ("TrajectoryReset", TrajectoryReset),
             ("ExperimentPublished", ExperimentPublished),
             ("NewGlobalBest", NewGlobalBest),
