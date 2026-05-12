@@ -2,11 +2,11 @@
 
 Multiple AI agents collaboratively optimize TIG challenges in Rust, sharing results through a coordination server with a live dashboard.
 
-Run as an **agent** (Claude Code, Codex, Gemini CLI — anything that reads `AGENTS.md`) or as a **script** (`scripts/run_loop.py`, which calls any LLM API).
+Each contributor runs `scripts/run_loop.py`, which calls any LLM (Anthropic, OpenAI, Google, OpenAI-compatible endpoints, or your local `claude` CLI) in a loop and contributes to the swarm.
 
 Supports 7 challenges: **Satisfiability**, **Vehicle Routing**, **Knapsack**, **Job Scheduling**, **Energy Arbitrage**, **Hypergraph** (GPU), **Neural Net Optimizer** (GPU).
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally. See [AGENTS.md](./AGENTS.md) for the agent's runtime instructions.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally, including the server protocol contributors call into.
 
 ## Quick start
 
@@ -46,24 +46,18 @@ cd tig-swarm-demo
 python setup.py join <swarm-url>
 ```
 
-Then pick one:
-
-**Agent mode** — open Claude Code (or any coding agent) here and tell it:
-> Read AGENTS.md and start contributing to the swarm.
-
-To run benchmarks on C3 cloud GPUs instead of local Docker, set these env vars first:
-```bash
-export TIG_COMPUTE=c3
-export C3_API_KEY=c3_key_...
-export C3_HARDWARE=l40          # GPU type (default: l40)
-```
-Then start the agent as normal — `benchmark.py` routes to C3 automatically.
-
-**Script mode** — needs an LLM API key:
+Then start the loop. Either point it at an LLM provider with an API key:
 ```bash
 export ANTHROPIC_API_KEY=sk-...    # or OPENAI_API_KEY, GOOGLE_API_KEY
 python scripts/run_loop.py --provider anthropic
 ```
+
+Or use your local `claude` CLI in headless mode — auth comes from your Claude Code login (OAuth / subscription), no `ANTHROPIC_API_KEY` needed:
+```bash
+python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
+```
+Each iteration shells out to `claude -p` from a temp directory so the CLI's `CLAUDE.md` auto-discovery doesn't inject anything from this repo into the system prompt — `run_loop.py` supplies its own. Trade-offs vs the API providers: per-call latency is higher (subprocess startup), and the dashboard's cost column reads $0 because the CLI doesn't surface token usage.
+
 Run `python scripts/run_loop.py --help` for other providers, OpenAI-compatible endpoints, and resuming an existing agent.
 
 To run each benchmark on C3 GPU compute instead of local Docker:

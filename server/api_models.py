@@ -2,9 +2,9 @@
 
 Before this module, ``/api/state``, ``/api/replay``, and ``/api/diversity``
 returned ad-hoc dicts assembled inline in server.py — the dashboard's
-``types.ts`` redeclared them by hand and the agent loop dict-poked them
-with ``python3 -c`` snippets in AGENTS.md. The contract was implicit,
-documented only in field comments scattered across server.py.
+``types.ts`` redeclared them by hand and the contributor loop poked them
+ad-hoc from ``scripts/run_loop.py``. The contract was implicit, documented
+only in field comments scattered across server.py.
 
 This module makes those contracts explicit. Each endpoint that has a
 model here imports it and either passes it as ``response_model`` (when
@@ -138,8 +138,8 @@ class StateResponse(_ResponseBase):
 
     NOT YET enforced as a FastAPI ``response_model``. The endpoint still
     returns hand-built dicts in server.py; this model captures the wire
-    form so the dashboard's ``types.ts`` and AGENTS.md's agent-loop
-    snippets have a single named contract to reference.
+    form so the dashboard's ``types.ts`` and the loop's response handling
+    in ``scripts/run_loop.py`` share a single named contract to reference.
 
     Agent-loop view (``?agent_id=…``) and dashboard view (no agent_id)
     diverge — fields that only appear in one are marked Optional. A

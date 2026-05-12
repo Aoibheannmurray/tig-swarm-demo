@@ -11,6 +11,7 @@ Usage:
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
     python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+    python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
     # Resume a previous agent
     python scripts/run_loop.py --provider anthropic --agent-id <id> --agent-name <name>
@@ -31,6 +32,15 @@ Picking a model (--model):
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
 --c3-api-key, or existing `c3 login` credentials.
+
+claude-code provider:
+    Shells out to your local `claude -p` binary instead of hitting an HTTP
+    API. Auth comes from your Claude Code login (OAuth / subscription) — no
+    ANTHROPIC_API_KEY needed. Calls run from a temp directory so the CLI's
+    CLAUDE.md auto-discovery does NOT pull this repo's docs into the system
+    prompt — run_loop.py supplies its own. Token usage is not reported by
+    the CLI, so the dashboard's per-agent cost column will read $0 for this
+    provider.
 """
 
 from __future__ import annotations
