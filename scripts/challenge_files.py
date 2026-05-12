@@ -101,8 +101,24 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+_FENCED_BLOCK_RE = re.compile(r"```(?:[\w+-]*)\s*\n(.*?)\n```", re.DOTALL)
+
+
 def parse_code(text: str) -> str:
-    return _strip_fences(text)
+    # Defensive against chatty LLMs that ignore "no preamble / no fences":
+    # if the response wraps the code in ```...```, take the first fenced
+    # block's contents; then drop any prose still sitting before the
+    # required `use super::*;` anchor.
+    text = text.strip()
+    m = _FENCED_BLOCK_RE.search(text)
+    if m:
+        text = m.group(1).strip()
+    else:
+        text = _strip_fences(text)
+    idx = text.find("use super::*;")
+    if idx > 0:
+        text = text[idx:]
+    return text.strip()
 
 
 def parse_gpu_code(text: str) -> tuple[str, str]:

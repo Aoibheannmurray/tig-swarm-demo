@@ -25,8 +25,7 @@ Railway project (overwriting the local `.railway/` link), and contributor
 setup overwrites the same set of templated files.
 
 Files this script reads / writes:
-  - AGENTS.md, README.md, scripts/publish.py
-    (templated: ${SERVER_URL} -> the chosen URL)
+  - README.md (templated: ${SERVER_URL} -> the chosen URL)
   - swarm.config.json (owner-only mirror of what's stored on the server)
   - agent.config.json (local script-loop runtime defaults; no API keys)
   - CHALLENGE.md (per-challenge docs, from src/<challenge>/README.md)
@@ -59,8 +58,6 @@ ROOT = Path(__file__).parent
 TEMPLATED_FILES = [
     ROOT / "README.md",
 ]
-AGENTS_TEMPLATE = ROOT / "AGENTS.md.template"
-AGENTS_OUTPUT = ROOT / "AGENTS.md"
 
 # Heuristic URL patterns that the wizard treats as "the swarm URL" and
 # replaces with the new one. Catches the canonical Railway domain and raw
@@ -77,7 +74,6 @@ _RAW_IP_URL_RE = re.compile(r"https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?")
 PLACEHOLDER_URL = "${SERVER_URL}"
 PLACEHOLDER_CHALLENGE = "${CHALLENGE_NAME}"
 PLACEHOLDER_ALGO = "${ALGORITHM_PATH}"
-PLACEHOLDER_TIMEOUT = "${TIMEOUT}"
 
 # Per-challenge defaults for the wizard prompts. The canonical definitions
 # live in server/challenges.py; this dict is built from there at module
@@ -99,7 +95,6 @@ CHALLENGES: dict[str, dict] = {
 CPU_CHALLENGES = {k: v for k, v in CHALLENGES.items() if not v["is_gpu"]}
 GPU_CHALLENGES = {k: v for k, v in CHALLENGES.items() if v["is_gpu"]}
 
-DEFAULT_TIMEOUT = 30
 DEFAULT_INSTANCES_PER_TRACK = 2
 DEFAULT_TRACKS_PER_CHALLENGE = {
     "satisfiability": {"n_vars=100000,ratio=4150": 2},
@@ -179,18 +174,6 @@ def prompt_optional(label: str, default: str | None = None) -> str | None:
     return default
 
 
-def _strip_conditional_blocks(text: str, is_gpu: bool) -> str:
-    """Process <!-- IF_GPU/IF_CPU --> blocks: keep matching, strip non-matching."""
-    if is_gpu:
-        text = re.sub(r'<!-- IF_GPU -->\n?', '', text)
-        text = re.sub(r'<!-- END_GPU -->\n?', '', text)
-        text = re.sub(r'<!-- IF_CPU -->.*?<!-- END_CPU -->\n?', '', text, flags=re.DOTALL)
-    else:
-        text = re.sub(r'<!-- IF_CPU -->\n?', '', text)
-        text = re.sub(r'<!-- END_CPU -->\n?', '', text)
-        text = re.sub(r'<!-- IF_GPU -->.*?<!-- END_GPU -->\n?', '', text, flags=re.DOTALL)
-    return text
-
 
 def _swap(text: str, placeholder: str, prior: str | None, new: str, is_url: bool = False) -> str:
     """Replace the placeholder and the previously-templated value with `new`.
@@ -213,30 +196,14 @@ def template_files(
     challenge: str | None = None,
     algorithm_path: str | None = None,
     prior: dict | None = None,
-    timeout: int | None = None,
 ) -> None:
     """Substitute swarm-specific placeholders into every tracked file that
-    contains them. AGENTS.md is regenerated from AGENTS.md.template each
-    time (with GPU/CPU conditional blocks resolved); other files are
-    updated in-place using prior values from swarm.config.json.
-    """
+    contains them, using prior values from swarm.config.json to undo
+    previously-templated state."""
     prior = prior or {}
     prior_url = prior.get("server_url")
     prior_challenge = prior.get("challenge")
     prior_algo = prior.get("algorithm_path")
-
-    ch_def = _CHALLENGE_REGISTRY.get(challenge) if challenge else None
-    is_gpu = ch_def.is_gpu if ch_def else False
-
-    if AGENTS_TEMPLATE.exists():
-        text = AGENTS_TEMPLATE.read_text()
-        text = text.replace(PLACEHOLDER_URL, server_url)
-        if challenge:
-            text = text.replace(PLACEHOLDER_CHALLENGE, challenge)
-        text = text.replace(PLACEHOLDER_TIMEOUT, str(timeout or DEFAULT_TIMEOUT))
-        text = _strip_conditional_blocks(text, is_gpu)
-        AGENTS_OUTPUT.write_text(text)
-        print(f"  generated {AGENTS_OUTPUT.relative_to(ROOT)}")
 
     for path in TEMPLATED_FILES:
         if not path.exists():
@@ -987,7 +954,6 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         challenge=active_challenge,
         algorithm_path=cfg["algorithm_path"],
         prior=prior,
-        timeout=active_sub["timeout"],
     )
     write_challenge_md(active_challenge)
     write_swarm_config(cfg)
@@ -1095,7 +1061,6 @@ def run_switch(challenge: str) -> int:
     template_files(
         server_url, challenge=challenge,
         algorithm_path=new_algo_path, prior=prior,
-        timeout=sub.get("timeout") if sub else None,
     )
     write_challenge_md(challenge)
     cfg = dict(prior)
@@ -1118,9 +1083,8 @@ def run_switch(challenge: str) -> int:
     if prior.get("active_challenge") and prior["active_challenge"] != challenge:
         print(f"  Prior trajectories on {prior['active_challenge']} are preserved")
         print(f"  server-side and resume on switch-back.")
-    print("  All contributors auto-follow on their next iteration.")
-    print("\nTell your running agent (or your driver script):")
-    print("  'Re-read AGENTS.md and continue the loop on the new challenge.'")
+    print("  All contributors auto-follow on their next iteration —")
+    print("  scripts/run_loop.py runs `setup.py sync` at the top of each loop.")
     return 0
 
 
@@ -1162,7 +1126,6 @@ def run_sync() -> int:
     template_files(
         server_url, challenge=new_challenge,
         algorithm_path=new_algo_path, prior=prior,
-        timeout=sub.get("timeout") if sub else None,
     )
     write_challenge_md(new_challenge)
     cfg = dict(prior)
@@ -1185,7 +1148,7 @@ def run_sync() -> int:
     write_swarm_config(cfg)
     print(f"\nSynced to {new_challenge} (was {local_challenge}).")
     print("  Your prior trajectory on this challenge (if any) will resume server-side.")
-    print("  Tell your running agent (or driver script): 're-read AGENTS.md'.")
+    print("  scripts/run_loop.py picks up the new CHALLENGE.md on its next iteration.")
     return 0
 
 
@@ -1265,19 +1228,17 @@ def run_join(server_url: str, args: argparse.Namespace | None = None) -> int:
     algorithm_path = None
     stagnation_threshold = 2
     swarm_type = "cpu"
-    timeout = None
     try:
         with urllib.request.urlopen(f"{server_url.rstrip('/')}/api/swarm_config", timeout=4) as r:
             swarm = json.load(r)
         challenge = swarm.get("active_challenge") or swarm.get("challenge")
         stagnation_threshold = swarm.get("stagnation_threshold", 2)
         swarm_type = swarm.get("swarm_type", "cpu")
-        timeout = swarm.get("timeout")
         if challenge:
             algorithm_path = f"src/{challenge}/algorithm/mod.rs"
     except Exception as e:
         print(f"  couldn't fetch swarm config from {server_url}: {e}")
-        print("  AGENTS.md / CHALLENGE.md will only have the URL templated; rerun this command once the server is up.")
+        print("  CHALLENGE.md will only have the URL templated; rerun this command once the server is up.")
 
     contributor_name, contributor_llm = _prompt_contributor_identity(prior, args)
 
@@ -1289,7 +1250,6 @@ def run_join(server_url: str, args: argparse.Namespace | None = None) -> int:
         challenge=challenge,
         algorithm_path=algorithm_path,
         prior=prior,
-        timeout=timeout,
     )
     if challenge:
         write_challenge_md(challenge)
@@ -1336,18 +1296,18 @@ def run_join(server_url: str, args: argparse.Namespace | None = None) -> int:
     configure_agent_runtime(args)
 
     print(
-        "\nDone — this clone is now wired into the swarm.\n"
-        "\n  1. Coding agent (Claude Code, Codex, Gemini CLI, Cursor, Aider, …):\n"
-        "     Open Claude Code in this directory and have it read AGENTS.md\n"
-        "     to start contributing.\n"
-        "\n  2. Script loop:\n"
-        "     Export the API key for your configured provider, then run:\n"
-        "\n         python scripts/run_loop.py\n"
-        "\n     The loop reads provider/compute defaults from agent.config.json and\n"
-        "     stores its agent_id there after first registration.\n"
-        "\nEdit tacit_knowledge_personal.md any time with private hints — they\n"
+        "\nDone — this clone is now wired into the swarm. Start the optimization\n"
+        "loop with scripts/run_loop.py:\n"
+        "\n     export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY, GOOGLE_API_KEY\n"
+        "     python scripts/run_loop.py\n"
+        "\nOr use your local `claude` CLI in headless mode (no API key needed):\n"
+        "\n     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7\n"
+        "\nDefaults come from agent.config.json (provider, model, compute). The\n"
+        "loop saves its agent_id there after first registration so it resumes\n"
+        "automatically on later runs.\n"
+        "Edit tacit_knowledge_personal.md any time with private hints — they\n"
         "only ever live on your machine.\n"
-        "\nWhen the swarm owner switches the active challenge, your loop's\n"
+        "\nWhen the swarm owner switches the active challenge, run_loop.py's\n"
         "Step 0 (`python setup.py sync`) picks up the change automatically on\n"
         "the next iteration.\n"
     )

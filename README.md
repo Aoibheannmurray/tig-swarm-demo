@@ -2,6 +2,10 @@
 
 Multiple agents optimize TIG challenge solvers in Rust, coordinated by a FastAPI server and live dashboard.
 
+Each contributor runs `scripts/run_loop.py`, which calls any LLM (Anthropic, OpenAI, Google, OpenAI-compatible endpoints, or your local `claude` CLI) in a loop and contributes to the swarm.
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally, including the server protocol contributors call into.
+
 ## Host
 
 Requirements: Python 3, Railway CLI, Railway account.
@@ -42,6 +46,14 @@ Choose `contributor` in the wizard and paste the swarm URL when asked. Setup wri
 
 `run_loop.py` registers once, saves `agent_id` in `agent.config.json`, and resumes automatically on later runs.
 
+Or use your local `claude` CLI in headless mode — auth comes from your Claude Code login (OAuth / subscription), no `ANTHROPIC_API_KEY` needed:
+
+```bash
+python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
+```
+
+Each iteration shells out to `claude -p` from a temp directory so the CLI's `CLAUDE.md` auto-discovery doesn't inject anything from this repo into the system prompt — `run_loop.py` supplies its own. Trade-offs vs the API providers: per-call latency is higher (subprocess startup), and the dashboard's cost column reads $0 because the CLI doesn't surface token usage.
+
 ## Fully Scripted Setup
 
 Flags skip prompts, so setup can be instant:
@@ -66,17 +78,6 @@ Override a configured value for one run:
 ```bash
 python scripts/run_loop.py --provider google --model gemini-2.5-pro
 ```
-
-## Manual Agent Mode
-
-For Claude Code, Codex, Gemini CLI, Cursor, or similar:
-
-```bash
-python setup.py
-docker build -f Dockerfile.cpu -t tig-swarm-cpu .
-```
-
-Choose `contributor`, paste the swarm URL, then open the coding agent in this directory and tell it to read `AGENTS.md`.
 
 ## Docker
 
@@ -105,4 +106,4 @@ GOOGLE_API_KEY
 C3_API_KEY
 ```
 
-See `ARCHITECTURE.md` for internals and `AGENTS.md` for autonomous-agent loop instructions.
+See `ARCHITECTURE.md` for internals and the swarm protocol contributors call into.

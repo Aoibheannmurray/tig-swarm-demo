@@ -164,7 +164,11 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge.
 {challenge_md}
 {time_guidance}
 
-`use super::*;` must remain as the first import. Return the complete Rust source file — no explanation, no markdown fences."""
+OUTPUT FORMAT (strict):
+Your response will be written verbatim to mod.rs and compiled. The very first
+character of your response MUST be `u` from `use super::*;`. No preamble, no
+prose, no markdown fences (```), no commentary before or after the code.
+`use super::*;` must remain as the first import."""
 
 
 def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:

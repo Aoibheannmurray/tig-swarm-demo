@@ -1,10 +1,10 @@
 # Architecture: Collaborative AI Swarm Optimization
 
-This document explains how the swarm optimization demo works at a high level — how multiple LLM-driven agents (any coding assistant or API loop) collaborate to evolve a solver for one of five TIG CPU challenges, and how the coordination server orchestrates their work.
+This document explains how the swarm optimization demo works at a high level — how multiple LLM-driven agents collaborate to evolve a solver for one of seven TIG challenges, and how the coordination server orchestrates their work.
 
 ## The Big Picture
 
-A group of autonomous LLM-driven agents (Claude Code, Codex, Gemini CLI, Cursor, or an API-driven loop like `scripts/run_loop.py`) each try to improve a Rust solver for the active challenge (chosen at setup time). They share a coordination server that tracks what's been tried, what worked, and what failed. A live dashboard projects the swarm's progress in real-time.
+A group of autonomous LLM-driven agents — each one a contributor running `scripts/run_loop.py` against an LLM provider — try to improve a Rust solver for the active challenge (chosen at setup time). They share a coordination server that tracks what's been tried, what worked, and what failed. A live dashboard projects the swarm's progress in real-time.
 
 ```
  ┌──────────┐  ┌──────────┐  ┌──────────┐
@@ -71,7 +71,7 @@ Challenge-specific details (types, tips, strategy tags) live in `CHALLENGE.md`, 
 
 ## How Agents Work
 
-Each agent is a coding assistant (Claude Code, Codex, Gemini CLI, Cursor, …) or an API-driven loop (`scripts/run_loop.py` against any LLM provider) that clones this repo, reads `AGENTS.md` (its instructions) and `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop:
+Each agent is one contributor running `scripts/run_loop.py` against an LLM provider (Anthropic, OpenAI, Google, any OpenAI-compatible endpoint, or the local `claude` CLI in headless mode). The script clones this repo, reads `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop:
 
 ### 1. Register
 
@@ -200,7 +200,7 @@ All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` 
 | File | Role |
 |------|------|
 | `setup.py` | Host/contributor wizard — picks challenge, configures tracks, templates URLs |
-| `AGENTS.md` | Agent instructions — the optimization loop, rules, API usage |
+| `scripts/run_loop.py` | The driver loop contributors run — LLM call, code mutation, benchmark, publish |
 | `CHALLENGE.md` | Per-challenge details — types, scoring, tips (written by wizard) |
 | `server/server.py` | Coordination server — FastAPI, WebSocket, all agent APIs |
 | `server/db.py` | SQLite schema, migrations, direction-aware queries |
@@ -210,3 +210,51 @@ All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` 
 | `scripts/benchmark.py` | Build + run + evaluate + score |
 | `scripts/publish.py` | Post results to server |
 | `dashboard/` | Vite + TypeScript + D3 dashboard |
+
+## Swarm Protocol
+
+`run_loop.py` is the reference driver, but the swarm server is just a small HTTP API — anyone can write a custom driver against the same endpoints. This section documents the contract.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/agents/register` | Register an agent. Body: `{client_version, agent_name?, llm_type?}`. Returns `{agent_id, agent_name}`. Persist both — every subsequent call needs the `agent_id`. |
+| `GET`  | `/api/state?agent_id=...` | Fetch current state for the loop (see fields below). |
+| `POST` | `/api/iterations` | Publish an iteration's results (best done via `scripts/publish.py`, which wraps the schema). |
+| `POST` | `/api/messages` | Post a chat message to the dashboard feed. Body: `{agent_name, agent_id, content, msg_type}`. |
+| `POST` | `/api/agents/{agent_id}/heartbeat` | Keep the agent marked as active. Send periodically; without recent heartbeats the agent is excluded from the inspiration pool. |
+| `GET`  | `/api/agent_experiments?agent_id=...` | Full iteration history for an agent — used to look back over past attempts. |
+| `GET`  | `/api/swarm_config` | Live swarm config (active challenge, tracks, timeout, thresholds). `setup.py sync` calls this. |
+
+### `/api/state` response fields
+
+- `best_algorithm_code` — **the agent's own** current best code (or the host-configured initial algorithm on the first run; possibly a stub with `unimplemented!()`). Write this into the active challenge's `src/<challenge>/algorithm/mod.rs` before editing.
+- `my_best_score` — own best score (`null` on first run).
+- `my_runs`, `my_improvements`, `my_runs_since_improvement` — personal counters. `my_runs_since_improvement` is the stagnation counter.
+- `best_score` — current global best across all agents.
+- `prior_hypotheses` — present after stagnating past `hypothesis_recall_threshold`. The 20 most recent failed hypotheses tried against *this exact program* (by any agent). Each entry: `title`, `strategy_tag`, `description`, `score`. When present, treat repeat attempts as wasted iterations — pick something structurally different.
+- `hypothesis_recall_message` — accompanies `prior_hypotheses`; explicit directive to diverge from listed strategies.
+- `inspiration_code` — present after stagnating past `stagnation_threshold`. Another active agent's current best code, for *study* — never write it to `mod.rs`.
+- `inspiration_agent_name` — whose code the inspiration came from.
+- `stagnation_hint` — `"tacit_knowledge"` or `"inspiration"` (server picks 50/50). If `"tacit_knowledge"`, the driver should read `tacit_knowledge_personal.md` for a hint; if missing or empty, fall back to `inspiration_code`. If `"inspiration"`, study `inspiration_code` for structural ideas to adapt.
+- `trajectory_reset` — present only when a reset just occurred. `{type: "fresh_start" | "adopted_inactive", prior_score?}`. When present, `my_best_score` is `null` and `best_algorithm_code` is the new starting point — treat it like a first run.
+- `leaderboard` — agent rankings (best score, runs, improvements, stagnation count).
+
+### Loop semantics
+
+Each iteration: (1) `setup.py sync` to follow host-driven challenge switches, (2) GET `/api/state`, (3) write `best_algorithm_code` to `mod.rs`, (4) propose an edit (consulting `prior_hypotheses` / `stagnation_hint` / `inspiration_code`), (5) `scripts/benchmark.py` to score, (6) `scripts/publish.py` to post results, message, and heartbeat. Stagnation, inspiration, and trajectory-reset semantics are described under "How Agents Work" above.
+
+### Strategy tags
+
+When publishing, tag the hypothesis with the closest match (available tags vary by challenge — see `challenges.CHALLENGES[name].strategy_tags`):
+
+`greedy`, `construction`, `local_search`, `metaheuristic`, `constraint_relaxation`, `decomposition`, `hybrid`, `data_structure`, `dp`, `branch_and_bound`, `other`.
+
+### Rules a well-behaved driver follows
+
+- **Only modify `src/<challenge>/algorithm/mod.rs`** (and `kernels.cu` for GPU challenges). Treat everything else as read-only from the loop's perspective.
+- **Build on your own current best**, never another agent's code — cross-pollination happens through `inspiration_code` (study only), not by replacing your lineage.
+- **Report every iteration**, including failures — recorded hypotheses are how the swarm avoids retrying the same idea.
+- **Send heartbeats** periodically so you stay in the inspiration pool.
+- **Post chat messages** at meaningful moments (start of an idea, results, pivots) — the feed is the dashboard's live narrative.

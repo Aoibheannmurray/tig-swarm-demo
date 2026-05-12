@@ -1,76 +1,43 @@
 #include <stdint.h>
 #include <math.h>
-#include <float.h>
 
 extern "C" __global__ void adamw_update_kernel(
-    const float *params,
-    const float *grads,
-    float *m,
-    float *v,
-    float *updates,
-    unsigned long long n,
-    float lr,
-    float beta1,
-    float beta2,
-    float eps,
-    float weight_decay,
-    float bias_correction1,
-    float bias_correction2
+    const float* __restrict__ param,
+    const float* __restrict__ grad,
+    float* __restrict__ m,
+    float* __restrict__ v,
+    float* __restrict__ update,
+    const uint32_t n,
+    const float lr,
+    const float beta1,
+    const float beta2,
+    const float bias_correction1,
+    const float bias_correction2,
+    const float eps,
+    const float weight_decay
 ) {
-    unsigned long long idx = (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x
-                             + (unsigned long long)threadIdx.x;
-
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) {
         return;
     }
 
-    float p = params[idx];
-    float g = grads[idx];
-    float old_m = m[idx];
-    float old_v = v[idx];
+    const float g = grad[idx];
 
-    if (!isfinite(p) || !isfinite(g) || !isfinite(old_m) || !isfinite(old_v)) {
-        m[idx] = 0.0f;
-        v[idx] = 0.0f;
-        updates[idx] = 0.0f;
-        return;
+    const float mt = beta1 * m[idx] + (1.0f - beta1) * g;
+    const float vt = beta2 * v[idx] + (1.0f - beta2) * g * g;
+
+    m[idx] = mt;
+    v[idx] = vt;
+
+    const float m_hat = mt / bias_correction1;
+    const float v_hat = vt / bias_correction2;
+
+    const float adam_step = m_hat / (sqrtf(v_hat) + eps);
+
+    float wd_step = 0.0f;
+    if (g != 0.0f) {
+        wd_step = weight_decay * param[idx];
     }
 
-    if (g == 0.0f && old_m == 0.0f && old_v == 0.0f) {
-        updates[idx] = 0.0f;
-        return;
-    }
-
-    float one_minus_beta1 = 1.0f - beta1;
-    float one_minus_beta2 = 1.0f - beta2;
-
-    float new_m = beta1 * old_m + one_minus_beta1 * g;
-    float new_v = beta2 * old_v + one_minus_beta2 * g * g;
-
-    if (!isfinite(new_m) || !isfinite(new_v) || new_v < 0.0f) {
-        m[idx] = 0.0f;
-        v[idx] = 0.0f;
-        updates[idx] = 0.0f;
-        return;
-    }
-
-    m[idx] = new_m;
-    v[idx] = new_v;
-
-    float bc1 = fmaxf(bias_correction1, 1.0e-16f);
-    float bc2 = fmaxf(bias_correction2, 1.0e-16f);
-
-    float m_hat = new_m / bc1;
-    float v_hat = new_v / bc2;
-    float denom = sqrtf(fmaxf(v_hat, 0.0f)) + eps;
-
-    float adam_term = m_hat / denom;
-    float decay_term = weight_decay * p;
-    float upd = -lr * (adam_term + decay_term);
-
-    if (!isfinite(upd)) {
-        upd = 0.0f;
-    }
-
-    updates[idx] = upd;
+    update[idx] = -lr * (adam_step + wd_step);
 }
