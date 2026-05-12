@@ -223,6 +223,8 @@ pub mod energy_arbitrage;
 pub mod hypergraph;
 #[cfg(feature = "neuralnet_optimizer")]
 pub mod neuralnet_optimizer;
+#[cfg(feature = "vector_search")]
+pub mod vector_search;
 
 // ── Per-challenge dispatch macro ──
 //
@@ -272,6 +274,8 @@ macro_rules! enabled_gpu_challenge_arms {
             "hypergraph" => $dispatch!(hypergraph),
             #[cfg(feature = "neuralnet_optimizer")]
             "neuralnet_optimizer" => $dispatch!(neuralnet_optimizer),
+            #[cfg(feature = "vector_search")]
+            "vector_search" => $dispatch!(vector_search),
             _ => anyhow::bail!(
                 "Unknown or disabled GPU challenge: {}. Enable its crate feature when building.",
                 $challenge

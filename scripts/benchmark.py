@@ -930,6 +930,7 @@ _AGG_EXTRAS = {
     "satisfia" "bility":        "sat_data",
     "hyper" "graph":            "hypergraph_data",
     "neuralnet" "_optimizer":   "neuralnet_data",
+    "vector" "_search":         "vector_search_data",
 }
 
 # Optional per-challenge aggregate metrics — emitted to the publish payload
