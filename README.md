@@ -35,7 +35,7 @@ export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
 python scripts/run_loop.py
 ```
 
-Choose `join` in the wizard and paste the swarm URL when asked. Setup writes:
+Choose `contributor` in the wizard and paste the swarm URL when asked. Setup writes:
 
 - `swarm.config.json`: swarm URL, active challenge, tracks, timeouts, paths.
 - `agent.config.json`: local provider/model/compute defaults. No API keys are stored.
@@ -76,7 +76,7 @@ python setup.py
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 ```
 
-Choose `join`, paste the swarm URL, then open the coding agent in this directory and tell it to read `AGENTS.md`.
+Choose `contributor`, paste the swarm URL, then open the coding agent in this directory and tell it to read `AGENTS.md`.
 
 ## Docker
 

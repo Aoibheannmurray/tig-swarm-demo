@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TIG Swarm setup wizard.
 
-Two modes:
+Common modes:
 
   python setup.py create      Owner: stand up a new swarm on Railway. Drives
                               the `railway` CLI to create a project + service
@@ -10,18 +10,19 @@ Two modes:
                               timeout, …) to the live URL. Prints a share link
                               for contributors.
 
-  python setup.py join URL    Contributor: point this clone at an existing
-                              swarm URL, configure local runtime defaults, and
-                              create a stub tacit_knowledge_personal.md for the
-                              agent's private hints.
-
   python setup.py             Interactive wizard. Choose host/contributor, then
                               answer only the prompts not already supplied by
                               command-line flags.
 
+  python setup.py --swarm-url URL
+                              Contributor: point this clone at an existing
+                              swarm URL, configure local runtime defaults, and
+                              create a stub tacit_knowledge_personal.md for the
+                              agent's private hints.
+
 Re-running either mode is safe — `create` always provisions a brand-new
-Railway project (overwriting the local `.railway/` link), and `join`
-overwrites the same set of templated files.
+Railway project (overwriting the local `.railway/` link), and contributor
+setup overwrites the same set of templated files.
 
 Files this script reads / writes:
   - AGENTS.md, README.md, scripts/publish.py
@@ -431,7 +432,7 @@ def read_initial_algorithms() -> dict[str, dict[str, str]]:
 
 def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
     """Pull a challenge's tracks/timeout/scoring_direction from the live
-    server. Used by switch / sync / join to mirror the active challenge's
+    server. Used by switch / sync / contributor setup to mirror the active challenge's
     sub-config to top-level swarm.config.json keys so benchmark.py's
     offline fallback keeps working."""
     try:
@@ -939,7 +940,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         print(
             "  warning: server did not respond at /api/swarm_config within 60s.\n"
             "  Check `railway logs` for errors. You can re-run\n"
-            f"  `python setup.py join {server_url}` once it's up to finish wiring."
+            f"  `python setup.py --swarm-url {server_url}` once it's up to finish wiring."
         )
 
     n_with_code = sum(1 for v in initial_algorithms.values() if v.get("algorithm_code", "").strip())
@@ -1013,10 +1014,10 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print(f"  Swarm type:  {type_label}")
     print(f"  Active challenge:  {active_challenge}")
     print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
-    print("\n  Share this with anyone who wants to join:\n")
+    print("\n  Share this with anyone who wants to contribute:\n")
     print(f"    git clone {repo_url}")
     print(f"    cd {repo_dir_hint}")
-    print(f"    python setup.py join {server_url}")
+    print(f"    python setup.py --swarm-url {server_url}")
     print("\n  Admin key (keep private — gates /api/admin/*):")
     print(f"    {admin_key}")
     print("\n  Manage the service in Railway: https://railway.com/dashboard")
@@ -1044,7 +1045,7 @@ def run_switch(challenge: str) -> int:
     prior = read_prior_swarm_config()
     if not prior:
         print("no swarm.config.json found — run `python setup.py create` (host) "
-              "or `python setup.py join <URL>` (contributor) first.")
+              "or `python setup.py --swarm-url <URL>` (contributor) first.")
         return 1
     swarm_type = prior.get("swarm_type", "cpu")
     is_gpu_swarm = swarm_type == "gpu"
@@ -1131,7 +1132,7 @@ def run_sync() -> int:
     the contributor's local files auto-follow the owner's challenge choice."""
     prior = read_prior_swarm_config()
     if not prior:
-        print("no swarm.config.json found — run `python setup.py join <URL>` first.")
+        print("no swarm.config.json found — run `python setup.py --swarm-url <URL>` first.")
         return 1
     server_url = prior.get("server_url")
     if not server_url:
@@ -1349,7 +1350,7 @@ def run_join(server_url: str, args: argparse.Namespace | None = None) -> int:
 
 
 def run_configure_agent(args: argparse.Namespace | None = None) -> int:
-    """Configure local script-loop defaults, joining a swarm first when a
+    """Configure local script-loop defaults, connecting to a swarm first when a
     swarm URL is supplied or no local swarm config exists."""
     prior = read_prior_swarm_config()
     server_url = _arg_value(args, "swarm_url")
@@ -1385,7 +1386,7 @@ def run_configure_agent(args: argparse.Namespace | None = None) -> int:
 
 def add_agent_setup_args(parser: argparse.ArgumentParser, *, include_swarm_url: bool) -> None:
     if include_swarm_url:
-        parser.add_argument("--swarm-url", help="Swarm URL to join/configure.")
+        parser.add_argument("--swarm-url", help="Swarm URL to configure this clone against.")
     parser.add_argument("--agent-name", help="Contributor display name for the dashboard.")
     parser.add_argument("--llm-label", help="Dashboard LLM label, independent of provider.")
     parser.add_argument("--provider", choices=AGENT_PROVIDERS, help="Script-loop LLM provider.")
@@ -1433,12 +1434,9 @@ def main() -> int:
     )
     add_agent_setup_args(create, include_swarm_url=False)
     add_create_setup_args(create)
-    join = sub.add_parser("join", help="Contributor: point this clone at a swarm URL.")
-    join.add_argument("server_url", nargs="?", help="The swarm owner's server URL.")
-    add_agent_setup_args(join, include_swarm_url=True)
     configure = sub.add_parser(
         "configure-agent",
-        help="Configure local script-loop runtime defaults; joins when --swarm-url is supplied.",
+        help="Configure local script-loop runtime defaults; connects when --swarm-url is supplied.",
     )
     add_agent_setup_args(configure, include_swarm_url=True)
     switch = sub.add_parser(
@@ -1467,15 +1465,15 @@ def main() -> int:
                 configure_agent_runtime(args)
             return rc
         if args.yes:
-            print("No mode selected. Pass --swarm-url to join non-interactively, "
-                  "or use `create`, `join`, or `configure-agent`.")
+            print("No mode selected. Pass --swarm-url to configure non-interactively, "
+                  "or use `create` or `configure-agent`.")
             return 1
         choice = prompt_choice(
             "What do you want to set up?",
-            ["join", "create", "configure-agent"],
-            default="join",
+            ["contributor", "host", "configure-agent"],
+            default="contributor",
         )
-        if choice == "create":
+        if choice == "host":
             rc = run_create(args)
             if rc == 0:
                 configure_agent_runtime(args)
@@ -1490,14 +1488,6 @@ def main() -> int:
         if rc == 0:
             configure_agent_runtime(args)
         return rc
-    if args.mode == "join":
-        server_url = args.server_url or args.swarm_url
-        if not server_url:
-            if args.yes:
-                print("join requires a URL. Pass it positionally or with --swarm-url.")
-                return 1
-            server_url = prompt("Swarm URL")
-        return run_join(server_url, args)
     if args.mode == "configure-agent":
         return run_configure_agent(args)
     if args.mode == "switch":

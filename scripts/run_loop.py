@@ -6,7 +6,7 @@ benchmarking, and result publishing.  Works with any LLM provider (Anthropic,
 OpenAI, Google) or any OpenAI-compatible endpoint via --api-base.
 
 Usage:
-    python setup.py join <swarm-url>
+    python setup.py
     export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
     python scripts/run_loop.py
 
@@ -68,7 +68,7 @@ from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 def load_config() -> dict:
     cfg_path = ROOT / "swarm.config.json"
     if not cfg_path.exists():
-        sys.exit("swarm.config.json not found. Run `python setup.py join <url>` first.")
+        sys.exit("swarm.config.json not found. Run `python setup.py` first.")
     return json.loads(cfg_path.read_text())
 
 

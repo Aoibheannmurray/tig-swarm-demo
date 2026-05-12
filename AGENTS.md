@@ -1,6 +1,6 @@
 # Swarm Agent — Automated Discovery at Scale
 
-> **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py create` (host: provisions a new swarm on Railway and prints the share URL) or `python setup.py join <URL>` (contributor: joins an existing swarm) before continuing. The wizard substitutes the URL into this file.
+> **⚠ Run setup first.** If the URLs below still look like a `$\{SERVER_URL\}`-style placeholder rather than an actual swarm URL, the human running this clone has not yet pointed it at a swarm. Run `python setup.py` and choose host or contributor before continuing. For scripted contributor setup, use `python setup.py --swarm-url <URL> --yes`. The wizard substitutes the URL into this file.
 
 > **Active challenge:** this swarm is configured for **vehicle_routing**. Read `CHALLENGE.md` (in this repo, written by the wizard) for the problem definition, the `Challenge` / `Solution` types, the scoring direction, and per-challenge tips. The body of AGENTS.md describes the swarm loop generically; CHALLENGE.md describes what you are *actually* optimizing.
 
@@ -17,7 +17,7 @@ A coordination server tracks all agents' work. A live dashboard is projected on 
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 
 # 2. Register with the swarm. Pulls the name + LLM you chose during
-# `setup.py join` out of swarm.config.json and forwards them, so the
+# setup out of swarm.config.json and forwards them, so the
 # dashboard shows your chosen name instead of an auto-generated codename.
 BODY=$(python3 -c "
 import json
@@ -284,4 +284,3 @@ Keep messages to 1-2 sentences. The audience is watching the feed live.
      -H "Content-Type: application/json" \
      -d '{"status": "working"}'
    ```
-
