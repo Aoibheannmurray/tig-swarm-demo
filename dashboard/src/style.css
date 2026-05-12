@@ -1674,11 +1674,8 @@ html, body {
 
 /* ── Welcome image ── */
 .welcome-art {
-  /* Portrait aspect (640x1086) matches the prometheus icon — sized so the
-     full composition (flames rising from the cupped hand) fills the slot
-     without letterboxing. */
-  width: 200px;
-  height: 340px;
+  width: 320px;
+  height: 320px;
   margin: 0 auto 18px;
   transition: opacity 0.32s ease-out, filter 0.32s ease-out;
 }
@@ -1797,8 +1794,8 @@ html, body {
   }
 
   .welcome-art {
-    width: 160px;
-    height: 270px;
+    width: 240px;
+    height: 240px;
     margin-bottom: 12px;
   }
 
