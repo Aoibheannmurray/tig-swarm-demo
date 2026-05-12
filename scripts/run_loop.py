@@ -100,6 +100,39 @@ _ITERATION_BACKOFF_SECS = 5
 # error wrappers) and not worth a round-trip to confirm "no change".
 _REDESCRIBE_SIMILARITY_THRESHOLD = 0.95
 
+_PROMPT_LOG_DIR = ROOT / "prompts_log"
+
+
+def _call_llm_logged(
+    call_type: str, config: dict,
+    provider: str, model: str, api_key: str,
+    system: str, prompt: str, api_base: str | None = None,
+) -> tuple[str, dict]:
+    """Wrapper around call_llm that records the exchange when log_prompts is set.
+
+    One markdown file per call in ./prompts_log/. No-op when the flag is off.
+    """
+    response, usage = call_llm(provider, model, api_key, system, prompt, api_base)
+    if config.get("log_prompts"):
+        try:
+            _PROMPT_LOG_DIR.mkdir(exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1e6) % 1_000_000:06d}"
+            path = _PROMPT_LOG_DIR / f"{ts}_{call_type}.md"
+            path.write_text(
+                f"# {call_type}\n\n"
+                f"- timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"- provider: {provider}\n"
+                f"- model: {model}\n"
+                f"- input_tokens: {usage.get('input_tokens', 0)}\n"
+                f"- output_tokens: {usage.get('output_tokens', 0)}\n\n"
+                f"## SYSTEM\n\n{system}\n\n"
+                f"## USER\n\n{prompt}\n\n"
+                f"## RESPONSE\n\n{response}\n"
+            )
+        except Exception as e:
+            print(f"  [LOG] Prompt log write failed: {e}", file=sys.stderr)
+    return response, usage
+
 
 # ── Config & sync ──────────────────────────────────────────────────
 
@@ -192,7 +225,8 @@ def _generate_code(
                 + files.separator_suffix()
             )
         try:
-            code_response, usage = call_llm(
+            code_response, usage = _call_llm_logged(
+                "code", config,
                 args.provider, model, api_key,
                 build_code_system_prompt(challenge_md, config),
                 user_prompt,
@@ -233,7 +267,8 @@ def _try_compile_fix(
     code, kernel = files.read()
     fix_prompt = build_compile_fix_prompt(code, kernel, build_err[-1500:], files.is_gpu)
     try:
-        fix_response, usage = call_llm(
+        fix_response, usage = _call_llm_logged(
+            "compile_fix", config,
             args.provider, model, api_key,
             build_code_system_prompt(challenge_md, config),
             fix_prompt,
@@ -335,7 +370,8 @@ def _fix_runtime_errors(
         print(f"  Errors: {runtime_errors}")
         current_code, current_kernel = files.read()
         try:
-            fix_response, usage = call_llm(
+            fix_response, usage = _call_llm_logged(
+                "runtime_fix", config,
                 args.provider, model, api_key,
                 build_code_system_prompt(challenge_md, config),
                 build_runtime_fix_prompt(current_code, bench, current_kernel, config.get("timeout", 30)),
@@ -611,7 +647,8 @@ def main() -> int:
 
         print(f"  [LLM] Generating hypothesis via {args.provider}/{model}…")
         try:
-            hyp_response, hyp_usage = call_llm(
+            hyp_response, hyp_usage = _call_llm_logged(
+                "hypothesis", config,
                 args.provider, model, api_key,
                 build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
                 build_hypothesis_user_prompt(state, config),
@@ -726,7 +763,8 @@ def main() -> int:
                 f"(post-fix similarity {post_fix_similarity * 100:.0f}%) — re-describing hypothesis ..."
             )
             try:
-                redesc_response, redesc_usage = call_llm(
+                redesc_response, redesc_usage = _call_llm_logged(
+                    "redescribe", config,
                     args.provider, model, api_key,
                     build_redescribe_system_prompt(config),
                     build_redescribe_hypothesis_prompt(

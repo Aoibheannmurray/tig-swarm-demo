@@ -29,3 +29,4 @@ tacit_knowledge_personal.md
 
 src/*/algorithm/mod.rs
 tig-monorepo/
+prompts_log/
