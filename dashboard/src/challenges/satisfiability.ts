@@ -14,9 +14,13 @@ type AllSatData = Record<string, SatData>;
 
 const VB_W = 1000;
 const VB_H = 1000;
-const BANNER_H = 200;            // PASS/FAIL banner across the top
-const BANNER_GAP = 20;            // gap between banner and grid
+const BANNER_H = 70;             // small PASS/FAIL banner across the top
+const BANNER_GAP = 16;            // gap between banner and grid
 const GRID_TOP = BANNER_H + BANNER_GAP;
+// Leave empty SVG space below the grid so the absolutely-positioned
+// VARIABLES / SATISFIED stat boxes (CSS: bottom:16px) overlay a clean
+// background instead of sitting on top of grid cells.
+const GRID_BOTTOM_PAD = 130;
 
 // SAT is binary: every clause must be satisfied for the instance to PASS.
 // Banner accent colors match the existing palette — dark forest for the
@@ -133,31 +137,23 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     const pass = m > 0 && data.num_satisfied === m;
     const unsat = m - data.num_satisfied;
 
-    // PASS/FAIL banner. Solid colored rect across the top with stacked
-    // headline + sub-line in white. Same SVG-string-buffer pattern as the
-    // grid below — one assignment, no per-element layout churn.
+    // PASS/FAIL banner — a thin colored strip with a single white label.
+    // No icon, no sub-line: just "SATISFIED" or "FAILED TO SATISFY".
     const bannerColor = pass ? PASS_COLOR : FAIL_COLOR;
-    const headline = pass ? "✓ SATISFIED" : "✗ UNSAT";
-    const subline = pass
-      ? `all ${m.toLocaleString()} clauses satisfied`
-      : `${unsat.toLocaleString()} of ${m.toLocaleString()} clauses unsatisfied`;
+    const headline = pass ? "SATISFIED" : "FAILED TO SATISFY";
     const cx = VB_W / 2;
-    const headlineY = BANNER_H * 0.50;
-    const sublineY = BANNER_H * 0.78;
     const bannerHtml =
       `<rect x="0" y="0" width="${VB_W}" height="${BANNER_H}" fill="${bannerColor}"/>` +
-      `<text x="${cx}" y="${headlineY.toFixed(2)}" text-anchor="middle" ` +
+      `<text x="${cx}" y="${(BANNER_H / 2).toFixed(2)}" text-anchor="middle" ` +
         `dominant-baseline="central" fill="rgba(255,255,255,0.96)" ` +
-        `font-size="76" font-weight="700" ` +
-        `font-family="'JetBrains Mono', monospace" letter-spacing="2">${headline}</text>` +
-      `<text x="${cx}" y="${sublineY.toFixed(2)}" text-anchor="middle" ` +
-        `dominant-baseline="central" fill="rgba(255,255,255,0.78)" ` +
-        `font-size="26" font-family="'JetBrains Mono', monospace">${subline}</text>`;
+        `font-size="34" font-weight="700" ` +
+        `font-family="'JetBrains Mono', monospace" letter-spacing="2">${headline}</text>`;
     (this.bannerG.node() as SVGGElement).innerHTML = bannerHtml;
 
-    // Variable-assignment grid.
+    // Variable-assignment grid. Bottom-padded so the absolutely-positioned
+    // stat boxes overlay a clean area rather than the grid itself.
     let gridHtml = "";
-    const gridH = VB_H - GRID_TOP;
+    const gridH = VB_H - GRID_TOP - GRID_BOTTOM_PAD;
     const n = data.viz_count;
     if (n > 0) {
       const aspect = VB_W / gridH;
