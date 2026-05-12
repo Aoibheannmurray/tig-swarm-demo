@@ -1,9 +1,9 @@
 // Shared scaffolding for the per-challenge visualization panels.
 //
-// All five display panels (solution, gantt, knapsack, energy, sat) used to
-// duplicate ~80 lines of identical code: history entries, replay fetch,
-// instance rotation, empty-state toggle, agent-name rendering, score-delta
-// formatting, LIVE-button wiring. This base class owns all of that.
+// Every per-challenge panel in this folder extends DisplayPanelBase. The
+// base class owns the bits that used to duplicate across every panel:
+// history entries, replay fetch, instance rotation, empty-state toggle,
+// agent-name rendering, score-delta formatting, LIVE-button wiring.
 //
 // A subclass must implement:
 //   - idPrefix:        unique prefix for DOM ids (e.g. "sat", "knapsack")
@@ -23,7 +23,7 @@ import type { Panel, WSMessage } from "../types";
 import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
-import type { Challenge } from "../lib/challengeRegistry";
+import type { Challenge } from "./registry";
 
 export interface DisplayHistoryEntry<TInstances> {
   experiment_id: string;
@@ -58,6 +58,10 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   protected historyIndex = -1;
   protected historyLoaded = false;
   protected rotationTimer: ReturnType<typeof setInterval> | null = null;
+  // ResizeObservers (and similar) registered by subclasses via
+  // observeResize(); disconnected automatically in dispose() so a challenge
+  // switch doesn't leak observers attached to the previous panel's DOM.
+  private resizeObservers: ResizeObserver[] = [];
 
   protected abstract idPrefix: string;
   protected abstract scaffoldHtml(): string;
@@ -67,6 +71,9 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   // Hooks — override as needed.
   protected onAfterApplyHistory(): void {}
   protected onReset(): void {}
+  // Called from dispose() — subclasses release their own per-instance
+  // listeners/observers (e.g. ResizeObserver) here.
+  protected onDispose(): void {}
 
   constructor(challenge: string) {
     this.challenge = challenge as Challenge;
@@ -123,6 +130,17 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       clearInterval(this.rotationTimer);
       this.rotationTimer = null;
     }
+    for (const ro of this.resizeObservers) ro.disconnect();
+    this.resizeObservers = [];
+    this.onDispose();
+  }
+
+  // Subclass helper — registers a ResizeObserver that's auto-disconnected
+  // when the panel is disposed.
+  protected observeResize(target: Element, callback: () => void): void {
+    const ro = new ResizeObserver(callback);
+    ro.observe(target);
+    this.resizeObservers.push(ro);
   }
 
   protected async fetchHistory() {
@@ -145,6 +163,14 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       const existingIds = new Set(
         this.historyEntries.map((e) => e.experiment_id),
       );
+      // Remember which entry the user is looking at, so we can restore the
+      // index after the merge+sort possibly shifts it (e.g. older entries
+      // get prepended and push the current entry further down the list).
+      const wasAtLatest = this.isAtLatest();
+      const currentEntryId =
+        this.historyIndex >= 0
+          ? this.historyEntries[this.historyIndex]?.experiment_id
+          : undefined;
       const merged = [
         ...fetched.filter((e) => !existingIds.has(e.experiment_id)),
         ...this.historyEntries,
@@ -153,10 +179,14 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
         (a.created_at || "").localeCompare(b.created_at || ""),
       );
       this.historyEntries = merged;
-      const wasAtLatest = this.isAtLatest();
       if (wasAtLatest && this.historyEntries.length) {
         this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
+      } else if (currentEntryId !== undefined) {
+        const restored = this.historyEntries.findIndex(
+          (e) => e.experiment_id === currentEntryId,
+        );
+        if (restored >= 0) this.historyIndex = restored;
       }
       this.historyLoaded = true;
       this.updateHistoryLabel();

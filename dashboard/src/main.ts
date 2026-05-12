@@ -1,7 +1,6 @@
-import "@phosphor-icons/web/regular/style.css";
 import "./style.css";
 import { SwarmWebSocket } from "./lib/websocket";
-import { MockDataGenerator } from "./mock";
+import { getDashboardUrls, installKeyboardNav } from "./lib/bootstrap";
 import { viewportFlash } from "./lib/animate";
 import {
   soundAgentJoined, soundHypothesisProposed, soundExperimentPublished,
@@ -24,25 +23,11 @@ import { ChartPanel } from "./panels/chart";
 import { DiversityPanel } from "./panels/diversity";
 import { FeedPanel } from "./panels/feed";
 import { LeaderboardPanel } from "./panels/leaderboard";
-import { buildPanelFor, isKnownChallenge } from "./lib/challengeRegistry";
+import { buildPanelFor, isKnownChallenge } from "./challenges/registry";
 
 import type { WSMessage, Panel } from "./types";
 
-// ── Config ──
-const params = new URLSearchParams(window.location.search);
-const isMock = params.has("mock");
-const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-const wsUrl = params.get("ws") || `${wsProtocol}//${window.location.host}/ws/dashboard`;
-
-// Derive REST API URL from WS URL
-function getApiUrl(): string {
-  const explicit = params.get("api");
-  if (explicit) return explicit;
-  return wsUrl
-    .replace("ws://", "http://")
-    .replace("wss://", "https://")
-    .replace("/ws/dashboard", "");
-}
+const { wsUrl, apiUrl } = getDashboardUrls();
 
 // ── Initialize panels ──
 // Panels are constructed inside `bootstrap()` after loadSwarmConfig() so
@@ -71,8 +56,8 @@ function constructDisplayPanel() {
     displayPanel = undefined;
     container.innerHTML = "";
   }
-  // The registry maps challenge id → panel factory. Adding a 6th challenge
-  // is one entry in lib/challengeRegistry.ts — no edit here.
+  // The registry maps challenge id → panel factory. Adding a new challenge
+  // is one entry in challenges/registry.ts — no edit here.
   const challenge = getViewedChallenge();
   if (!isKnownChallenge(challenge)) {
     console.warn(`[Dashboard] No panel registered for challenge "${challenge}"`);
@@ -154,7 +139,7 @@ function handleMessage(msg: WSMessage) {
   }
 
   // Refetch swarm config when the host switches the active challenge.
-  handleSwarmConfigEvent(getApiUrl(), msg);
+  handleSwarmConfigEvent(apiUrl, msg);
 
   panels.forEach((panel) => panel.handleMessage(msg));
 
@@ -163,7 +148,7 @@ function handleMessage(msg: WSMessage) {
   // baselines are correct without requiring a full page reload. Without
   // this, panels sit blank until the next live event arrives.
   if (msg.type === "reset" && msg.challenge === getViewedChallenge()) {
-    void loadInitialState(getApiUrl(), getViewedChallenge());
+    void loadInitialState(apiUrl, getViewedChallenge());
   }
 }
 
@@ -314,7 +299,10 @@ async function loadInitialState(apiUrl: string, challenge: string) {
 
     // Seed the chart's score-history line when the (compact) replay
     // lands. Doesn't block visualization or stats panels above.
+    // Drop the result if the user has switched challenges while the
+    // replay was in flight — otherwise stale data overwrites the chart.
     replayPromise.then((replay) => {
+      if (challenge !== getViewedChallenge()) return;
       if (replay && replay.length) chartPanel.seedHistory(replay);
     });
   } catch (e) {
@@ -334,46 +322,27 @@ onViewedChallengeChange((c) => {
     p.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
     p.setChallenge?.(c);
   });
-  void loadInitialState(getApiUrl(), c);
+  void loadInitialState(apiUrl, c);
 });
 
 // ── Welcome overlay ──
 initWelcome();
 
 // ── Keyboard navigation ──
+installKeyboardNav("main");
 document.addEventListener("keydown", (e) => {
-  if (e.key === "2") window.location.href = "/ideas.html";
-  if (e.key === "3") window.location.href = "/diversity.html";
-  if (e.key === "4") window.location.href = "/benchmark.html";
-  if (e.key === "5") window.location.href = "/trajectories.html";
   if (e.key === "j" || e.key === "J") toggleWelcome();
-  if (e.key === "r" || e.key === "R") startReplay(getApiUrl(), handleMessage);
+  if (e.key === "r" || e.key === "R") startReplay(apiUrl, handleMessage);
 });
 
 // ── Connect ──
-if (isMock) {
-  console.log("[Dashboard] Running in MOCK mode");
-  soundEnabled = true;
+console.log(`[Dashboard] Connecting to ${wsUrl}, API: ${apiUrl}`);
+
+void loadSwarmConfig(apiUrl).then(() => {
   constructPanels();
-  const mock = new MockDataGenerator();
-  mock.onMessage(handleMessage);
-  mock.start();
+  void loadInitialState(apiUrl, getViewedChallenge());
+});
 
-  const wsEl = document.getElementById("ws-status");
-  if (wsEl) {
-    wsEl.textContent = "MOCK";
-    wsEl.className = "ws-status connected";
-  }
-} else {
-  const apiUrl = getApiUrl();
-  console.log(`[Dashboard] Connecting to ${wsUrl}, API: ${apiUrl}`);
-
-  void loadSwarmConfig(apiUrl).then(() => {
-    constructPanels();
-    void loadInitialState(apiUrl, getViewedChallenge());
-  });
-
-  const ws = new SwarmWebSocket(wsUrl);
-  ws.onMessage(handleMessage);
-  ws.connect();
-}
+const ws = new SwarmWebSocket(wsUrl);
+ws.onMessage(handleMessage);
+ws.connect();

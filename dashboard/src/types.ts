@@ -1,22 +1,3 @@
-export interface RoutePoint {
-  x: number;
-  y: number;
-  customer_id: number;
-}
-
-export interface VehicleRoute {
-  vehicle_id: number;
-  path: RoutePoint[];
-}
-
-export interface RouteData {
-  depot: { x: number; y: number };
-  routes: VehicleRoute[];
-}
-
-// solution_data from server: dict keyed by instance name
-export type AllRouteData = Record<string, RouteData>;
-
 export interface LeaderboardEntry {
   rank: number;
   agent_id: string;
@@ -128,7 +109,9 @@ export interface NewGlobalBest {
   // % improvement over the previous global best (null if first ever)
   incremental_improvement_pct: number | null;
   num_instances: number;
-  solution_data: AllRouteData | null;
+  // Shape varies by challenge — each per-challenge panel casts to its own
+  // Record<instance_name, TInstances> in DisplayPanelBase.handleNewGlobalBest.
+  solution_data: Record<string, unknown> | null;
   // Per-track mean quality for the new global best (see ExperimentPublished).
   track_scores?: Record<string, number> | null;
   timestamp: string;

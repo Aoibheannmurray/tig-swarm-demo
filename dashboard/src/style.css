@@ -440,66 +440,6 @@ html, body {
 }
 
 
-/* ── QR Overlay ── */
-.qr-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(26, 26, 26, 0.55);
-  backdrop-filter: blur(8px);
-}
-
-.qr-card {
-  background: var(--bg-card);
-  border: 0.5px solid var(--border-subtle);
-  border-radius: 16px;
-  padding: 40px;
-  text-align: center;
-  box-shadow: 0 8px 24px rgba(26, 26, 26, 0.10);
-}
-
-.qr-title {
-  font-family: var(--display);
-  font-style: italic;
-  font-size: 28px;
-  font-weight: 500;
-  color: var(--ink);
-  margin-bottom: 24px;
-}
-
-.qr-canvas-wrap {
-  margin: 0 auto 20px;
-  display: flex;
-  justify-content: center;
-}
-
-.qr-canvas-wrap canvas {
-  border-radius: 4px;
-}
-
-.qr-url {
-  font-size: 13px;
-  color: var(--color-accent);
-  margin-bottom: 8px;
-  font-family: var(--mono);
-}
-
-.qr-instructions {
-  font-size: 12px;
-  color: var(--text-mid);
-  margin-bottom: 20px;
-}
-
-.qr-hint {
-  font-size: 9px;
-  color: var(--text-dim);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-}
-
 /* ── Replay Overlay ── */
 .replay-overlay {
   position: fixed;
@@ -567,13 +507,6 @@ html, body {
   font-size: 14px;
   color: var(--text-dim);
   margin-top: 12px;
-}
-
-.qr-fallback {
-  font-size: 16px;
-  color: var(--color-accent);
-  padding: 40px 20px;
-  word-break: break-all;
 }
 
 /* ── Routes panel ── */
@@ -666,14 +599,6 @@ html, body {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
-}
-
-.solution-score-bks {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-  font-weight: 500;
 }
 
 .solution-route-distance {

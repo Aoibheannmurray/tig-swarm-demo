@@ -1,6 +1,6 @@
-import type { WSMessage } from "../types";
-import { getAgentColor } from "../lib/colors";
-import { formatTime } from "../lib/animate";
+import type { WSMessage } from "../../types";
+import { getAgentColor } from "../../lib/colors";
+import { formatTime } from "../../lib/animate";
 
 interface FeedItem {
   id: string;

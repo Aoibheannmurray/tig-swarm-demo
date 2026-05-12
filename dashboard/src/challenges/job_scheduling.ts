@@ -1,5 +1,6 @@
-import * as d3 from "d3";
-import { DisplayPanelBase } from "./displayPanelBase";
+import { scaleLinear } from "d3-scale";
+import { select, type Selection } from "d3-selection";
+import { DisplayPanelBase } from "./base";
 import { token } from "../lib/colors";
 
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
@@ -40,10 +41,10 @@ function jobColor(job: number): string {
 export class GanttPanel extends DisplayPanelBase<AllGanttData> {
   protected idPrefix = "gantt";
 
-  private svg!: d3.Selection<SVGSVGElement, unknown, HTMLElement, any>;
-  private chartG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
-  private axisG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
-  private labelG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
+  private svg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
+  private chartG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private axisG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private labelG!: Selection<SVGGElement, unknown, HTMLElement, any>;
 
   private makespanEl!: HTMLElement;
 
@@ -95,7 +96,7 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
     this.historyLiveBtnEl = document.getElementById("gantt-hist-live")!;
     this.emptyStateEl = document.getElementById("gantt-empty-state")!;
 
-    this.svg = d3.select("#gantt-svg") as any;
+    this.svg = select("#gantt-svg") as any;
     this.svg
       .attr("viewBox", `0 0 ${VB_W} ${VB_H}`)
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -111,7 +112,7 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
     const resize = () => {
       this.svg.attr("width", wrap.clientWidth).attr("height", wrap.clientHeight);
     };
-    new ResizeObserver(resize).observe(wrap);
+    this.observeResize(wrap, resize);
     resize();
   }
 
@@ -138,7 +139,7 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
     const nMachines = data.num_machines;
     const makespan = data.makespan;
 
-    const x = d3.scaleLinear().domain([0, makespan]).range([0, CHART_W]);
+    const x = scaleLinear().domain([0, makespan]).range([0, CHART_W]);
     const rowH = CHART_H / nMachines;
     const barH = rowH * 0.78;
     const barPad = (rowH - barH) / 2;

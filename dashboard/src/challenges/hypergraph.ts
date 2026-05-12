@@ -1,5 +1,7 @@
-import * as d3 from "d3";
-import { DisplayPanelBase } from "./displayPanelBase";
+import { range } from "d3-array";
+import { scaleBand, scaleLinear } from "d3-scale";
+import { select, type Selection } from "d3-selection";
+import { DisplayPanelBase } from "./base";
 
 interface HypergraphData {
   num_nodes: number;
@@ -19,8 +21,8 @@ const MARGIN = { top: 24, right: 16, bottom: 32, left: 48 };
 export class HypergraphPanel extends DisplayPanelBase<AllHypergraphData> {
   protected idPrefix = "hg";
 
-  private svg!: d3.Selection<SVGSVGElement, unknown, HTMLElement, any>;
-  private chartG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
+  private svg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
+  private chartG!: Selection<SVGGElement, unknown, HTMLElement, any>;
   private nodesEl!: HTMLElement;
   private metricEl!: HTMLElement;
 
@@ -78,7 +80,7 @@ export class HypergraphPanel extends DisplayPanelBase<AllHypergraphData> {
     this.nodesEl = document.getElementById("hg-nodes")!;
     this.metricEl = document.getElementById("hg-metric")!;
 
-    this.svg = d3.select("#hg-svg") as any;
+    this.svg = select("#hg-svg") as any;
     this.svg
       .attr("viewBox", `0 0 ${VB_W} ${VB_H}`)
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -91,7 +93,7 @@ export class HypergraphPanel extends DisplayPanelBase<AllHypergraphData> {
       const h = wrap.clientHeight;
       this.svg.attr("width", w).attr("height", h);
     };
-    new ResizeObserver(resize).observe(wrap);
+    this.observeResize(wrap, resize);
     resize();
   }
 
@@ -116,12 +118,12 @@ export class HypergraphPanel extends DisplayPanelBase<AllHypergraphData> {
     const iH = VB_H - MARGIN.top - MARGIN.bottom;
     const yMax = Math.max(maxSize * 1.05, Math.max(...sizes) * 1.05);
 
-    const x = d3.scaleBand<number>()
-      .domain(d3.range(n))
+    const x = scaleBand<number>()
+      .domain(range(n))
       .range([0, iW])
       .padding(0.15);
 
-    const y = d3.scaleLinear()
+    const y = scaleLinear()
       .domain([0, yMax])
       .range([iH, 0]);
 

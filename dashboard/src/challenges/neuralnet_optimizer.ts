@@ -1,4 +1,4 @@
-import { DisplayPanelBase } from "./displayPanelBase";
+import { DisplayPanelBase } from "./base";
 
 interface NeuralnetData {
   epochs_used: number;

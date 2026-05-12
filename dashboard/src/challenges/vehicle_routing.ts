@@ -1,7 +1,21 @@
-import * as d3 from "d3";
-import type { RouteData, AllRouteData, RoutePoint } from "../types";
+import { select } from "d3-selection";
+import { curveCatmullRom, line } from "d3-shape";
 import { getRouteColor } from "../lib/colors";
-import { DisplayPanelBase } from "./displayPanelBase";
+import { DisplayPanelBase } from "./base";
+
+interface RoutePoint {
+  x: number;
+  y: number;
+  customer_id: number;
+}
+
+interface RouteData {
+  depot: { x: number; y: number };
+  routes: { vehicle_id: number; path: RoutePoint[] }[];
+}
+
+// solution_data from server: dict keyed by instance name.
+type AllRouteData = Record<string, RouteData>;
 
 const STYLE = {
   customerRadius: 0.006,
@@ -12,10 +26,10 @@ const STYLE = {
   routeDashOff:   0.007,
 } as const;
 
-const routeLine = d3.line<RoutePoint>()
+const routeLine = line<RoutePoint>()
   .x((d) => d.x)
   .y((d) => d.y)
-  .curve(d3.curveCatmullRom.alpha(0.5));
+  .curve(curveCatmullRom.alpha(0.5));
 
 function fullPath(data: RouteData, route: { path: RoutePoint[] }): RoutePoint[] {
   const depot = { x: data.depot.x, y: data.depot.y, customer_id: -1 };
@@ -97,7 +111,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
     this.historyLiveBtnEl = document.getElementById("solution-hist-live")!;
     this.emptyStateEl = document.getElementById("solution-empty-state")!;
 
-    this.svg = d3.select("#solution-svg");
+    this.svg = select("#solution-svg");
     this.svg
       .attr("viewBox", "0 0 1000 1000")
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -118,7 +132,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       const size = Math.max(0, Math.min(wrap.clientWidth, wrap.clientHeight));
       this.svg.attr("width", size).attr("height", size);
     };
-    new ResizeObserver(resize).observe(wrap);
+    this.observeResize(wrap, resize);
     resize();
   }
 

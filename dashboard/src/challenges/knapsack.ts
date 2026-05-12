@@ -1,5 +1,6 @@
-import * as d3 from "d3";
-import { DisplayPanelBase } from "./displayPanelBase";
+import { scaleLinear } from "d3-scale";
+import { select, type Selection } from "d3-selection";
+import { DisplayPanelBase } from "./base";
 
 interface KnapsackData {
   num_selected: number;
@@ -34,8 +35,8 @@ const AXIS_LABEL_K_THRESHOLD = 50;
 export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
   protected idPrefix = "knapsack";
 
-  private svg!: d3.Selection<SVGSVGElement, unknown, HTMLElement, any>;
-  private chartG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
+  private svg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
+  private chartG!: Selection<SVGGElement, unknown, HTMLElement, any>;
 
   private valueEl!: HTMLElement;
   private itemsEl!: HTMLElement;
@@ -104,7 +105,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     this.historyLiveBtnEl = document.getElementById("knapsack-hist-live")!;
     this.emptyStateEl = document.getElementById("knapsack-empty-state")!;
 
-    this.svg = d3.select("#knapsack-svg") as any;
+    this.svg = select("#knapsack-svg") as any;
     this.svg
       .attr("viewBox", `0 0 ${VB_W} ${VB_H}`)
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -117,7 +118,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
       const size = Math.max(0, Math.min(wrap.clientWidth, wrap.clientHeight));
       this.svg.attr("width", size).attr("height", size);
     };
-    new ResizeObserver(resize).observe(wrap);
+    this.observeResize(wrap, resize);
     resize();
   }
 
@@ -165,7 +166,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     // Continuous opacity scale: maps the value range to [OPACITY_LOW, OPACITY_HIGH].
     // The eye reads opacity as intensity, so the strongest cells stand out
     // sharply against the cream surface even at small cell sizes.
-    const opacityScale = d3.scaleLinear()
+    const opacityScale = scaleLinear()
       .domain([minVal, maxVal])
       .range([OPACITY_LOW, OPACITY_HIGH])
       .clamp(true);

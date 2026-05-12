@@ -1,5 +1,5 @@
-import * as d3 from "d3";
-import { DisplayPanelBase } from "./displayPanelBase";
+import { select, type Selection } from "d3-selection";
+import { DisplayPanelBase } from "./base";
 
 interface SatData {
   num_variables: number;
@@ -27,9 +27,9 @@ const BIN_COLORS = ["#8B2D2D", "#A66E45", "#6B7F4E", "#4A7C5A"]; // 0,1,2,3 sats
 export class SatPanel extends DisplayPanelBase<AllSatData> {
   protected idPrefix = "sat";
 
-  private svg!: d3.Selection<SVGSVGElement, unknown, HTMLElement, any>;
-  private histG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
-  private gridG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
+  private svg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
+  private histG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private gridG!: Selection<SVGGElement, unknown, HTMLElement, any>;
 
   private satEl!: HTMLElement;
   private varsEl!: HTMLElement;
@@ -87,7 +87,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     this.historyLiveBtnEl = document.getElementById("sat-hist-live")!;
     this.emptyStateEl = document.getElementById("sat-empty-state")!;
 
-    this.svg = d3.select("#sat-svg") as any;
+    this.svg = select("#sat-svg") as any;
     this.svg
       .attr("viewBox", `0 0 ${VB_W} ${VB_H}`)
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -101,7 +101,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
       const size = Math.max(0, Math.min(wrap.clientWidth, wrap.clientHeight));
       this.svg.attr("width", size).attr("height", size);
     };
-    new ResizeObserver(resize).observe(wrap);
+    this.observeResize(wrap, resize);
     resize();
   }
 
@@ -121,7 +121,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
       return;
     }
 
-    // Build SVG via a string buffer and assign once. d3.append per
+    // Build SVG via a string buffer and assign once. append per
     // element triggers a layout pass each call — for thousands of
     // assignment cells that becomes the dominant cost.
     let histHtml = "";
