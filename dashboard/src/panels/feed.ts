@@ -99,9 +99,18 @@ export class FeedPanel implements Panel {
         // Show "+" green for improvement, "-" red for regression.
         const fmtDelta = (d: number | null | undefined): string => {
           if (d == null) return "";
+          // Snap machine-precision blow-ups (server divides by a near-zero
+          // previous best) to ∞% so we don't render misleading 1e16-style
+          // values. Threshold is generous — 10000x change is the upper end
+          // of any legitimate delta we'd ever care to display.
+          if (!Number.isFinite(d) || Math.abs(d) > 1e6) {
+            const s = d > 0 ? "+" : "-";
+            const c = d > 0 ? "var(--green)" : "var(--red)";
+            return `<span style="color:${c}">${s}∞%</span>`;
+          }
           const sign = d > 0 ? "+" : "";
           const color = d > 0 ? "var(--green)" : d < 0 ? "var(--red)" : "var(--text-dim)";
-          return `<span style="color:${color}">${sign}${d.toFixed(4)}%</span>`;
+          return `<span style="color:${color}">${sign}${d.toFixed(3)}%</span>`;
         };
 
         const ownDelta = msg.delta_vs_own_best_pct;

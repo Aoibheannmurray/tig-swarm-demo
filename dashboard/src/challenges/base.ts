@@ -249,12 +249,21 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   // Default formatter: shows raw % delta with the sign of the score change.
   // VRP overrides this to flip sign (lower distance = improvement).
   protected formatScoreDelta(currentScore: number, prevScore: number) {
-    const pct =
-      prevScore !== 0
-        ? ((currentScore - prevScore) / Math.abs(prevScore)) * 100
-        : 0;
+    // A prevScore of exactly 0 — or near-zero machine-precision noise from
+    // mean-over-instances aggregation when every instance failed — would
+    // otherwise produce 1e16-style percentages that are meaningless. Snap
+    // those to ∞% so the dashboard says "we went from nothing to something"
+    // instead of a misleading huge number.
+    const delta = currentScore - prevScore;
+    const pct = prevScore !== 0 ? (delta / Math.abs(prevScore)) * 100 : Infinity;
+    if (!Number.isFinite(pct) || Math.abs(pct) > 1e6) {
+      const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
+      this.scoreDeltaEl.textContent = `${sign}∞% vs prev best`;
+      this.scoreDeltaEl.style.color = "var(--green)";
+      return;
+    }
     const sign = pct >= 0 ? "+" : "";
-    this.scoreDeltaEl.textContent = `${sign}${pct.toFixed(5)}% vs prev best`;
+    this.scoreDeltaEl.textContent = `${sign}${pct.toFixed(3)}% vs prev best`;
     this.scoreDeltaEl.style.color = "var(--green)";
   }
 

@@ -149,17 +149,6 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
     this.updateViewBox();
   }
 
-  // VRP scores are distances — lower is better. Override the default
-  // formatter so a drop in distance shows as a positive % improvement,
-  // matching the live feed's `+X.XXXXX% vs prev best` convention.
-  protected formatScoreDelta(currentScore: number, prevScore: number): void {
-    const pct = prevScore > 0 ? ((prevScore - currentScore) / prevScore) * 100 : 0;
-    const scoreChange = -pct;
-    const sign = scoreChange >= 0 ? "+" : "";
-    this.scoreDeltaEl.textContent = `${sign}${scoreChange.toFixed(5)}% vs prev best`;
-    this.scoreDeltaEl.style.color = "var(--green)";
-  }
-
   // Compute a square viewBox that tightly bounds *all* instances' data.
   private updateViewBox() {
     const all = Object.values(this.allInstances);
