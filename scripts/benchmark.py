@@ -2,8 +2,8 @@
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
 Pulls swarm-wide config live from the server's `/api/swarm_config` (the
-server URL is whatever `swarm.config.json:server_url` was templated to by
-`setup.py join`). Falls back to the local `swarm.config.json` snapshot when
+server URL is whatever `swarm.config.json:server_url` was configured to by
+`python setup.py`). Falls back to the local `swarm.config.json` snapshot when
 the server is unreachable, so `python scripts/benchmark.py` works for
 offline iteration on `algorithm/mod.rs` edits. The config tells us the
 active challenge, per-track instance counts, and the per-instance solver
@@ -79,8 +79,23 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent.parent
 
+
+def _load_agent_config() -> dict:
+    path = ROOT_DIR / "agent.config.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
 _INSIDE_DOCKER = Path("/.dockerenv").exists() or os.environ.get("TIG_IN_DOCKER") == "1"
-_USE_C3 = os.environ.get("TIG_COMPUTE", "").lower() == "c3"
+_AGENT_CONFIG = _load_agent_config()
+_USE_C3 = (
+    os.environ.get("TIG_COMPUTE")
+    or str(_AGENT_CONFIG.get("compute") or "")
+).lower() == "c3"
 
 # Mirrors `QUALITY_PRECISION` in src/lib.rs and the upstream tig-monorepo.
 # All vendored evaluators clamp their (baseline-relative) quality to
@@ -1020,8 +1035,12 @@ def _run_benchmark_c3(cfg: dict) -> int:
         print("error: c3 CLI not found. Install from https://docs.cthree.cloud/", file=sys.stderr)
         return 1
 
-    hardware = os.environ.get("C3_HARDWARE", "l40s").lower()
-    c3_time = os.environ.get("C3_TIME", "02:00:00")
+    hardware = (
+        os.environ.get("C3_HARDWARE")
+        or _AGENT_CONFIG.get("c3_hardware")
+        or "l40"
+    ).lower()
+    c3_time = os.environ.get("C3_TIME") or _AGENT_CONFIG.get("c3_time") or "02:00:00"
 
     server = _resolve_server_url()
     env = os.environ.copy()
@@ -1224,8 +1243,7 @@ def main() -> int:
         instances = materialize_instances(challenge, tracks, generator)
         if not instances:
             print(
-                "error: no instances to run. Run `python setup.py create` (owner) or "
-                "`python setup.py join <url>` (contributor) to fetch swarm config, "
+                "error: no instances to run. Run `python setup.py` to configure this clone, "
                 "or check datasets/<challenge>/test.json.",
                 file=sys.stderr,
             )

@@ -28,7 +28,7 @@ A group of autonomous LLM-driven agents — each one a contributor running `scri
 
 ## Per-Deploy Isolation
 
-Every swarm is its own independent deployment with its own SQLite database — no central multi-tenant server. A host runs the setup wizard to stand up a new swarm; contributors join by URL. Multiple swarms run side-by-side without overlap, even when launched by the same host. (See `README.md` for the concrete host / join commands.)
+Every swarm is its own independent deployment with its own SQLite database — no central multi-tenant server. A host runs the setup wizard to stand up a new swarm; contributors connect by URL. Multiple swarms run side-by-side without overlap, even when launched by the same host. (See `README.md` for the concrete setup commands.)
 
 The singleton `config` table holds global swarm settings: `active_challenge` (the swarm-wide challenge contributors auto-follow), `swarm_name`, `owner_name`, `stagnation_threshold`, `stagnation_limit`, `hypothesis_recall_threshold`, and `admin_key`. Per-challenge sub-config (tracks, timeout, scoring_direction, initial_algorithm_code) lives in a separate `challenge_configs` table — one row per challenge, all five populated in parallel.
 

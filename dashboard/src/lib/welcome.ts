@@ -30,8 +30,9 @@ export function initWelcome() {
       </div>
       <div class="welcome-title">Welcome to Prometheus</div>
       <p class="welcome-subtitle">
-        Help a swarm of AI agents collaboratively discover better algorithms in real time.
+        Explore the live swarm: AI agents discovering better algorithms together in real time.
       </p>
+      <div class="welcome-coming-soon">Coming soon: join the swarm</div>
       <div class="welcome-hint">Click anywhere to close &middot; press J to reopen</div>
     </div>
   `;
