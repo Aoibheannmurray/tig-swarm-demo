@@ -290,7 +290,11 @@ async function loadInitialState(apiUrl: string, challenge: string) {
           type: "experiment_published",
           experiment_id: exp.id || "",
           agent_name: exp.agent_name,
-          agent_id: "",
+          // Server now includes agent_id in /api/state's recent_experiments
+          // (was missing before). getAgentColor is keyed on agent_id, so
+          // threading the real id through makes backfilled experiments
+          // render with the same palette color as live WS events.
+          agent_id: exp.agent_id || "",
           score: exp.score,
           feasible: exp.feasible !== false,
           improvement_pct: exp.improvement_pct || 0,
@@ -309,7 +313,9 @@ async function loadInitialState(apiUrl: string, challenge: string) {
           type: "hypothesis_proposed",
           hypothesis_id: hyp.id || "",
           agent_name: hyp.agent_name,
-          agent_id: "",
+          // Server's recent_hypotheses already includes agent_id; thread it
+          // through so the feed dot uses the agent's palette color.
+          agent_id: hyp.agent_id || "",
           title: hyp.title,
           description: hyp.description || "",
           strategy_tag: hyp.strategy_tag,

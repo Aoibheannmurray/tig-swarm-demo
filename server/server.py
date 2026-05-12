@@ -840,6 +840,12 @@ async def get_state(
         "recent_experiments": [
             {
                 "id": e["id"],
+                # Include agent_id so the dashboard can resolve each backfilled
+                # experiment to the agent's palette color (getAgentColor is
+                # keyed on agent_id). Without this, backfilled experiments
+                # render with the event-type fallback color while live ones
+                # use the agent's color — same agent, two colors.
+                "agent_id": e["agent_id"],
                 "agent_name": e["agent_name"],
                 "score": e["score"],
                 "feasible": bool(e["feasible"]),
