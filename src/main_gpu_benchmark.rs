@@ -8,7 +8,7 @@ fn cli() -> Command {
     Command::new("tig_gpu_benchmark")
         .about("Combined generate+solve+evaluate for GPU challenges")
         .arg(
-            arg!(<CHALLENGE> "Challenge name (hypergraph, neuralnet_optimizer)")
+            arg!(<CHALLENGE> "Challenge name (hypergraph, neuralnet_optimizer, vector_search)")
                 .value_parser(value_parser!(String)),
         )
         .arg(
@@ -94,6 +94,20 @@ macro_rules! append_viz_data {
                     "total_params": total_params,
                     "noise_floor": noise_floor,
                     "model_loss": model_loss,
+                });
+            }
+            #[cfg(feature = "vector_search")]
+            "vector_search" => {
+                let inst: &challenges::vector_search::Challenge = &$instance;
+                let sol: &challenges::vector_search::Solution = &$solution;
+                let avg_distance = inst.evaluate_average_distance(
+                    sol, $module.clone(), $stream.clone(), $prop,
+                ).ok();
+                $json["vector_search_data"] = serde_json::json!({
+                    "num_queries": inst.num_queries,
+                    "vector_dims": inst.vector_dims,
+                    "database_size": inst.database_size,
+                    "avg_distance": avg_distance,
                 });
             }
             _ => {}

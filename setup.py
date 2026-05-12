@@ -104,6 +104,7 @@ DEFAULT_TRACKS_PER_CHALLENGE = {
     "energy_arbitrage": {"s=BASELINE": 2},
     "hypergraph": {"n_h_edges=10000": 2},
     "neuralnet_optimizer": {"n_hidden=4": 2},
+    "vector_search": {"n_queries=10": 2},
 }
 
 AGENT_CONFIG_PATH = ROOT / "agent.config.json"
