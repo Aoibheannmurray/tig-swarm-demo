@@ -1211,9 +1211,14 @@ def _prompt_contributor_identity(
     instead of every contributor showing as a generated codename."""
     yes = _arg_enabled(args, "yes")
     prior_name = (prior or {}).get("contributor_name") or ""
+    effective_provider = (
+        _arg_value(args, "provider")
+        or read_prior_agent_config().get("provider")
+        or DEFAULT_AGENT_CONFIG["provider"]
+    )
     prior_llm = (
         (prior or {}).get("contributor_llm")
-        or provider_to_llm_label(_arg_value(args, "provider"))
+        or provider_to_llm_label(effective_provider)
         or "claude_code"
     )
     arg_name = _arg_value(args, "agent_name")
