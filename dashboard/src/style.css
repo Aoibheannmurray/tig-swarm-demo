@@ -861,8 +861,8 @@ html, body {
 .energy-bar-up,
 .energy-bar-down {
   transform-box: fill-box;
-  animation: energy-bar-grow 0.45s ease-out backwards;
-  animation-delay: calc(var(--t, 0) * 12ms);
+  animation: energy-bar-grow 0.65s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 20ms);
 }
 .energy-bar-up   { transform-origin: 50% 100%; }
 .energy-bar-down { transform-origin: 50% 0%; }
@@ -875,7 +875,7 @@ html, body {
 .energy-price-line {
   stroke-dasharray: 100;
   stroke-dashoffset: 100;
-  animation: energy-price-draw 1.3s ease-out 0.1s forwards;
+  animation: energy-price-draw 2.1s ease-out 0.15s forwards;
 }
 
 @keyframes energy-price-draw {
