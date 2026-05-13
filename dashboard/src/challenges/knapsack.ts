@@ -19,13 +19,16 @@ type AllKnapsackData = Record<string, KnapsackData>;
 // Olive opacity ramp — strongest cells reach full saturation against the
 // cream surface so the heaviest interactions stay unmistakable.
 const HEAT_HUE = "107, 127, 78"; // #6B7F4E
-const OPACITY_LOW = 0.08;
+const OPACITY_LOW = 0.18;
 const OPACITY_HIGH = 1.0;
+// Explicit-zero cells stay a touch fainter than OPACITY_LOW so they're
+// visibly distinct from low-but-nonzero values without disappearing.
+const OPACITY_ZERO = 0.1;
 
 // Fixed pixel sizes (no viewBox scaling) so each cell stays the same size
 // regardless of K — when the matrix is bigger than the panel, the user
 // scrolls instead of squinting at sub-pixel cells.
-const CELL_SIZE = 8;
+const CELL_SIZE = 6;
 const CELL_GAP = 1;
 
 // Left sidebar (marginal-contribution bars + row labels). Stays put while
@@ -119,7 +122,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         <div class="kn-legend" aria-hidden="true">
           <span class="kn-legend-end" id="knapsack-legend-min">0</span>
           <div class="kn-legend-swatches">
-            <span style="background: linear-gradient(to right, rgba(107,127,78,0.08), rgba(107,127,78,1));"></span>
+            <span style="background: linear-gradient(to right, rgba(107,127,78,0.18), rgba(107,127,78,1));"></span>
           </div>
           <span class="kn-legend-end" id="knapsack-legend-max">+</span>
         </div>
@@ -265,7 +268,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         const fill = i === j
           ? "rgba(26,26,26,0.06)"
           : v <= 0
-            ? `rgba(${HEAT_HUE}, 0.04)`
+            ? `rgba(${HEAT_HUE}, ${OPACITY_ZERO})`
             : `rgba(${HEAT_HUE}, ${opacityScale(v).toFixed(3)})`;
         const colItem = items[j];
         mParts.push(
