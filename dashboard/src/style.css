@@ -701,7 +701,7 @@ html, body {
 
 /* Flowing dash animation */
 .route-flowing {
-  animation: dashFlow 1.2s linear infinite;
+  animation: dashFlow 0.5s linear infinite;
 }
 
 @keyframes dashFlow {
