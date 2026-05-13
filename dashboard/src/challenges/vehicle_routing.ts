@@ -214,7 +214,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-dasharray="${dashOn} ${dashOff}" class="route-flowing"/>`);
 
       for (const pt of route.path) {
-        customerParts.push(`<circle cx="${pt.x}" cy="${pt.y}" r="${customerR}" fill="${color}" stroke="#fff" stroke-width="${customerStroke}"/>`);
+        customerParts.push(`<circle cx="${pt.x}" cy="${pt.y}" r="${customerR}" fill="${color}" stroke="#1A1A1A" stroke-width="${customerStroke}"/>`);
       }
     });
     routeNode.innerHTML = routeParts.join("");

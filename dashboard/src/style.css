@@ -532,8 +532,7 @@ html, body {
   align-items: center;
   justify-content: center;
   position: relative;
-  /* background: #FFFFFF; — revert to this to go back to white canvas */
-  background: var(--ink);
+  background: #FFFFFF;
   border-radius: 4px;
 }
 
