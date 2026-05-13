@@ -83,6 +83,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
   private sidebarSvg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
   private matrixSvg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
   private matrixScrollEl!: HTMLElement;
+  private gridEl!: HTMLElement;
 
   private valueEl!: HTMLElement;
   private itemsEl!: HTMLElement;
@@ -97,7 +98,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         ${this.navsScaffold()}
         <div class="knapsack-svg-wrap" id="knapsack-svg-wrap">
           <div class="kn-sidebar-caption" aria-hidden="true">CONTRIBUTION</div>
-          <div class="knapsack-grid">
+          <div class="knapsack-grid" id="knapsack-grid">
             <svg id="knapsack-sidebar-svg"></svg>
             <div class="knapsack-matrix-hscroll" id="knapsack-matrix-hscroll">
               <svg id="knapsack-matrix-svg"></svg>
@@ -148,6 +149,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     this.sidebarSvg = select("#knapsack-sidebar-svg") as any;
     this.matrixSvg = select("#knapsack-matrix-svg") as any;
     this.matrixScrollEl = document.getElementById("knapsack-matrix-hscroll")!;
+    this.gridEl = document.getElementById("knapsack-grid")!;
   }
 
   protected onReset(): void {
@@ -215,6 +217,11 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     this.matrixSvg
       .attr("width", matrixPx)
       .attr("height", matrixPx);
+
+    // Balance the sidebar's left-side weight with equal-width padding on
+    // the right, so the matrix itself (not the {sidebar + matrix} pair)
+    // is what's geometrically centred in the wrap.
+    this.gridEl.style.paddingRight = `${sidebarTotalW}px`;
 
     // ── Sidebar SVG: marginal bars + row labels ──
     const sParts: string[] = [];
