@@ -25,7 +25,7 @@ const OPACITY_HIGH = 1.0;
 // Fixed pixel sizes (no viewBox scaling) so each cell stays the same size
 // regardless of K — when the matrix is bigger than the panel, the user
 // scrolls instead of squinting at sub-pixel cells.
-const CELL_SIZE = 14;
+const CELL_SIZE = 8;
 const CELL_GAP = 1;
 
 // Left sidebar (marginal-contribution bars + row labels). Stays put while
@@ -198,8 +198,12 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
       .clamp(true);
 
     // ── Intrinsic dimensions ──
+    // Drop row labels below ~10 px cells — they'd overlap and look like noise.
+    // The cell tooltip still names each item on hover.
+    const showRowLabels = CELL_SIZE >= 10;
     const matrixPx = k * CELL_SIZE;
-    const sidebarTotalW = SIDEBAR_W + SIDEBAR_GAP + ROW_LABEL_W + SIDEBAR_GAP;
+    const sidebarTotalW = SIDEBAR_W + SIDEBAR_GAP +
+      (showRowLabels ? ROW_LABEL_W + SIDEBAR_GAP : 0);
     const sidebarH = SIDEBAR_PAD_TOP + matrixPx;
     const matrixH = SIDEBAR_PAD_TOP + matrixPx;
 
@@ -239,12 +243,14 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         `</rect>`,
       );
 
-      const cy = SIDEBAR_PAD_TOP + i * CELL_SIZE + CELL_SIZE / 2;
-      sParts.push(
-        `<text x="${labelX}" y="${cy.toFixed(1)}" ` +
-        `text-anchor="end" dominant-baseline="central" fill="rgba(26,26,26,0.55)" ` +
-        `font-family="var(--mono)" font-size="${labelFs}">${items[i]}</text>`,
-      );
+      if (showRowLabels) {
+        const cy = SIDEBAR_PAD_TOP + i * CELL_SIZE + CELL_SIZE / 2;
+        sParts.push(
+          `<text x="${labelX}" y="${cy.toFixed(1)}" ` +
+          `text-anchor="end" dominant-baseline="central" fill="rgba(26,26,26,0.55)" ` +
+          `font-family="var(--mono)" font-size="${labelFs}">${items[i]}</text>`,
+        );
+      }
     }
     sidebarNode.innerHTML = sParts.join("");
 
