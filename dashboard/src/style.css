@@ -164,6 +164,40 @@ html, body {
   padding: 12px 16px;
 }
 
+/* New-best flash — overlay is injected into every .panel-inner by the
+   panel base class. Sits on top of the panel content but doesn't
+   interact (pointer-events: none). The flash-new-best class drives a
+   one-shot inset glow keyframe coloured by the contributing agent. */
+.panel-flash-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  border-radius: inherit;
+  opacity: 0;
+}
+
+.panel-flash-overlay.flash-new-best {
+  animation: panel-new-best-flash 700ms ease-out;
+}
+
+@keyframes panel-new-best-flash {
+  0% {
+    opacity: 0;
+    box-shadow: inset 0 0 0 0 var(--flash-color, var(--green));
+  }
+  15% {
+    opacity: 1;
+    box-shadow:
+      inset 0 0 0 2px var(--flash-color, var(--green)),
+      inset 0 0 28px 6px var(--flash-color, var(--green));
+  }
+  100% {
+    opacity: 0;
+    box-shadow: inset 0 0 0 0 transparent;
+  }
+}
+
 /* ── Dedicated single-panel pages (diversity.html, benchmark.html) ── */
 .dashboard-single {
   position: relative;
@@ -838,9 +872,11 @@ html, body {
   z-index: 2;
 }
 
-/* Selected-count sits inside .knapsack-value-box, above the VALUE readout.
-   Smaller / dimmer than VALUE so VALUE remains the primary metric. */
-.knapsack-selected-value {
+/* Compact readout line that pairs with .solution-sub-value but at a
+   smaller weight — useful when a panel wants a secondary stat stacked
+   above the main one (knapsack: SELECTED above VALUE; SAT: SHOWING above
+   CLAUSES). */
+.solution-sub-value-sm {
   font-family: var(--mono);
   font-size: 14px;
   font-weight: 400;

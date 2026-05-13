@@ -63,6 +63,13 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   // switch doesn't leak observers attached to the previous panel's DOM.
   private resizeObservers: ResizeObserver[] = [];
 
+  // Root .panel-inner element + the overlay we inject for the new-best
+  // flash animation. Both are set up in init() so every subclass gets
+  // the flash for free without touching its scaffoldHtml.
+  private panelInnerEl: HTMLElement | null = null;
+  private flashOverlayEl: HTMLElement | null = null;
+  private flashTimer: ReturnType<typeof setTimeout> | null = null;
+
   protected abstract idPrefix: string;
   protected abstract scaffoldHtml(): string;
   protected abstract attachRefs(root: HTMLElement): void;
@@ -117,6 +124,18 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
     container.innerHTML = this.scaffoldHtml();
     this.attachRefs(container);
 
+    // Inject a transparent overlay over the panel-inner for the
+    // new-best flash. Appended last so it stacks above sibling content
+    // without needing per-panel z-index plumbing.
+    this.panelInnerEl = container.querySelector(".panel-inner") as HTMLElement | null;
+    if (this.panelInnerEl) {
+      const overlay = document.createElement("div");
+      overlay.className = "panel-flash-overlay";
+      overlay.setAttribute("aria-hidden", "true");
+      this.panelInnerEl.appendChild(overlay);
+      this.flashOverlayEl = overlay;
+    }
+
     // Generic button wiring. Subclasses must use the agreed id convention:
     //   {idPrefix}-prev, -next                     instance navigation
     //   {idPrefix}-hist-prev, -hist-next, -hist-live   history navigation
@@ -157,9 +176,35 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       clearInterval(this.rotationTimer);
       this.rotationTimer = null;
     }
+    if (this.flashTimer !== null) {
+      clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
     for (const ro of this.resizeObservers) ro.disconnect();
     this.resizeObservers = [];
     this.onDispose();
+  }
+
+  // Briefly pulse the panel edges to signal that a new global best just
+  // arrived. Colour comes from the contributing agent (falls back to the
+  // theme's success green) so a glance at any panel tells you who pushed.
+  protected flashNewBest(agentColor?: string): void {
+    const overlay = this.flashOverlayEl;
+    if (!overlay) return;
+    if (this.flashTimer !== null) {
+      clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
+    overlay.classList.remove("flash-new-best");
+    overlay.style.setProperty("--flash-color", agentColor ?? "var(--green)");
+    // Force a reflow so re-adding the class restarts the animation when
+    // bests arrive back-to-back.
+    void overlay.offsetWidth;
+    overlay.classList.add("flash-new-best");
+    this.flashTimer = setTimeout(() => {
+      overlay.classList.remove("flash-new-best");
+      this.flashTimer = null;
+    }, 700);
   }
 
   // Subclass helper — registers a ResizeObserver that's auto-disconnected
@@ -399,6 +444,9 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
         this.updateHistoryLabel();
         this.updateEmptyState();
       }
+      // Pulse the panel for genuinely new entries (replays of duplicates
+      // don't count — those just patch existing history slots).
+      this.flashNewBest(entry.agent_id ? getAgentColor(entry.agent_id) : undefined);
     }
   }
 }

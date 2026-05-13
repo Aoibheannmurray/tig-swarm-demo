@@ -57,12 +57,9 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
           </div>
         </div>
         <div class="knapsack-value-box">
+          <div class="solution-sub-value-sm" id="sat-vars">---</div>
           <div class="solution-sub-label" id="sat-sat-label">CLAUSES</div>
           <div class="solution-sub-value" id="sat-sat">---</div>
-        </div>
-        <div class="knapsack-items-box">
-          <div class="solution-sub-label">VARIABLES</div>
-          <div class="solution-sub-value" id="sat-vars">---</div>
         </div>
         <div class="solution-score">
           <div class="solution-score-label">SCORE</div>
@@ -176,9 +173,6 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
       this.satLabelEl.textContent = "UNSATISFIED";
       this.satEl.textContent = `${unsat.toLocaleString()} / ${m.toLocaleString()}`;
     }
-    const sampledNote = data.viz_stride > 1
-      ? ` (showing 1/${data.viz_stride})`
-      : "";
-    this.varsEl.textContent = `${data.num_variables.toLocaleString()}${sampledNote}`;
+    this.varsEl.textContent = `showing ${data.viz_count.toLocaleString()}`;
   }
 }

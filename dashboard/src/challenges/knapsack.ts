@@ -111,7 +111,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         </div>
         <div class="knapsack-value-box">
           <div class="solution-sub-label">SELECTED</div>
-          <div class="knapsack-selected-value" id="knapsack-items">---</div>
+          <div class="solution-sub-value-sm" id="knapsack-items">---</div>
           <div class="solution-sub-label">VALUE</div>
           <div class="solution-sub-value" id="knapsack-value">---</div>
         </div>
