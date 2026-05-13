@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""Fleet launcher — run multiple swarm agents from one repo via git worktrees.
+
+Each entry in fleet.config.json gets:
+  - its own git worktree at worktrees/<name>/ on branch fleet/<name>
+  - its own agent.config.json (registers a fresh swarm agent on first run,
+    resumes the persisted agent_id on subsequent runs)
+  - a subprocess running scripts/run_loop.py inside that worktree
+
+All children stream stdout through this process, prefixed by agent name.
+Ctrl-C terminates the whole fleet.
+
+Usage:
+    python scripts/run_fleet.py                    # spawn everyone
+    python scripts/run_fleet.py --only claude-1    # spawn just one (repeatable)
+    python scripts/run_fleet.py --list             # status table, then exit
+    python scripts/run_fleet.py --clean            # remove every fleet worktree
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
+WORKTREES_DIR = ROOT / "worktrees"
+
+# Fields on a fleet entry that are forwarded into the worktree's
+# agent.config.json. run_loop.py reads its provider/model/compute defaults
+# from there — no CLI flags needed on the subprocess.
+_AGENT_CONFIG_KEYS = (
+    "provider", "model", "api_base", "compute",
+    "c3_hardware", "c3_time", "c3_cloud_provider", "c3_no_build",
+)
+
+_PROVIDER_TO_DEFAULT_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GOOGLE_API_KEY",
+}
+
+_COLORS = ["\033[36m", "\033[33m", "\033[35m", "\033[32m", "\033[34m", "\033[31m"]
+_RESET = "\033[0m"
+
+
+# ── Config ─────────────────────────────────────────────────────────
+
+
+def _load_fleet() -> list[dict]:
+    if not FLEET_CONFIG_PATH.exists():
+        sys.exit(
+            f"fleet.config.json not found at {FLEET_CONFIG_PATH}.\n"
+            f"Copy fleet.config.example.json and edit it."
+        )
+    data = json.loads(FLEET_CONFIG_PATH.read_text())
+    agents = data.get("agents") or []
+    if not agents:
+        sys.exit("fleet.config.json has no agents.")
+
+    names: list[str] = []
+    for entry in agents:
+        name = entry.get("name")
+        if not name:
+            sys.exit("Every agent in fleet.config.json must have a 'name'.")
+        names.append(name)
+    if len(set(names)) != len(names):
+        sys.exit("fleet.config.json has duplicate agent names.")
+    return agents
+
+
+# ── Git worktree helpers ───────────────────────────────────────────
+
+
+def _git(args: list[str]) -> str:
+    result = subprocess.run(
+        ["git"] + args, cwd=ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed:\n{result.stderr.strip()}"
+        )
+    return result.stdout.strip()
+
+
+def _existing_worktree_paths() -> set[str]:
+    out = _git(["worktree", "list", "--porcelain"])
+    paths: set[str] = set()
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            paths.add(line[len("worktree "):])
+    return paths
+
+
+def _branch_exists(branch: str) -> bool:
+    return bool(_git(["branch", "--list", branch]))
+
+
+def _ensure_worktree(name: str) -> Path:
+    path = WORKTREES_DIR / name
+    branch = f"fleet/{name}"
+    known = _existing_worktree_paths()
+
+    if path.exists() and str(path) not in known:
+        # Stale directory not tracked as a worktree — prune and rebuild.
+        _git(["worktree", "prune"])
+        shutil.rmtree(path)
+
+    if not path.exists():
+        WORKTREES_DIR.mkdir(exist_ok=True)
+        if _branch_exists(branch):
+            _git(["worktree", "add", str(path), branch])
+        else:
+            _git(["worktree", "add", "-b", branch, str(path)])
+
+    return path
+
+
+def _seed_worktree(path: Path, agent: dict) -> None:
+    """Write swarm/agent config and optional tacit knowledge into the worktree.
+
+    Preserves any persisted agent_id from earlier fleet runs so the same swarm
+    identity is reused across restarts.
+    """
+    root_swarm = ROOT / "swarm.config.json"
+    wt_swarm = path / "swarm.config.json"
+    if not wt_swarm.exists():
+        if not root_swarm.exists():
+            sys.exit(
+                "swarm.config.json missing in repo root. "
+                "Run `python setup.py` first."
+            )
+        shutil.copy2(root_swarm, wt_swarm)
+
+    wt_agent = path / "agent.config.json"
+    existing: dict = {}
+    if wt_agent.exists():
+        try:
+            parsed = json.loads(wt_agent.read_text())
+            if isinstance(parsed, dict):
+                existing = parsed
+        except json.JSONDecodeError:
+            pass
+
+    merged = dict(existing)
+    for key in _AGENT_CONFIG_KEYS:
+        if key in agent:
+            merged[key] = agent[key]
+    # The example config uses "hardware" as the friendly name; run_loop.py
+    # reads "c3_hardware" first and falls back to "hardware", so normalize.
+    if "hardware" in agent and "c3_hardware" not in agent:
+        merged["c3_hardware"] = agent["hardware"]
+    wt_agent.write_text(json.dumps(merged, indent=2) + "\n")
+
+    tacit = agent.get("tacit_knowledge")
+    if tacit:
+        src = Path(tacit)
+        if not src.is_absolute():
+            src = ROOT / src
+        if not src.exists():
+            sys.exit(f"Agent {agent['name']}: tacit_knowledge file not found: {src}")
+        shutil.copy2(src, path / "tacit_knowledge_personal.md")
+
+
+# ── API keys ───────────────────────────────────────────────────────
+
+
+def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
+    """Return (env_var_to_set, value) for this agent's subprocess.
+
+    Returns (None, None) for claude-code, which uses the local CLI's auth.
+    Exits with a clear message if a required env var is missing.
+    """
+    provider = agent.get("provider") or "anthropic"
+    if provider == "claude-code":
+        return None, None
+    if provider not in _PROVIDER_TO_DEFAULT_ENV:
+        sys.exit(f"Agent {agent['name']}: unknown provider {provider!r}")
+
+    target = _PROVIDER_TO_DEFAULT_ENV[provider]
+    source = agent.get("api_key_env") or target
+    value = os.environ.get(source, "")
+    if not value:
+        sys.exit(
+            f"Agent {agent['name']}: environment variable {source} is unset or empty."
+        )
+    return target, value
+
+
+# ── Streaming ──────────────────────────────────────────────────────
+
+
+def _stream_output(name: str, color: str, proc: subprocess.Popen) -> None:
+    prefix = f"{color}[{name}]{_RESET} " if color else f"[{name}] "
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(prefix + line)
+        sys.stdout.flush()
+
+
+# ── Subcommands ────────────────────────────────────────────────────
+
+
+def cmd_list(agents: list[dict]) -> int:
+    known = _existing_worktree_paths()
+    print(f"  {'name':20s}  {'worktree':10s}  {'agent_id':40s}  path")
+    for agent in agents:
+        name = agent["name"]
+        path = WORKTREES_DIR / name
+        present = "ok" if str(path) in known else "missing"
+        agent_id = "<unregistered>"
+        wt_agent = path / "agent.config.json"
+        if wt_agent.exists():
+            try:
+                data = json.loads(wt_agent.read_text())
+                agent_id = data.get("agent_id") or "<unregistered>"
+            except json.JSONDecodeError:
+                pass
+        print(f"  {name:20s}  {present:10s}  {agent_id:40s}  {path}")
+    return 0
+
+
+def cmd_clean(agents: list[dict]) -> int:
+    for agent in agents:
+        name = agent["name"]
+        path = WORKTREES_DIR / name
+        branch = f"fleet/{name}"
+        if path.exists():
+            try:
+                _git(["worktree", "remove", "--force", str(path)])
+                print(f"  removed worktree {path}")
+            except RuntimeError as e:
+                print(f"  could not remove {path}: {e}", file=sys.stderr)
+        if _branch_exists(branch):
+            try:
+                _git(["branch", "-D", branch])
+                print(f"  deleted branch {branch}")
+            except RuntimeError as e:
+                print(f"  could not delete branch {branch}: {e}", file=sys.stderr)
+    _git(["worktree", "prune"])
+    return 0
+
+
+def cmd_run(agents: list[dict], only: list[str] | None) -> int:
+    if only:
+        names = {a["name"] for a in agents}
+        unknown = [n for n in only if n not in names]
+        if unknown:
+            sys.exit(f"Unknown agent name(s) in --only: {', '.join(unknown)}")
+        agents = [a for a in agents if a["name"] in only]
+
+    # Resolve every API key up front so missing secrets fail fast before any
+    # worktree work or subprocess starts.
+    key_envs = [_resolve_api_key(a) for a in agents]
+
+    use_color = sys.stdout.isatty()
+    procs: list[tuple[str, subprocess.Popen, threading.Thread]] = []
+
+    for i, agent in enumerate(agents):
+        name = agent["name"]
+        print(f"  [fleet] preparing {name}…")
+        path = _ensure_worktree(name)
+        _seed_worktree(path, agent)
+
+        env = os.environ.copy()
+        target, value = key_envs[i]
+        if target and value:
+            env[target] = value
+        # Stdout is piped (not a TTY), so Python would block-buffer the child's
+        # output and the fleet would look silent until buffers fill. Force
+        # line-buffered I/O so [BENCH]/registration prints stream live.
+        env["PYTHONUNBUFFERED"] = "1"
+
+        color = _COLORS[i % len(_COLORS)] if use_color else ""
+        cmd = [sys.executable, "scripts/run_loop.py"]
+        proc = subprocess.Popen(
+            cmd, cwd=path, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        t = threading.Thread(
+            target=_stream_output, args=(name, color, proc), daemon=True,
+        )
+        t.start()
+        procs.append((name, proc, t))
+        print(f"  [fleet] spawned {name} (pid {proc.pid}) in {path}")
+
+    print(f"  [fleet] {len(procs)} agent(s) running. Ctrl-C to stop.")
+
+    stopping = False
+
+    def _shutdown(_signum, _frame):
+        nonlocal stopping
+        if stopping:
+            return
+        stopping = True
+        print("\n  [fleet] shutdown signal — terminating agents…")
+        for _, p, _t in procs:
+            if p.poll() is None:
+                p.terminate()
+        deadline = time.time() + 10
+        for nm, p, _t in procs:
+            remaining = max(0.0, deadline - time.time())
+            try:
+                p.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                print(f"  [fleet] killing {nm} (didn't exit in 10s)")
+                p.kill()
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    while any(p.poll() is None for _, p, _ in procs):
+        time.sleep(1)
+
+    for name, p, t in procs:
+        t.join(timeout=2)
+        print(f"  [fleet] {name} exited with code {p.returncode}")
+    return 0
+
+
+# ── Entry point ────────────────────────────────────────────────────
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description="Run multiple swarm agents from one repo via git worktrees.",
+    )
+    p.add_argument(
+        "--only", action="append",
+        help="Run only this agent (repeatable). Default: all agents in fleet.config.json.",
+    )
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--list", action="store_true",
+        help="Print agent / worktree status and exit.",
+    )
+    g.add_argument(
+        "--clean", action="store_true",
+        help="Remove every fleet worktree and its throwaway branch, then exit.",
+    )
+    args = p.parse_args()
+
+    agents = _load_fleet()
+    if args.list:
+        return cmd_list(agents)
+    if args.clean:
+        return cmd_clean(agents)
+    return cmd_run(agents, args.only)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
