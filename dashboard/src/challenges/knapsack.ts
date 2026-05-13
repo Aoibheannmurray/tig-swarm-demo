@@ -25,7 +25,7 @@ const OPACITY_HIGH = 1.0;
 // Fixed pixel sizes (no viewBox scaling) so each cell stays the same size
 // regardless of K — when the matrix is bigger than the panel, the user
 // scrolls instead of squinting at sub-pixel cells.
-const CELL_SIZE = 18;
+const CELL_SIZE = 14;
 const CELL_GAP = 1;
 
 // Left sidebar (marginal-contribution bars + row labels). Stays put while
