@@ -16,31 +16,24 @@ interface KnapsackData {
 
 type AllKnapsackData = Record<string, KnapsackData>;
 
-const MARGIN = { top: 8, right: 8, bottom: 8, left: 8 };
-const VB_W = 1000;
-const VB_H = 1000;
-const CHART_W = VB_W - MARGIN.left - MARGIN.right;
-const CHART_H = VB_H - MARGIN.top - MARGIN.bottom;
-
 // Olive opacity ramp — strongest cells reach full saturation against the
-// cream surface so the heaviest interactions stay unmistakable at K=50.
+// cream surface so the heaviest interactions stay unmistakable.
 const HEAT_HUE = "107, 127, 78"; // #6B7F4E
 const OPACITY_LOW = 0.08;
 const OPACITY_HIGH = 1.0;
 
-// Below this K, draw item-ID labels between the marginal sidebar and the
-// matrix so each row/column is identifiable.
-const AXIS_LABEL_K_THRESHOLD = 50;
+// Fixed pixel sizes (no viewBox scaling) so each cell stays the same size
+// regardless of K — when the matrix is bigger than the panel, the user
+// scrolls instead of squinting at sub-pixel cells.
+const CELL_SIZE = 18;
+const CELL_GAP = 1;
 
-// Top strip reserved for the budget bar.
-const BUDGET_H = 40;
-const BUDGET_GAP = 18;
-const BUDGET_LABEL_W = 80;
-
-// Left strip reserved for the marginal-contribution bars.
+// Left sidebar (marginal-contribution bars + row labels). Stays put while
+// the matrix scrolls horizontally so each row is always identifiable.
 const SIDEBAR_W = 120;
 const SIDEBAR_GAP = 6;
-const ROW_LABEL_W = 26;
+const ROW_LABEL_W = 32;
+const SIDEBAR_PAD_TOP = 18; // headroom for the CONTRIBUTION caption
 
 // Greedy nearest-neighbor leaf-ordering on the K×K interaction matrix.
 // Seeded with the item that has the largest total interaction (the most
@@ -85,12 +78,12 @@ function clusterOrder(mat: number[][]): number[] {
 export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
   protected idPrefix = "knapsack";
 
-  private svg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
-  private chartG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private sidebarSvg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
+  private matrixSvg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
+  private matrixScrollEl!: HTMLElement;
 
   private valueEl!: HTMLElement;
   private itemsEl!: HTMLElement;
-  private weightEl!: HTMLElement;
   private legendMinEl!: HTMLElement;
   private legendMaxEl!: HTMLElement;
 
@@ -101,7 +94,12 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         <div class="knapsack-agent-name" id="knapsack-agent-name"></div>
         ${this.navsScaffold()}
         <div class="knapsack-svg-wrap" id="knapsack-svg-wrap">
-          <svg id="knapsack-svg"></svg>
+          <div class="knapsack-grid">
+            <svg id="knapsack-sidebar-svg"></svg>
+            <div class="knapsack-matrix-hscroll" id="knapsack-matrix-hscroll">
+              <svg id="knapsack-matrix-svg"></svg>
+            </div>
+          </div>
           <div class="solution-empty-state" id="knapsack-empty-state">
             <div class="solution-empty-state-title">Challenge not started yet</div>
             <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
@@ -114,10 +112,6 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         <div class="knapsack-items-box">
           <div class="solution-sub-label">ITEMS</div>
           <div class="solution-sub-value" id="knapsack-items">---</div>
-        </div>
-        <div class="knapsack-weight-box">
-          <div class="solution-sub-label">WEIGHT</div>
-          <div class="solution-sub-value" id="knapsack-weight">---</div>
         </div>
         <div class="solution-score">
           <div class="solution-score-label">SCORE</div>
@@ -140,7 +134,6 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     this.scoreDeltaEl = document.getElementById("knapsack-score-delta")!;
     this.valueEl = document.getElementById("knapsack-value")!;
     this.itemsEl = document.getElementById("knapsack-items")!;
-    this.weightEl = document.getElementById("knapsack-weight")!;
     this.legendMinEl = document.getElementById("knapsack-legend-min")!;
     this.legendMaxEl = document.getElementById("knapsack-legend-max")!;
     this.instanceLabelEl = document.getElementById("knapsack-instance-label")!;
@@ -151,55 +144,41 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     this.historyLiveBtnEl = document.getElementById("knapsack-hist-live")!;
     this.emptyStateEl = document.getElementById("knapsack-empty-state")!;
 
-    this.svg = select("#knapsack-svg") as any;
-    this.svg
-      .attr("viewBox", `0 0 ${VB_W} ${VB_H}`)
-      .attr("preserveAspectRatio", "xMidYMid meet");
-
-    this.chartG = this.svg.append("g")
-      .attr("transform", `translate(${MARGIN.left},${MARGIN.top})`) as any;
-
-    const wrap = document.getElementById("knapsack-svg-wrap")!;
-    const resize = () => {
-      const size = Math.max(0, Math.min(wrap.clientWidth, wrap.clientHeight));
-      this.svg.attr("width", size).attr("height", size);
-    };
-    this.observeResize(wrap, resize);
-    resize();
+    this.sidebarSvg = select("#knapsack-sidebar-svg") as any;
+    this.matrixSvg = select("#knapsack-matrix-svg") as any;
+    this.matrixScrollEl = document.getElementById("knapsack-matrix-hscroll")!;
   }
 
   protected onReset(): void {
-    (this.chartG.node() as SVGGElement).innerHTML = "";
+    (this.sidebarSvg.node() as SVGSVGElement).innerHTML = "";
+    (this.matrixSvg.node() as SVGSVGElement).innerHTML = "";
     this.valueEl.textContent = "---";
     this.itemsEl.textContent = "---";
-    this.weightEl.textContent = "---";
   }
 
   protected showInstance(data: KnapsackData) {
-    const chartNode = this.chartG.node() as SVGGElement;
+    const sidebarNode = this.sidebarSvg.node() as SVGSVGElement;
+    const matrixNode = this.matrixSvg.node() as SVGSVGElement;
 
     if (!data || !data.interaction_values || !data.interaction_values.length) {
-      chartNode.innerHTML = "";
+      sidebarNode.innerHTML = "";
+      matrixNode.innerHTML = "";
       this.valueEl.textContent = "---";
       this.itemsEl.textContent = "---";
-      this.weightEl.textContent = "---";
       return;
     }
 
     const k = data.viz_items.length;
-    const showAxisLabels = k <= AXIS_LABEL_K_THRESHOLD;
 
     // Reorder rows/cols via greedy nearest-neighbor TSP on interactions.
-    // Permute every per-item array consistently so the budget bar, marginal
-    // sidebar and matrix all share the same ordering.
+    // Permute every per-item array consistently so the sidebar bars and the
+    // matrix share the same row ordering.
     const order = clusterOrder(data.interaction_values);
     const items = order.map(i => data.viz_items[i]);
-    const weights = order.map(i => data.viz_weights?.[i] ?? 0);
     const marginals = order.map(i => data.viz_marginals?.[i] ?? 0);
     const mat: number[][] = order.map(i => order.map(j => data.interaction_values[i][j]));
 
-    // Compute the matrix value range over the upper triangle (the matrix is
-    // symmetric; the diagonal is zero by construction).
+    // Matrix value range over upper triangle.
     let minVal = Infinity;
     let maxVal = -Infinity;
     for (let i = 0; i < k; i++) {
@@ -218,129 +197,66 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
       .range([OPACITY_LOW, OPACITY_HIGH])
       .clamp(true);
 
-    const parts: string[] = [];
+    // ── Intrinsic dimensions ──
+    const matrixPx = k * CELL_SIZE;
+    const sidebarTotalW = SIDEBAR_W + SIDEBAR_GAP + ROW_LABEL_W + SIDEBAR_GAP;
+    const sidebarH = SIDEBAR_PAD_TOP + matrixPx;
+    const matrixH = SIDEBAR_PAD_TOP + matrixPx;
 
-    // ── Geometry ──
-    const bodyTop = BUDGET_H + BUDGET_GAP;
-    const bodyH = CHART_H - bodyTop;
-    const labelW = showAxisLabels ? ROW_LABEL_W : 0;
-    const matrixSide = Math.min(
-      bodyH,
-      CHART_W - SIDEBAR_W - SIDEBAR_GAP - labelW - SIDEBAR_GAP,
-    );
-    const matrixX = SIDEBAR_W + SIDEBAR_GAP + labelW + SIDEBAR_GAP;
-    const matrixY = bodyTop + (bodyH - matrixSide) / 2;
-    const cellSize = matrixSide / k;
+    this.sidebarSvg
+      .attr("width", sidebarTotalW)
+      .attr("height", sidebarH);
+    this.matrixSvg
+      .attr("width", matrixPx)
+      .attr("height", matrixH);
 
-    // ── Budget bar ──
-    // Stacked horizontal bar of weights (one segment per viz item, in cluster
-    // order, opacity-coded by marginal contribution). Background tracks
-    // max_weight so headroom is visible; a tick marks total_weight.
-    const barX = BUDGET_LABEL_W;
-    const barY = 12;
-    const barH = 18;
-    const barW = CHART_W - barX;
-    const maxW = Math.max(1, data.max_weight);
-    const wToPx = barW / maxW;
-    const vizWeightSum = weights.reduce((a, b) => a + b, 0);
-    const tailWeight = Math.max(0, data.total_weight - vizWeightSum);
-    const maxMarginalForColor = Math.max(1, ...marginals);
-
-    // Caption to the left of the bar — terse, paired with the WEIGHT box
-    // below the SVG that carries the actual numbers.
-    parts.push(
-      `<text x="0" y="${(barY + barH / 2 + 3.5).toFixed(1)}" ` +
-      `fill="rgba(26,26,26,0.55)" font-family="var(--mono)" font-size="11" ` +
-      `letter-spacing="0.15em">BUDGET</text>`,
-    );
-
-    // Background bar (max_weight extent)
-    parts.push(
-      `<rect x="${barX}" y="${barY}" width="${barW}" height="${barH}" ` +
-      `fill="rgba(26,26,26,0.04)" stroke="rgba(26,26,26,0.18)" stroke-width="0.5" rx="2"/>`,
-    );
-
-    // Per-item segments (filled portion)
-    let segX = barX;
-    for (let i = 0; i < k; i++) {
-      const w = weights[i] * wToPx;
-      if (w <= 0) continue;
-      const op = OPACITY_LOW + (OPACITY_HIGH - OPACITY_LOW) *
-        (marginals[i] / maxMarginalForColor);
-      parts.push(
-        `<rect x="${segX.toFixed(3)}" y="${barY}" width="${w.toFixed(3)}" ` +
-        `height="${barH}" fill="rgba(${HEAT_HUE}, ${op.toFixed(3)})">` +
-        `<title>item ${items[i]}: weight ${weights[i]}, marginal ${marginals[i].toFixed(0)}</title>` +
-        `</rect>`,
-      );
-      segX += w;
-    }
-    // Tail segment for items beyond the viz cap (when num_selected > k)
-    if (tailWeight > 0) {
-      const w = tailWeight * wToPx;
-      parts.push(
-        `<rect x="${segX.toFixed(3)}" y="${barY}" width="${w.toFixed(3)}" ` +
-        `height="${barH}" fill="rgba(${HEAT_HUE}, 0.35)" ` +
-        `stroke="rgba(${HEAT_HUE},0.7)" stroke-dasharray="2 2" stroke-width="0.5">` +
-        `<title>+ ${data.num_selected - k} more items (weight ${tailWeight})</title>` +
-        `</rect>`,
-      );
-      segX += w;
-    }
-
-    // ── Marginal sidebar ──
-    // Horizontal bars to the left of each matrix row, growing leftward from
-    // the matrix's left edge so the bar tips align and length comparisons
-    // are easy.
+    // ── Sidebar SVG: caption + marginal bars + row labels ──
+    const sParts: string[] = [];
     const maxMarginal = Math.max(1, ...marginals);
-    const sidebarRight = matrixX - labelW - SIDEBAR_GAP;
-    const sidebarLeft = sidebarRight - SIDEBAR_W;
+    const sidebarRight = SIDEBAR_W; // bars end at x = SIDEBAR_W
+    const labelX = SIDEBAR_W + SIDEBAR_GAP + ROW_LABEL_W; // labels right-aligned here
 
-    // Sidebar caption (top-left, above the first bar)
-    parts.push(
-      `<text x="${sidebarLeft}" y="${bodyTop - 4}" fill="rgba(26,26,26,0.55)" ` +
+    sParts.push(
+      `<text x="0" y="12" fill="rgba(26,26,26,0.55)" ` +
       `font-family="var(--mono)" font-size="10" letter-spacing="0.15em">CONTRIBUTION</text>`,
     );
 
-    const barRowH = Math.min(cellSize - 1, cellSize * 0.78);
-    const barRowOffset = (cellSize - barRowH) / 2;
+    const barH = Math.max(2, CELL_SIZE - CELL_GAP * 2);
+    const barRowOffset = (CELL_SIZE - barH) / 2;
+    const labelFs = Math.max(8, Math.min(11, CELL_SIZE * 0.5)).toFixed(1);
+
     for (let i = 0; i < k; i++) {
       const m = marginals[i];
       const w = (m / maxMarginal) * SIDEBAR_W;
-      const yTop = matrixY + i * cellSize + barRowOffset;
+      const yTop = SIDEBAR_PAD_TOP + i * CELL_SIZE + barRowOffset;
       const xLeft = sidebarRight - w;
       const op = OPACITY_LOW + (OPACITY_HIGH - OPACITY_LOW) * (m / maxMarginal);
-      parts.push(
+      sParts.push(
         `<rect x="${xLeft.toFixed(3)}" y="${yTop.toFixed(3)}" ` +
-        `width="${w.toFixed(3)}" height="${barRowH.toFixed(3)}" ` +
+        `width="${w.toFixed(3)}" height="${barH.toFixed(3)}" ` +
         `fill="rgba(${HEAT_HUE}, ${op.toFixed(3)})">` +
         `<title>item ${items[i]}: contribution ${m.toFixed(0)}</title>` +
         `</rect>`,
       );
-    }
 
-    // ── Row labels (between sidebar and matrix) ──
-    if (showAxisLabels) {
-      const labelFs = Math.max(8, Math.min(11, cellSize * 0.42)).toFixed(1);
-      for (let i = 0; i < k; i++) {
-        const cy = matrixY + i * cellSize + cellSize / 2;
-        parts.push(
-          `<text x="${(matrixX - SIDEBAR_GAP).toFixed(1)}" y="${cy.toFixed(1)}" ` +
-          `text-anchor="end" dominant-baseline="central" fill="rgba(26,26,26,0.55)" ` +
-          `font-family="var(--mono)" font-size="${labelFs}">${items[i]}</text>`,
-        );
-      }
+      const cy = SIDEBAR_PAD_TOP + i * CELL_SIZE + CELL_SIZE / 2;
+      sParts.push(
+        `<text x="${labelX}" y="${cy.toFixed(1)}" ` +
+        `text-anchor="end" dominant-baseline="central" fill="rgba(26,26,26,0.55)" ` +
+        `font-family="var(--mono)" font-size="${labelFs}">${items[i]}</text>`,
+      );
     }
+    sidebarNode.innerHTML = sParts.join("");
 
-    // ── Matrix ──
-    const gap = Math.min(1, cellSize * 0.06);
-    const w = (cellSize - gap).toFixed(3);
+    // ── Matrix SVG ──
+    const mParts: string[] = [];
+    const cellW = (CELL_SIZE - CELL_GAP).toFixed(3);
     for (let i = 0; i < k; i++) {
-      const yPos = (matrixY + i * cellSize).toFixed(3);
+      const yPos = (SIDEBAR_PAD_TOP + i * CELL_SIZE).toFixed(3);
       const rowVals = mat[i];
       const rowItem = items[i];
       for (let j = 0; j < k; j++) {
-        const xPos = (matrixX + j * cellSize).toFixed(3);
+        const xPos = (j * CELL_SIZE).toFixed(3);
         const v = rowVals[j];
         const fill = i === j
           ? "rgba(26,26,26,0.06)"
@@ -348,19 +264,21 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
             ? `rgba(${HEAT_HUE}, 0.04)`
             : `rgba(${HEAT_HUE}, ${opacityScale(v).toFixed(3)})`;
         const colItem = items[j];
-        parts.push(
-          `<rect x="${xPos}" y="${yPos}" width="${w}" height="${w}" fill="${fill}">` +
+        mParts.push(
+          `<rect x="${xPos}" y="${yPos}" width="${cellW}" height="${cellW}" fill="${fill}">` +
           `<title>item ${rowItem} ↔ item ${colItem}: ${v.toFixed(0)}</title>` +
           `</rect>`,
         );
       }
     }
-    chartNode.innerHTML = parts.join("");
+    matrixNode.innerHTML = mParts.join("");
+
+    // Reset horizontal scroll so a new instance starts at column 0.
+    this.matrixScrollEl.scrollLeft = 0;
 
     this.valueEl.textContent = data.total_value.toLocaleString();
     const suffix = data.num_selected > k ? ` (showing ${k})` : "";
     this.itemsEl.textContent = `${data.num_selected} / ${data.num_items}${suffix}`;
-    this.weightEl.textContent = `${data.total_weight} / ${data.max_weight}`;
 
     if (this.legendMinEl) this.legendMinEl.textContent = minVal.toFixed(0);
     if (this.legendMaxEl) this.legendMaxEl.textContent = maxVal.toFixed(0);

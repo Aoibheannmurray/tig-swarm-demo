@@ -762,7 +762,6 @@ html, body {
   letter-spacing: 0.02em;
 }
 
-.knapsack-svg-wrap,
 .sat-svg-wrap {
   flex: 1 1 auto;
   min-height: 0;
@@ -772,8 +771,40 @@ html, body {
   position: relative;
 }
 
-.knapsack-panel svg,
 .sat-panel svg {
+  display: block;
+}
+
+/* Knapsack uses a custom scroll layout (fixed-px cells, sticky sidebar)
+   so it doesn't share the SAT-style centered-square wrapper above. */
+.knapsack-svg-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  position: relative;
+  /* Leave clearance for the absolutely-positioned VALUE / ITEMS / SCORE
+     readouts at the bottom of the panel. */
+  padding-bottom: 56px;
+}
+
+.knapsack-grid {
+  display: flex;
+  align-items: flex-start;
+  min-height: 100%;
+}
+
+.knapsack-panel #knapsack-sidebar-svg {
+  flex: 0 0 auto;
+  display: block;
+}
+
+.knapsack-matrix-hscroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.knapsack-panel #knapsack-matrix-svg {
   display: block;
 }
 
@@ -788,16 +819,7 @@ html, body {
 .knapsack-items-box {
   position: absolute;
   bottom: 16px;
-  left: 36%;
-  transform: translateX(-50%);
-  text-align: center;
-  z-index: 2;
-}
-
-.knapsack-weight-box {
-  position: absolute;
-  bottom: 16px;
-  left: 64%;
+  left: 50%;
   transform: translateX(-50%);
   text-align: center;
   z-index: 2;

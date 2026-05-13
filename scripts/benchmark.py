@@ -636,10 +636,13 @@ def _knapsack_parse_solution(sol_path: str) -> list[int] | None:
 def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
     """Build interaction-matrix viz payload from instance + solution files.
 
-    The matrix sent to the dashboard is K×K where K = len(selected items),
-    capped at MAX_VIZ_ITEMS to keep the payload and rendering tractable.
+    The matrix sent to the dashboard is K×K where K = min(num_selected,
+    MAX_VIZ_ITEMS). When num_selected exceeds the cap, the visible subset
+    is the top-K items ranked by marginal contribution (sum of pairwise
+    interactions with every other selected item) — so the densest cluster
+    is always on screen rather than an arbitrary slice by item ID.
     """
-    MAX_VIZ_ITEMS = 50
+    MAX_VIZ_ITEMS = 300
 
     items = _knapsack_parse_solution(sol_path)
     if items is None:
@@ -663,7 +666,27 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
         for j in sorted_items[idx_a + 1:]:
             total_value += interaction_values[i][j]
 
-    viz_items = sorted_items[:MAX_VIZ_ITEMS]
+    # True marginal contribution of each selected item: sum of its
+    # interactions with every other selected item. O(num_selected²) but
+    # ndarray/numpy isn't worth pulling in for this size — at 1250
+    # selected items it's ~1.5M ops.
+    all_marginals: dict[int, int] = {}
+    for i in sorted_items:
+        row = interaction_values[i]
+        m = 0
+        for j in sorted_items:
+            if j != i:
+                m += row[j]
+        all_marginals[i] = m
+
+    # Pick the K most-contributing items (and keep them sorted by ID for
+    # stable downstream indexing; the dashboard re-orders by cluster anyway).
+    if len(sorted_items) <= MAX_VIZ_ITEMS:
+        viz_items = sorted_items
+    else:
+        ranked = sorted(sorted_items, key=lambda i: -all_marginals[i])
+        viz_items = sorted(ranked[:MAX_VIZ_ITEMS])
+
     k = len(viz_items)
     sub_matrix = [[0] * k for _ in range(k)]
     for ri, i in enumerate(viz_items):
@@ -671,22 +694,8 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
             if i != j:
                 sub_matrix[ri][rj] = interaction_values[i][j]
 
-    # Per-viz-item weight (drives the budget bar's segmentation).
     viz_weights = [weights[i] for i in viz_items]
-
-    # True marginal contribution of each viz item: sum of its interactions
-    # with every other selected item (not just other viz items). Used by the
-    # marginal sidebar to rank which selected items are load-bearing vs
-    # redundant. Note: Σ marginal_i = 2 × total_value because each pair is
-    # counted from both endpoints — the bars are comparative, not additive.
-    viz_marginals = []
-    for i in viz_items:
-        row = interaction_values[i]
-        m = 0
-        for j in sorted_items:
-            if j != i:
-                m += row[j]
-        viz_marginals.append(m)
+    viz_marginals = [all_marginals[i] for i in viz_items]
 
     return {
         "knapsack_data": {
