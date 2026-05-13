@@ -119,7 +119,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
 
     const defs = this.svg.append("defs");
     const filter = defs.append("filter").attr("id", "route-glow");
-    filter.append("feGaussianBlur").attr("stdDeviation", "3").attr("result", "blur");
+    filter.append("feGaussianBlur").attr("stdDeviation", "1.5").attr("result", "blur");
     const merge = filter.append("feMerge");
     merge.append("feMergeNode").attr("in", "blur");
     merge.append("feMergeNode").attr("in", "SourceGraphic");
