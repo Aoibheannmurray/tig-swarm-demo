@@ -788,7 +788,16 @@ html, body {
 .knapsack-items-box {
   position: absolute;
   bottom: 16px;
-  left: 50%;
+  left: 36%;
+  transform: translateX(-50%);
+  text-align: center;
+  z-index: 2;
+}
+
+.knapsack-weight-box {
+  position: absolute;
+  bottom: 16px;
+  left: 64%;
   transform: translateX(-50%);
   text-align: center;
   z-index: 2;
@@ -931,8 +940,8 @@ html, body {
 .gantt-bar {
   transform-box: fill-box;
   transform-origin: 0% 50%;
-  animation: gantt-bar-grow 0.55s ease-out backwards;
-  animation-delay: calc(var(--t, 0) * 1500ms);
+  animation: gantt-bar-grow 0.8s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 2200ms);
 }
 
 @keyframes gantt-bar-grow {

@@ -671,11 +671,30 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
             if i != j:
                 sub_matrix[ri][rj] = interaction_values[i][j]
 
+    # Per-viz-item weight (drives the budget bar's segmentation).
+    viz_weights = [weights[i] for i in viz_items]
+
+    # True marginal contribution of each viz item: sum of its interactions
+    # with every other selected item (not just other viz items). Used by the
+    # marginal sidebar to rank which selected items are load-bearing vs
+    # redundant. Note: Σ marginal_i = 2 × total_value because each pair is
+    # counted from both endpoints — the bars are comparative, not additive.
+    viz_marginals = []
+    for i in viz_items:
+        row = interaction_values[i]
+        m = 0
+        for j in sorted_items:
+            if j != i:
+                m += row[j]
+        viz_marginals.append(m)
+
     return {
         "knapsack_data": {
             "num_selected": len(sorted_items),
             "num_items": n,
             "viz_items": viz_items,
+            "viz_weights": viz_weights,
+            "viz_marginals": viz_marginals,
             "interaction_values": sub_matrix,
             "total_value": max(0, total_value),
             "max_weight": max_weight,
