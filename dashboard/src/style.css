@@ -701,11 +701,11 @@ html, body {
 
 /* Flowing dash animation */
 .route-flowing {
-  animation: dashFlow 4s linear infinite;
+  animation: dashFlow 1.2s linear infinite;
 }
 
 @keyframes dashFlow {
-  to { stroke-dashoffset: -20; }
+  to { stroke-dashoffset: -25; }
 }
 
 .depot-pulse {
