@@ -797,6 +797,20 @@ html, body {
   padding-bottom: 24px;
 }
 
+/* Caption for the marginal sidebar — sits at a fixed top-left of the
+   wrap so it doesn't enter the centred flow of the matrix. */
+.kn-sidebar-caption {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  color: rgba(26, 26, 26, 0.55);
+  z-index: 2;
+  pointer-events: none;
+}
+
 .knapsack-panel #knapsack-sidebar-svg {
   flex: 0 0 auto;
   display: block;

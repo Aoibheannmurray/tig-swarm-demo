@@ -36,7 +36,6 @@ const CELL_GAP = 1;
 const SIDEBAR_W = 120;
 const SIDEBAR_GAP = 6;
 const ROW_LABEL_W = 32;
-const SIDEBAR_PAD_TOP = 18; // headroom for the CONTRIBUTION caption
 
 // Greedy nearest-neighbor leaf-ordering on the K×K interaction matrix.
 // Seeded with the item that has the largest total interaction (the most
@@ -97,6 +96,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
         <div class="knapsack-agent-name" id="knapsack-agent-name"></div>
         ${this.navsScaffold()}
         <div class="knapsack-svg-wrap" id="knapsack-svg-wrap">
+          <div class="kn-sidebar-caption" aria-hidden="true">CONTRIBUTION</div>
           <div class="knapsack-grid">
             <svg id="knapsack-sidebar-svg"></svg>
             <div class="knapsack-matrix-hscroll" id="knapsack-matrix-hscroll">
@@ -205,26 +205,22 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     const matrixPx = k * CELL_SIZE;
     const sidebarTotalW = SIDEBAR_W + SIDEBAR_GAP +
       (showRowLabels ? ROW_LABEL_W + SIDEBAR_GAP : 0);
-    const sidebarH = SIDEBAR_PAD_TOP + matrixPx;
-    const matrixH = SIDEBAR_PAD_TOP + matrixPx;
 
+    // SVG heights are exactly the matrix height so the {sidebar + matrix}
+    // pair centres on the matrix itself (the CONTRIBUTION caption lives in
+    // a separate, fixed-position HTML element above the wrap).
     this.sidebarSvg
       .attr("width", sidebarTotalW)
-      .attr("height", sidebarH);
+      .attr("height", matrixPx);
     this.matrixSvg
       .attr("width", matrixPx)
-      .attr("height", matrixH);
+      .attr("height", matrixPx);
 
-    // ── Sidebar SVG: caption + marginal bars + row labels ──
+    // ── Sidebar SVG: marginal bars + row labels ──
     const sParts: string[] = [];
     const maxMarginal = Math.max(1, ...marginals);
     const sidebarRight = SIDEBAR_W; // bars end at x = SIDEBAR_W
     const labelX = SIDEBAR_W + SIDEBAR_GAP + ROW_LABEL_W; // labels right-aligned here
-
-    sParts.push(
-      `<text x="0" y="12" fill="rgba(26,26,26,0.55)" ` +
-      `font-family="var(--mono)" font-size="10" letter-spacing="0.15em">CONTRIBUTION</text>`,
-    );
 
     const barH = Math.max(2, CELL_SIZE - CELL_GAP * 2);
     const barRowOffset = (CELL_SIZE - barH) / 2;
@@ -233,7 +229,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     for (let i = 0; i < k; i++) {
       const m = marginals[i];
       const w = (m / maxMarginal) * SIDEBAR_W;
-      const yTop = SIDEBAR_PAD_TOP + i * CELL_SIZE + barRowOffset;
+      const yTop = i * CELL_SIZE + barRowOffset;
       const xLeft = sidebarRight - w;
       const op = OPACITY_LOW + (OPACITY_HIGH - OPACITY_LOW) * (m / maxMarginal);
       sParts.push(
@@ -245,7 +241,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
       );
 
       if (showRowLabels) {
-        const cy = SIDEBAR_PAD_TOP + i * CELL_SIZE + CELL_SIZE / 2;
+        const cy = i * CELL_SIZE + CELL_SIZE / 2;
         sParts.push(
           `<text x="${labelX}" y="${cy.toFixed(1)}" ` +
           `text-anchor="end" dominant-baseline="central" fill="rgba(26,26,26,0.55)" ` +
@@ -259,7 +255,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     const mParts: string[] = [];
     const cellW = (CELL_SIZE - CELL_GAP).toFixed(3);
     for (let i = 0; i < k; i++) {
-      const yPos = (SIDEBAR_PAD_TOP + i * CELL_SIZE).toFixed(3);
+      const yPos = (i * CELL_SIZE).toFixed(3);
       const rowVals = mat[i];
       const rowItem = items[i];
       for (let j = 0; j < k; j++) {
