@@ -21,9 +21,9 @@ type AllKnapsackData = Record<string, KnapsackData>;
 const HEAT_HUE = "107, 127, 78"; // #6B7F4E
 const OPACITY_LOW = 0.18;
 const OPACITY_HIGH = 1.0;
-// Explicit-zero cells stay a touch fainter than OPACITY_LOW so they're
-// visibly distinct from low-but-nonzero values without disappearing.
-const OPACITY_ZERO = 0.1;
+// Explicit-zero cells stay much fainter than OPACITY_LOW so they're
+// clearly distinct from low-but-nonzero values.
+const OPACITY_ZERO = 0.04;
 
 // Fixed pixel sizes (no viewBox scaling) so each cell stays the same size
 // regardless of K — when the matrix is bigger than the panel, the user
