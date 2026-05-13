@@ -200,10 +200,6 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
     const dashOn = (STYLE.routeDashOn * s).toFixed(3);
     const dashOff = (STYLE.routeDashOff * s).toFixed(3);
 
-    // Cap the dashFlow CSS animation when there are many routes — it's
-    // a per-frame GPU cost that scales with route count.
-    const animateRoutes = data.routes.length <= 30;
-
     const routeParts: string[] = [];
     const customerParts: string[] = [];
     data.routes.forEach((route, i) => {
@@ -212,9 +208,8 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       const d = routeLine(path);
       if (!d) return;
 
-      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${glowW}" stroke-opacity="0.1" filter="url(#route-glow)"/>`);
-      const cls = animateRoutes ? ' class="route-flowing"' : "";
-      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-opacity="0.9" stroke-dasharray="${dashOn} ${dashOff}"${cls}/>`);
+      routeParts.push(`<path d="${d}" fill="none" stroke="#fff" stroke-width="${glowW}" stroke-opacity="0.18" filter="url(#route-glow)"/>`);
+      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-opacity="0.9" stroke-dasharray="${dashOn} ${dashOff}" class="route-flowing"/>`);
 
       for (const pt of route.path) {
         customerParts.push(`<circle cx="${pt.x}" cy="${pt.y}" r="${customerR}" fill="${color}" opacity="0.75"/>`);
