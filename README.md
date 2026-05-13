@@ -54,6 +54,47 @@ python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
 Each iteration shells out to `claude -p` from a temp directory so the CLI's `CLAUDE.md` auto-discovery doesn't inject anything from this repo into the system prompt — `run_loop.py` supplies its own. Trade-offs vs the API providers: per-call latency is higher (subprocess startup), and the dashboard's cost column reads $0 because the CLI doesn't surface token usage.
 
+## Running Multiple Agents
+
+If you have the API quota (or a Claude Code subscription) to run several agents at once, `scripts/run_fleet.py` launches them from a single clone. Each agent gets its own git worktree under `worktrees/<name>/`, its own swarm `agent_id` (persisted in that worktree's `agent.config.json`), and runs `run_loop.py` as an isolated subprocess. All children stream stdout through the launcher, prefixed by agent name.
+
+Run `python setup.py` once first as a contributor so `swarm.config.json` exists. Then:
+
+```bash
+cp fleet.config.example.json fleet.config.json
+# edit fleet.config.json — name, provider, model, api_key_env per agent
+export ANTHROPIC_API_KEY=sk-...      # whatever keys your entries reference
+export OPENAI_API_KEY=sk-...
+python scripts/run_fleet.py
+```
+
+`Ctrl-C` terminates the whole fleet (SIGTERM, 10s grace, then SIGKILL).
+
+Each entry in `fleet.config.json` maps 1:1 to a `run_loop.py` invocation:
+
+```json
+{
+  "name": "claude-1",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "compute": "c3",
+  "hardware": "l40"
+}
+```
+
+`api_key_env` lets agents on the same provider use different keys (e.g. two `openai` entries pointing at `OPENAI_API_KEY` and `OPENAI_API_KEY_2`). Omit it for `claude-code` — that provider uses your local CLI's login.
+
+Other commands:
+
+```bash
+python scripts/run_fleet.py --list             # show agent names, agent_ids, worktree status
+python scripts/run_fleet.py --only claude-1    # run a subset (repeatable)
+python scripts/run_fleet.py --clean            # remove every fleet worktree and its branch
+```
+
+Because benchmarking is offloaded (set `"compute": "c3"` per agent), running N agents only multiplies LLM calls and remote benchmark submissions — it doesn't multiply local CPU or Docker pressure.
+
 ## Fully Scripted Setup
 
 Flags skip prompts, so setup can be instant:
