@@ -7,11 +7,11 @@ import { DisplayPanelBase } from "./base";
 import { token } from "../lib/colors";
 
 // Categorical assignments from the earthen viz palette:
-//   discharge (energy out) → terracotta (--viz-1)
-//   charge    (energy in)  → slate blue (--viz-4)
-//   da-price line          → mustard    (--viz-2)
-const DISCHARGE = () => token("--viz-1", "#B8541F");
-const CHARGE    = () => token("--viz-4", "#4E6B85");
+//   discharge (energy out) → plum   (--viz-5)
+//   charge    (energy in)  → olive  (--viz-3)
+//   da-price line          → mustard (--viz-2)
+const DISCHARGE = () => token("--viz-5", "#7A4F6E");
+const CHARGE    = () => token("--viz-3", "#6B7F4E");
 const PRICE     = () => token("--viz-2", "#C68F3E");
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
 const AXIS_LBL  = () => token("--ink-mid", "rgba(26,26,26,0.70)");
@@ -180,13 +180,13 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
     // axes
     const xTicks = axisBottom(x).ticks(8).tickFormat((d) => `${d}h`);
     this.xAxisG.call(xTicks as any)
-      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 11);
     this.xAxisG.selectAll("line").attr("stroke", AXIS_TEXT());
     this.xAxisG.select(".domain").attr("stroke", AXIS_TEXT());
 
     const yLeftTicks = axisLeft(yPower).ticks(6).tickFormat((d) => `${d}`);
     this.yLeftAxisG.call(yLeftTicks as any)
-      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 11);
     this.yLeftAxisG.selectAll("line").attr("stroke", AXIS_TEXT());
     this.yLeftAxisG.select(".domain").attr("stroke", AXIS_TEXT());
 
@@ -195,12 +195,12 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       .attr("x", -CHART_H / 2).attr("y", -38)
       .attr("text-anchor", "middle")
       .attr("fill", AXIS_LBL())
-      .attr("font-size", 9)
+      .attr("font-size", 11)
       .text("MW");
 
     const yRightTicks = axisRight(yPrice).ticks(6).tickFormat((d) => `$${d}`);
     this.yRightAxisG.call(yRightTicks as any)
-      .selectAll("text").attr("fill", PRICE()).attr("font-size", 9);
+      .selectAll("text").attr("fill", PRICE()).attr("font-size", 11);
     this.yRightAxisG.selectAll("line").attr("stroke", PRICE()).attr("opacity", 0.4);
     this.yRightAxisG.select(".domain").attr("stroke", PRICE()).attr("opacity", 0.4);
 
@@ -209,7 +209,7 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       .attr("x", CHART_H / 2).attr("y", -40)
       .attr("text-anchor", "middle")
       .attr("fill", PRICE())
-      .attr("font-size", 9)
+      .attr("font-size", 11)
       .text("$/MWh");
 
     // legend
@@ -219,21 +219,21 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       .attr("fill", DISCHARGE()).attr("opacity", 0.85);
     this.chartG.append("text")
       .attr("x", 18).attr("y", legendY + 9)
-      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("Discharge");
+      .attr("fill", AXIS_LBL()).attr("font-size", 11).text("Discharge");
 
     this.chartG.append("rect")
       .attr("x", 84).attr("y", legendY).attr("width", 10).attr("height", 10)
       .attr("fill", CHARGE()).attr("opacity", 0.85);
     this.chartG.append("text")
       .attr("x", 98).attr("y", legendY + 9)
-      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("Charge");
+      .attr("fill", AXIS_LBL()).attr("font-size", 11).text("Charge");
 
     this.chartG.append("line")
       .attr("x1", 152).attr("x2", 162).attr("y1", legendY + 5).attr("y2", legendY + 5)
       .attr("stroke", PRICE()).attr("stroke-width", 1.5);
     this.chartG.append("text")
       .attr("x", 166).attr("y", legendY + 9)
-      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("DA Price");
+      .attr("fill", AXIS_LBL()).attr("font-size", 11).text("DA Price");
 
     this.batteriesEl.textContent = String(data.num_batteries);
   }
