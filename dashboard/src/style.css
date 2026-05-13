@@ -525,6 +525,23 @@ html, body {
   letter-spacing: 0.02em;
 }
 
+.solution-navs {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.solution-navs > * {
+  pointer-events: auto;
+}
+
 .solution-svg-wrap {
   flex: 1 1 auto;
   min-height: 0;
@@ -631,7 +648,6 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  margin: 4px 0 6px 0;
   z-index: 3;
 }
 
@@ -668,7 +684,6 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  margin: 2px 0 4px 0;
   z-index: 3;
 }
 

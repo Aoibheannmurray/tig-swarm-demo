@@ -69,16 +69,18 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       <div class="panel-inner solution-panel">
         <div class="panel-label">ROUTES</div>
         <div class="solution-agent-name" id="solution-agent-name"></div>
-        <div class="solution-history-nav" id="solution-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="solution-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="solution-history-label"></span>
-          <button class="solution-nav-btn" id="solution-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="solution-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="solution-nav" style="display:none">
-          <button class="solution-nav-btn" id="solution-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="solution-instance-label"></span>
-          <button class="solution-nav-btn" id="solution-next">&rsaquo;</button>
+        <div class="solution-navs">
+          <div class="solution-history-nav" id="solution-history-nav" style="display:none">
+            <button class="solution-nav-btn" id="solution-hist-prev" title="Previous global best">&lsaquo;</button>
+            <span class="solution-history-label" id="solution-history-label"></span>
+            <button class="solution-nav-btn" id="solution-hist-next" title="Next global best">&rsaquo;</button>
+            <button class="solution-history-live" id="solution-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+          </div>
+          <div class="solution-nav" id="solution-nav" style="display:none">
+            <button class="solution-nav-btn" id="solution-prev">&lsaquo;</button>
+            <span class="solution-instance-label" id="solution-instance-label"></span>
+            <button class="solution-nav-btn" id="solution-next">&rsaquo;</button>
+          </div>
         </div>
         <div class="solution-svg-wrap" id="solution-svg-wrap">
           <svg id="solution-svg"></svg>
