@@ -925,6 +925,21 @@ html, body {
   display: block;
 }
 
+/* Time-order sweep: each bar grows from its left edge (its start_time
+ * anchor) to its full width, staggered by `--t` (bar.start / makespan,
+ * 0..1) across a 1.5s sweep. Plays once per showInstance redraw. */
+.gantt-bar {
+  transform-box: fill-box;
+  transform-origin: 0% 50%;
+  animation: gantt-bar-grow 0.55s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 1500ms);
+}
+
+@keyframes gantt-bar-grow {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
 .gantt-makespan-box {
   position: absolute;
   bottom: 16px;

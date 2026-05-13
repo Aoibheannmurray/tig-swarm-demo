@@ -175,7 +175,8 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
       const bx = x(bar.start);
       const bw = Math.max(x(bar.end) - x(bar.start), 0.8);
       const by = bar.machine * rowH + barPad;
-      parts.push(`<rect x="${bx.toFixed(2)}" y="${by.toFixed(2)}" width="${bw.toFixed(2)}" height="${barHStr}" fill="${jobColor(bar.job)}" stroke="rgba(26,26,26,0.20)" stroke-width="0.4" rx="1"/>`);
+      const frac = makespan > 0 ? (bar.start / makespan).toFixed(4) : "0";
+      parts.push(`<rect class="gantt-bar" style="--t:${frac}" x="${bx.toFixed(2)}" y="${by.toFixed(2)}" width="${bw.toFixed(2)}" height="${barHStr}" fill="${jobColor(bar.job)}" stroke="rgba(26,26,26,0.20)" stroke-width="0.4" rx="1"/>`);
     }
 
     const xMakespan = x(makespan).toFixed(2);
