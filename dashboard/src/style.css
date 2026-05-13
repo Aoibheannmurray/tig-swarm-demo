@@ -512,9 +512,15 @@ html, body {
 /* Default inset for every challenge's SVG canvas. Each panel's wrap is a
  * flex centerer; padding here gives the chart breathing room inside the
  * panel so it doesn't crowd the edges. Per-panel rules below can override
- * this (e.g. energy uses a larger inset). */
+ * this (e.g. energy uses a larger inset).
+ *
+ * margin-top reserves vertical clearance for the absolutely-positioned
+ * `.solution-navs` block (history + instance nav, ~58px tall starting at
+ * top: 12px). Without it the chart's top edge slides up under the second
+ * nav row on tall-square charts like knapsack / SAT. */
 [id$="-svg-wrap"] {
   padding: 20px 32px;
+  margin-top: 24px;
 }
 
 /* ── Routes panel ── */
