@@ -532,6 +532,8 @@ html, body {
   align-items: center;
   justify-content: center;
   position: relative;
+  background: #FFFFFF;
+  border-radius: 4px;
 }
 
 .solution-panel svg {
@@ -701,7 +703,7 @@ html, body {
 
 /* Flowing dash animation */
 .route-flowing {
-  animation: dashFlow 0.5s linear infinite;
+  animation: dashFlow 0.7s linear infinite;
 }
 
 @keyframes dashFlow {

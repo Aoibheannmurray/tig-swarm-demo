@@ -19,8 +19,9 @@ type AllRouteData = Record<string, RouteData>;
 
 const STYLE = {
   customerRadius: 0.006,
+  customerStroke: 0.0015,
   depotSize:      0.020,
-  routeStroke:    0.004,
+  routeStroke:    0.0055,
   glowStroke:     0.012,
   routeDashOn:    0.018,
   routeDashOff:   0.007,
@@ -118,7 +119,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
 
     const defs = this.svg.append("defs");
     const filter = defs.append("filter").attr("id", "route-glow");
-    filter.append("feGaussianBlur").attr("stdDeviation", "1.5").attr("result", "blur");
+    filter.append("feGaussianBlur").attr("stdDeviation", "3").attr("result", "blur");
     const merge = filter.append("feMerge");
     merge.append("feMergeNode").attr("in", "blur");
     merge.append("feMergeNode").attr("in", "SourceGraphic");
@@ -195,6 +196,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
 
     const s = this.viewSide;
     const customerR = (STYLE.customerRadius * s).toFixed(3);
+    const customerStroke = (STYLE.customerStroke * s).toFixed(3);
     const routeW = (STYLE.routeStroke * s).toFixed(3);
     const glowW = (STYLE.glowStroke * s).toFixed(3);
     const dashOn = (STYLE.routeDashOn * s).toFixed(3);
@@ -208,11 +210,11 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       const d = routeLine(path);
       if (!d) return;
 
-      routeParts.push(`<path d="${d}" fill="none" stroke="#fff" stroke-width="${glowW}" stroke-opacity="0.18" filter="url(#route-glow)"/>`);
-      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-opacity="0.9" stroke-dasharray="${dashOn} ${dashOff}" class="route-flowing"/>`);
+      routeParts.push(`<path d="${d}" fill="none" stroke="rgba(26,26,26,0.30)" stroke-width="${glowW}" filter="url(#route-glow)"/>`);
+      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-dasharray="${dashOn} ${dashOff}" class="route-flowing"/>`);
 
       for (const pt of route.path) {
-        customerParts.push(`<circle cx="${pt.x}" cy="${pt.y}" r="${customerR}" fill="${color}" opacity="0.75"/>`);
+        customerParts.push(`<circle cx="${pt.x}" cy="${pt.y}" r="${customerR}" fill="${color}" stroke="#fff" stroke-width="${customerStroke}"/>`);
       }
     });
     routeNode.innerHTML = routeParts.join("");
