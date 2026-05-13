@@ -22,7 +22,6 @@ const STYLE = {
   customerStroke: 0.0015,
   depotSize:      0.020,
   routeStroke:    0.0055,
-  glowStroke:     0.012,
   routeDashOn:    0.018,
   routeDashOff:   0.007,
 } as const;
@@ -117,13 +116,6 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       .attr("viewBox", "0 0 1000 1000")
       .attr("preserveAspectRatio", "xMidYMid meet");
 
-    const defs = this.svg.append("defs");
-    const filter = defs.append("filter").attr("id", "route-glow");
-    filter.append("feGaussianBlur").attr("stdDeviation", "3").attr("result", "blur");
-    const merge = filter.append("feMerge");
-    merge.append("feMergeNode").attr("in", "blur");
-    merge.append("feMergeNode").attr("in", "SourceGraphic");
-
     this.routeGroup = this.svg.append("g").attr("class", "routes");
     this.customerGroup = this.svg.append("g").attr("class", "customers");
     this.depotGroup = this.svg.append("g").attr("class", "depot");
@@ -198,7 +190,6 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
     const customerR = (STYLE.customerRadius * s).toFixed(3);
     const customerStroke = (STYLE.customerStroke * s).toFixed(3);
     const routeW = (STYLE.routeStroke * s).toFixed(3);
-    const glowW = (STYLE.glowStroke * s).toFixed(3);
     const dashOn = (STYLE.routeDashOn * s).toFixed(3);
     const dashOff = (STYLE.routeDashOff * s).toFixed(3);
 
@@ -210,7 +201,6 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       const d = routeLine(path);
       if (!d) return;
 
-      routeParts.push(`<path d="${d}" fill="none" stroke="rgba(26,26,26,0.30)" stroke-width="${glowW}" filter="url(#route-glow)"/>`);
       routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-dasharray="${dashOn} ${dashOff}" class="route-flowing"/>`);
 
       for (const pt of route.path) {
