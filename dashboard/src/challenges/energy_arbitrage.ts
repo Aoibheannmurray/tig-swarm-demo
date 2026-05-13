@@ -158,11 +158,11 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       const discharge = data.agg_discharge[t];
       if (discharge > 0) {
         const yTop = yPower(discharge);
-        parts.push(`<rect x="${xPos}" y="${yTop.toFixed(2)}" width="${barW}" height="${(yPower(0) - yTop).toFixed(2)}" fill="${DISCHARGE()}" opacity="0.85"/>`);
+        parts.push(`<rect class="energy-bar-up" style="--t:${t}" x="${xPos}" y="${yTop.toFixed(2)}" width="${barW}" height="${(yPower(0) - yTop).toFixed(2)}" fill="${DISCHARGE()}" opacity="0.85"/>`);
       }
       if (charge < 0) {
         const yBot = yPower(charge);
-        parts.push(`<rect x="${xPos}" y="${yZero}" width="${barW}" height="${(yBot - yPower(0)).toFixed(2)}" fill="${CHARGE()}" opacity="0.85"/>`);
+        parts.push(`<rect class="energy-bar-down" style="--t:${t}" x="${xPos}" y="${yZero}" width="${barW}" height="${(yBot - yPower(0)).toFixed(2)}" fill="${CHARGE()}" opacity="0.85"/>`);
       }
     }
 
@@ -172,7 +172,7 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
         .y((d) => yPrice(d));
       const path = priceLine(data.avg_da_price);
       if (path) {
-        parts.push(`<path d="${path}" fill="none" stroke="${PRICE()}" stroke-width="1.5" opacity="0.95"/>`);
+        parts.push(`<path class="energy-price-line" pathLength="100" d="${path}" fill="none" stroke="${PRICE()}" stroke-width="1.5" opacity="0.95"/>`);
       }
     }
     chartNode.innerHTML = parts.join("");

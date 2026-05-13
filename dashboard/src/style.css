@@ -855,6 +855,33 @@ html, body {
   z-index: 2;
 }
 
+/* Chart-fill-in animation: bars grow from the zero baseline (discharge up,
+ * charge down), staggered by their time index t (set inline as --t). Plays
+ * once whenever showInstance() rewrites the chart's innerHTML. */
+.energy-bar-up,
+.energy-bar-down {
+  transform-box: fill-box;
+  animation: energy-bar-grow 0.45s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 12ms);
+}
+.energy-bar-up   { transform-origin: 50% 100%; }
+.energy-bar-down { transform-origin: 50% 0%; }
+
+@keyframes energy-bar-grow {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+.energy-price-line {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  animation: energy-price-draw 1.3s ease-out 0.1s forwards;
+}
+
+@keyframes energy-price-draw {
+  to { stroke-dashoffset: 0; }
+}
+
 /* ── Gantt panel (job scheduling) ── */
 .gantt-panel {
   display: flex;
