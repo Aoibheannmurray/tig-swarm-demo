@@ -509,6 +509,14 @@ html, body {
   margin-top: 12px;
 }
 
+/* Default inset for every challenge's SVG canvas. Each panel's wrap is a
+ * flex centerer; padding here gives the chart breathing room inside the
+ * panel so it doesn't crowd the edges. Per-panel rules below can override
+ * this (e.g. energy uses a larger inset). */
+[id$="-svg-wrap"] {
+  padding: 20px 32px;
+}
+
 /* ── Routes panel ── */
 .solution-panel {
   display: flex;
