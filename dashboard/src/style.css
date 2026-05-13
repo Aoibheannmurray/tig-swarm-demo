@@ -840,7 +840,7 @@ html, body {
   align-items: center;
   justify-content: center;
   position: relative;
-  padding: 12px 28px;
+  padding: 24px 56px;
 }
 
 .energy-panel svg {
