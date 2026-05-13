@@ -44,7 +44,7 @@ State isolation is enforced at the schema level:
 
 Two correctness invariants underpin the design:
 
-1. **The inactive-algorithm pool is per-challenge.** `pick_random_inactive(conn, challenge)` only returns algorithms tagged with the requested challenge — so a stagnating agent's "fresh start" can't be handed code from a different challenge that wouldn't compile against its `Challenge` / `Solution` types.
+1. **The inactive-algorithm pool is per-challenge.** `get_inactive_with_deactivations(conn, challenge)` only returns algorithms tagged with the requested challenge — so a stagnating agent's "fresh start" can't be handed code from a different challenge that wouldn't compile against its `Challenge` / `Solution` types.
 2. **Inspiration is filtered by per-challenge active agents.** The "active peers" set comes from `agent_challenge_state(*, challenge).last_active_at`, NOT from the global `agents.last_heartbeat`. An agent who's been on VRP for days but switched to SAT five minutes ago does NOT supply VRP inspiration to other VRP-resident agents.
 
 The owner switches the active challenge via admin-key-gated `POST /api/swarm_config { active_challenge }`. The server broadcasts `swarm_config_updated` over the WebSocket so live dashboards re-fetch; contributors pick up the new challenge on their next iteration via `python setup.py sync`. Only the owner can change the active challenge — contributors get a clear error from `setup.py switch` and rely on `sync` instead.

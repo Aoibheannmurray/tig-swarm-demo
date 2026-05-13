@@ -104,14 +104,22 @@ async def get_challenge_config_cached(challenge: str) -> dict:
         return _challenge_config_cache[challenge]
     async with db.connect() as conn:
         row = await db.get_challenge_config(conn, challenge)
-    cfg = row or {
-        "challenge": challenge,
-        "tracks": "{}",
-        "timeout": 5,
-        "scoring_direction": "max",
-        "initial_algorithm_code": "",
-        "initial_kernel_code": "",
-    }
+    if row is None:
+        # No row in challenge_configs yet — the wizard hasn't run for this
+        # challenge. Mirror the schema/registry defaults so callers always
+        # see a fully-populated dict.
+        ch_def = challenges.CHALLENGES.get(challenge)
+        cfg = {
+            "challenge": challenge,
+            "tracks": "{}",
+            "timeout": ch_def.default_timeout if ch_def else 30,
+            "scoring_direction": ch_def.scoring_direction if ch_def else "max",
+            "initial_algorithm_code": "",
+            "initial_kernel_code": "",
+            "strategy_tags": "[]",
+        }
+    else:
+        cfg = row
     _challenge_config_cache[challenge] = cfg
     return cfg
 
@@ -1791,8 +1799,10 @@ async def get_swarm_config():
         ch_def = challenges.CHALLENGES.get(ch_name)
         available[ch_name] = {
             "tracks": tracks,
-            "timeout": row.get("timeout") or 5,
-            "scoring_direction": row.get("scoring_direction") or "max",
+            "timeout": row.get("timeout") or (ch_def.default_timeout if ch_def else 30),
+            "scoring_direction": row.get("scoring_direction") or (
+                ch_def.scoring_direction if ch_def else "max"
+            ),
             # Flag-only: don't ship the algorithm body in this response (it
             # can be large and is fetched separately from /api/initial_algorithm).
             "has_initial_algorithm": bool(row.get("initial_algorithm_code")),

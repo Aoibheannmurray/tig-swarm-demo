@@ -226,10 +226,15 @@ DEFAULT_CONFIG = {
 
 
 async def _add_column(db, table: str, column: str, typedef: str) -> None:
+    # Idempotent ALTER for legacy DBs that predate columns now in SCHEMA.
+    # Only swallow the duplicate-column error — anything else (locked DB,
+    # type mismatch, etc.) must surface so init_db doesn't silently leave
+    # the schema half-migrated.
     try:
         await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
-    except Exception:
-        pass  # column already exists
+    except aiosqlite.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
 
 
 async def init_db() -> None:
@@ -310,7 +315,7 @@ _AGENT_BESTS_COLS = (
 
 
 async def get_global_best(
-    conn: aiosqlite.Connection, challenge: str, direction: str = "min"
+    conn: aiosqlite.Connection, challenge: str, *, direction: str
 ) -> dict | None:
     # Global best is the best-scoring `agent_bests` row — i.e. whichever
     # agent's branch currently holds the leading feasible score for the
@@ -379,8 +384,9 @@ async def upsert_agent_best(
 async def list_agent_bests(
     conn: aiosqlite.Connection,
     challenge: str,
+    *,
+    direction: str,
     exclude_agent_ids: list[str] | None = None,
-    direction: str = "min",
     active_only: bool = False,
     inactive_cutoff: str | None = None,
 ) -> list[dict]:
@@ -442,7 +448,8 @@ async def compute_leaderboard(
     conn: aiosqlite.Connection,
     challenge: str,
     inactive_cutoff: str | None = None,
-    direction: str = "min",
+    *,
+    direction: str,
 ) -> list[dict]:
     # Per-challenge leaderboard. Only includes agents that have actually
     # PUBLISHED at least one iteration on this challenge. An agent that
@@ -514,23 +521,6 @@ async def get_challenge_total_agents(
     cur = await conn.execute(
         "SELECT COUNT(*) as c FROM agent_challenge_state WHERE challenge = ?",
         (challenge,),
-    )
-    row = await cur.fetchone()
-    return row["c"] if row else 0
-
-
-async def get_trajectory_unique_agents(
-    conn: aiosqlite.Connection, trajectory_id: str
-) -> int:
-    """Number of distinct agents that have published an experiment on the
-    given trajectory. Authoritative replacement for trajectories.num_agents,
-    which is only ever incremented on creation / adoption — not for the case
-    where the same trajectory has been worked on by multiple agents in
-    sequence after each adoption."""
-    cur = await conn.execute(
-        "SELECT COUNT(DISTINCT agent_id) as c FROM experiments "
-        "WHERE trajectory_id = ?",
-        (trajectory_id,),
     )
     row = await cur.fetchone()
     return row["c"] if row else 0
@@ -645,11 +635,17 @@ async def increment_agent_challenge_counters(
 # ── challenge_configs helpers ──
 
 
+_CHALLENGE_CONFIG_COLS = (
+    "challenge, tracks, timeout, scoring_direction, "
+    "initial_algorithm_code, initial_kernel_code, strategy_tags"
+)
+
+
 async def get_challenge_config(
     conn: aiosqlite.Connection, challenge: str
 ) -> dict | None:
     cursor = await conn.execute(
-        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code, initial_kernel_code "
+        f"SELECT {_CHALLENGE_CONFIG_COLS} "
         "FROM challenge_configs WHERE challenge = ?",
         (challenge,),
     )
@@ -659,7 +655,7 @@ async def get_challenge_config(
 
 async def list_challenge_configs(conn: aiosqlite.Connection) -> list[dict]:
     cursor = await conn.execute(
-        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code, initial_kernel_code "
+        f"SELECT {_CHALLENGE_CONFIG_COLS} "
         "FROM challenge_configs ORDER BY challenge"
     )
     return [dict(row) for row in await cursor.fetchall()]
@@ -715,16 +711,10 @@ async def upsert_challenge_config(
 # ── active_challenge helpers ──
 
 
-async def get_active_challenge(conn: aiosqlite.Connection) -> str:
-    """The swarm-wide challenge contributors auto-follow. Owner-set."""
-    cursor = await conn.execute(
-        "SELECT value FROM config WHERE key = 'active_challenge'"
-    )
-    row = await cursor.fetchone()
-    return row["value"] if row else DEFAULT_CHALLENGE
-
-
 async def set_active_challenge(conn: aiosqlite.Connection, challenge: str) -> None:
+    """Swarm-wide active challenge. Owner-set via POST /api/swarm_config.
+    Reads go through `get_config_cached` in server.py, not a dedicated
+    helper, so contributors hit the cache on every /api/state call."""
     await conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
         ("active_challenge", challenge),
@@ -749,29 +739,6 @@ async def deposit_inactive(
         (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id),
     )
     return cursor.lastrowid
-
-
-async def count_inactive(conn: aiosqlite.Connection, challenge: str) -> int:
-    row = await (await conn.execute(
-        "SELECT COUNT(*) as c FROM inactive_algorithms WHERE challenge = ?",
-        (challenge,),
-    )).fetchone()
-    return row["c"]
-
-
-async def pick_random_inactive(
-    conn: aiosqlite.Connection, challenge: str
-) -> dict | None:
-    # CORRECTNESS INVARIANT: must filter by challenge so a stagnating agent's
-    # "fresh start" cannot be handed code from a different challenge that
-    # won't compile against its types.
-    cursor = await conn.execute(
-        "SELECT id, agent_id, challenge, algorithm_code, kernel_code, score, trajectory_id, program_id "
-        "FROM inactive_algorithms WHERE challenge = ? ORDER BY RANDOM() LIMIT 1",
-        (challenge,),
-    )
-    row = await cursor.fetchone()
-    return dict(row) if row else None
 
 
 async def remove_inactive(conn: aiosqlite.Connection, inactive_id: int) -> None:
@@ -924,8 +891,9 @@ async def list_trajectories(
 async def get_trajectory_score_history(
     conn: aiosqlite.Connection,
     trajectory_id: str,
+    *,
+    direction: str,
     challenge: str | None = None,
-    direction: str = "max",
 ) -> list[dict]:
     if challenge is None:
         cursor = await conn.execute(
