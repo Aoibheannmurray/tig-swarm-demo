@@ -23,16 +23,9 @@ pub struct Solution {
 - `variables.len()` must equal `num_variables`.
 - Every clause must be satisfied: at least one literal in the clause must evaluate to true under the assignment.
 
-## Scoring
+## Objective
 
-SAT is the only challenge without an algorithmic baseline — scoring is binary per instance:
-
-```
-quality = 1,000,000   if all clauses satisfied
-quality = 0           otherwise
-```
-
-Per-track scores are arithmetic means of per-instance quality, then shifted geometric mean across tracks. Higher is better. Since the score is binary, feasibility is everything — partial satisfaction scores zero.
+Find a satisfying assignment — every clause must have at least one true literal. Partial satisfaction does not count; the task is all-or-nothing per instance.
 
 ## Solver Interface
 

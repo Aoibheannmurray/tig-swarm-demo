@@ -23,27 +23,16 @@ pub struct Solution {
 
 ## Value Calculation
 
-```
-total_value = Σ values[i] for i in selected
-            + Σ interaction_values[i][j] for all pairs (i < j) in selected
+```rust
+total_value = selected.iter().map(|&i| values[i]).sum()
+            + pairs(selected).map(|(i, j)| interaction_values[i][j]).sum()  // i < j
 ```
 
-Clamped to 0 if negative.
 
 ## Feasibility Constraints
 
 - All item indices must be valid (`< num_items`) and unique.
-- `Σ weights[i] for i in selected` must be `≤ max_weight`.
-
-## Scoring
-
-Your solution's `total_value` is compared against a baseline (tabu search with greedy construction):
-
-```
-quality = (your_value − baseline_value) / baseline_value × 1,000,000
-```
-
-Clamped to ±10,000,000. Higher is better. Zero means matching the baseline.
+- `selected.iter().map(|&i| weights[i]).sum() <= max_weight`
 
 ## Solver Interface
 
@@ -66,8 +55,8 @@ These are the actual Rust signatures available on the types above.
 ### `Challenge` methods
 
 ```rust
-// Validate solution and return total value (individual + pairwise interaction values,
-// clamped to 0). Checks weight constraint and item validity.
+// Validate solution and return total value (individual + pairwise interaction values)
+// Checks weight constraint and item validity.
 // Returns Err if any constraint is violated.
 pub fn evaluate_total_value(&self, solution: &Solution) -> Result<u32>
 ```

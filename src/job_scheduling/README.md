@@ -36,16 +36,6 @@ Jobs in `job_schedule` are grouped by product in order: the first `jobs_per_prod
 4. Operations within a job must respect precedence: `start_time[op] >= start_time[op-1] + processing_time[op-1]`.
 5. No two operations on the same machine may overlap in time.
 
-## Scoring
-
-Your makespan is compared against a SOTA baseline (dispatching rules with random restarts):
-
-```
-quality = (sota_makespan − your_makespan) / sota_makespan × 1,000,000
-```
-
-Clamped to ±10,000,000. Higher is better (lower makespan = higher quality). Zero means matching the baseline.
-
 ## Solver Interface
 
 ```rust
