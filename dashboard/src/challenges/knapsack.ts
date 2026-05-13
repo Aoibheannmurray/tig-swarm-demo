@@ -106,12 +106,10 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
           </div>
         </div>
         <div class="knapsack-value-box">
+          <div class="solution-sub-label">SELECTED</div>
+          <div class="knapsack-selected-value" id="knapsack-items">---</div>
           <div class="solution-sub-label">VALUE</div>
           <div class="solution-sub-value" id="knapsack-value">---</div>
-        </div>
-        <div class="knapsack-items-box">
-          <div class="solution-sub-label">ITEMS</div>
-          <div class="solution-sub-value" id="knapsack-items">---</div>
         </div>
         <div class="solution-score">
           <div class="solution-score-label">SCORE</div>
@@ -283,8 +281,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     this.matrixScrollEl.scrollLeft = 0;
 
     this.valueEl.textContent = data.total_value.toLocaleString();
-    const suffix = data.num_selected > k ? ` (showing ${k})` : "";
-    this.itemsEl.textContent = `${data.num_selected} / ${data.num_items}${suffix}`;
+    this.itemsEl.textContent = data.num_selected.toLocaleString();
 
     if (this.legendMinEl) this.legendMinEl.textContent = minVal.toFixed(0);
     if (this.legendMaxEl) this.legendMaxEl.textContent = maxVal.toFixed(0);

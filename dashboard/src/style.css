@@ -816,13 +816,16 @@ html, body {
   z-index: 2;
 }
 
-.knapsack-items-box {
-  position: absolute;
-  bottom: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  text-align: center;
-  z-index: 2;
+/* Selected-count sits inside .knapsack-value-box, above the VALUE readout.
+   Smaller / dimmer than VALUE so VALUE remains the primary metric. */
+.knapsack-selected-value {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  margin-bottom: 4px;
 }
 
 /* Diverging legend strip — sits at top-right of the knapsack panel showing
