@@ -549,8 +549,6 @@ html, body {
   align-items: center;
   justify-content: center;
   position: relative;
-  background: #FFFFFF;
-  border-radius: 4px;
 }
 
 .solution-panel svg {
