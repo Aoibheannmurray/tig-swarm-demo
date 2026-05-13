@@ -72,17 +72,7 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
       <div class="panel-inner gantt-panel">
         <div class="panel-label">SCHEDULE</div>
         <div class="gantt-agent-name" id="gantt-agent-name"></div>
-        <div class="solution-history-nav" id="gantt-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="gantt-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="gantt-history-label"></span>
-          <button class="solution-nav-btn" id="gantt-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="gantt-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="gantt-nav" style="display:none">
-          <button class="solution-nav-btn" id="gantt-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="gantt-instance-label"></span>
-          <button class="solution-nav-btn" id="gantt-next">&rsaquo;</button>
-        </div>
+        ${this.navsScaffold()}
         <div class="gantt-svg-wrap" id="gantt-svg-wrap">
           <svg id="gantt-svg"></svg>
           <div class="solution-empty-state" id="gantt-empty-state">

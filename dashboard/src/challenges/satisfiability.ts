@@ -48,17 +48,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
       <div class="panel-inner knapsack-panel">
         <div class="panel-label">CLAUSES &amp; ASSIGNMENT</div>
         <div class="knapsack-agent-name" id="sat-agent-name"></div>
-        <div class="solution-history-nav" id="sat-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="sat-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="sat-history-label"></span>
-          <button class="solution-nav-btn" id="sat-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="sat-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="sat-nav" style="display:none">
-          <button class="solution-nav-btn" id="sat-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="sat-instance-label"></span>
-          <button class="solution-nav-btn" id="sat-next">&rsaquo;</button>
-        </div>
+        ${this.navsScaffold()}
         <div class="sat-svg-wrap" id="sat-svg-wrap">
           <svg id="sat-svg"></svg>
           <div class="solution-empty-state" id="sat-empty-state">

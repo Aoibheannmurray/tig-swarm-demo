@@ -71,6 +71,29 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   // Hooks — override as needed.
   protected onAfterApplyHistory(): void {}
   protected onReset(): void {}
+
+  // Universal scaffold for the BEST/LIVE history nav + instance nav. Each
+  // subclass drops `${this.navsScaffold()}` into its scaffoldHtml() so both
+  // nav rows render inside `.solution-navs`, which is absolutely positioned
+  // at the top-center of `.panel-inner` by the shared style.css rule.
+  protected navsScaffold(): string {
+    const p = this.idPrefix;
+    return `
+      <div class="solution-navs">
+        <div class="solution-history-nav" id="${p}-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="${p}-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="${p}-history-label"></span>
+          <button class="solution-nav-btn" id="${p}-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="${p}-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        </div>
+        <div class="solution-nav" id="${p}-nav" style="display:none">
+          <button class="solution-nav-btn" id="${p}-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="${p}-instance-label"></span>
+          <button class="solution-nav-btn" id="${p}-next">&rsaquo;</button>
+        </div>
+      </div>
+    `;
+  }
   // Called from dispose() — subclasses release their own per-instance
   // listeners/observers (e.g. ResizeObserver) here.
   protected onDispose(): void {}

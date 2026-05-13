@@ -31,17 +31,7 @@ export class HypergraphPanel extends DisplayPanelBase<AllHypergraphData> {
       <div class="panel-inner hg-panel">
         <div class="panel-label">PARTITION BALANCE</div>
         <div class="knapsack-agent-name" id="hg-agent-name"></div>
-        <div class="solution-history-nav" id="hg-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="hg-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="hg-history-label"></span>
-          <button class="solution-nav-btn" id="hg-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="hg-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="hg-nav" style="display:none">
-          <button class="solution-nav-btn" id="hg-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="hg-instance-label"></span>
-          <button class="solution-nav-btn" id="hg-next">&rsaquo;</button>
-        </div>
+        ${this.navsScaffold()}
         <div class="hg-svg-wrap" id="hg-svg-wrap">
           <svg id="hg-svg"></svg>
           <div class="solution-empty-state" id="hg-empty-state">

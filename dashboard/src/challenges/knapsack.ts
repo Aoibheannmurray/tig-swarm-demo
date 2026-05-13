@@ -48,17 +48,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
       <div class="panel-inner knapsack-panel">
         <div class="panel-label">SELECTED · ITEM INTERACTIONS</div>
         <div class="knapsack-agent-name" id="knapsack-agent-name"></div>
-        <div class="solution-history-nav" id="knapsack-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="knapsack-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="knapsack-history-label"></span>
-          <button class="solution-nav-btn" id="knapsack-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="knapsack-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="knapsack-nav" style="display:none">
-          <button class="solution-nav-btn" id="knapsack-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="knapsack-instance-label"></span>
-          <button class="solution-nav-btn" id="knapsack-next">&rsaquo;</button>
-        </div>
+        ${this.navsScaffold()}
         <div class="knapsack-svg-wrap" id="knapsack-svg-wrap">
           <svg id="knapsack-svg"></svg>
           <div class="solution-empty-state" id="knapsack-empty-state">

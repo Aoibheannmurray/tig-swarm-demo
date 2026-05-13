@@ -28,17 +28,7 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
       <div class="panel-inner nn-panel">
         <div class="panel-label">NEURAL NET OPTIMIZER</div>
         <div class="knapsack-agent-name" id="nn-agent-name"></div>
-        <div class="solution-history-nav" id="nn-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="nn-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="nn-history-label"></span>
-          <button class="solution-nav-btn" id="nn-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="nn-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="nn-nav" style="display:none">
-          <button class="solution-nav-btn" id="nn-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="nn-instance-label"></span>
-          <button class="solution-nav-btn" id="nn-next">&rsaquo;</button>
-        </div>
+        ${this.navsScaffold()}
         <div class="nn-viz-area" id="nn-viz-area">
           <div class="nn-arch-diagram" id="nn-arch-diagram"></div>
           <div class="nn-epochs-section">
