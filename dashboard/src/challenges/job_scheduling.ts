@@ -37,24 +37,27 @@ const CHART_H = VB_H - MARGIN.top - MARGIN.bottom;
 // generated colors blend with the base palette.
 const JOB_PALETTE_BASE = [
   "#B8541F",
+  "#A66E45",
   "#C68F3E",
   "#6B7F4E",
-  "#4E6B85",
-  "#7A4F6E",
   "#4A8C8A",
-  "#A66E45",
+  "#4E6B85",
   "#8B6B8C",
+  "#7A4F6E",
 ];
 
 function jobColor(job: number): string {
   const i = ((job % 1e6) + 1e6) % 1e6;
   if (i < JOB_PALETTE_BASE.length) return JOB_PALETTE_BASE[i];
   // Golden-angle hue walk starting at +100° so the first generated color
-  // lands in the green/cyan band (gap in the base palette). S/L pinned to
-  // the muted range that matches the swatches above.
+  // lands in the green/cyan band (gap in the base palette). Lightness
+  // alternates between two bands (38% / 56%) so adjacent generated jobs
+  // get clear value contrast — at S=28% the eye can't separate close
+  // hues alone. (Temporary — revisit if the band feels too stripey.)
   const k = i - JOB_PALETTE_BASE.length;
   const hue = (k * 137.508 + 100) % 360;
-  return `hsl(${hue.toFixed(1)}, 28%, 44%)`;
+  const lightness = k % 2 === 0 ? 38 : 56;
+  return `hsl(${hue.toFixed(1)}, 28%, ${lightness}%)`;
 }
 
 export class GanttPanel extends DisplayPanelBase<AllGanttData> {
