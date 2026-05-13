@@ -789,8 +789,12 @@ html, body {
 
 .knapsack-grid {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: center;
   min-height: 100%;
+  /* Bias the visual centre slightly above the geometric centre of the wrap
+     (the wrap already reserves padding-bottom for the stats readouts). */
+  padding-bottom: 24px;
 }
 
 .knapsack-panel #knapsack-sidebar-svg {
@@ -799,8 +803,12 @@ html, body {
 }
 
 .knapsack-matrix-hscroll {
-  flex: 1 1 auto;
+  /* Shrink-to-fit the matrix when it's narrower than the available space
+     (so the {sidebar + matrix} pair centres cleanly); scroll horizontally
+     when the matrix is wider than the panel. */
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
 }
 
