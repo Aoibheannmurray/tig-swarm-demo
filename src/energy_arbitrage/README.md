@@ -2,7 +2,7 @@
 
 ## What You Are Solving
 
-You control a fleet of batteries placed across an electrical grid. At each 15-minute time step, your policy decides how much to charge or discharge each battery. You earn money by buying cheap energy and selling it when prices are high. Your total profit must beat a baseline policy to score positively.
+You control a fleet of batteries placed across an electrical grid. At each 15-minute time step, your policy decides how much to charge or discharge each battery. You earn money by buying cheap energy and selling it when prices are high. The objective is to **maximise total profit** over the episode.
 
 The core difficulty is the combination of:
 1. **Unknown future prices** — real-time prices are stochastic and revealed one step at a time.
@@ -24,50 +24,69 @@ pub fn solve_challenge(
 }
 
 pub fn policy(challenge: &Challenge, state: &State) -> Result<Vec<f64>> {
-    // TODO: implement your policy here
-    Err(anyhow!("Not implemented"))
+    // Zero actions are always feasible (exogenous injections leave headroom).
+    // Replace this with your strategy.
+    Ok(vec![0.0; challenge.num_batteries])
 }
 ```
 
 `grid_optimize` runs the full episode by calling your policy once per time step. **It may only be called once per challenge instance.** If your policy returns `Err`, the rollout terminates immediately and the solution is invalid.
 
 
-## Key Types
+## Types
 
-### `Challenge` — static problem data (available throughout the episode)
+Static problem data (`Challenge`) is fixed for the episode. `State` is revealed one step at a time.
 
-```
-challenge.num_steps          : usize        — total time steps H (96 or 192)
-challenge.num_batteries      : usize        — number of batteries m
-challenge.network            : Network      — grid topology, PTDFs, flow limits
-challenge.batteries          : Vec<Battery> — battery specs (see below)
-challenge.exogenous_injections: Vec<Vec<f64>> — [H][n] pre-generated nodal injections (MW)
-challenge.market.day_ahead_prices: Vec<Vec<f64>> — [H][n] day-ahead prices ($/MWh), fully known
-```
+```rust
+pub struct Challenge {
+    pub seed: [u8; 32],
+    pub num_steps: usize,                    // total time steps H (varies by track)
+    pub num_batteries: usize,                // m
+    pub network: Network,
+    pub batteries: Vec<Battery>,
+    pub exogenous_injections: Vec<Vec<f64>>, // [num_steps][num_nodes] MW
+    pub market: Market,
+}
 
-### `State` — dynamic information revealed each step
+pub struct State {
+    pub time_step: usize,                    // 0-based
+    pub socs: Vec<f64>,                      // state-of-charge per battery (MWh)
+    pub rt_prices: Vec<f64>,                 // real-time nodal prices THIS step ($/MWh)
+    pub exogenous_injections: Vec<f64>,      // nodal injections THIS step (MW)
+    pub action_bounds: Vec<(f64, f64)>,      // (u_min, u_max) per battery (MW)
+                                             // SOC + nameplate power only — NOT network-aware
+    pub total_profit: f64,                   // cumulative profit so far ($)
+}
 
-```
-state.time_step     : usize           — current step index (0-based)
-state.socs          : Vec<f64>        — current state-of-charge per battery (MWh)
-state.rt_prices     : Vec<f64>        — real-time nodal prices THIS step ($/MWh)
-state.exogenous_injections: Vec<f64>  — exogenous nodal injections THIS step (MW)
-state.action_bounds : Vec<(f64, f64)> — (u_min, u_max) per battery (MW)
-state.total_profit  : f64             — cumulative profit so far ($)
-```
+pub struct Battery {
+    pub node: usize,
+    pub capacity_mwh: f64,                   // Ē_b — varies per instance
+    pub power_charge_mw: f64,                // P̄^c_b
+    pub power_discharge_mw: f64,             // P̄^d_b
+    pub efficiency_charge: f64,              // η^c = 0.95 (fixed)
+    pub efficiency_discharge: f64,           // η^d = 0.95 (fixed)
+    pub soc_min_mwh: f64,                    // E^min = 0.10 × Ē_b
+    pub soc_max_mwh: f64,                    // E^max = 0.90 × Ē_b
+    pub soc_initial_mwh: f64,                // E_0   = 0.50 × Ē_b
+}
 
-### `Battery`
+pub struct Network {
+    pub num_nodes: usize,                    // n
+    pub num_lines: usize,                    // L
+    pub lines: Vec<(usize, usize)>,          // (from_node, to_node)
+    pub flow_limits: Vec<f64>,               // effective limits after congestion scaling (MW)
+    pub ptdf: Vec<Vec<f64>>,                 // [num_lines][num_nodes]
+    pub slack_bus: usize,
+}
 
-```
-battery.node              : usize  — grid node where this battery is located
-battery.capacity_mwh      : f64    — energy capacity Ē_b (MWh)
-battery.power_charge_mw   : f64    — max charge power P̄^c_b (MW)
-battery.power_discharge_mw: f64    — max discharge power P̄^d_b (MW)
-battery.efficiency_charge : f64    — η^c = 0.95
-battery.efficiency_discharge: f64  — η^d = 0.95
-battery.soc_min_mwh       : f64    — E^min = 0.10 × Ē_b
-battery.soc_max_mwh       : f64    — E^max = 0.90 × Ē_b
-battery.soc_initial_mwh   : f64    — E_0 = 0.50 × Ē_b
+pub struct Market {
+    pub params: MarketParams,                // volatility, jump_probability, tail_index
+    pub day_ahead_prices: Vec<Vec<f64>>,     // [num_steps][num_nodes] $/MWh — fully known up front
+}
+
+pub struct Solution {
+    pub schedule: Vec<Vec<f64>>,             // [num_steps][num_batteries] — produced by grid_optimize
+}
 ```
 
 
@@ -84,16 +103,23 @@ Your policy returns `Vec<f64>` of length `num_batteries`. Each element is a **si
 
 ## Profit Formula
 
-Per step, for each battery $b$ with action $u_b$:
+Constants (fixed across all tracks):
+
+- `Δt    = 0.25 h`     — step duration (15-minute slots)
+- `κ_tx  = 0.25 $/MWh` — transaction cost
+- `κ_deg = 1.0  $`     — degradation scale
+- `β     = 2.0`        — degradation exponent
+
+Per step, for each battery `b` with action `u_b` (MW) at price `λ_b = rt_prices[battery.node]` ($/MWh):
 
 ```
-revenue   = u_b × rt_prices[battery.node] × 0.25        ($)
-tx_cost   = 0.25 × |u_b| × 0.25                          ($)   [κ_tx = 0.25 $/MWh]
-deg_cost  = 1.0 × (|u_b| × 0.25 / battery.capacity_mwh)²  ($)   [κ_deg=1.0, β=2.0]
-profit_b  = revenue - tx_cost - deg_cost
+revenue   = u_b × λ_b × Δt
+tx_cost   = κ_tx × |u_b| × Δt
+deg_cost  = κ_deg × (|u_b| × Δt / capacity_mwh) ^ β
+profit_b  = revenue − tx_cost − deg_cost
 ```
 
-Total step profit = sum over all batteries. Idle batteries (u=0) contribute nothing. The degradation cost scales with cycle depth relative to capacity, so it is small for modest actions.
+Total step profit = sum over all batteries. Idle batteries (u=0) contribute nothing. Degradation grows quadratically with cycle depth relative to capacity, so small/moderate actions pay almost nothing.
 
 
 ## Network Constraint — The Hard Constraint
@@ -139,84 +165,28 @@ This validates the action and returns the next `State` without touching the hidd
 RT prices are **policy-independent** — the actual prices in the real rollout are fully determined by the challenge seed before the episode starts. This means you can simulate the real rollout exactly if you know the prices at future steps. However, future RT prices are not directly accessible; you can forecast them using day-ahead prices as a guide.
 
 
-## Scoring
-
-```
-quality = (total_profit - baseline_profit) / (baseline_profit + 1e-6)
-```
-
-The baseline is the better of:
-1. A **greedy DA policy**: charge when current DA price is below a 3-hour look-ahead average minus a threshold; discharge when above.
-2. A **conservative policy**: do nothing (zero actions every step).
-
-Quality > 0 means you beat the baseline. The score is a fixed-point integer with 6 decimal places.
-
-
-## Exact Method Signatures
-
-These are the actual Rust signatures — use the exact return types shown.
-
-### `Challenge` methods
+## Methods
 
 ```rust
-// Compute total nodal injections (exogenous + battery actions, slack-balanced).
+// On Challenge
 pub fn compute_total_injections(&self, state: &State, action: &[f64]) -> Vec<f64>
-
-// Compute per-step profit for given action.
 pub fn compute_profit(&self, state: &State, action: &[f64]) -> f64
-
-// Simulate one step without commitment (for look-ahead planning).
-// Validates action, returns Err if any constraint is violated.
+// Simulate one step without commitment (look-ahead). Validates action; Err on violation.
 pub fn take_step(&self, state: &State, action: &[f64], next_rt_prices: NextRTPrices) -> Result<State>
-
-// Run the full rollout. Calls policy(challenge, state) at each step.
-// May only be called ONCE per challenge instance.
+// Run the full rollout. MAY ONLY BE CALLED ONCE per challenge instance.
 pub fn grid_optimize(&self, policy: &dyn Fn(&Challenge, &State) -> Result<Vec<f64>>) -> Result<Solution>
-```
 
-### `Network` methods (accessed via `challenge.network`)
-
-```rust
-// Compute line flows from nodal injections. Returns Vec of length num_lines.
-// NOTE: returns Vec<f64> directly, NOT Result.
-pub fn compute_flows(&self, injections: &[f64]) -> Vec<f64>
-
-// Check all line flows are within limits. Returns Ok(()) or Err.
+// On Network (challenge.network)
+pub fn compute_flows(&self, injections: &[f64]) -> Vec<f64>   // returns Vec, NOT Result
 pub fn verify_flows(&self, flows: &[f64]) -> Result<()>
-```
 
-### `Network` fields
-
-```rust
-pub num_nodes: usize
-pub num_lines: usize
-pub lines: Vec<(usize, usize)>        // (from_node, to_node)
-pub flow_limits: Vec<f64>              // effective limits after congestion scaling
-pub ptdf: Vec<Vec<f64>>               // PTDF matrix [num_lines][num_nodes]
-pub slack_bus: usize
-```
-
-### `Battery` methods (accessed via `challenge.batteries[b]`)
-
-```rust
-// Apply action to SOC, return new SOC (clamped to bounds).
+// On Battery (challenge.batteries[b])
 pub fn apply_action_to_soc(&self, action: f64, soc: f64) -> f64
-```
 
-### `NextRTPrices` enum (for `take_step`)
-
-```rust
 pub enum NextRTPrices {
-    Override(Vec<f64>),    // provide your own price forecast
-    Generate([u8; 32]),    // generate from seed (not useful for innovators)
+    Override(Vec<f64>),    // your own forecast for the next step (length = num_nodes)
+    Generate([u8; 32]),    // seed-based; the real rollout uses a hidden seed, so this cannot reproduce its prices
 }
-```
-
-### `Market` fields (accessed via `challenge.market`)
-
-```rust
-pub params: MarketParams               // volatility, jump_probability, tail_index
-pub day_ahead_prices: Vec<Vec<f64>>    // [num_steps][num_nodes]
 ```
 
 ### Available crates

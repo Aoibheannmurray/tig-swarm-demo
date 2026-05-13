@@ -43,16 +43,6 @@ The evaluator sums these per-query distances on GPU and returns `total / num_que
 - `solution.indexes.len()` must equal `num_queries`.
 - Every value in `solution.indexes` must be a valid database index, i.e. in `[0, database_size)`.
 
-## Scoring
-
-Your mean Euclidean distance is compared against a hardcoded baseline of 11.0:
-
-```
-quality = (11.0 - your_mean_distance) / 11.0 * 1,000,000
-```
-
-Clamped to +/-10,000,000. **Higher quality is better.** Lower mean distance gives higher quality.
-
 ## Solver Interface
 
 ```rust
