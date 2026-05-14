@@ -16,6 +16,7 @@ import {
   getViewedChallenge,
   onViewedChallengeChange,
 } from "./lib/viewedChallenge";
+import { registerAgentColor } from "./lib/colors";
 
 import { ChallengeSelectorPanel } from "./panels/challenge-selector";
 import { StatsPanel } from "./panels/stats";
@@ -122,16 +123,23 @@ function handleMessage(msg: WSMessage) {
   // so they always carry the current name; agent_renamed is the explicit
   // signal when no leaderboard update follows. agent_joined seeds first-name
   // entries before any leaderboard fires.
+  //
+  // Pin each agent's palette color at the same point. Registering up-front
+  // means every later panel — feed dot, chart line, leaderboard, diversity —
+  // resolves the *same* slot regardless of which one renders the agent
+  // first, and there is no per-event-type color override anywhere.
   if (msg.type === "leaderboard_update") {
     for (const entry of msg.entries) {
       if (entry.agent_id && entry.agent_name) {
         agentNameMap.set(entry.agent_id, entry.agent_name);
+        registerAgentColor(entry.agent_id);
       }
     }
   } else if (msg.type === "agent_renamed") {
     agentNameMap.set(msg.agent_id, msg.new_name);
   } else if (msg.type === "agent_joined") {
     agentNameMap.set(msg.agent_id, msg.agent_name);
+    if (msg.agent_id) registerAgentColor(msg.agent_id);
   }
 
   if (soundEnabled) {

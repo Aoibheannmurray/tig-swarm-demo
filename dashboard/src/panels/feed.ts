@@ -1,17 +1,22 @@
 import type { Panel, WSMessage } from "../types";
 import { formatTime } from "../lib/animate";
-import { getAgentColor } from "../lib/colors";
+import { getAgentColor, NEUTRAL_AGENT_COLOR } from "../lib/colors";
 import { formatScore } from "../lib/format";
 
 const MAX_ITEMS = 200;
 
-const EVENT_CONFIG: Record<string, { dot: string; icon: string }> = {
-  agent_joined: { dot: "var(--cyan)", icon: "+" },
-  hypothesis_proposed: { dot: "var(--purple)", icon: "?" },
-  experiment_success: { dot: "var(--green)", icon: "✓" },
-  experiment_fail: { dot: "var(--red)", icon: "✗" },
-  new_global_best: { dot: "var(--amber)", icon: "★" },
-  chat: { dot: "var(--text-dim)", icon: "…" },
+// Event glyph only — colors are *not* set per event type. The dot always
+// paints with the agent's own palette color (assigned globally when the
+// agent registers; see lib/colors.ts and main.ts). This keeps every panel
+// — feed, leaderboard, chart, diversity — visually consistent for a given
+// agent regardless of which kind of event the feed line is reporting.
+const EVENT_ICON: Record<string, string> = {
+  agent_joined: "+",
+  hypothesis_proposed: "?",
+  experiment_success: "✓",
+  experiment_fail: "✗",
+  new_global_best: "★",
+  chat: "…",
 };
 
 // Per-item bookkeeping for in-place rename updates. The element holds the
@@ -145,8 +150,8 @@ export class FeedPanel implements Panel {
         return;
     }
 
-    const config = EVENT_CONFIG[eventType] || EVENT_CONFIG.agent_joined;
-    const agentColor = agentId ? getAgentColor(agentId) : config.dot;
+    const icon = EVENT_ICON[eventType] ?? EVENT_ICON.chat;
+    const agentColor = agentId ? getAgentColor(agentId) : NEUTRAL_AGENT_COLOR;
     const rawTimestamp = "timestamp" in msg ? (msg.timestamp as string) : "";
     const timestamp = rawTimestamp ? formatTime(rawTimestamp) : "";
 
@@ -162,7 +167,7 @@ export class FeedPanel implements Panel {
       item.innerHTML = `
         <span class="feed-time">${timestamp}</span>
         <span class="feed-dot" style="background:${agentColor}"></span>
-        <span class="feed-icon">${config.icon}</span>
+        <span class="feed-icon">${icon}</span>
         <span class="feed-text">${render(safeName)}</span>
       `;
     };
