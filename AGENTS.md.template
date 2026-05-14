@@ -70,6 +70,8 @@ python setup.py sync
 
 No-op when already in sync (most iterations). If the swarm host has switched the active challenge since your last loop, this re-templates `CHALLENGE.md` and `swarm.config.json` to the new challenge — re-read `CHALLENGE.md` and continue the loop on the new challenge. Your prior trajectory on the new challenge (if any) resumes automatically server-side.
 
+> **`setup.py sync` is the *only* point at which a host-side challenge switch is picked up by this agent.** `scripts/benchmark.py` reads from local `swarm.config.json` and will not auto-follow a server-side switch until you re-run sync. This is deliberate: once Step 1's state read happens, the iteration is locked to that challenge through publish. If the host rotates challenges between iterations, the next Step 0 picks up the new one — and benchmark prints an advisory warning if you've forgotten to sync.
+
 > **Before running `sync`, finish your current iteration first.** If you're partway through an iteration (have run benchmark and/or are about to publish) when the host switches challenges, **complete the current iteration on the previous challenge** — run `scripts/benchmark.py`, then `scripts/publish.py` — *before* running `sync`. The work counts toward the prior challenge's leaderboard and your stagnation counter on it. Only then run `sync` and start a fresh iteration on the new challenge. Don't abandon a partially-done iteration.
 
 ### Step 1: Get Current State
@@ -196,7 +198,7 @@ BENCH=$(python3 scripts/benchmark.py 2>/dev/null)
 echo "$BENCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Score: {d[\"score\"]}, Feasible: {d[\"feasible\"]}')"
 ```
 
-This builds, generates the per-track instances on first run (cached under `datasets/<challenge>/generated/`), runs the solver on every instance from every track defined in the swarm's `swarm_config.tracks`, evaluates each, and outputs JSON. The instance count and per-instance timeout are whatever the swarm host configured — check `swarm.config.json` if you need the exact numbers. **Save the output in `$BENCH`** — you will reuse it in Step 5.
+This builds, generates the per-track instances on first run (cached under `datasets/<challenge>/generated/`), runs the solver on every instance from every track defined in the swarm's `swarm_config.tracks`, evaluates each, and outputs JSON. The instance count and per-instance timeout come from local `swarm.config.json` (refreshed by Step 0's `setup.py sync`). **Save the output in `$BENCH`** — you will reuse it in Step 5.
 
 **Per-instance time budget: ${TIMEOUT} seconds.** Your solver process is killed after this hard deadline. The solver will keep running for the full ${TIMEOUT}s unless your code returns early — so do NOT use a fixed iteration count as your loop bound. Instead, use a time-based loop (`std::time::Instant` + deadline) that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2–5s) for cleanup. Call `save_solution()` early with your first feasible solution, then keep improving and re-saving — when the deadline hits, the last saved solution is evaluated. If no solution was saved, the instance counts as infeasible.
 

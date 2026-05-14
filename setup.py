@@ -41,6 +41,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -227,6 +228,10 @@ def template_files(
 
 def write_swarm_config(cfg: dict) -> None:
     out = ROOT / "swarm.config.json"
+    # Stamp every write — benchmark.py reads this to show when the local
+    # config was last refreshed, and to detect stale syncs vs. host-side
+    # challenge switches that have not yet been picked up by setup.py sync.
+    cfg["synced_at"] = datetime.now(timezone.utc).isoformat()
     out.write_text(json.dumps(cfg, indent=2) + "\n")
     print(f"  wrote {out.relative_to(ROOT)}")
 
