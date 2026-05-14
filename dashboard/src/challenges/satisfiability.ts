@@ -27,10 +27,17 @@ const GRID_BOTTOM_PAD = 130;
 // "satisfied" bucket from the prior histogram, dark wine for danger.
 const PASS_COLOR = "#4A7C5A";
 const FAIL_COLOR = "#8B2D2D";
+// Neutral "scanning" tone — sits between PASS_COLOR and FAIL_COLOR so the
+// banner doesn't pre-announce the verdict before the scanline finishes.
+const SCAN_COLOR = "#3a4150";
 // Variable-assignment grid TRUE-cell color, branched on pass/fail so the
 // pass state reads through to the secondary view.
 const TRUE_PASS = "#4A7C5A";
 const TRUE_FAIL = "#4E6B85";
+
+// Scanline sweep: the grid "reads" the assignment top-to-bottom on each
+// render. Short enough that 8-second instance rotations still feel snappy.
+const SCAN_DURATION_MS = 800;
 
 export class SatPanel extends DisplayPanelBase<AllSatData> {
   protected idPrefix = "sat";
@@ -42,6 +49,12 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
   private satEl!: HTMLElement;
   private satLabelEl!: HTMLElement;
   private varsEl!: HTMLElement;
+
+  // Active scanline animation handle, plus a token that increments on every
+  // (re)render so an in-flight rAF callback knows it's been superseded and
+  // bails out instead of mutating the next instance's DOM.
+  private scanRafId: number | null = null;
+  private scanToken = 0;
 
   protected scaffoldHtml(): string {
     return `
@@ -104,6 +117,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
   }
 
   protected onReset(): void {
+    this.cancelScan();
     (this.bannerG.node() as SVGGElement).innerHTML = "";
     (this.gridG.node() as SVGGElement).innerHTML = "";
     this.satEl.textContent = "---";
@@ -111,7 +125,31 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     this.varsEl.textContent = "---";
   }
 
+  protected onDispose(): void {
+    this.cancelScan();
+  }
+
+  private cancelScan(): void {
+    if (this.scanRafId !== null) {
+      cancelAnimationFrame(this.scanRafId);
+      this.scanRafId = null;
+    }
+    this.scanToken++;
+  }
+
+  private renderBanner(color: string, headline: string, textOpacity: number): void {
+    const cx = VB_W / 2;
+    (this.bannerG.node() as SVGGElement).innerHTML =
+      `<rect x="0" y="0" width="${VB_W}" height="${BANNER_H}" fill="${color}"/>` +
+      `<text x="${cx}" y="${(BANNER_H / 2).toFixed(2)}" text-anchor="middle" ` +
+        `dominant-baseline="central" fill="rgba(255,255,255,${textOpacity})" ` +
+        `font-size="34" font-weight="700" ` +
+        `font-family="'JetBrains Mono', monospace" letter-spacing="2">${headline}</text>`;
+  }
+
   protected showInstance(data: SatData) {
+    this.cancelScan();
+
     if (!data || !data.assignment_bits) {
       (this.bannerG.node() as SVGGElement).innerHTML = "";
       (this.gridG.node() as SVGGElement).innerHTML = "";
@@ -125,24 +163,15 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     const pass = m > 0 && data.num_satisfied === m;
     const unsat = m - data.num_satisfied;
 
-    // PASS/FAIL banner — a thin colored strip with a single white label.
-    // No icon, no sub-line: just "SATISFIED" or "FAILED TO SATISFY".
-    const bannerColor = pass ? PASS_COLOR : FAIL_COLOR;
-    const headline = pass ? "SATISFIED" : "FAILED TO SATISFY";
-    const cx = VB_W / 2;
-    const bannerHtml =
-      `<rect x="0" y="0" width="${VB_W}" height="${BANNER_H}" fill="${bannerColor}"/>` +
-      `<text x="${cx}" y="${(BANNER_H / 2).toFixed(2)}" text-anchor="middle" ` +
-        `dominant-baseline="central" fill="rgba(255,255,255,0.96)" ` +
-        `font-size="34" font-weight="700" ` +
-        `font-family="'JetBrains Mono', monospace" letter-spacing="2">${headline}</text>`;
-    (this.bannerG.node() as SVGGElement).innerHTML = bannerHtml;
+    // Banner starts in a neutral "SCANNING…" state. We commit to the real
+    // PASS / FAIL headline once the scanline finishes sweeping the grid.
+    this.renderBanner(SCAN_COLOR, "SCANNING…", 0.85);
 
     // Variable-assignment grid. Bottom-padded so the absolutely-positioned
     // stat boxes overlay a clean area rather than the grid itself.
-    let gridHtml = "";
     const gridH = VB_H - GRID_TOP - GRID_BOTTOM_PAD;
     const n = data.viz_count;
+    let cellsHtml = "";
     if (n > 0) {
       const aspect = VB_W / gridH;
       const cols = Math.max(1, Math.round(Math.sqrt(n * aspect)));
@@ -159,10 +188,23 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
         const r = Math.floor(i / cols);
         const c = i % cols;
         const isTrue = bits.charCodeAt(i) === 49;
-        gridHtml += `<rect x="${(c * cellW).toFixed(3)}" y="${(r * cellH).toFixed(3)}" width="${w}" height="${h}" fill="${isTrue ? trueColor : falseColor}"/>`;
+        cellsHtml += `<rect x="${(c * cellW).toFixed(3)}" y="${(r * cellH).toFixed(3)}" width="${w}" height="${h}" fill="${isTrue ? trueColor : falseColor}"/>`;
       }
     }
-    (this.gridG.node() as SVGGElement).innerHTML = gridHtml;
+
+    // Wrap cells in a clipPath whose rect grows downward; a thin bright
+    // bar rides the leading edge as the visible scanline. Both are in
+    // gridG's translated coord space, so x/y stay relative to the grid.
+    const scanlineColor = pass ? "rgba(220,240,220,0.85)" : "rgba(210,225,240,0.85)";
+    (this.gridG.node() as SVGGElement).innerHTML = n > 0
+      ? `<defs>
+          <clipPath id="sat-scan-clip">
+            <rect id="sat-scan-clip-rect" x="0" y="0" width="${VB_W}" height="0"/>
+          </clipPath>
+        </defs>
+        <g clip-path="url(#sat-scan-clip)">${cellsHtml}</g>
+        <rect id="sat-scanline" x="0" y="0" width="${VB_W}" height="3" fill="${scanlineColor}"/>`
+      : "";
 
     // Stat box. Label flips PASS↔FAIL to match the banner's headline;
     // dropped the percentage because 99.9%-of-clauses is still UNSAT and
@@ -177,5 +219,42 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     this.varsEl.textContent = data.num_variables <= 10000
       ? data.num_variables.toLocaleString()
       : `showing ${data.viz_count.toLocaleString()}`;
+
+    const finalBannerColor = pass ? PASS_COLOR : FAIL_COLOR;
+    const finalHeadline = pass ? "SATISFIED" : "FAILED TO SATISFY";
+    const commitBanner = () => this.renderBanner(finalBannerColor, finalHeadline, 0.96);
+
+    // Nothing to sweep (empty grid) — commit immediately.
+    if (n <= 0 || gridH <= 0) {
+      commitBanner();
+      return;
+    }
+
+    const gridNode = this.gridG.node() as SVGGElement;
+    const clipRect = gridNode.querySelector("#sat-scan-clip-rect") as SVGRectElement | null;
+    const scanLine = gridNode.querySelector("#sat-scanline") as SVGRectElement | null;
+    if (!clipRect || !scanLine) {
+      commitBanner();
+      return;
+    }
+
+    const token = ++this.scanToken;
+    const start = performance.now();
+    const step = (now: number) => {
+      if (token !== this.scanToken) return; // superseded by a newer render
+      const t = Math.min(1, (now - start) / SCAN_DURATION_MS);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const y = eased * gridH;
+      clipRect.setAttribute("height", y.toFixed(2));
+      scanLine.setAttribute("y", Math.min(y, gridH - 3).toFixed(2));
+      if (t < 1) {
+        this.scanRafId = requestAnimationFrame(step);
+      } else {
+        scanLine.setAttribute("opacity", "0");
+        this.scanRafId = null;
+        commitBanner();
+      }
+    };
+    this.scanRafId = requestAnimationFrame(step);
   }
 }
