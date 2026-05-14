@@ -981,7 +981,8 @@ html, body {
 .energy-price-line {
   stroke-dasharray: 100;
   stroke-dashoffset: 100;
-  animation: energy-price-draw 2.1s ease-out 0.15s forwards;
+  /* Duration is set inline per-instance to match the bar stagger span. */
+  animation: energy-price-draw 2.1s ease-out forwards;
 }
 
 @keyframes energy-price-draw {
