@@ -1,10 +1,11 @@
 // Single source of truth for per-challenge dashboard wiring.
 //
-// Adding a 6th challenge to the dashboard means adding ONE entry to the
-// CHALLENGES table below — the union type, the score label, the panel
-// factory, the fallback sub-config, and the pretty name are all read
-// off the entry. Previously each of those lived in its own
-// hardcoded if/else or per-panel literal, drifting out of sync.
+// Adding a new challenge to the dashboard:
+//   1. Drop a `challenges/<challenge_id>.ts` file with a panel class that
+//      extends `DisplayPanelBase` (see ./base.ts).
+//   2. Import it and add ONE entry to the CHALLENGES table below — the
+//      union type, the score label, the panel factory, the fallback
+//      sub-config, and the pretty name are all read off the entry.
 //
 // Server-driven config (active_challenge, available_challenges, tracks,
 // timeout, scoring_direction) still flows through swarmConfig.ts; this
@@ -12,14 +13,14 @@
 // wire.
 
 import type { Panel } from "../types";
-import { SolutionPanel } from "../panels/solution";
-import { GanttPanel } from "../panels/gantt";
-import { KnapsackPanel } from "../panels/knapsack";
-import { EnergyPanel } from "../panels/energy";
-import { SatPanel } from "../panels/sat";
-import { HypergraphPanel } from "../panels/hypergraph";
-import { NeuralnetPanel } from "../panels/neuralnet";
-import { VectorSearchPanel } from "../panels/vector_search";
+import { SolutionPanel } from "./vehicle_routing";
+import { GanttPanel } from "./job_scheduling";
+import { KnapsackPanel } from "./knapsack";
+import { EnergyPanel } from "./energy_arbitrage";
+import { SatPanel } from "./satisfiability";
+import { HypergraphPanel } from "./hypergraph";
+import { NeuralnetPanel } from "./neuralnet_optimizer";
+import { VectorSearchPanel } from "./vector_search";
 
 export type ScoringDirection = "min" | "max";
 

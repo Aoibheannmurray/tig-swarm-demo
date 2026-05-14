@@ -1,15 +1,15 @@
 import { defineConfig } from "vite";
-import { resolve } from "path";
 
 export default defineConfig({
+  publicDir: "static",
   build: {
     rollupOptions: {
       input: {
-        main: resolve(__dirname, "index.html"),
-        ideas: resolve(__dirname, "ideas.html"),
-        diversity: resolve(__dirname, "diversity.html"),
-        benchmark: resolve(__dirname, "benchmark.html"),
-        trajectories: resolve(__dirname, "trajectories.html"),
+        main: "index.html",
+        ideas: "ideas.html",
+        diversity: "diversity.html",
+        benchmark: "benchmark.html",
+        trajectories: "trajectories.html",
       },
     },
   },

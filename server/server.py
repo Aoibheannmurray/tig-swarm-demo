@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from models import (
-    RegisterRequest, HeartbeatRequest,
+    RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
     MessageCreate,
     SwarmConfigUpdate,
@@ -104,14 +104,22 @@ async def get_challenge_config_cached(challenge: str) -> dict:
         return _challenge_config_cache[challenge]
     async with db.connect() as conn:
         row = await db.get_challenge_config(conn, challenge)
-    cfg = row or {
-        "challenge": challenge,
-        "tracks": "{}",
-        "timeout": 5,
-        "scoring_direction": "max",
-        "initial_algorithm_code": "",
-        "initial_kernel_code": "",
-    }
+    if row is None:
+        # No row in challenge_configs yet — the wizard hasn't run for this
+        # challenge. Mirror the schema/registry defaults so callers always
+        # see a fully-populated dict.
+        ch_def = challenges.CHALLENGES.get(challenge)
+        cfg = {
+            "challenge": challenge,
+            "tracks": "{}",
+            "timeout": ch_def.default_timeout if ch_def else 30,
+            "scoring_direction": ch_def.scoring_direction if ch_def else "max",
+            "initial_algorithm_code": "",
+            "initial_kernel_code": "",
+            "strategy_tags": "[]",
+        }
+    else:
+        cfg = row
     _challenge_config_cache[challenge] = cfg
     return cfg
 
@@ -375,8 +383,20 @@ async def register_agent(req: RegisterRequest):
             "VALUES (?, ?, ?, ?, ?, ?)",
             (agent_id, agent_name, timestamp, timestamp, "idle", llm_type),
         )
-        await conn.commit()
         config = await db.get_config(conn)
+        # Persist a join event so the dashboard's live feed can replay it
+        # on reload via /api/messages. The `challenge` column is NOT NULL,
+        # so we record the active challenge at join time; clients querying
+        # /api/messages get agent_joined rows back regardless of which
+        # challenge they ask about (see list_messages).
+        active_challenge = config.get("active_challenge") or DEFAULT_CHALLENGE
+        await conn.execute(
+            "INSERT INTO messages (id, agent_id, challenge, agent_name, content, msg_type, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new_id(), agent_id, active_challenge, agent_name,
+             "joined the swarm", "agent_joined", timestamp),
+        )
+        await conn.commit()
 
     await manager.broadcast(ws_events.AgentJoined(
         agent_id=agent_id,
@@ -407,6 +427,57 @@ async def register_agent(req: RegisterRequest):
             "available_challenges": available,
         },
     )
+
+
+@app.post("/api/agents/{agent_id}/rename")
+async def rename_agent(agent_id: str, req: RenameRequest):
+    """Update an existing agent's display name. `agents.name` is the
+    single source of truth for an agent's name — leaderboard, messages
+    GET, and every event broadcast resolve through it — so this is the
+    only operation that affects what the dashboard shows for `agent_id`.
+
+    Returns 404 if the agent doesn't exist, 409 if `agent_name` collides
+    with another agent, 400 if blank. Idempotent when the new name
+    equals the current one (no broadcast in that case)."""
+    requested = (req.agent_name or "").strip()
+    if not requested:
+        raise HTTPException(status_code=400, detail="agent_name must be non-empty")
+
+    timestamp = now()
+    async with db.connect() as conn:
+        cur = await conn.execute(
+            "SELECT name FROM agents WHERE id = ?", (agent_id,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+        old_name = row["name"]
+        if old_name == requested:
+            return {"agent_id": agent_id, "agent_name": requested}
+
+        cur = await conn.execute(
+            "SELECT id FROM agents WHERE name = ? AND id != ?",
+            (requested, agent_id),
+        )
+        if await cur.fetchone() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"agent_name {requested!r} is already taken",
+            )
+
+        await conn.execute(
+            "UPDATE agents SET name = ? WHERE id = ?",
+            (requested, agent_id),
+        )
+        await conn.commit()
+
+    await manager.broadcast(ws_events.AgentRenamed(
+        agent_id=agent_id,
+        old_name=old_name,
+        new_name=requested,
+        timestamp=timestamp,
+    ))
+    return {"agent_id": agent_id, "agent_name": requested}
 
 
 @app.post("/api/agents/{agent_id}/heartbeat")
@@ -682,9 +753,14 @@ async def get_state(
             ch_def = challenges.CHALLENGES.get(challenge)
             is_gpu = ch_def.is_gpu if ch_def else False
 
+            # Server's view of this agent's name — used by the loop client
+            # to detect a local rename (swarm.config.json contributor_name
+            # diverging from server's agents.name) and POST /rename.
+            self_agent_name = await get_agent_name(conn, agent_id)
             resp = {
                 "challenge": challenge,
                 "is_gpu": is_gpu,
+                "agent_name": self_agent_name,
                 "best_score": global_best_score,
                 "best_algorithm_code": my_best_code,
                 "best_experiment_id": my_best_experiment_id,
@@ -772,6 +848,12 @@ async def get_state(
         "recent_experiments": [
             {
                 "id": e["id"],
+                # Include agent_id so the dashboard can resolve each backfilled
+                # experiment to the agent's palette color (getAgentColor is
+                # keyed on agent_id). Without this, backfilled experiments
+                # render with the event-type fallback color while live ones
+                # use the agent's color — same agent, two colors.
+                "agent_id": e["agent_id"],
                 "agent_name": e["agent_name"],
                 "score": e["score"],
                 "feasible": bool(e["feasible"]),
@@ -1098,9 +1180,10 @@ async def create_message(req: MessageCreate):
         # feed can attribute messages to an agent_id that the leaderboard
         # has no row for, making the dashboard look inconsistent.
         cursor = await conn.execute(
-            "SELECT 1 FROM agents WHERE id = ?", (req.agent_id,)
+            "SELECT name FROM agents WHERE id = ?", (req.agent_id,)
         )
-        if await cursor.fetchone() is None:
+        row = await cursor.fetchone()
+        if row is None:
             raise HTTPException(
                 status_code=404,
                 detail=(
@@ -1108,16 +1191,20 @@ async def create_message(req: MessageCreate):
                     "Call POST /api/agents/register first."
                 ),
             )
+        # `req.agent_name` is intentionally ignored — `agents.name` is the
+        # single source of truth. Clients that want to change the display
+        # name must POST /api/agents/{id}/rename first.
+        agent_name = row["name"]
         await conn.execute(
             "INSERT INTO messages (id, agent_id, challenge, agent_name, content, msg_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (msg_id, req.agent_id, challenge, req.agent_name, req.content, req.msg_type, timestamp),
+            (msg_id, req.agent_id, challenge, agent_name, req.content, req.msg_type, timestamp),
         )
         await conn.commit()
 
     await manager.broadcast(ws_events.ChatMessage(
         challenge=challenge,
         message_id=msg_id,
-        agent_name=req.agent_name,
+        agent_name=agent_name,
         agent_id=req.agent_id,
         content=req.content,
         msg_type=req.msg_type,
@@ -1129,11 +1216,20 @@ async def create_message(req: MessageCreate):
 
 @app.get("/api/messages")
 async def list_messages(limit: int = 50, challenge: str | None = None):
+    """Chat messages for the requested challenge, plus agent_joined events
+    regardless of challenge (joins are swarm-wide). `agent_name` is JOINed
+    from `agents` so retired snapshot data in `messages.agent_name` is
+    never returned — current name only."""
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         cursor = await conn.execute(
-            "SELECT * FROM messages WHERE challenge = ? "
-            "ORDER BY created_at DESC LIMIT ?",
+            "SELECT m.id, m.agent_id, m.challenge, "
+            "       COALESCE(a.name, m.agent_name) AS agent_name, "
+            "       m.content, m.msg_type, m.created_at "
+            "FROM messages m "
+            "LEFT JOIN agents a ON a.id = m.agent_id "
+            "WHERE m.challenge = ? OR m.msg_type = 'agent_joined' "
+            "ORDER BY m.created_at DESC LIMIT ?",
             (challenge, limit),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
@@ -1356,8 +1452,16 @@ async def get_replay(challenge: str | None = None, compact: int = 0):
     """
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
+        # JOIN agents so the response always carries the agent's current
+        # name; the bh.agent_name snapshot is only used as a fallback when
+        # the agent row has been deleted (shouldn't happen in practice).
         cursor = await conn.execute(
-            "SELECT * FROM best_history WHERE challenge = ? ORDER BY created_at ASC",
+            "SELECT bh.experiment_id, bh.agent_id, "
+            "       COALESCE(a.name, bh.agent_name) AS agent_name, "
+            "       bh.score, bh.solution_data, bh.created_at "
+            "FROM best_history bh "
+            "LEFT JOIN agents a ON a.id = bh.agent_id "
+            "WHERE bh.challenge = ? ORDER BY bh.created_at ASC",
             (challenge,),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
@@ -1695,8 +1799,10 @@ async def get_swarm_config():
         ch_def = challenges.CHALLENGES.get(ch_name)
         available[ch_name] = {
             "tracks": tracks,
-            "timeout": row.get("timeout") or 5,
-            "scoring_direction": row.get("scoring_direction") or "max",
+            "timeout": row.get("timeout") or (ch_def.default_timeout if ch_def else 30),
+            "scoring_direction": row.get("scoring_direction") or (
+                ch_def.scoring_direction if ch_def else "max"
+            ),
             # Flag-only: don't ship the algorithm body in this response (it
             # can be large and is fetched separately from /api/initial_algorithm).
             "has_initial_algorithm": bool(row.get("initial_algorithm_code")),

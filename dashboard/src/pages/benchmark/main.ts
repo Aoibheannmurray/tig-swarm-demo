@@ -1,27 +1,13 @@
-import "@phosphor-icons/web/regular/style.css";
-import "./style.css";
-import { SwarmWebSocket } from "./lib/websocket";
-import { MockDataGenerator } from "./mock";
-import { ChartPanel } from "./panels/chart";
-import { ChallengeSelectorPanel } from "./panels/challenge-selector";
-import { loadSwarmConfig, handleWsEvent as handleSwarmConfigEvent } from "./lib/swarmConfig";
-import { getViewedChallenge, onViewedChallengeChange } from "./lib/viewedChallenge";
-import type { WSMessage } from "./types";
+import "../../style.css";
+import { SwarmWebSocket } from "../../lib/websocket";
+import { getDashboardUrls, installKeyboardNav } from "../../lib/bootstrap";
+import { ChartPanel } from "../../panels/chart";
+import { ChallengeSelectorPanel } from "../../panels/challenge-selector";
+import { loadSwarmConfig, handleWsEvent as handleSwarmConfigEvent } from "../../lib/swarmConfig";
+import { getViewedChallenge, onViewedChallengeChange } from "../../lib/viewedChallenge";
+import type { WSMessage } from "../../types";
 
-// ── Config ──
-const params = new URLSearchParams(window.location.search);
-const isMock = params.has("mock");
-const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-const wsUrl = params.get("ws") || `${wsProtocol}//${window.location.host}/ws/dashboard`;
-
-function getApiUrl(): string {
-  const explicit = params.get("api");
-  if (explicit) return explicit;
-  return wsUrl
-    .replace("ws://", "http://")
-    .replace("wss://", "https://")
-    .replace("/ws/dashboard", "");
-}
+const { wsUrl, apiUrl } = getDashboardUrls();
 
 // ── Initialize single panel ──
 const selectorMount = document.getElementById("panel-challenge-selector");
@@ -65,14 +51,14 @@ function handleMessage(msg: WSMessage) {
   if (CHALLENGE_SCOPED[m.type] && m.challenge && m.challenge !== getViewedChallenge()) {
     return;
   }
-  handleSwarmConfigEvent(getApiUrl(), msg);
+  handleSwarmConfigEvent(apiUrl, msg);
   challengeSelector.handleMessage(msg);
   chartPanel.handleMessage(msg);
 }
 
 onViewedChallengeChange(() => {
   chartPanel.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
-  void loadInitialState(getApiUrl());
+  void loadInitialState(apiUrl);
 });
 
 // ── Hydrate from /api/state + /api/replay ──
@@ -110,24 +96,11 @@ async function loadInitialState(apiUrl: string) {
   }
 }
 
-// ── Keyboard navigation ──
-document.addEventListener("keydown", (e) => {
-  if (e.key === "1") window.location.href = "/";
-  if (e.key === "2") window.location.href = "/ideas.html";
-  if (e.key === "3") window.location.href = "/diversity.html";
-});
+installKeyboardNav("benchmark");
 
 // ── Connect ──
-if (isMock) {
-  console.log("[Benchmark] Running in MOCK mode");
-  const mock = new MockDataGenerator();
-  mock.onMessage(handleMessage);
-  mock.start();
-} else {
-  const apiUrl = getApiUrl();
-  console.log(`[Benchmark] Connecting to ${wsUrl}, API: ${apiUrl}`);
-  void loadSwarmConfig(apiUrl).then(() => loadInitialState(apiUrl));
-  const ws = new SwarmWebSocket(wsUrl);
-  ws.onMessage(handleMessage);
-  ws.connect();
-}
+console.log(`[Benchmark] Connecting to ${wsUrl}, API: ${apiUrl}`);
+void loadSwarmConfig(apiUrl).then(() => loadInitialState(apiUrl));
+const ws = new SwarmWebSocket(wsUrl);
+ws.onMessage(handleMessage);
+ws.connect();

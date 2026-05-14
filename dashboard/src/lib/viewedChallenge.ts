@@ -12,7 +12,7 @@
 // pages, since each entry-point HTML loads this same module).
 
 import { getActiveChallenge, getAvailableChallenges } from "./swarmConfig";
-import type { Challenge } from "./challengeRegistry";
+import type { Challenge } from "../challenges/registry";
 
 const STORAGE_KEY = "viewedChallenge";
 

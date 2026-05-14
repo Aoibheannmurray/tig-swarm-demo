@@ -20,7 +20,7 @@ import {
   isKnownChallenge,
   prettyName,
   type Challenge,
-} from "../lib/challengeRegistry";
+} from "../challenges/registry";
 import {
   getViewedChallenge,
   setViewedChallenge,

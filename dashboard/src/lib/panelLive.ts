@@ -16,7 +16,7 @@
 //     at the latest.
 
 import { getActiveChallenge } from "./swarmConfig";
-import type { Challenge } from "./challengeRegistry";
+import type { Challenge } from "../challenges/registry";
 import { setViewedChallenge } from "./viewedChallenge";
 
 /**

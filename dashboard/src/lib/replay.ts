@@ -95,11 +95,20 @@ export async function startReplay(
     </div>
   `;
 
-  // Dismiss after 5s or on click
+  // Dismiss after 8s or on click — whichever first. Clearing the timer on
+  // click stops the overlay closure (and its references to `resolve` /
+  // `overlay`) from being held for the rest of the 8s window.
   await new Promise<void>((resolve) => {
-    const dismiss = () => { resolve(); };
+    let dismissed = false;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      clearTimeout(timer);
+      overlay.removeEventListener("click", dismiss);
+      resolve();
+    };
     overlay.addEventListener("click", dismiss);
-    setTimeout(dismiss, 8000);
+    const timer = setTimeout(dismiss, 8000);
   });
 
   overlay.remove();
