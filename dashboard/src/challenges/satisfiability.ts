@@ -38,8 +38,9 @@ const TRUE_PASS_FINAL = "#4A7C5A";
 const TRUE_FAIL_FINAL = "#8B2D2D";
 
 // Scanline sweep: the grid "reads" the assignment top-to-bottom on each
-// render. Short enough that 8-second instance rotations still feel snappy.
-const SCAN_DURATION_MS = 800;
+// render. Slower than a UI animation on purpose — the deliberate pace is
+// what sells the "scanning" feel. Still well under the 8s instance rotation.
+const SCAN_DURATION_MS = 2000;
 // Single-row highlight that rides under the scanline so the row being
 // "read" is visibly brighter than its neighbours.
 const ROW_GLOW_FILL = "rgba(255,255,255,0.18)";

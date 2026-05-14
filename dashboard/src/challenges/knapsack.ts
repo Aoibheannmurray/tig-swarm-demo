@@ -37,6 +37,14 @@ const SIDEBAR_W = 120;
 const SIDEBAR_GAP = 6;
 const ROW_LABEL_W = 32;
 
+// Bar grow-in: each row's bar starts at width 0 anchored at the sidebar's
+// right edge and transitions to its final width, staggered top→bottom.
+// Stagger is capped so the total intro stays well under the 8 s instance
+// rotation regardless of how many items the instance happens to surface.
+const BAR_GROW_MS = 400;
+const BAR_STAGGER_MS = 30;
+const BAR_GROW_TOTAL_CAP_MS = 1400;
+
 // Greedy nearest-neighbor leaf-ordering on the K×K interaction matrix.
 // Seeded with the item that has the largest total interaction (the most
 // "central" member of the visible set), then walks to the most-similar
@@ -89,6 +97,11 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
   private itemsEl!: HTMLElement;
   private legendMinEl!: HTMLElement;
   private legendMaxEl!: HTMLElement;
+
+  // rAF handle for the deferred "set final x/width" step that triggers the
+  // CSS transition on each bar. Cancelled on reset, dispose, or whenever
+  // a new instance render replaces the sidebar DOM.
+  private barAnimRafId: number | null = null;
 
   protected scaffoldHtml(): string {
     return `
@@ -153,13 +166,27 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
   }
 
   protected onReset(): void {
+    this.cancelBarAnim();
     (this.sidebarSvg.node() as SVGSVGElement).innerHTML = "";
     (this.matrixSvg.node() as SVGSVGElement).innerHTML = "";
     this.valueEl.textContent = "---";
     this.itemsEl.textContent = "---";
   }
 
+  protected onDispose(): void {
+    this.cancelBarAnim();
+  }
+
+  private cancelBarAnim(): void {
+    if (this.barAnimRafId !== null) {
+      cancelAnimationFrame(this.barAnimRafId);
+      this.barAnimRafId = null;
+    }
+  }
+
   protected showInstance(data: KnapsackData) {
+    this.cancelBarAnim();
+
     const sidebarNode = this.sidebarSvg.node() as SVGSVGElement;
     const matrixNode = this.matrixSvg.node() as SVGSVGElement;
 
@@ -233,16 +260,33 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     const barRowOffset = (CELL_SIZE - barH) / 2;
     const labelFs = Math.max(8, Math.min(11, CELL_SIZE * 0.5)).toFixed(1);
 
+    // Per-row stagger, capped so the whole sidebar grow-in fits inside
+    // BAR_GROW_TOTAL_CAP_MS even when k is large.
+    const stagger = k > 1
+      ? Math.min(
+          BAR_STAGGER_MS,
+          Math.max(0, (BAR_GROW_TOTAL_CAP_MS - BAR_GROW_MS) / (k - 1)),
+        )
+      : 0;
+
     for (let i = 0; i < k; i++) {
       const m = marginals[i];
       const w = (m / maxMarginal) * SIDEBAR_W;
       const yTop = i * CELL_SIZE + barRowOffset;
       const xLeft = sidebarRight - w;
       const op = OPACITY_LOW + (OPACITY_HIGH - OPACITY_LOW) * (m / maxMarginal);
+      // Render the bar in its collapsed state (width 0, x pinned to the
+      // sidebar's right edge). data-fx / data-fw carry the final geometry
+      // so the deferred rAF below can promote it without recomputing.
+      // The inline transition + per-row delay is what makes the grow-in
+      // happen once those attributes change.
+      const delay = (i * stagger).toFixed(1);
       sParts.push(
-        `<rect x="${xLeft.toFixed(3)}" y="${yTop.toFixed(3)}" ` +
-        `width="${w.toFixed(3)}" height="${barH.toFixed(3)}" ` +
-        `fill="rgba(${HEAT_HUE}, ${op.toFixed(3)})">` +
+        `<rect class="kn-bar" data-fx="${xLeft.toFixed(3)}" data-fw="${w.toFixed(3)}" ` +
+        `x="${sidebarRight}" y="${yTop.toFixed(3)}" ` +
+        `width="0" height="${barH.toFixed(3)}" ` +
+        `fill="rgba(${HEAT_HUE}, ${op.toFixed(3)})" ` +
+        `style="transition: x ${BAR_GROW_MS}ms ease-out ${delay}ms, width ${BAR_GROW_MS}ms ease-out ${delay}ms;">` +
         `<title>item ${items[i]}: contribution ${m.toFixed(0)}</title>` +
         `</rect>`,
       );
@@ -257,6 +301,22 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
       }
     }
     sidebarNode.innerHTML = sParts.join("");
+
+    // Promote each bar from its collapsed state to its final geometry in
+    // the next frame. Deferring by one rAF tick gives the browser a chance
+    // to commit the initial layout, so the subsequent attribute change is
+    // what the CSS transition picks up.
+    this.barAnimRafId = requestAnimationFrame(() => {
+      this.barAnimRafId = null;
+      sidebarNode
+        .querySelectorAll<SVGRectElement>(".kn-bar")
+        .forEach((b) => {
+          const fx = b.getAttribute("data-fx");
+          const fw = b.getAttribute("data-fw");
+          if (fx !== null) b.setAttribute("x", fx);
+          if (fw !== null) b.setAttribute("width", fw);
+        });
+    });
 
     // ── Matrix SVG ──
     const mParts: string[] = [];
