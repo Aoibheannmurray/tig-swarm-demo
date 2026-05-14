@@ -172,11 +172,14 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
         .y((d) => yPrice(d));
       const path = priceLine(data.avg_da_price);
       if (path) {
-        // Match the bars' total stagger span: last bar starts at (n-1)*20ms
-        // and grows for 650ms. Keep these in sync with the .energy-bar-*
-        // animation rules in style.css.
-        const priceAnimMs = Math.max(0, (n - 1) * 20) + 650;
-        parts.push(`<path class="energy-price-line" style="animation-duration:${priceAnimMs}ms" pathLength="100" d="${path}" fill="none" stroke="${PRICE()}" stroke-width="1.5" opacity="0.95"/>`);
+        // Sync line index `i` with bar `i`'s completion: bar i starts at
+        // i*20ms and grows for 650ms, so it's done at i*20 + 650. Match
+        // that pace by delaying the line by one bar-grow duration and
+        // running it at 20ms per index. Keep in sync with the
+        // .energy-bar-* animation rules in style.css.
+        const priceDelayMs = 650;
+        const priceAnimMs = Math.max(20, (n - 1) * 20);
+        parts.push(`<path class="energy-price-line" style="animation-duration:${priceAnimMs}ms;animation-delay:${priceDelayMs}ms" pathLength="100" d="${path}" fill="none" stroke="${PRICE()}" stroke-width="1.5" opacity="0.95"/>`);
       }
     }
     chartNode.innerHTML = parts.join("");
