@@ -30,14 +30,22 @@ const FAIL_COLOR = "#8B2D2D";
 // Neutral "scanning" tone — sits between PASS_COLOR and FAIL_COLOR so the
 // banner doesn't pre-announce the verdict before the scanline finishes.
 const SCAN_COLOR = "#3a4150";
-// Variable-assignment grid TRUE-cell color, branched on pass/fail so the
-// pass state reads through to the secondary view.
-const TRUE_PASS = "#4A7C5A";
-const TRUE_FAIL = "#4E6B85";
+// TRUE-cell colors. Every TRUE cell starts in TRUE_INITIAL (blue) so the
+// grid reads as "pending" while the scanline sweeps; once the sweep ends
+// the cells fade to the verdict-coloured _FINAL value.
+const TRUE_INITIAL = "#4E6B85";
+const TRUE_PASS_FINAL = "#4A7C5A";
+const TRUE_FAIL_FINAL = "#8B2D2D";
 
 // Scanline sweep: the grid "reads" the assignment top-to-bottom on each
 // render. Short enough that 8-second instance rotations still feel snappy.
 const SCAN_DURATION_MS = 800;
+// Single-row highlight that rides under the scanline so the row being
+// "read" is visibly brighter than its neighbours.
+const ROW_GLOW_FILL = "rgba(255,255,255,0.18)";
+// Duration of the post-sweep blue→green/red fade. Kept in sync with the
+// CSS transition rule baked into the inline <style> block.
+const RECOLOR_FADE_MS = 250;
 
 export class SatPanel extends DisplayPanelBase<AllSatData> {
   protected idPrefix = "sat";
@@ -139,12 +147,14 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
 
   private renderBanner(color: string, headline: string, textOpacity: number): void {
     const cx = VB_W / 2;
+    const text = headline
+      ? `<text x="${cx}" y="${(BANNER_H / 2).toFixed(2)}" text-anchor="middle" ` +
+          `dominant-baseline="central" fill="rgba(255,255,255,${textOpacity})" ` +
+          `font-size="34" font-weight="700" ` +
+          `font-family="'JetBrains Mono', monospace" letter-spacing="2">${headline}</text>`
+      : "";
     (this.bannerG.node() as SVGGElement).innerHTML =
-      `<rect x="0" y="0" width="${VB_W}" height="${BANNER_H}" fill="${color}"/>` +
-      `<text x="${cx}" y="${(BANNER_H / 2).toFixed(2)}" text-anchor="middle" ` +
-        `dominant-baseline="central" fill="rgba(255,255,255,${textOpacity})" ` +
-        `font-size="34" font-weight="700" ` +
-        `font-family="'JetBrains Mono', monospace" letter-spacing="2">${headline}</text>`;
+      `<rect x="0" y="0" width="${VB_W}" height="${BANNER_H}" fill="${color}"/>` + text;
   }
 
   protected showInstance(data: SatData) {
@@ -163,22 +173,23 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     const pass = m > 0 && data.num_satisfied === m;
     const unsat = m - data.num_satisfied;
 
-    // Banner starts in a neutral "SCANNING…" state. We commit to the real
-    // PASS / FAIL headline once the scanline finishes sweeping the grid.
-    this.renderBanner(SCAN_COLOR, "SCANNING…", 0.85);
+    // Banner during the sweep: dark neutral strip, no headline text.
+    // The PASS / FAIL headline is rendered only after the scanline reaches
+    // the bottom of the grid (see commitBanner below).
+    this.renderBanner(SCAN_COLOR, "", 0);
 
     // Variable-assignment grid. Bottom-padded so the absolutely-positioned
     // stat boxes overlay a clean area rather than the grid itself.
     const gridH = VB_H - GRID_TOP - GRID_BOTTOM_PAD;
     const n = data.viz_count;
     let cellsHtml = "";
+    let cellH = 0;
     if (n > 0) {
       const aspect = VB_W / gridH;
       const cols = Math.max(1, Math.round(Math.sqrt(n * aspect)));
       const rows = Math.ceil(n / cols);
       const cellW = VB_W / cols;
-      const cellH = gridH / rows;
-      const trueColor = pass ? TRUE_PASS : TRUE_FAIL;
+      cellH = gridH / rows;
       const falseColor = "rgba(26,26,26,0.06)";
       const bits = data.assignment_bits;
       const w = Math.max(0.5, cellW - 0.4).toFixed(3);
@@ -188,22 +199,22 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
         const r = Math.floor(i / cols);
         const c = i % cols;
         const isTrue = bits.charCodeAt(i) === 49;
-        cellsHtml += `<rect x="${(c * cellW).toFixed(3)}" y="${(r * cellH).toFixed(3)}" width="${w}" height="${h}" fill="${isTrue ? trueColor : falseColor}"/>`;
+        const cls = isTrue ? ` class="sat-true-cell"` : "";
+        cellsHtml += `<rect${cls} x="${(c * cellW).toFixed(3)}" y="${(r * cellH).toFixed(3)}" width="${w}" height="${h}" fill="${isTrue ? TRUE_INITIAL : falseColor}"/>`;
       }
     }
 
-    // Wrap cells in a clipPath whose rect grows downward; a thin bright
-    // bar rides the leading edge as the visible scanline. Both are in
-    // gridG's translated coord space, so x/y stay relative to the grid.
-    const scanlineColor = pass ? "rgba(220,240,220,0.85)" : "rgba(210,225,240,0.85)";
+    // Cells render in TRUE_INITIAL blue from frame 0; the scanline and a
+    // single-row glow ride on top. The inline <style> sets the fill
+    // transition the post-sweep recolour relies on. Order matters: row
+    // glow above cells (so the active row reads as brighter), scanline
+    // above the glow (so the leading edge stays crisp).
+    const scanlineColor = pass ? "rgba(220,240,220,0.9)" : "rgba(210,225,240,0.9)";
     (this.gridG.node() as SVGGElement).innerHTML = n > 0
-      ? `<defs>
-          <clipPath id="sat-scan-clip">
-            <rect id="sat-scan-clip-rect" x="0" y="0" width="${VB_W}" height="0"/>
-          </clipPath>
-        </defs>
-        <g clip-path="url(#sat-scan-clip)">${cellsHtml}</g>
-        <rect id="sat-scanline" x="0" y="0" width="${VB_W}" height="3" fill="${scanlineColor}"/>`
+      ? `<style>.sat-true-cell { transition: fill ${RECOLOR_FADE_MS}ms ease-out; }</style>` +
+        cellsHtml +
+        `<rect id="sat-row-glow" x="0" y="0" width="${VB_W}" height="${cellH.toFixed(3)}" fill="${ROW_GLOW_FILL}" pointer-events="none"/>` +
+        `<rect id="sat-scanline" x="0" y="0" width="${VB_W}" height="3" fill="${scanlineColor}" pointer-events="none"/>`
       : "";
 
     // Stat box. Label flips PASS↔FAIL to match the banner's headline;
@@ -222,37 +233,47 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
 
     const finalBannerColor = pass ? PASS_COLOR : FAIL_COLOR;
     const finalHeadline = pass ? "SATISFIED" : "FAILED TO SATISFY";
-    const commitBanner = () => this.renderBanner(finalBannerColor, finalHeadline, 0.96);
+    const finalTrueColor = pass ? TRUE_PASS_FINAL : TRUE_FAIL_FINAL;
+    const gridNode = this.gridG.node() as SVGGElement;
+    const commitVerdict = () => {
+      // CSS transition on .sat-true-cell handles the blue→final-colour fade.
+      gridNode
+        .querySelectorAll(".sat-true-cell")
+        .forEach((c) => c.setAttribute("fill", finalTrueColor));
+      this.renderBanner(finalBannerColor, finalHeadline, 0.96);
+    };
 
     // Nothing to sweep (empty grid) — commit immediately.
     if (n <= 0 || gridH <= 0) {
-      commitBanner();
+      commitVerdict();
       return;
     }
 
-    const gridNode = this.gridG.node() as SVGGElement;
-    const clipRect = gridNode.querySelector("#sat-scan-clip-rect") as SVGRectElement | null;
     const scanLine = gridNode.querySelector("#sat-scanline") as SVGRectElement | null;
-    if (!clipRect || !scanLine) {
-      commitBanner();
+    const rowGlow = gridNode.querySelector("#sat-row-glow") as SVGRectElement | null;
+    if (!scanLine || !rowGlow) {
+      commitVerdict();
       return;
     }
 
     const token = ++this.scanToken;
     const start = performance.now();
+    const maxRowY = Math.max(0, gridH - cellH);
     const step = (now: number) => {
       if (token !== this.scanToken) return; // superseded by a newer render
       const t = Math.min(1, (now - start) / SCAN_DURATION_MS);
       const eased = 1 - Math.pow(1 - t, 3);
       const y = eased * gridH;
-      clipRect.setAttribute("height", y.toFixed(2));
       scanLine.setAttribute("y", Math.min(y, gridH - 3).toFixed(2));
+      const rowY = Math.min(Math.floor(y / cellH) * cellH, maxRowY);
+      rowGlow.setAttribute("y", rowY.toFixed(2));
       if (t < 1) {
         this.scanRafId = requestAnimationFrame(step);
       } else {
         scanLine.setAttribute("opacity", "0");
+        rowGlow.setAttribute("opacity", "0");
         this.scanRafId = null;
-        commitBanner();
+        commitVerdict();
       }
     };
     this.scanRafId = requestAnimationFrame(step);
