@@ -59,6 +59,7 @@ job_scheduling = []
 energy_arbitrage = []
 hypergraph = ["cudarc"]
 neuralnet_optimizer = ["cudarc", "cudarc/cublas", "cudarc/cudnn"]
+vector_search = ["cudarc"]
 
 # Convenience feature sets for the bins. Each binary needs at least one
 # challenge feature enabled — pick e.g. `--features solver,knapsack`.

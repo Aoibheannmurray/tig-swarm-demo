@@ -104,6 +104,7 @@ ChallengeName = Literal[
     "energy_arbitrage",
     "hypergraph",
     "neuralnet_optimizer",
+    "vector_search",
 ]
 
 

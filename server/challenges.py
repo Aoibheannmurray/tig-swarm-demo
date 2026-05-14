@@ -147,6 +147,23 @@ CHALLENGES: dict[str, ChallengeDef] = {
         default_timeout=120,
         is_gpu=True,
     ),
+    "vector_search": ChallengeDef(
+        name="vector_search",
+        scoring_direction="max",
+        track_keys=(
+            "n_queries=10",
+            "n_queries=20",
+            "n_queries=50",
+            "n_queries=100",
+            "n_queries=200",
+        ),
+        strategy_tags=(
+            "construction", "local_search", "metaheuristic",
+            "decomposition", "hybrid", "data_structure", "other",
+        ),
+        default_timeout=60,
+        is_gpu=True,
+    ),
 }
 
 

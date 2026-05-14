@@ -53,16 +53,6 @@ A hyperedge whose nodes all lie in a single partition contributes 0. The goal is
 - Every value in `partition` must be in `[0, num_parts)`.
 - Each partition must contain at least 1 node and at most `max_part_size` nodes.
 
-## Scoring
-
-Your solution's `connectivity_metric` is compared against a greedy recursive-bipartitioning baseline:
-
-```
-quality = (baseline_metric - your_metric) / baseline_metric * 1,000,000
-```
-
-Clamped to +/-10,000,000. **Higher quality is better.** Zero means matching the baseline. Positive means you beat the baseline (lower connectivity). Negative means worse than the baseline.
-
 ## Solver Interface
 
 ```rust

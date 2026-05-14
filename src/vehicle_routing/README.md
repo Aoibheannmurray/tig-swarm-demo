@@ -46,16 +46,6 @@ Travel time equals distance (1 unit distance = 1 unit time). For each route, tim
 5. Time window respected at every node (see time model above).
 6. Vehicle returns to depot before `due_times[0]`.
 
-## Scoring
-
-Your total distance is compared against a Solomon I1 insertion heuristic baseline:
-
-```
-quality = (baseline_distance − your_distance) / baseline_distance × 1,000,000
-```
-
-Clamped to ±10,000,000. Higher is better (shorter distance = higher quality). Zero means matching the baseline.
-
 ## Solver Interface
 
 ```rust

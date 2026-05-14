@@ -6,14 +6,19 @@ benchmarking, and result publishing.  Works with any LLM provider (Anthropic,
 OpenAI, Google) or any OpenAI-compatible endpoint via --api-base.
 
 Usage:
-    python scripts/run_loop.py --provider anthropic
+    python setup.py
+    export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
+    python scripts/run_loop.py
+
+    # Overrides still work:
     python scripts/run_loop.py --provider openai --model gpt-4o
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
     python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+    python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
-    # Resume a previous agent
-    python scripts/run_loop.py --provider anthropic --agent-id <id> --agent-name <name>
+    # Resume a specific previous agent
+    python scripts/run_loop.py --agent-id <id> --agent-name <name>
 
 Picking a model (--model):
     anthropic   claude-opus-4-7, claude-sonnet-4-6 (default),
@@ -28,9 +33,19 @@ Picking a model (--model):
     endpoint (Together, Groq, DeepSeek, Ollama, vLLM, …); pass the host's
     model ID via --model.
 
+Provider/model/compute defaults come from agent.config.json when present.
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
 --c3-api-key, or existing `c3 login` credentials.
+
+claude-code provider:
+    Shells out to your local `claude -p` binary instead of hitting an HTTP
+    API. Auth comes from your Claude Code login (OAuth / subscription) — no
+    ANTHROPIC_API_KEY needed. Calls run from a temp directory so the CLI's
+    CLAUDE.md auto-discovery does NOT pull this repo's docs into the system
+    prompt — run_loop.py supplies its own. Token usage is not reported by
+    the CLI, so the dashboard's per-agent cost column will read $0 for this
+    provider.
 """
 
 from __future__ import annotations
@@ -46,6 +61,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+AGENT_CONFIG_PATH = ROOT / "agent.config.json"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
@@ -84,6 +100,39 @@ _ITERATION_BACKOFF_SECS = 5
 # error wrappers) and not worth a round-trip to confirm "no change".
 _REDESCRIBE_SIMILARITY_THRESHOLD = 0.95
 
+_PROMPT_LOG_DIR = ROOT / "prompts_log"
+
+
+def _call_llm_logged(
+    call_type: str, config: dict,
+    provider: str, model: str, api_key: str,
+    system: str, prompt: str, api_base: str | None = None,
+) -> tuple[str, dict]:
+    """Wrapper around call_llm that records the exchange when log_prompts is set.
+
+    One markdown file per call in ./prompts_log/. No-op when the flag is off.
+    """
+    response, usage = call_llm(provider, model, api_key, system, prompt, api_base)
+    if config.get("log_prompts"):
+        try:
+            _PROMPT_LOG_DIR.mkdir(exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1e6) % 1_000_000:06d}"
+            path = _PROMPT_LOG_DIR / f"{ts}_{call_type}.md"
+            path.write_text(
+                f"# {call_type}\n\n"
+                f"- timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"- provider: {provider}\n"
+                f"- model: {model}\n"
+                f"- input_tokens: {usage.get('input_tokens', 0)}\n"
+                f"- output_tokens: {usage.get('output_tokens', 0)}\n\n"
+                f"## SYSTEM\n\n{system}\n\n"
+                f"## USER\n\n{prompt}\n\n"
+                f"## RESPONSE\n\n{response}\n"
+            )
+        except Exception as e:
+            print(f"  [LOG] Prompt log write failed: {e}", file=sys.stderr)
+    return response, usage
+
 
 # ── Config & sync ──────────────────────────────────────────────────
 
@@ -91,8 +140,22 @@ _REDESCRIBE_SIMILARITY_THRESHOLD = 0.95
 def load_config() -> dict:
     cfg_path = ROOT / "swarm.config.json"
     if not cfg_path.exists():
-        sys.exit("swarm.config.json not found. Run `python setup.py join <url>` first.")
+        sys.exit("swarm.config.json not found. Run `python setup.py` first.")
     return json.loads(cfg_path.read_text())
+
+
+def load_agent_config() -> dict:
+    if not AGENT_CONFIG_PATH.exists():
+        return {}
+    try:
+        data = json.loads(AGENT_CONFIG_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_agent_config(config: dict) -> None:
+    AGENT_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
 
 
 def sync_challenge() -> None:
@@ -162,7 +225,8 @@ def _generate_code(
                 + files.separator_suffix()
             )
         try:
-            code_response, usage = call_llm(
+            code_response, usage = _call_llm_logged(
+                "code", config,
                 args.provider, model, api_key,
                 build_code_system_prompt(challenge_md, config),
                 user_prompt,
@@ -203,7 +267,8 @@ def _try_compile_fix(
     code, kernel = files.read()
     fix_prompt = build_compile_fix_prompt(code, kernel, build_err[-1500:], files.is_gpu)
     try:
-        fix_response, usage = call_llm(
+        fix_response, usage = _call_llm_logged(
+            "compile_fix", config,
             args.provider, model, api_key,
             build_code_system_prompt(challenge_md, config),
             fix_prompt,
@@ -305,7 +370,8 @@ def _fix_runtime_errors(
         print(f"  Errors: {runtime_errors}")
         current_code, current_kernel = files.read()
         try:
-            fix_response, usage = call_llm(
+            fix_response, usage = _call_llm_logged(
+                "runtime_fix", config,
                 args.provider, model, api_key,
                 build_code_system_prompt(challenge_md, config),
                 build_runtime_fix_prompt(current_code, bench, current_kernel, config.get("timeout", 30)),
@@ -368,9 +434,9 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     p.add_argument(
-        "--provider", required=True,
+        "--provider",
         choices=["anthropic", "openai", "google", "claude-code"],
-        help="LLM provider (claude-code uses 'claude -p' headless mode, no API key needed)",
+        help="LLM provider (default: agent.config.json, then anthropic)",
     )
     default_hint = ", ".join(f"{prov}={mid}" for prov, mid in DEFAULT_MODELS.items())
     p.add_argument(
@@ -383,11 +449,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--api-key", help="API key (default: from env var)")
     p.add_argument("--api-base", help="Base URL for OpenAI-compatible endpoints")
     p.add_argument(
-        "--compute", choices=["local", "c3"], default="local",
-        help="Where to run each benchmark job (default: local)",
+        "--compute", choices=["local", "c3"],
+        help="Where to run each benchmark job (default: agent.config.json, then local)",
     )
     p.add_argument(
-        "--hardware", default="l40",
+        "--hardware",
         help="C3 GPU profile for --compute c3 (default: l40)",
     )
     p.add_argument(
@@ -398,7 +464,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--c3-time", default="02:00:00",
+        "--c3-time",
         help="C3 job walltime for each benchmark job (default: 02:00:00)",
     )
     p.add_argument(
@@ -412,22 +478,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument("--agent-id", help="Resume with an existing agent ID")
     p.add_argument("--agent-name", help="Agent name (used with --agent-id)")
+    p.add_argument("--new-agent", action="store_true", help="Register a new agent even if agent.config.json has one.")
     return p.parse_args()
 
 
-def resolve_api_key(args: argparse.Namespace) -> str:
-    if args.provider == "claude-code":
+def resolve_api_key(provider: str, api_key: str | None) -> str:
+    if provider == "claude-code":
         return ""
-    if args.api_key:
-        return args.api_key
+    if api_key:
+        return api_key
     env_map = {
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",
     }
-    key = os.environ.get(env_map[args.provider], "")
+    key = os.environ.get(env_map[provider], "")
     if not key:
-        sys.exit(f"No API key. Set ${env_map[args.provider]} or pass --api-key.")
+        sys.exit(f"No API key. Set ${env_map[provider]} or pass --api-key.")
     return key
 
 
@@ -436,10 +503,26 @@ def resolve_api_key(args: argparse.Namespace) -> str:
 
 def main() -> int:
     args = parse_args()
-    api_key = resolve_api_key(args)
-    model = args.model or DEFAULT_MODELS[args.provider]
-
     config = load_config()
+    agent_config = load_agent_config()
+
+    args.provider = args.provider or agent_config.get("provider") or "anthropic"
+    valid_providers = set(DEFAULT_MODELS) | {"claude-code"}
+    if args.provider not in valid_providers:
+        sys.exit(f"Unknown provider: {args.provider}")
+    args.model = args.model or agent_config.get("model")
+    args.api_base = args.api_base or agent_config.get("api_base")
+    args.compute = args.compute or agent_config.get("compute") or "local"
+    args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
+    args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
+    args.c3_cloud_provider = args.c3_cloud_provider or agent_config.get("c3_cloud_provider")
+    args.c3_no_build = args.c3_no_build or bool(agent_config.get("c3_no_build", False))
+    if args.compute not in ("local", "c3"):
+        sys.exit(f"Unknown compute provider: {args.compute}")
+
+    api_key = resolve_api_key(args.provider, args.api_key)
+    model = args.model or DEFAULT_MODELS.get(args.provider, "")
+
     server = config.get("server_url", "").rstrip("/")
     if not server:
         sys.exit("No server_url in swarm.config.json. Run setup.py first.")
@@ -447,13 +530,40 @@ def main() -> int:
         if shutil.which("c3") is None:
             sys.exit("c3 CLI not found. Install it from https://docs.cthree.cloud/.")
 
-    if args.agent_id:
-        agent_id = args.agent_id
-        agent_name = args.agent_name or f"script-{agent_id[:8]}"
+    # Register or resume. agent.config.json is local-only, so it is safe to
+    # persist the swarm agent id there for automatic restarts.
+    configured_agent_id = agent_config.get("agent_id")
+    configured_agent_name = agent_config.get("agent_name")
+    if args.new_agent:
+        configured_agent_id = None
+        configured_agent_name = None
+
+    if args.agent_id or configured_agent_id:
+        agent_id = args.agent_id or configured_agent_id
+        agent_name = args.agent_name or configured_agent_name or f"script-{agent_id[:8]}"
         print(f"Resuming agent: {agent_name} ({agent_id})")
     else:
         agent_id, agent_name = register_agent(server, config)
         print(f"Registered as: {agent_name} ({agent_id})")
+
+    updated_agent_config = dict(agent_config)
+    runtime_defaults = {
+        "provider": args.provider,
+        "model": args.model,
+        "api_base": args.api_base,
+        "compute": args.compute,
+        "c3_hardware": args.hardware,
+        "c3_time": args.c3_time,
+        "c3_cloud_provider": args.c3_cloud_provider,
+        "c3_no_build": args.c3_no_build,
+    }
+    for key, value in runtime_defaults.items():
+        updated_agent_config.setdefault(key, value)
+    updated_agent_config.update({
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+    })
+    write_agent_config(updated_agent_config)
 
     challenge_md = read_challenge_md()
 
@@ -549,7 +659,8 @@ def main() -> int:
 
         print(f"  [LLM] Generating hypothesis via {args.provider}/{model}…")
         try:
-            hyp_response, hyp_usage = call_llm(
+            hyp_response, hyp_usage = _call_llm_logged(
+                "hypothesis", config,
                 args.provider, model, api_key,
                 build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
                 build_hypothesis_user_prompt(state, config),
@@ -664,7 +775,8 @@ def main() -> int:
                 f"(post-fix similarity {post_fix_similarity * 100:.0f}%) — re-describing hypothesis ..."
             )
             try:
-                redesc_response, redesc_usage = call_llm(
+                redesc_response, redesc_usage = _call_llm_logged(
+                    "redescribe", config,
                     args.provider, model, api_key,
                     build_redescribe_system_prompt(config),
                     build_redescribe_hypothesis_prompt(

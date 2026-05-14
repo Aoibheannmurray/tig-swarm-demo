@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -26,7 +27,7 @@ Usage = dict[str, int]  # {"input_tokens": N, "output_tokens": N}
 
 _ZERO_USAGE: Usage = {"input_tokens": 0, "output_tokens": 0}
 
-_TIMEOUT = 180
+_TIMEOUT = 1800
 _DEFAULT_MAX_TOKENS = 16384
 
 _MODEL_MAX_TOKENS: list[tuple[str, int]] = [
@@ -179,14 +180,27 @@ def call_openai(
 def call_claude_code(
     system: str, prompt: str, model: str | None = None,
 ) -> tuple[str, Usage]:
-    cmd = ["claude", "--bare", "-p", "--system-prompt", system, "--max-output-tokens", str(_max_tokens_for_model(model or ""))]
+    # --tools "" disables all built-in harness tools (Read/Write/Bash/etc.).
+    # Without this, Opus sees Write in scope, treats "return the file" as
+    # "write the file," and produces chatty preamble like "It looks like file
+    # write permissions need to be granted..." which then breaks `cargo build`.
+    cmd = ["claude", "-p", "--system-prompt", system, "--tools", ""]
     if model:
         cmd += ["--model", model]
-    result = subprocess.run(
-        cmd, input=prompt, capture_output=True, text=True, timeout=_TIMEOUT,
-    )
+    # Run from a temp dir so the CLI's CLAUDE.md auto-discovery doesn't pull
+    # this repo's docs into every prompt — we supply our own system prompt.
+    # We can't use --bare to disable discovery because --bare also disables
+    # OAuth and forces ANTHROPIC_API_KEY, defeating the point of the
+    # subscription path.
+    with tempfile.TemporaryDirectory() as cwd:
+        result = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True,
+            timeout=_TIMEOUT, cwd=cwd,
+        )
     if result.returncode != 0:
-        raise RuntimeError(f"claude -p failed (exit {result.returncode}): {result.stderr[:800]}")
+        # `claude` writes auth/usage errors to stdout, so include both streams.
+        err = (result.stderr or result.stdout or "").strip()[:800]
+        raise RuntimeError(f"claude -p failed (exit {result.returncode}): {err}")
     return result.stdout, dict(_ZERO_USAGE)
 
 

@@ -20,6 +20,7 @@ import { EnergyPanel } from "./energy_arbitrage";
 import { SatPanel } from "./satisfiability";
 import { HypergraphPanel } from "./hypergraph";
 import { NeuralnetPanel } from "./neuralnet_optimizer";
+import { VectorSearchPanel } from "./vector_search";
 
 export type ScoringDirection = "min" | "max";
 
@@ -98,6 +99,12 @@ export const CHALLENGES = {
     pretty: "Neural Net Optimizer",
     scoreLabel: "QUALITY",
     panelFactory: (id: string) => new NeuralnetPanel(id),
+    fallback: { ...FALLBACK_SUB },
+  },
+  vector_search: {
+    pretty: "Vector Search",
+    scoreLabel: "QUALITY",
+    panelFactory: (id: string) => new VectorSearchPanel(id),
     fallback: { ...FALLBACK_SUB },
   },
 } as const satisfies Record<string, ChallengeEntry>;

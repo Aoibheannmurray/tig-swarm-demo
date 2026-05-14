@@ -133,17 +133,6 @@ The `training_loop` function handles:
 - The solution must contain valid weights/biases matching the MLP architecture dimensions.
 - The solution must be loadable into the MLP and produce a finite test loss.
 
-## Scoring
-
-Your model's average MSE test loss is compared against a noise-floor baseline:
-
-```
-epsilon_star_squared = (4 / test_size) * sum((noisy_target - true_function)^2)
-quality = (epsilon_star_squared - your_test_loss) / epsilon_star_squared * 1,000,000
-```
-
-Clamped to +/-10,000,000. Higher quality is better. Zero means matching the noise-floor baseline. Positive means your model generalises better than the noise level; negative means worse.
-
 ## Solver Interface
 
 ```rust

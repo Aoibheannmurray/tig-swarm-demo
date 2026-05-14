@@ -1,95 +1,150 @@
 # TIG Swarm Demo
 
-Multiple AI agents collaboratively optimize TIG challenges in Rust, sharing results through a coordination server with a live dashboard.
+Multiple agents optimize TIG challenge solvers in Rust, coordinated by a FastAPI server and live dashboard.
 
-Run as an **agent** (Claude Code, Codex, Gemini CLI — anything that reads `AGENTS.md`) or as a **script** (`scripts/run_loop.py`, which calls any LLM API).
+Each contributor runs `scripts/run_loop.py`, which calls any LLM (Anthropic, OpenAI, Google, OpenAI-compatible endpoints, or your local `claude` CLI) in a loop and contributes to the swarm.
 
-Supports 7 challenges: **Satisfiability**, **Vehicle Routing**, **Knapsack**, **Job Scheduling**, **Energy Arbitrage**, **Hypergraph** (GPU), **Neural Net Optimizer** (GPU).
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally, including the server protocol contributors call into.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally. See [AGENTS.md](./AGENTS.md) for the agent's runtime instructions.
+## Host
 
-## Quick start
+Requirements: Python 3, Railway CLI, Railway account.
 
-### Host a swarm
-
-Need: Python 3, a free [Railway](https://railway.com) account, and the Railway CLI.
-
-**1. Install the Railway CLI** (pick one):
-```bash
-brew install railway          # macOS with Homebrew
-npm i -g @railway/cli         # Node.js
-cargo install railwayapp --locked  # Rust/Cargo
-```
-
-**2. Log in:**
 ```bash
 railway login
-```
-This opens a browser — complete the OAuth flow there.
-
-**3. Provision and deploy:**
-```bash
-git clone <repo>
-cd tig-swarm-demo
-python setup.py create
+python setup.py
 ```
 
-The wizard provisions a Railway service, deploys, and prints your **swarm URL** (share with contributors) and **admin key** (also saved to `swarm.config.json`).
+Choose `create` in the wizard. It deploys a new Railway swarm, writes local `swarm.config.json`, and prints the dashboard URL plus admin key. Edit `initial_algorithms/<challenge>.rs` before creating if you want agents to start from a custom seed.
 
-### Join a swarm
-
-Need: Python 3, Docker.
+Switch the active challenge later:
 
 ```bash
-git clone <repo>
-cd tig-swarm-demo
-python setup.py join <swarm-url>
+python setup.py switch vehicle_routing
 ```
 
-Then pick one:
+Host setup can also be scripted:
 
-**Agent mode** — open Claude Code (or any coding agent) here and tell it:
-> Read AGENTS.md and start contributing to the swarm.
-
-To run benchmarks on C3 cloud GPUs instead of local Docker, set these env vars first:
 ```bash
-export TIG_COMPUTE=c3
-export C3_API_KEY=c3_key_...
-export C3_HARDWARE=l40          # GPU type (default: l40)
+python setup.py create --swarm-name my-tig-swarm --swarm-type cpu --active-challenge vehicle_routing --use-defaults --yes
 ```
-Then start the agent as normal — `benchmark.py` routes to C3 automatically.
 
-**Script mode** — needs an LLM API key:
+## Contributor
+
+Requirements: Python 3 and Docker.
+
 ```bash
-export ANTHROPIC_API_KEY=sk-...    # or OPENAI_API_KEY, GOOGLE_API_KEY
-python scripts/run_loop.py --provider anthropic
+python setup.py
+export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
+python scripts/run_loop.py
 ```
-Run `python scripts/run_loop.py --help` for other providers, OpenAI-compatible endpoints, and resuming an existing agent.
 
-To run each benchmark on C3 GPU compute instead of local Docker:
+Choose `contributor` in the wizard and paste the swarm URL when asked. Setup writes:
+
+- `swarm.config.json`: swarm URL, active challenge, tracks, timeouts, paths.
+- `agent.config.json`: local provider/model/compute defaults. No API keys are stored.
+
+`run_loop.py` registers once, saves `agent_id` in `agent.config.json`, and resumes automatically on later runs.
+
+Or use your local `claude` CLI in headless mode — auth comes from your Claude Code login (OAuth / subscription), no `ANTHROPIC_API_KEY` needed:
+
 ```bash
-export ANTHROPIC_API_KEY=sk-...
-export C3_API_KEY=c3_key_...
-python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 ```
-In C3 mode the LLM loop stays local. Each candidate algorithm submits one C3 Docker benchmark job, waits for the benchmark JSON, then publishes back to the swarm server.
-If you already ran `c3 login`, `C3_API_KEY` is optional.
 
-> One clone = one swarm. To join a second swarm, clone again into a separate directory.
+Each iteration shells out to `claude -p` from a temp directory so the CLI's `CLAUDE.md` auto-discovery doesn't inject anything from this repo into the system prompt — `run_loop.py` supplies its own. Trade-offs vs the API providers: per-call latency is higher (subprocess startup), and the dashboard's cost column reads $0 because the CLI doesn't surface token usage.
 
-## Dashboard
+## Running Multiple Agents
 
-Open the swarm URL in a browser. Hotkeys: `1` main / `2` ideas / `Q` QR code / `R` replay. Other pages: `/ideas.html`, `/diversity.html`, `/benchmark.html`.
+If you have the API quota (or a Claude Code subscription) to run several agents at once, `scripts/run_fleet.py` launches them from a single clone. Each agent gets its own git worktree under `worktrees/<name>/`, its own swarm `agent_id` (persisted in that worktree's `agent.config.json`), and runs `run_loop.py` as an isolated subprocess. All children stream stdout through the launcher, prefixed by agent name.
 
-## Setup commands
+Run `python setup.py` once first as a contributor so `swarm.config.json` exists. Then:
 
-| Command | Who | What |
-|---|---|---|
-| `setup.py create` | Host | Provision a new swarm on Railway |
-| `setup.py join <url>` | Contributor | Point this clone at an existing swarm |
-| `setup.py switch <challenge>` | Host | Change the active challenge for everyone (per-agent state is preserved per-challenge) |
-| `setup.py sync` | Contributor | Re-template if the active challenge changed (the agent loop runs this automatically) |
+```bash
+cp fleet.config.example.json fleet.config.json
+# edit fleet.config.json — name, provider, model, api_key_env per agent
+export ANTHROPIC_API_KEY=sk-...      # whatever keys your entries reference
+export OPENAI_API_KEY=sk-...
+python scripts/run_fleet.py
+```
 
-## Seeding the initial algorithm
+`Ctrl-C` terminates the whole fleet (SIGTERM, 10s grace, then SIGKILL).
 
-Every agent starts a fresh trajectory from the same seed: `initial_algorithms/<challenge>.rs` (one per challenge). Default is a stub with `unimplemented!()` — edit these files *before* `setup.py create` to seed the swarm with working baselines. GPU challenges also have `initial_algorithms/<challenge>.cu` for CUDA kernels.
+Each entry in `fleet.config.json` maps 1:1 to a `run_loop.py` invocation:
+
+```json
+{
+  "name": "claude-1",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "compute": "c3",
+  "hardware": "l40"
+}
+```
+
+`api_key_env` lets agents on the same provider use different keys (e.g. two `openai` entries pointing at `OPENAI_API_KEY` and `OPENAI_API_KEY_2`). Omit it for `claude-code` — that provider uses your local CLI's login.
+
+Other commands:
+
+```bash
+python scripts/run_fleet.py --list             # show agent names, agent_ids, worktree status
+python scripts/run_fleet.py --only claude-1    # run a subset (repeatable)
+python scripts/run_fleet.py --clean            # remove every fleet worktree and its branch
+```
+
+Because benchmarking is offloaded (set `"compute": "c3"` per agent), running N agents only multiplies LLM calls and remote benchmark submissions — it doesn't multiply local CPU or Docker pressure.
+
+## Fully Scripted Setup
+
+Flags skip prompts, so setup can be instant:
+
+```bash
+python setup.py \
+  --swarm-url <swarm-url> \
+  --agent-name sam-agent \
+  --provider anthropic \
+  --compute local \
+  --yes
+```
+
+Change local runtime defaults later:
+
+```bash
+python setup.py configure-agent --provider openai --model gpt-5 --compute c3 --hardware l40
+```
+
+Override a configured value for one run:
+
+```bash
+python scripts/run_loop.py --provider google --model gemini-2.5-pro
+```
+
+## Docker
+
+Build the local benchmark image once:
+
+```bash
+docker build -f Dockerfile.cpu -t tig-swarm-cpu .
+```
+
+GPU swarms use:
+
+```bash
+docker build -f Dockerfile.gpu -t tig-swarm-gpu .
+```
+
+## Config Rule
+
+Swarm state lives on the server. Local files only tell this clone how to connect and run.
+
+Secrets stay in environment variables:
+
+```bash
+ANTHROPIC_API_KEY
+OPENAI_API_KEY
+GOOGLE_API_KEY
+C3_API_KEY
+```
+
+See `ARCHITECTURE.md` for internals and the swarm protocol contributors call into.

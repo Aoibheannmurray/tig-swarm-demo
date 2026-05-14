@@ -28,7 +28,7 @@ def _resolve_server_url() -> str:
             pass
     sys.exit(
         "publish.py: server URL not configured. Run "
-        "`python setup.py join <swarm-url>` (or set TIG_SWARM_SERVER)."
+        "`python setup.py` (or set TIG_SWARM_SERVER)."
     )
 
 SERVER = _resolve_server_url()
