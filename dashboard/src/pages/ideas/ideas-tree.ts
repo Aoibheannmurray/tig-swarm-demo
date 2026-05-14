@@ -13,9 +13,16 @@ interface FeedItem {
 
 const MAX_FEED_ITEMS = 40;
 
+// Tracks element + timestamp so we can keep the feed sorted newest-first
+// across racing backfill sources (chat history, hypothesis replay, etc.).
+interface RenderedItem {
+  el: HTMLElement;
+  timestamp: string;
+}
+
 export class IdeasTree {
   private feedEl!: HTMLElement;
-  private feedItems: HTMLElement[] = [];
+  private feedItems: RenderedItem[] = [];
   private statsEl!: HTMLElement;
   private hypothesisCount = 0;
   private succeededCount = 0;
@@ -57,7 +64,7 @@ export class IdeasTree {
 
   handleMessage(msg: WSMessage) {
     if (msg.type === "reset") {
-      this.feedItems.forEach((el) => el.remove());
+      this.feedItems.forEach((item) => item.el.remove());
       this.feedItems = [];
       this.feedEl.innerHTML = "";
       this.hypothesisCount = 0;
@@ -173,20 +180,38 @@ export class IdeasTree {
       `;
     }
 
+    // Keep feedItems sorted newest-first by ISO timestamp so racing backfill
+    // sources don't end up out of order. Live messages typically hit idx 0.
+    let insertIdx = 0;
+    if (item.timestamp) {
+      while (
+        insertIdx < this.feedItems.length &&
+        this.feedItems[insertIdx].timestamp > item.timestamp
+      ) {
+        insertIdx++;
+      }
+    }
+
     el.style.opacity = "0";
     el.style.transform = "translateY(-16px)";
-    this.feedEl.prepend(el);
+    if (insertIdx === 0) {
+      this.feedEl.prepend(el);
+    } else if (insertIdx >= this.feedItems.length) {
+      this.feedEl.appendChild(el);
+    } else {
+      this.feedEl.insertBefore(el, this.feedItems[insertIdx].el);
+    }
     requestAnimationFrame(() => {
       el.style.transition = "opacity 0.35s ease, transform 0.35s ease";
       el.style.opacity = "1";
       el.style.transform = "translateY(0)";
     });
 
-    this.feedItems.unshift(el);
+    this.feedItems.splice(insertIdx, 0, { el, timestamp: item.timestamp });
 
     while (this.feedItems.length > MAX_FEED_ITEMS) {
       const old = this.feedItems.pop()!;
-      old.remove();
+      old.el.remove();
     }
   }
 

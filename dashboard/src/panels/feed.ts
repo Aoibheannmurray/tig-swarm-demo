@@ -21,6 +21,8 @@ const EVENT_CONFIG: Record<string, { dot: string; icon: string }> = {
 interface FeedItem {
   el: HTMLElement;
   agentId: string;
+  // Used to keep items[] sorted newest-first across racing backfill sources.
+  timestamp: string;
   render: (name: string) => void;
 }
 
@@ -145,7 +147,8 @@ export class FeedPanel implements Panel {
 
     const config = EVENT_CONFIG[eventType] || EVENT_CONFIG.agent_joined;
     const agentColor = agentId ? getAgentColor(agentId) : config.dot;
-    const timestamp = "timestamp" in msg ? formatTime(msg.timestamp as string) : "";
+    const rawTimestamp = "timestamp" in msg ? (msg.timestamp as string) : "";
+    const timestamp = rawTimestamp ? formatTime(rawTimestamp) : "";
 
     const item = document.createElement("div");
     item.className = `feed-item ${eventType === "new_global_best" ? "feed-item--best" : ""}`;
@@ -165,10 +168,26 @@ export class FeedPanel implements Panel {
     };
     writeText(this.nameFor(agentId, fallbackName));
 
+    // Find insertion index — items[] is kept sorted newest-first by ISO
+    // timestamp. Without a timestamp (shouldn't happen for real events) we
+    // fall back to "newest", i.e. the top.
+    let insertIdx = 0;
+    if (rawTimestamp) {
+      while (insertIdx < this.items.length && this.items[insertIdx].timestamp > rawTimestamp) {
+        insertIdx++;
+      }
+    }
+
     // Animate in
     item.style.transform = "translateY(-28px)";
     item.style.opacity = "0";
-    this.list.prepend(item);
+    if (insertIdx === 0) {
+      this.list.prepend(item);
+    } else if (insertIdx >= this.items.length) {
+      this.list.appendChild(item);
+    } else {
+      this.list.insertBefore(item, this.items[insertIdx].el);
+    }
 
     requestAnimationFrame(() => {
       item.style.transition = "transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease";
@@ -176,7 +195,7 @@ export class FeedPanel implements Panel {
       item.style.opacity = "1";
     });
 
-    this.items.unshift({ el: item, agentId, render: writeText });
+    this.items.splice(insertIdx, 0, { el: item, agentId, timestamp: rawTimestamp, render: writeText });
 
     // Remove excess
     while (this.items.length > MAX_ITEMS) {
