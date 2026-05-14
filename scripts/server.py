@@ -40,13 +40,46 @@ def server_get(url: str, timeout: int = 10) -> dict:
 # ── Agent API ──────────────────────────────────────────────────────
 
 
-def register_agent(server: str, config: dict | None = None) -> tuple[str, str]:
+_AGENTIC_PROVIDERS = ("claude-code-agentic", "codex-agentic")
+
+
+def derive_llm_label(provider: str | None, model: str | None) -> str:
+    """Dashboard label inferred from what the loop is actually running.
+
+    The model name is the most informative bit (`claude-opus-4-7`,
+    `gpt-5`, `gemini-2.5-pro`), so we lead with it. For agentic providers
+    we append the provider in parens so the dashboard can distinguish
+    e.g. `claude-opus-4-7` (one-shot API) from `claude-opus-4-7 (claude-
+    code-agentic)`. When the model is unspecified (the CLI is using its
+    own default), the provider name alone is the best we can do.
+    """
+    provider = (provider or "").strip()
+    model = (model or "").strip()
+    if model:
+        if provider in _AGENTIC_PROVIDERS:
+            return f"{model} ({provider})"
+        return model
+    return provider or "unknown"
+
+
+def register_agent(
+    server: str, config: dict | None = None,
+    *, provider: str | None = None, model: str | None = None,
+) -> tuple[str, str]:
+    """Register an agent. Forwards a dashboard label as `llm_type`.
+
+    Label resolution order: an explicit `contributor_llm` in swarm.config
+    (set by `setup.py --llm-label` or hand-edited) wins; otherwise we
+    derive it from the live provider+model so the dashboard always
+    tracks what's actually running.
+    """
     body: dict = {}
-    if config:
-        if config.get("contributor_name"):
-            body["agent_name"] = config["contributor_name"]
-        if config.get("contributor_llm"):
-            body["llm_type"] = config["contributor_llm"]
+    if config and config.get("contributor_name"):
+        body["agent_name"] = config["contributor_name"]
+
+    explicit = (config or {}).get("contributor_llm")
+    body["llm_type"] = explicit or derive_llm_label(provider, model)
+
     data = server_post(f"{server}/api/agents/register", body)
     return data["agent_id"], data["agent_name"]
 
