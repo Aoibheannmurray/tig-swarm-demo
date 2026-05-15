@@ -69,7 +69,7 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
     return `
       <div class="panel-inner knapsack-panel">
         <div class="panel-label">CLAUSES &amp; ASSIGNMENT</div>
-        <div class="knapsack-agent-name" id="sat-agent-name"></div>
+        <div class="solution-agent-name" id="sat-agent-name"></div>
         ${this.navsScaffold()}
         <div class="sat-svg-wrap" id="sat-svg-wrap">
           <svg id="sat-svg"></svg>

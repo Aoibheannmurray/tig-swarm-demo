@@ -787,14 +787,10 @@ html, body {
   padding: 12px 16px;
 }
 
-.knapsack-agent-name {
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 500;
-  min-height: 15px;
-  margin-bottom: 4px;
-  letter-spacing: 0.02em;
-}
+/* `.knapsack-agent-name` previously lived here as a duplicate of
+   `.solution-agent-name` (same six properties, four panels using it). All
+   four panel scaffolds now reference `.solution-agent-name` directly so
+   the agent-name styling has one source of truth. */
 
 .sat-svg-wrap {
   flex: 1 1 auto;
@@ -2142,36 +2138,68 @@ html, body {
   font-style: italic;
 }
 
-/* ── Neural net optimizer panel ── */
+/* ── Neural net optimizer panel ──
+   Mirrors the hypergraph layout: panel-inner > header rows > *-svg-wrap (the
+   viz area, with absolute empty-state overlay) > *-bottom-bar (stats). */
 .nn-panel {
   display: flex;
   flex-direction: column;
-  padding: 12px 16px;
+  padding: 2px 12px 0;
 }
 
-.nn-viz-area {
+.nn-panel .panel-label {
+  font-size: 10px;
+  margin-bottom: 2px;
+}
+.nn-panel .solution-agent-name {
+  font-size: 11px;
+  min-height: 13px;
+  margin-bottom: 0;
+}
+
+.nn-svg-wrap {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  align-items: stretch;
+  justify-content: stretch;
   position: relative;
+  padding: 4px 0 8px;
+}
+
+.nn-viz-stack {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .nn-arch-diagram {
   flex: 1 1 auto;
   min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
+}
+.nn-arch-diagram svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
-.nn-epochs-section {
+.nn-meters {
   flex: 0 0 auto;
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
   padding: 0 4px;
 }
 
-.nn-epochs-header {
+.nn-meter {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.nn-meter-head {
   font-family: var(--ui);
   font-size: 9px;
   font-weight: 500;
@@ -2181,7 +2209,7 @@ html, body {
   margin-bottom: 4px;
 }
 
-.nn-epochs-bar-wrap {
+.nn-meter-bar-wrap {
   height: 10px;
   background: var(--bg-sunken);
   border-radius: 5px;
@@ -2189,7 +2217,7 @@ html, body {
   overflow: hidden;
 }
 
-.nn-epochs-bar {
+.nn-meter-bar {
   height: 100%;
   background: var(--color-accent);
   border-radius: 5px;
@@ -2197,20 +2225,17 @@ html, body {
   width: 0%;
 }
 
-.nn-epochs-label {
+.nn-meter-label {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 10px;
   color: var(--ink-mid);
-  margin-top: 2px;
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.nn-loss-section {
-  flex: 0 0 auto;
-  padding: 0 4px;
-  margin-top: 8px;
-}
-
-.nn-loss-bars {
+.nn-loss-rows {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -2259,10 +2284,161 @@ html, body {
   opacity: 0.5;
 }
 
-.nn-loss-label {
+/* Bottom stat bar — mirrors .hg-bottom-bar. Sits flush with the panel
+   bottom so HIDDEN LAYERS / PARAMETERS / SCORE never overlap. */
+.nn-bottom-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 24px;
+  padding: 8px 4px 10px;
+}
+
+.nn-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.nn-stat-label {
+  font-size: 8px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  line-height: 1.2;
+}
+
+.nn-stat-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.nn-stat-score {
+  text-align: right;
+  margin-left: auto;
+}
+.nn-stat-score .nn-stat-label {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+}
+.nn-stat-score .nn-stat-value {
+  font-size: 32px;
+  font-weight: 300;
+  line-height: 1.1;
+}
+.nn-stat-delta {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+/* ── Vector search panel ──
+   Same shape as neural net + hypergraph: vs-svg-wrap fills the panel,
+   vs-bottom-bar sits flush. */
+.vs-panel {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 12px 0;
+}
+
+.vs-panel .panel-label {
+  font-size: 10px;
+  margin-bottom: 2px;
+}
+.vs-panel .solution-agent-name {
+  font-size: 11px;
+  min-height: 13px;
+  margin-bottom: 0;
+}
+
+.vs-svg-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  position: relative;
+  padding: 4px 0 8px;
+}
+
+.vs-svg-wrap svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.vs-distance-badge {
+  position: absolute;
+  top: 6px;
+  right: 8px;
   font-family: var(--mono);
   font-size: 10px;
-  color: var(--ink-mid);
+  color: var(--text-mid);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 2px 6px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.vs-bottom-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 24px;
+  padding: 8px 4px 10px;
+}
+
+.vs-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.vs-stat-label {
+  font-size: 8px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  line-height: 1.2;
+}
+
+.vs-stat-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.vs-stat-score {
+  text-align: right;
+  margin-left: auto;
+}
+.vs-stat-score .vs-stat-label {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+}
+.vs-stat-score .vs-stat-value {
+  font-size: 32px;
+  font-weight: 300;
+  line-height: 1.1;
+}
+.vs-stat-delta {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
   margin-top: 2px;
 }
 
@@ -2270,18 +2446,128 @@ html, body {
 .hg-panel {
   display: flex;
   flex-direction: column;
-  padding: 12px 16px;
+  /* No bottom padding so the stats sit flush with the panel edge; minimal
+     top padding so the SVG starts right under the header. */
+  padding: 2px 12px 0;
+}
+
+/* Tighten the header above the viz so the galaxy gets the maximum share of
+   the panel height. Scoped to .hg-panel so other challenges keep their
+   default chrome sizing. */
+.hg-panel .panel-label {
+  font-size: 10px;
+  margin-bottom: 2px;
+}
+.hg-panel .solution-agent-name {
+  font-size: 11px;
+  min-height: 13px;
+  margin-bottom: 0;
 }
 
 .hg-svg-wrap {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: stretch;
   position: relative;
 }
 
 .hg-panel svg {
   display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Stats overlay. Absolute-positioned with transparent background so the
+   galaxy SVG fills the entire panel below the header and the cluster
+   labels can render right down to the panel edge. Text-shadow halos in
+   the cream panel colour keep the stat values readable when cluster
+   dots happen to sit behind them. */
+.hg-bottom-bar {
+  position: absolute;
+  bottom: 4px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0;
+  background: transparent;
+  z-index: 2;
+  pointer-events: none;
+  flex-wrap: wrap;
+}
+.hg-bottom-bar .hg-stat-label,
+.hg-bottom-bar .hg-stat-value,
+.hg-bottom-bar .hg-stat-delta {
+  text-shadow:
+    0 0 4px var(--bg-card),
+    0 0 4px var(--bg-card),
+    0 0 4px var(--bg-card);
+}
+.hg-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.hg-stat-label {
+  font-size: 8px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  line-height: 1.2;
+}
+.hg-stat-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+.hg-stat-score {
+  text-align: right;
+  margin-left: auto;
+}
+.hg-stat-score .hg-stat-label {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+}
+.hg-stat-score .hg-stat-value {
+  font-size: 32px;
+  font-weight: 300;
+  line-height: 1.1;
+}
+.hg-stat-delta {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+/* Subtle settling animation when the panel re-renders (instance rotation,
+   new global best). 200ms is short enough to feel snappy, long enough to
+   read as a deliberate "ok, here's the new state" instead of a jarring
+   replacement. */
+@keyframes hg-fade-in {
+  from { opacity: 0; transform: scale(0.985); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.hg-chart.hg-fade-in {
+  animation: hg-fade-in 220ms ease-out;
+  transform-origin: 50% 50%;
+}
+
+/* Over-cap halo pulse. Faint red dashed ring around partitions whose weight
+   exceeds the imbalance tolerance — pulses gently so the constraint
+   violation reads even from a glance across the room. */
+@keyframes hg-halo-pulse {
+  0%, 100% { stroke-opacity: 0.35; }
+  50%      { stroke-opacity: 0.8;  }
+}
+.hg-halo--violation {
+  animation: hg-halo-pulse 2.2s ease-in-out infinite;
 }
