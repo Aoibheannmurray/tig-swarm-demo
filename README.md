@@ -67,21 +67,35 @@ Change local runtime defaults later:
 python setup.py configure-agent --provider openai --model gpt-5 --compute c3 --hardware l40
 ```
 
-C3 Docker jobs use public Docker Hub images. The defaults are `rust:1-bookworm` for CPU jobs and `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` for GPU jobs. Override them when you publish prebuilt images:
+C3 Docker jobs use public Docker Hub images. The defaults are `rust:1-bookworm` for CPU jobs and `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` for GPU jobs. To use TIG-specific prebuilt environments, build and push images to Docker Hub:
 
 ```bash
-python setup.py configure-agent \
-  --compute c3 \
-  --env samleeney/c3-jax-cuda-uat:20260513-l40
+docker login
+
+docker build -f Dockerfile.cpu -t <dockerhub-user>/tig-swarm-cpu:latest .
+docker push <dockerhub-user>/tig-swarm-cpu:latest
+
+docker build -f Dockerfile.gpu -t <dockerhub-user>/tig-swarm-gpu:latest .
+docker push <dockerhub-user>/tig-swarm-gpu:latest
 ```
 
-The `samleeney/c3-jax-cuda-uat:20260513-l40` image is an example image location, not a guaranteed TIG-maintained default. C3 must be able to pull the image from Docker Hub, so local tags such as `tig-swarm-cpu:latest` are not enough unless they have been pushed to a public Docker Hub repository. In regular use, `--env` should either be managed per contributor in their own `agent.config.json`, or maintained centrally by TIG and replaced here with the official TIG-owned image ref.
+C3 must be able to pull the image from Docker Hub, so local tags such as `tig-swarm-cpu:latest` are not enough unless they have been pushed to a public Docker Hub repository. Configure `--env` to match the swarm/challenge type this clone is running:
+
+```bash
+# CPU swarms/challenges
+python setup.py configure-agent --compute c3 --env <dockerhub-user>/tig-swarm-cpu:latest
+
+# GPU swarms/challenges
+python setup.py configure-agent --compute c3 --env <dockerhub-user>/tig-swarm-gpu:latest
+```
+
+In regular use, `--env` should either be managed per contributor in their own `agent.config.json`, or maintained centrally by TIG and replaced here with the official TIG-owned image ref.
 
 Override configured values for one run (flags beat `agent.config.json`):
 
 ```bash
 python scripts/run_loop.py --provider google --model gemini-2.5-pro
-python scripts/run_loop.py --compute c3 --env samleeney/c3-jax-cuda-uat:20260513-l40
+python scripts/run_loop.py --compute c3 --env <dockerhub-user>/tig-swarm-gpu:latest
 ```
 
 `run_loop.py` registers once, saves `agent_id` in `agent.config.json`, and resumes on later runs.
@@ -139,7 +153,7 @@ With `"compute": "c3"` per agent, benchmarking is offloaded — running N agents
 
 ## Docker
 
-Build the local benchmark image once (use `Dockerfile.gpu` for GPU swarms):
+Local Docker benchmarking uses local image tags. Build the local benchmark image once (use `Dockerfile.gpu` for GPU swarms):
 
 ```bash
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
