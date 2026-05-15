@@ -67,7 +67,14 @@ Change local runtime defaults later:
 python setup.py configure-agent --provider openai --model gpt-5 --compute c3 --hardware l40
 ```
 
-C3 Docker jobs use public Docker Hub images. The defaults are `rust:1-bookworm` for CPU jobs and `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` for GPU jobs. To use TIG-specific prebuilt environments, build and push images to Docker Hub:
+C3 Docker jobs default to public upstream Docker Hub images, so a fresh clone can run without access to any Sam/TIG-owned image:
+
+| Swarm/challenge type | Default C3 image |
+|----------------------|------------------|
+| CPU                  | `rust:1-bookworm` |
+| GPU                  | `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` |
+
+Those public defaults are the most portable path, but they install missing packages and Python/Rust dependencies during job startup. For faster C3 deploys, build a TIG-specific image with the benchmark dependencies already installed, push it to Docker Hub, and point `--env` at that image:
 
 ```bash
 docker login
