@@ -72,17 +72,16 @@ C3 Docker jobs use public Docker Hub images. The defaults are `rust:1-bookworm` 
 ```bash
 python setup.py configure-agent \
   --compute c3 \
-  --env-cpu rust:1-bookworm \
-  --env-gpu samleeney/c3-jax-cuda-uat:20260513-l40
+  --env samleeney/c3-jax-cuda-uat:20260513-l40
 ```
 
-The `samleeney/c3-jax-cuda-uat:20260513-l40` image is an example image location, not a guaranteed TIG-maintained default. C3 must be able to pull the image from Docker Hub, so local tags such as `tig-swarm-cpu:latest` are not enough unless they have been pushed to a public Docker Hub repository. In regular use, `--env-cpu` and `--env-gpu` should either be managed per contributor in their own `agent.config.json`, or maintained centrally by TIG and replaced here with the official TIG-owned image refs. Use `--env-image` only when the same image should be used for every C3 job.
+The `samleeney/c3-jax-cuda-uat:20260513-l40` image is an example image location, not a guaranteed TIG-maintained default. C3 must be able to pull the image from Docker Hub, so local tags such as `tig-swarm-cpu:latest` are not enough unless they have been pushed to a public Docker Hub repository. In regular use, `--env` should either be managed per contributor in their own `agent.config.json`, or maintained centrally by TIG and replaced here with the official TIG-owned image ref.
 
 Override configured values for one run (flags beat `agent.config.json`):
 
 ```bash
 python scripts/run_loop.py --provider google --model gemini-2.5-pro
-python scripts/run_loop.py --compute c3 --env-gpu samleeney/c3-jax-cuda-uat:20260513-l40
+python scripts/run_loop.py --compute c3 --env samleeney/c3-jax-cuda-uat:20260513-l40
 ```
 
 `run_loop.py` registers once, saves `agent_id` in `agent.config.json`, and resumes on later runs.

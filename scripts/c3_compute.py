@@ -58,7 +58,9 @@ def _arg_value(args: argparse.Namespace, name: str, default=None):
 
 def _select_docker_image(args: argparse.Namespace, config: dict) -> str:
     explicit = (
-        _arg_value(args, "env_image")
+        _arg_value(args, "env")
+        or _arg_value(args, "env_image")
+        or config.get("env")
         or config.get("env_image")
         or config.get("c3_image")
     )
@@ -442,7 +444,7 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
     cfg["c3_hardware"] = args.hardware.lower()
 
     image = _select_docker_image(args, cfg)
-    cfg["env_image"] = image
+    cfg["env"] = image
 
     env = os.environ.copy()
     if c3_key and not c3_key.startswith("your_"):

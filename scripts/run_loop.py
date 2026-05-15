@@ -15,7 +15,7 @@ Usage:
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
     python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
-    python scripts/run_loop.py --provider anthropic --compute c3 --env-cpu rust:1-bookworm
+    python scripts/run_loop.py --provider anthropic --compute c3 --env rust:1-bookworm
     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
     # Resume a specific previous agent
@@ -38,7 +38,7 @@ Provider/model/compute defaults come from agent.config.json when present.
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
 --c3-api-key, or existing `c3 login` credentials. C3 Docker jobs use public
-Docker Hub images, configured with --env-image/--env-cpu/--env-gpu.
+Docker Hub images, configured with --env.
 
 claude-code provider:
     Shells out to your local `claude -p` binary instead of hitting an HTTP
@@ -606,23 +606,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional C3 CLI provider passed as `c3 deploy -p ...`",
     )
     p.add_argument(
-        "--env-image",
-        help="Docker Hub environment image for all C3 jobs; overrides CPU/GPU defaults",
+        "--env",
+        help="Docker Hub environment image for C3 jobs; overrides built-in defaults",
     )
-    p.add_argument("--c3-image", dest="env_image", help=argparse.SUPPRESS)
-    p.add_argument(
-        "--env-cpu",
-        help="Docker Hub environment image for CPU C3 jobs (default: rust:1-bookworm)",
-    )
-    p.add_argument("--c3-cpu-image", dest="env_cpu", help=argparse.SUPPRESS)
-    p.add_argument(
-        "--env-gpu",
-        help=(
-            "Docker Hub environment image for GPU C3 jobs "
-            "(default: nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04)"
-        ),
-    )
-    p.add_argument("--c3-gpu-image", dest="env_gpu", help=argparse.SUPPRESS)
+    p.add_argument("--env-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--env-cpu", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-cpu-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--env-gpu", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument(
         "--agentic-timeout", type=int, default=900,
@@ -675,21 +667,15 @@ def main() -> int:
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
     args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
-    args.env_image = (
-        args.env_image
-        or agent_config.get("env_image")
-        or agent_config.get("c3_image")
-    )
-    args.env_cpu = (
-        args.env_cpu
-        or agent_config.get("env_cpu")
-        or agent_config.get("c3_cpu_image")
-    )
-    args.env_gpu = (
-        args.env_gpu
-        or agent_config.get("env_gpu")
-        or agent_config.get("c3_gpu_image")
-    )
+    args.env = args.env or agent_config.get("env")
+    if args.env is None:
+        args.env = agent_config.get("env_image") or agent_config.get("c3_image")
+    if args.env is None:
+        args.env = (
+            agent_config.get("env_gpu") or agent_config.get("c3_gpu_image")
+            if bool(config.get("is_gpu"))
+            else agent_config.get("env_cpu") or agent_config.get("c3_cpu_image")
+        )
     if args.compute not in ("local", "c3"):
         sys.exit(f"Unknown compute provider: {args.compute}")
 
@@ -727,6 +713,9 @@ def main() -> int:
     updated_agent_config.pop("c3_image", None)
     updated_agent_config.pop("c3_cpu_image", None)
     updated_agent_config.pop("c3_gpu_image", None)
+    updated_agent_config.pop("env_image", None)
+    updated_agent_config.pop("env_cpu", None)
+    updated_agent_config.pop("env_gpu", None)
     runtime_defaults = {
         "provider": args.provider,
         "model": args.model,
@@ -735,9 +724,7 @@ def main() -> int:
         "c3_hardware": args.hardware,
         "c3_time": args.c3_time,
         "c3_provider": args.c3_provider,
-        "env_image": args.env_image,
-        "env_cpu": args.env_cpu,
-        "env_gpu": args.env_gpu,
+        "env": args.env,
     }
     for key, value in runtime_defaults.items():
         updated_agent_config.setdefault(key, value)
@@ -769,8 +756,8 @@ def main() -> int:
 
     print(f"Provider: {args.provider}  Model: {model}")
     compute_desc = f"c3/{args.hardware.lower()}" if args.compute == "c3" else args.compute
-    if args.compute == "c3" and args.env_image:
-        compute_desc += f" image={args.env_image}"
+    if args.compute == "c3" and args.env:
+        compute_desc += f" image={args.env}"
     print(f"Compute: {compute_desc}")
     print(f"Challenge: {config.get('challenge', '?')}")
     print(f"Server: {server}")

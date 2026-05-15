@@ -122,9 +122,7 @@ DEFAULT_AGENT_CONFIG = {
     "c3_hardware": "l40",
     "c3_time": "02:00:00",
     "c3_provider": None,
-    "env_image": None,
-    "env_cpu": "rust:1-bookworm",
-    "env_gpu": "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04",
+    "env": None,
 }
 
 
@@ -324,25 +322,19 @@ def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
         c3_provider = prior.get("c3_provider")
     if c3_provider == "":
         c3_provider = None
-    env_image = _arg_value(args, "env_image")
-    if env_image is None:
-        env_image = prior.get("env_image")
-    if env_image is None:
-        env_image = prior.get("c3_image")
-    if env_image == "":
-        env_image = None
-    env_cpu = (
-        _arg_value(args, "env_cpu")
-        or prior.get("env_cpu")
-        or prior.get("c3_cpu_image")
-        or DEFAULT_AGENT_CONFIG["env_cpu"]
-    )
-    env_gpu = (
-        _arg_value(args, "env_gpu")
-        or prior.get("env_gpu")
-        or prior.get("c3_gpu_image")
-        or DEFAULT_AGENT_CONFIG["env_gpu"]
-    )
+    swarm_prior = read_prior_swarm_config() or {}
+    prior_is_gpu = bool(swarm_prior.get("is_gpu") or swarm_prior.get("swarm_type") == "gpu")
+    env = _arg_value(args, "env")
+    if env is None:
+        env = prior.get("env") or prior.get("env_image") or prior.get("c3_image")
+    if env is None:
+        env = (
+            prior.get("env_gpu") or prior.get("c3_gpu_image")
+            if prior_is_gpu
+            else prior.get("env_cpu") or prior.get("c3_cpu_image")
+        )
+    if env == "":
+        env = None
 
     if compute == "c3" and not yes:
         if _arg_value(args, "hardware") is None and _arg_value(args, "c3_hardware") is None:
@@ -351,13 +343,8 @@ def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
             c3_time = prompt("C3 job walltime", c3_time)
         if _arg_value(args, "c3_provider") is None:
             c3_provider = prompt_optional("C3 provider", c3_provider)
-        if _arg_value(args, "env_image") is None:
-            env_image = prompt_optional("C3 Docker image override", env_image)
-        if env_image is None:
-            if _arg_value(args, "env_cpu") is None:
-                env_cpu = prompt("C3 CPU environment image", env_cpu)
-            if _arg_value(args, "env_gpu") is None:
-                env_gpu = prompt("C3 GPU environment image", env_gpu)
+        if _arg_value(args, "env") is None:
+            env = prompt_optional("C3 Docker environment image", env)
 
     cfg = dict(prior)
     cfg.pop("c3_cloud_provider", None)
@@ -365,6 +352,9 @@ def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
     cfg.pop("c3_image", None)
     cfg.pop("c3_cpu_image", None)
     cfg.pop("c3_gpu_image", None)
+    cfg.pop("env_image", None)
+    cfg.pop("env_cpu", None)
+    cfg.pop("env_gpu", None)
     cfg.update({
         "provider": provider,
         "model": model,
@@ -373,9 +363,7 @@ def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
         "c3_hardware": c3_hardware,
         "c3_time": c3_time,
         "c3_provider": c3_provider,
-        "env_image": env_image,
-        "env_cpu": env_cpu,
-        "env_gpu": env_gpu,
+        "env": env,
     })
     write_agent_config(cfg)
 
@@ -1425,12 +1413,13 @@ def add_agent_setup_args(parser: argparse.ArgumentParser, *, include_swarm_url: 
     parser.add_argument("--hardware", help="C3 GPU hardware, e.g. l40.")
     parser.add_argument("--c3-time", help="C3 job walltime, e.g. 02:00:00.")
     parser.add_argument("--c3-provider", help="Optional C3 CLI provider.")
-    parser.add_argument("--env-image", help="Docker Hub environment image for all C3 jobs.")
-    parser.add_argument("--c3-image", dest="env_image", help=argparse.SUPPRESS)
-    parser.add_argument("--env-cpu", help="Docker Hub environment image for CPU C3 jobs.")
-    parser.add_argument("--c3-cpu-image", dest="env_cpu", help=argparse.SUPPRESS)
-    parser.add_argument("--env-gpu", help="Docker Hub environment image for GPU C3 jobs.")
-    parser.add_argument("--c3-gpu-image", dest="env_gpu", help=argparse.SUPPRESS)
+    parser.add_argument("--env", help="Docker Hub environment image for C3 jobs.")
+    parser.add_argument("--env-image", dest="env", help=argparse.SUPPRESS)
+    parser.add_argument("--c3-image", dest="env", help=argparse.SUPPRESS)
+    parser.add_argument("--env-cpu", dest="env", help=argparse.SUPPRESS)
+    parser.add_argument("--c3-cpu-image", dest="env", help=argparse.SUPPRESS)
+    parser.add_argument("--env-gpu", dest="env", help=argparse.SUPPRESS)
+    parser.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     parser.add_argument("--skip-tacit", action="store_true", help="Do not prompt for tacit knowledge.")
     parser.add_argument("--yes", action="store_true", help="Accept defaults for any optional setup prompts.")
 
