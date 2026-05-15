@@ -491,7 +491,14 @@ async def compute_leaderboard(
             ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
         WHERE acs.challenge = ?
           AND acs.experiments_completed > 0
-        ORDER BY current_score IS NULL, current_score {order}, a.name ASC
+        -- Sort by best-ever score (not current_score from agent_bests):
+        -- agent_bests is cleared when a trajectory stagnates or the
+        -- inactivity sweep fires, so current_score goes NULL for agents
+        -- whose trajectory has ended even though their historical peak
+        -- is still meaningful. best_ever_score on acs is monotonic — it
+        -- captures the agent's highest score across every trajectory
+        -- they've ever held on this challenge.
+        ORDER BY best_ever_score IS NULL, best_ever_score {order}, a.name ASC
         """,
         (challenge, challenge),
     )

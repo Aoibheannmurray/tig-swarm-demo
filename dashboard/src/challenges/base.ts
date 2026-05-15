@@ -23,7 +23,6 @@ import type { Panel, WSMessage } from "../types";
 import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
-import { isBetter } from "../lib/swarmConfig";
 import type { Challenge } from "./registry";
 
 export interface DisplayHistoryEntry<TInstances> {
@@ -117,26 +116,8 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   protected isAtLatest(): boolean {
     return (
       this.historyEntries.length === 0 ||
-      this.historyIndex === this.indexOfBest()
+      this.historyIndex >= this.historyEntries.length - 1
     );
-  }
-
-  // Index of the highest-scoring entry (using the challenge's direction).
-  // historyEntries is sorted chronologically, but the all-time best isn't
-  // necessarily the last entry — older best_history rows can include
-  // regressions that were marked "new global best" before the server
-  // started comparing against the true all-time best. Treating "latest"
-  // as the best-scoring entry keeps the dashboard's prominent score on
-  // the actual peak across active + inactive trajectories.
-  protected indexOfBest(): number {
-    if (this.historyEntries.length === 0) return -1;
-    let best = 0;
-    for (let i = 1; i < this.historyEntries.length; i++) {
-      if (isBetter(this.historyEntries[i].score, this.historyEntries[best].score, this.challenge)) {
-        best = i;
-      }
-    }
-    return best;
   }
 
   init(container: HTMLElement) {
@@ -173,7 +154,7 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
     this.historyLiveBtnEl?.addEventListener("click", () => {
       if (liveSwitchToActive(this.challenge)) return;
       if (!this.historyEntries.length) return;
-      this.historyIndex = this.indexOfBest();
+      this.historyIndex = this.historyEntries.length - 1;
       this.applyHistoryEntry();
     });
 
@@ -271,7 +252,7 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       );
       this.historyEntries = merged;
       if (wasAtLatest && this.historyEntries.length) {
-        this.historyIndex = this.indexOfBest();
+        this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
       } else if (currentEntryId !== undefined) {
         const restored = this.historyEntries.findIndex(
@@ -457,7 +438,7 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       const wasAtLatest = this.isAtLatest();
       this.historyEntries.push(entry);
       if (wasAtLatest) {
-        this.historyIndex = this.indexOfBest();
+        this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
       } else {
         this.updateHistoryLabel();
