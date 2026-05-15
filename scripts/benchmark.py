@@ -59,20 +59,14 @@ Output JSON shape:
 
 from __future__ import annotations
 
-import base64
-from contextlib import contextmanager
 import json
 import os
-import re
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.error
 import urllib.request
 import math
-import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -80,22 +74,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent.parent
 
 
-def _load_agent_config() -> dict:
-    path = ROOT_DIR / "agent.config.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text())
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
 _INSIDE_DOCKER = Path("/.dockerenv").exists() or os.environ.get("TIG_IN_DOCKER") == "1"
-_AGENT_CONFIG = _load_agent_config()
-_USE_C3 = (
-    os.environ.get("TIG_COMPUTE")
-    or str(_AGENT_CONFIG.get("compute") or "")
-).lower() == "c3"
 
 # Mirrors `QUALITY_PRECISION` in src/lib.rs and the upstream tig-monorepo.
 # All vendored evaluators clamp their (baseline-relative) quality to
@@ -943,202 +922,6 @@ _AGG_METRICS = {
 }
 
 
-# ── C3 remote benchmark ──────────────────────────────────────────
-
-
-def _bundle_project(challenge: str) -> str:
-    """Create a base64-encoded gzip tarball of essential project files.
-
-    Only includes the active challenge's source, not all challenges, to stay
-    under the Linux per-argument size limit (MAX_ARG_STRLEN = 128 KB).
-    """
-    import tarfile
-    import io
-
-    buf = io.BytesIO()
-    include_files = {"Cargo.toml", "swarm.config.json"}
-    include_src = {
-        "lib.rs",
-        challenge,
-    }
-
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for name in include_files:
-            full = ROOT_DIR / name
-            if full.is_file():
-                tar.add(str(full), arcname=name)
-
-        scripts_dir = ROOT_DIR / "scripts"
-        if scripts_dir.is_dir():
-            for script_file in scripts_dir.iterdir():
-                if script_file.is_file() and script_file.suffix == ".py":
-                    tar.add(str(script_file), arcname=f"scripts/{script_file.name}")
-
-        src_dir = ROOT_DIR / "src"
-        if src_dir.is_dir():
-            for name in sorted(os.listdir(src_dir)):
-                if name in include_src:
-                    full = src_dir / name
-                    if full.is_file():
-                        tar.add(str(full), arcname=f"src/{name}")
-                    elif full.is_dir():
-                        tar.add(str(full), arcname=f"src/{name}")
-
-        for bin_dir in ["src/bin"]:
-            full = ROOT_DIR / bin_dir
-            if full.is_dir():
-                tar.add(str(full), arcname=bin_dir)
-
-    return base64.b64encode(buf.getvalue()).decode()
-
-
-def _parse_instance_id(text: str) -> str | None:
-    """Extract instance/job ID from c3 instances launch output."""
-    for pat in [
-        r'"id"\s*:\s*"([^"]+)"',
-        r"(inst_[a-zA-Z0-9_-]+)",
-        r"(job_[a-zA-Z0-9_-]+)",
-        r"([a-f0-9]{8,})",
-    ]:
-        m = re.search(pat, text)
-        if m:
-            return m.group(1)
-    return None
-
-
-def _poll_c3_job(job_id: str, env: dict, poll_interval: int = 15) -> str:
-    """Poll c3 jobs get until terminal state."""
-    for _ in range(480):
-        result = subprocess.run(
-            ["c3", "jobs", "get", job_id, "-o", "json"],
-            capture_output=True, text=True, cwd=ROOT_DIR, env=env,
-        )
-        out = (result.stdout or "").lower()
-        if any(s in out for s in ["completed", "succeeded", "success"]):
-            return "completed"
-        if any(s in out for s in ["failed", "error", "cancelled", "canceled"]):
-            return "failed"
-        result_table = subprocess.run(
-            ["c3", "jobs", "get", job_id],
-            capture_output=True, text=True, cwd=ROOT_DIR, env=env,
-        )
-        out_table = (result_table.stdout or "").upper()
-        if "COMPLETED" in out_table or "SUCCEEDED" in out_table or "SUCCESS" in out_table:
-            return "completed"
-        if "FAILED" in out_table or "CANCELLED" in out_table:
-            return "failed"
-        time.sleep(poll_interval)
-    return "timeout"
-
-
-def _run_benchmark_c3(cfg: dict) -> int:
-    if shutil.which("c3") is None:
-        print("error: c3 CLI not found. Install from https://docs.cthree.cloud/", file=sys.stderr)
-        return 1
-
-    hardware = (
-        os.environ.get("C3_HARDWARE")
-        or _AGENT_CONFIG.get("c3_hardware")
-        or "l40"
-    ).lower()
-    c3_time = os.environ.get("C3_TIME") or _AGENT_CONFIG.get("c3_time") or "02:00:00"
-
-    server = _resolve_server_url()
-    env = os.environ.copy()
-    # Remove placeholder API keys so the CLI falls through to ~/.c3/config
-    if env.get("C3_API_KEY", "").startswith("your_"):
-        del env["C3_API_KEY"]
-
-    challenge = cfg.get("challenge", "unknown")
-    print("Bundling project files…", file=sys.stderr)
-    bundle_b64 = _bundle_project(challenge)
-
-    h, m_part, s = (c3_time.split(":") + ["0", "0", "0"])[:3]
-    runtime_secs = int(h) * 3600 + int(m_part) * 60 + int(s)
-
-    startup_cmd = (
-        "set -e && "
-        "apt-get update -qq && apt-get install -y -qq curl build-essential python3 python3-pip pkg-config libssl-dev > /dev/null 2>&1 && "
-        "pip3 install blake3 requests --break-system-packages -q && "
-        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1 && "
-        "export PATH=/root/.cargo/bin:$PATH && "
-        "mkdir -p /workspace && cd /workspace && "
-        f"echo '{bundle_b64}' | base64 -d | tar xzf - && "
-        "export TIG_IN_DOCKER=1 && "
-        f"export TIG_SWARM_SERVER='{server}' && "
-        "python3 scripts/benchmark.py"
-    )
-
-    cmd = [
-        "c3", "instances", "launch",
-        "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04",
-        "-g", hardware,
-        "-t", str(runtime_secs),
-        "--on-demand",
-        "-c", f"bash -c \"{startup_cmd}\"",
-        "-o", "json",
-    ]
-
-    c3_key = env.get("C3_API_KEY", "")
-    if c3_key:
-        cmd.extend(["-e", f"C3_API_KEY={c3_key}"])
-
-    print(f"Launching C3 {hardware} instance…", file=sys.stderr)
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT_DIR, env=env)
-
-    combined = (result.stdout or "") + "\n" + (result.stderr or "")
-    job_id = _parse_instance_id(combined)
-    if not job_id:
-        print(f"error: could not parse job/instance ID from c3 launch:\n{combined[-2000:]}", file=sys.stderr)
-        return 1
-
-    print(f"C3 instance launched: {job_id} — polling for completion…", file=sys.stderr)
-    status = _poll_c3_job(job_id, env)
-
-    logs_result = subprocess.run(
-        ["c3", "jobs", "logs", job_id],
-        capture_output=True, text=True, cwd=ROOT_DIR, env=env,
-    )
-    logs_out = logs_result.stdout or ""
-
-    if status != "completed":
-        print(f"error: C3 job {job_id} {status}:\n{logs_out[-4000:]}", file=sys.stderr)
-        return 1
-
-    for line in reversed(logs_out.strip().splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                bench = json.loads(line)
-                if "score" in bench or "challenge" in bench:
-                    print(json.dumps(bench, indent=2))
-                    return 0
-            except json.JSONDecodeError:
-                continue
-
-    json_blocks = re.findall(r'\{[^{}]*"score"[^{}]*\}', logs_out)
-    if json_blocks:
-        try:
-            bench = json.loads(json_blocks[-1])
-            print(json.dumps(bench, indent=2))
-            return 0
-        except json.JSONDecodeError:
-            pass
-
-    multi_line_match = re.search(r'\{\s*\n\s*"challenge".*?\n\}', logs_out, re.DOTALL)
-    if multi_line_match:
-        try:
-            bench = json.loads(multi_line_match.group())
-            print(json.dumps(bench, indent=2))
-            return 0
-        except json.JSONDecodeError:
-            pass
-
-    print(f"error: C3 job {job_id} completed but could not parse benchmark JSON from logs", file=sys.stderr)
-    print(f"Last 2000 chars of logs:\n{logs_out[-2000:]}", file=sys.stderr)
-    return 1
-
-
 # ── Aggregation & main ────────────────────────────────────────────
 
 
@@ -1199,9 +982,6 @@ def aggregate(results: list[dict]) -> dict:
 def main() -> int:
     print("Loading swarm config…", file=sys.stderr)
     cfg = load_swarm_config()
-
-    if _USE_C3 and not _INSIDE_DOCKER:
-        return _run_benchmark_c3(cfg)
 
     if not _INSIDE_DOCKER:
         return _reexec_in_docker(cfg)

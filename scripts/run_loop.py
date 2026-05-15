@@ -15,6 +15,7 @@ Usage:
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
     python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+    python scripts/run_loop.py --provider anthropic --compute c3 --c3-cpu-image rust:1-bookworm
     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
     # Resume a specific previous agent
@@ -36,7 +37,8 @@ Picking a model (--model):
 Provider/model/compute defaults come from agent.config.json when present.
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
---c3-api-key, or existing `c3 login` credentials.
+--c3-api-key, or existing `c3 login` credentials. C3 Docker jobs use public
+Docker Hub images, configured with --c3-image/--c3-cpu-image/--c3-gpu-image.
 
 claude-code provider:
     Shells out to your local `claude -p` binary instead of hitting an HTTP
@@ -468,12 +470,23 @@ def parse_args() -> argparse.Namespace:
         help="C3 job walltime for each benchmark job (default: 02:00:00)",
     )
     p.add_argument(
-        "--c3-cloud-provider",
-        help="Optional C3 CLI cloud provider passed as `c3 deploy -p ...`",
+        "--c3-provider",
+        help="Optional C3 CLI provider passed as `c3 deploy -p ...`",
     )
     p.add_argument(
-        "--c3-no-build", action="store_true",
-        help="Pass --no-build to c3 deploy, requiring a cached Docker image",
+        "--c3-image",
+        help="Docker Hub image for all C3 jobs; overrides CPU/GPU defaults",
+    )
+    p.add_argument(
+        "--c3-cpu-image",
+        help="Docker Hub image for CPU C3 jobs (default: rust:1-bookworm)",
+    )
+    p.add_argument(
+        "--c3-gpu-image",
+        help=(
+            "Docker Hub image for GPU C3 jobs "
+            "(default: nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04)"
+        ),
     )
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument("--agent-id", help="Resume with an existing agent ID")
@@ -515,8 +528,10 @@ def main() -> int:
     args.compute = args.compute or agent_config.get("compute") or "local"
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
-    args.c3_cloud_provider = args.c3_cloud_provider or agent_config.get("c3_cloud_provider")
-    args.c3_no_build = args.c3_no_build or bool(agent_config.get("c3_no_build", False))
+    args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
+    args.c3_image = args.c3_image or agent_config.get("c3_image")
+    args.c3_cpu_image = args.c3_cpu_image or agent_config.get("c3_cpu_image")
+    args.c3_gpu_image = args.c3_gpu_image or agent_config.get("c3_gpu_image")
     if args.compute not in ("local", "c3"):
         sys.exit(f"Unknown compute provider: {args.compute}")
 
@@ -547,6 +562,8 @@ def main() -> int:
         print(f"Registered as: {agent_name} ({agent_id})")
 
     updated_agent_config = dict(agent_config)
+    updated_agent_config.pop("c3_cloud_provider", None)
+    updated_agent_config.pop("c3_no_build", None)
     runtime_defaults = {
         "provider": args.provider,
         "model": args.model,
@@ -554,8 +571,10 @@ def main() -> int:
         "compute": args.compute,
         "c3_hardware": args.hardware,
         "c3_time": args.c3_time,
-        "c3_cloud_provider": args.c3_cloud_provider,
-        "c3_no_build": args.c3_no_build,
+        "c3_provider": args.c3_provider,
+        "c3_image": args.c3_image,
+        "c3_cpu_image": args.c3_cpu_image,
+        "c3_gpu_image": args.c3_gpu_image,
     }
     for key, value in runtime_defaults.items():
         updated_agent_config.setdefault(key, value)
@@ -569,6 +588,8 @@ def main() -> int:
 
     print(f"Provider: {args.provider}  Model: {model}")
     compute_desc = f"c3/{args.hardware.lower()}" if args.compute == "c3" else args.compute
+    if args.compute == "c3" and args.c3_image:
+        compute_desc += f" image={args.c3_image}"
     print(f"Compute: {compute_desc}")
     print(f"Challenge: {config.get('challenge', '?')}")
     print(f"Server: {server}")

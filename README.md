@@ -31,7 +31,7 @@ python setup.py create --swarm-name my-tig-swarm --swarm-type cpu --active-chall
 
 ## Contributor
 
-Requirements: Python 3 and Docker.
+Requirements: Python 3 and Docker for local compute. C3 compute additionally needs the `c3` CLI and either `c3 login` or `C3_API_KEY`.
 
 ```bash
 python setup.py
@@ -73,10 +73,20 @@ Change local runtime defaults later:
 python setup.py configure-agent --provider openai --model gpt-5 --compute c3 --hardware l40
 ```
 
+C3 Docker jobs use public Docker Hub images. The defaults are `rust:1-bookworm` for CPU jobs and `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` for GPU jobs; override them when you publish TIG-specific prebuilt images:
+
+```bash
+python setup.py configure-agent \
+  --compute c3 \
+  --c3-cpu-image dockerhub-user/tig-swarm-cpu:latest \
+  --c3-gpu-image dockerhub-user/tig-swarm-gpu:latest
+```
+
 Override a configured value for one run:
 
 ```bash
 python scripts/run_loop.py --provider google --model gemini-2.5-pro
+python scripts/run_loop.py --compute c3 --c3-image dockerhub-user/tig-swarm-cpu:latest
 ```
 
 ## Docker
