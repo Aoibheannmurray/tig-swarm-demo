@@ -317,14 +317,20 @@ _AGENT_BESTS_COLS = (
 async def get_global_best(
     conn: aiosqlite.Connection, challenge: str, *, direction: str
 ) -> dict | None:
-    # Global best is the best-scoring `agent_bests` row — i.e. whichever
-    # agent's branch currently holds the leading feasible score for the
-    # given challenge. `id` is aliased to experiment_id so callers that
-    # expect the old experiments shape keep working.
+    # Best-scoring feasible experiment for the challenge, across ALL
+    # trajectories — active and inactive. Querying `experiments` (not
+    # `agent_bests`) means the peak score from a now-deactivated trajectory
+    # still counts: agent_bests is wiped per-agent on stagnation reset,
+    # which would otherwise hide historical peaks once their trajectory
+    # ended. Returned shape mirrors the prior agent_bests-based result so
+    # callers don't need to change.
     order = _direction_order(direction)
     cursor = await conn.execute(
-        f"SELECT {_AGENT_BESTS_COLS} FROM agent_bests "
-        f"WHERE feasible = 1 AND challenge = ? "
+        "SELECT id as experiment_id, id, agent_id, challenge, "
+        "algorithm_code, kernel_code, score, feasible, challenge_metrics, "
+        "solution_data, track_scores, created_at as updated_at, "
+        "trajectory_id "
+        "FROM experiments WHERE feasible = 1 AND challenge = ? "
         f"ORDER BY score {order} LIMIT 1",
         (challenge,),
     )
@@ -805,11 +811,82 @@ async def create_trajectory(
 async def deactivate_trajectory(
     conn: aiosqlite.Connection, trajectory_id: str, deactivated_at: str
 ) -> None:
+    # `AND status = 'active'` makes this idempotent — callers that aren't
+    # certain whether the trajectory has already been deactivated (e.g.
+    # the inactivity sweep below) can re-fire without double-bumping
+    # num_deactivations.
     await conn.execute(
         "UPDATE trajectories SET status = 'inactive', deactivated_at = ?, "
-        "num_deactivations = num_deactivations + 1 WHERE id = ?",
+        "num_deactivations = num_deactivations + 1 "
+        "WHERE id = ? AND status = 'active'",
         (deactivated_at, trajectory_id),
     )
+
+
+async def deactivate_inactive_agent_trajectories(
+    conn: aiosqlite.Connection, cutoff_ts: str, timestamp: str
+) -> int:
+    """Free up trajectories owned by agents who've gone silent.
+
+    An agent that crashes or disconnects never hits the stagnation-reset
+    path in `publish_iteration`, so their trajectory stays flagged
+    `active` and their best algorithm is locked inside `agent_bests` —
+    invisible to the per-challenge inactive pool that other agents draw
+    inspiration from. This sweep handles that: for each (agent,
+    challenge) whose `last_active_at` is older than `cutoff_ts` but
+    still holds a `current_trajectory_id`, we:
+
+      1. Mark the trajectory inactive (unless another agent that IS still
+         live claims it as their current — shared trajectories shouldn't
+         deactivate while anyone's still working on them).
+      2. Deposit the agent's best into `inactive_algorithms` so it can be
+         adopted from the pool.
+      3. Clear their `agent_bests` row and null the trajectory pointer on
+         their `agent_challenge_state` row, so a returning agent starts
+         fresh on next /api/state.
+
+    Returns the number of (agent, challenge) pairs processed.
+    """
+    cursor = await conn.execute(
+        "SELECT agent_id, challenge, current_trajectory_id, current_program_id "
+        "FROM agent_challenge_state "
+        "WHERE last_active_at < ? AND current_trajectory_id IS NOT NULL",
+        (cutoff_ts,),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    for row in rows:
+        agent_id = row["agent_id"]
+        challenge = row["challenge"]
+        traj_id = row["current_trajectory_id"]
+        program_id = row["current_program_id"]
+
+        other_live = await (await conn.execute(
+            "SELECT 1 FROM agent_challenge_state "
+            "WHERE current_trajectory_id = ? AND last_active_at >= ? "
+            "  AND NOT (agent_id = ? AND challenge = ?) LIMIT 1",
+            (traj_id, cutoff_ts, agent_id, challenge),
+        )).fetchone()
+        if other_live is None:
+            await deactivate_trajectory(conn, traj_id, timestamp)
+
+        best = await get_agent_best(conn, agent_id, challenge)
+        if best is not None:
+            await deposit_inactive(
+                conn, agent_id, challenge,
+                best["algorithm_code"], best["score"], timestamp,
+                trajectory_id=traj_id, program_id=program_id,
+                kernel_code=best.get("kernel_code"),
+            )
+            await clear_agent_best(conn, agent_id, challenge)
+
+        await update_agent_challenge_state(
+            conn, agent_id, challenge,
+            set_fields={
+                "current_trajectory_id": None,
+                "current_program_id": None,
+            },
+        )
+    return len(rows)
 
 
 async def reactivate_trajectory(

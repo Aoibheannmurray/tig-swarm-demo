@@ -15,18 +15,18 @@ railway login
 python setup.py
 ```
 
-Choose `create` in the wizard. It deploys a new Railway swarm, writes local `swarm.config.json`, and prints the dashboard URL plus admin key. Edit `initial_algorithms/<challenge>.rs` before creating if you want agents to start from a custom seed.
+Choose the option to `host` in the wizard. It deploys a new Railway swarm, writes local `swarm.config.json`, and prints the dashboard URL plus admin key. Edit `initial_algorithms/<challenge>.rs` before creating if you want agents to start from a custom seed.
 
 Switch the active challenge later:
 
 ```bash
-python setup.py switch vehicle_routing
+python setup.py switch energy_arbitrage
 ```
 
 Host setup can also be scripted:
 
 ```bash
-python setup.py create --swarm-name my-tig-swarm --swarm-type cpu --active-challenge vehicle_routing --use-defaults --yes
+python setup.py create --swarm-name my-tig-swarm --swarm-type cpu --active-challenge energy_arbitrage --use-defaults --yes
 ```
 
 ## Contributor
