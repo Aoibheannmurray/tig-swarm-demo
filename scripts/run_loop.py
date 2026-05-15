@@ -177,8 +177,8 @@ def _run_benchmark_local() -> tuple[dict | None, str]:
         capture_output=True, text=True, cwd=ROOT,
     )
     if result.returncode != 0:
-        err = result.stderr[-2000:]
-        print(f"  Benchmark failed:\n{err}", file=sys.stderr)
+        err = result.stderr or result.stdout or "Benchmark failed"
+        print(f"  Benchmark failed:\n{err[-2000:]}", file=sys.stderr)
         return None, err
     try:
         return json.loads(result.stdout), ""
@@ -265,7 +265,7 @@ def _try_compile_fix(
     Returns (success, input_tokens, output_tokens).
     """
     code, kernel = files.read()
-    fix_prompt = build_compile_fix_prompt(code, kernel, build_err[-1500:], files.is_gpu)
+    fix_prompt = build_compile_fix_prompt(code, kernel, build_err, files.is_gpu)
     try:
         fix_response, usage = _call_llm_logged(
             "compile_fix", config,

@@ -234,6 +234,36 @@ def _poll_c3_job(job_id: str, env: dict, walltime_secs: int) -> str:
     return "timeout"
 
 
+def _pull_c3_results(job_id: str, env: dict) -> None:
+    subprocess.run(
+        ["c3", "pull", job_id], capture_output=True, text=True, cwd=ROOT, env=env,
+    )
+
+
+def _read_benchmark_stderr(job_id: str) -> str:
+    chunks = []
+    for artifact_dir in [
+        ROOT / job_id / "artifacts",
+        ROOT / job_id / "c3-artifacts",
+        ROOT / "c3-artifacts",
+    ]:
+        artifact_stderr = artifact_dir / "benchmark.stderr"
+        if artifact_stderr.exists() and artifact_stderr.stat().st_size > 0:
+            content = artifact_stderr.read_text(errors="replace")
+            chunks.append(f"{artifact_stderr}:\n{content}")
+    return "\n\n".join(chunks)
+
+
+def _c3_failure_detail(job_id: str, status: str, logs_out: str) -> str:
+    parts = [f"[C3] Job {job_id} {status}"]
+    benchmark_stderr = _read_benchmark_stderr(job_id)
+    if benchmark_stderr:
+        parts.append(f"benchmark.stderr:\n{benchmark_stderr}")
+    if logs_out:
+        parts.append(f"c3 logs:\n{logs_out}")
+    return "\n\n".join(parts)
+
+
 # ── Run benchmark on C3 ───────────────────────────────────────────
 
 
@@ -302,13 +332,12 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
         print(f"    {err}")
         if logs_out:
             print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
-        return None, f"{err}:\n{logs_out[-4000:]}"
+        _pull_c3_results(job_id, env)
+        return None, _c3_failure_detail(job_id, status, logs_out)
 
     print(f"    [C3] Job {job_id} completed — pulling results…")
 
-    subprocess.run(
-        ["c3", "pull", job_id], capture_output=True, text=True, cwd=ROOT, env=env,
-    )
+    _pull_c3_results(job_id, env)
 
     for artifact_dir in [ROOT / job_id / "artifacts", ROOT / job_id / "c3-artifacts",
                          ROOT / "c3-artifacts"]:
@@ -345,4 +374,4 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
     print(f"    {err}")
     if logs_out:
         print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
-    return None, err
+    return None, _c3_failure_detail(job_id, "completed but could not parse benchmark JSON", logs_out)
