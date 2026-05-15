@@ -176,11 +176,13 @@ def _seed_worktree(path: Path, agent: dict) -> None:
 def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
     """Return (env_var_to_set, value) for this agent's subprocess.
 
-    Returns (None, None) for claude-code, which uses the local CLI's auth.
-    Exits with a clear message if a required env var is missing.
+    Returns (None, None) for claude-code, claude-code-agentic, and
+    codex-agentic — all three use their respective CLI's local auth
+    (OAuth / subscription / `codex login`). Exits with a clear message if
+    a required env var is missing for an API-key provider.
     """
     provider = agent.get("provider") or "anthropic"
-    if provider == "claude-code":
+    if provider in ("claude-code", "claude-code-agentic", "codex-agentic"):
         return None, None
     if provider not in _PROVIDER_TO_DEFAULT_ENV:
         sys.exit(f"Agent {agent['name']}: unknown provider {provider!r}")

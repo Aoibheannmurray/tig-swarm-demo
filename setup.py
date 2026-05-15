@@ -109,7 +109,10 @@ DEFAULT_TRACKS_PER_CHALLENGE = {
 }
 
 AGENT_CONFIG_PATH = ROOT / "agent.config.json"
-AGENT_PROVIDERS = ["anthropic", "openai", "google", "claude-code"]
+AGENT_PROVIDERS = [
+    "anthropic", "openai", "google",
+    "claude-code", "claude-code-agentic", "codex-agentic",
+]
 AGENT_COMPUTE_CHOICES = ["local", "c3"]
 DEFAULT_AGENT_CONFIG = {
     "provider": "anthropic",
@@ -265,15 +268,6 @@ def _arg_enabled(args: argparse.Namespace | None, name: str) -> bool:
     return bool(getattr(args, name, False)) if args is not None else False
 
 
-def provider_to_llm_label(provider: str | None) -> str | None:
-    return {
-        "anthropic": "claude_api",
-        "openai": "openai_api",
-        "google": "gemini_api",
-        "claude-code": "claude_code",
-    }.get(provider or "")
-
-
 def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
     """Create/update local script-loop runtime defaults.
 
@@ -348,6 +342,41 @@ def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
         "c3_no_build": c3_no_build,
     })
     write_agent_config(cfg)
+
+    # Show what the dashboard will display for this agent. Mirrors
+    # scripts/server.py::derive_llm_label so the wizard's preview matches
+    # what register_agent will actually send. (Kept inline rather than
+    # imported because setup.py runs from the repo root and doesn't put
+    # scripts/ on sys.path.)
+    if model:
+        derived_label = (
+            f"{model} ({provider})"
+            if provider in ("claude-code-agentic", "codex-agentic")
+            else model
+        )
+    else:
+        derived_label = provider
+    print(f"\n  Dashboard label: {derived_label}")
+    print("  (auto-derived from provider + model; override with --llm-label)")
+
+    # Warn rather than fail — the user may be configuring on a different
+    # machine than the one that will run the loop. run_loop.py re-checks
+    # at startup and exits cleanly there if the CLI is still missing.
+    _PROVIDER_CLI = {
+        "claude-code": ("claude", "Claude Code (https://docs.claude.com/en/docs/claude-code)"),
+        "claude-code-agentic": ("claude", "Claude Code (https://docs.claude.com/en/docs/claude-code)"),
+        "codex-agentic": ("codex", "OpenAI Codex CLI (https://github.com/openai/codex)"),
+    }
+    cli_pair = _PROVIDER_CLI.get(provider)
+    if cli_pair is not None:
+        cli_name, doc_hint = cli_pair
+        if shutil.which(cli_name) is None:
+            print(
+                f"\n  ⚠  `{cli_name}` CLI not found on PATH. Install {doc_hint}\n"
+                f"     to use --provider {provider}.\n"
+                "     run_loop.py will exit at startup until it's installed."
+            )
+
     return cfg
 
 
@@ -1158,71 +1187,57 @@ def run_sync() -> int:
     return 0
 
 
-_LLM_CHOICES = [
-    "claude_code",
-    "claude_api",
-    "openai_api",
-    "gemini_api",
-    "other",
-]
 
 
 def _prompt_contributor_identity(
     prior: dict | None,
     args: argparse.Namespace | None = None,
 ) -> tuple[str | None, str | None]:
-    """Ask the contributor for an optional display name and which LLM is
-    driving their agent. Both are optional (Enter to accept defaults).
+    """Ask the contributor for an optional display name.
 
-    The chosen values are stored in swarm.config.json under
-    `contributor_name` / `contributor_llm` and forwarded to the server on
-    `/api/agents/register` so the dashboard can show "alice (gemini_api)"
-    instead of every contributor showing as a generated codename."""
+    The dashboard LLM label is no longer prompted — it's auto-derived
+    from `provider` + `model` in agent.config.json at registration time
+    (see scripts/server.py::derive_llm_label). The only way to set an
+    explicit, hand-picked label is to pass `--llm-label` here, which we
+    persist into swarm.config.json as `contributor_llm`. If neither
+    `--llm-label` nor a prior `contributor_llm` is set we return None,
+    and register_agent falls back to the auto-derivation.
+    """
     yes = _arg_enabled(args, "yes")
     prior_name = (prior or {}).get("contributor_name") or ""
-    effective_provider = (
-        _arg_value(args, "provider")
-        or read_prior_agent_config().get("provider")
-        or DEFAULT_AGENT_CONFIG["provider"]
-    )
-    prior_llm = (
-        (prior or {}).get("contributor_llm")
-        or provider_to_llm_label(effective_provider)
-        or "claude_code"
-    )
+    prior_llm = (prior or {}).get("contributor_llm")
     arg_name = _arg_value(args, "agent_name")
     arg_llm = _arg_value(args, "llm_label")
 
+    # Explicit --llm-label always wins; otherwise preserve any pre-existing
+    # contributor_llm in swarm.config.json (so this wizard run doesn't
+    # silently downgrade a user's hand-set label).
+    label = arg_llm if arg_llm is not None else prior_llm
+
     if yes:
-        return arg_name if arg_name is not None else (prior_name or None), arg_llm or prior_llm
+        return (
+            arg_name if arg_name is not None else (prior_name or None),
+            label,
+        )
+
+    if arg_name is not None:
+        return arg_name or None, label
 
     print(
         "\n── Your identity (optional) ──\n"
-        "Pick a name for your agent and tell the swarm which LLM is driving it.\n"
-        "Both default to the values from a previous run / a server-generated\n"
-        "codename — press Enter to skip either prompt.\n"
+        "Pick a display name for your agent — Enter to let the server\n"
+        "generate one. The dashboard LLM label is auto-derived from your\n"
+        "provider + model (use `--llm-label` to override).\n"
     )
-    if arg_name is not None:
-        chosen_name = arg_name or None
+    name_default = prior_name or "(let server generate)"
+    raw_name = input(f"Agent name [{name_default}]: ").strip()
+    if raw_name == "" and prior_name:
+        chosen_name = prior_name
+    elif raw_name == "":
+        chosen_name = None
     else:
-        name_default = prior_name or "(let server generate)"
-        raw_name = input(f"Agent name [{name_default}]: ").strip()
-        if raw_name == "" and prior_name:
-            chosen_name = prior_name
-        elif raw_name == "":
-            chosen_name = None
-        else:
-            chosen_name = raw_name
-
-    if arg_llm:
-        llm = arg_llm
-    else:
-        llm = prompt_choice(
-            "Which LLM label should the dashboard show?", _LLM_CHOICES, default=prior_llm,
-        )
-        if llm == "other":
-            llm = input("Model name (shown on the dashboard): ").strip() or "other"
-    return chosen_name, llm
+        chosen_name = raw_name
+    return chosen_name, label
 
 
 def run_join(server_url: str, args: argparse.Namespace | None = None) -> int:
@@ -1308,6 +1323,10 @@ def run_join(server_url: str, args: argparse.Namespace | None = None) -> int:
         "     python scripts/run_loop.py\n"
         "\nOr use your local `claude` CLI in headless mode (no API key needed):\n"
         "\n     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7\n"
+        "\nFor full agent mode (tools, file edits in a sandboxed worktree —\n"
+        "subscription only, much higher token use per iteration):\n"
+        "\n     python scripts/run_loop.py --provider claude-code-agentic --model claude-opus-4-7\n"
+        "     python scripts/run_loop.py --provider codex-agentic         # OpenAI Codex CLI\n"
         "\nDefaults come from agent.config.json (provider, model, compute). The\n"
         "loop saves its agent_id there after first registration so it resumes\n"
         "automatically on later runs.\n"
@@ -1341,8 +1360,11 @@ def run_configure_agent(args: argparse.Namespace | None = None) -> int:
     if _arg_value(args, "llm_label") is not None:
         prior["contributor_llm"] = _arg_value(args, "llm_label")
         updated = True
-    elif _arg_value(args, "provider") is not None:
-        prior["contributor_llm"] = provider_to_llm_label(_arg_value(args, "provider")) or prior.get("contributor_llm")
+    elif _arg_value(args, "provider") is not None and "contributor_llm" in prior:
+        # Provider changed and there's a stale explicit label from an older
+        # wizard run (or a previous --llm-label). Drop it so register_agent
+        # falls through to auto-derivation from the new provider+model.
+        del prior["contributor_llm"]
         updated = True
     if updated:
         write_swarm_config(prior)
