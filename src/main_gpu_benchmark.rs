@@ -188,7 +188,8 @@ fn run_instance(
 
             let elapsed = start.elapsed().as_secs_f64();
 
-            match saved.lock().unwrap().take() {
+            let saved_solution = saved.lock().unwrap().take();
+            match saved_solution {
                 Some(solution) => {
                     match instance.evaluate_solution(
                         &solution,
