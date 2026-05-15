@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{arg, value_parser, Command};
-use std::cell::Cell;
+use std::sync::Mutex;
 use std::time::Instant;
 use tig_challenges as challenges;
 
@@ -156,9 +156,9 @@ fn run_instance(
                 &prop,
             )?;
 
-            let saved: Cell<Option<challenges::$c::Solution>> = Cell::new(None);
+            let saved: Mutex<Option<challenges::$c::Solution>> = Mutex::new(None);
             let save_solution = |solution: &challenges::$c::Solution| -> Result<()> {
-                saved.set(Some(solution.clone()));
+                *saved.lock().unwrap() = Some(solution.clone());
                 Ok(())
             };
 
@@ -188,7 +188,7 @@ fn run_instance(
 
             let elapsed = start.elapsed().as_secs_f64();
 
-            match saved.take() {
+            match saved.lock().unwrap().take() {
                 Some(solution) => {
                     match instance.evaluate_solution(
                         &solution,
