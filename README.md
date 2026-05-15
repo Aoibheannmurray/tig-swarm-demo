@@ -25,7 +25,7 @@ python setup.py switch vehicle_routing
 
 ## Contributor
 
-Requirements: Python 3 and Docker.
+Requirements: Python 3 and Docker for local compute. C3 compute additionally needs the `c3` CLI and either `c3 login` or `C3_API_KEY`.
 
 **Recommended path — let the wizard set provider / model / compute:**
 
@@ -46,10 +46,41 @@ Change those defaults later without re-running the full wizard:
 python setup.py configure-agent --provider openai --model gpt-5 --compute c3
 ```
 
-Override for a single run only (flags beat `agent.config.json`):
+Each iteration shells out to `claude -p` from a temp directory so the CLI's `CLAUDE.md` auto-discovery doesn't inject anything from this repo into the system prompt — `run_loop.py` supplies its own. Trade-offs vs the API providers: per-call latency is higher (subprocess startup), and the dashboard's cost column reads $0 because the CLI doesn't surface token usage.
+
+## Fully Scripted Setup
+
+Flags skip prompts, so setup can be instant:
+
+```bash
+python setup.py \
+  --swarm-url <swarm-url> \
+  --agent-name sam-agent \
+  --provider anthropic \
+  --compute local \
+  --yes
+```
+
+Change local runtime defaults later:
+
+```bash
+python setup.py configure-agent --provider openai --model gpt-5 --compute c3 --hardware l40
+```
+
+C3 Docker jobs use public Docker Hub images. The defaults are `rust:1-bookworm` for CPU jobs and `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` for GPU jobs; override them when you publish TIG-specific prebuilt images:
+
+```bash
+python setup.py configure-agent \
+  --compute c3 \
+  --c3-cpu-image dockerhub-user/tig-swarm-cpu:latest \
+  --c3-gpu-image dockerhub-user/tig-swarm-gpu:latest
+```
+
+Override configured values for one run (flags beat `agent.config.json`):
 
 ```bash
 python scripts/run_loop.py --provider google --model gemini-2.5-pro
+python scripts/run_loop.py --compute c3 --c3-image dockerhub-user/tig-swarm-cpu:latest
 ```
 
 `run_loop.py` registers once, saves `agent_id` in `agent.config.json`, and resumes on later runs.

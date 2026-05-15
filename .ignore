@@ -11,7 +11,6 @@ target/
 datasets/
 initial_algorithms/
 
-scripts/c3/
 scripts/run_loop.py
 scripts/llm_backends.py
 scripts/admin_reset_challenge.py

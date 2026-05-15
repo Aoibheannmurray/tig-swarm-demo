@@ -121,8 +121,10 @@ DEFAULT_AGENT_CONFIG = {
     "compute": "local",
     "c3_hardware": "l40",
     "c3_time": "02:00:00",
-    "c3_cloud_provider": None,
-    "c3_no_build": False,
+    "c3_provider": None,
+    "c3_image": None,
+    "c3_cpu_image": "rust:1-bookworm",
+    "c3_gpu_image": "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04",
 }
 
 
@@ -317,20 +319,45 @@ def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
         or DEFAULT_AGENT_CONFIG["c3_hardware"]
     )
     c3_time = _arg_value(args, "c3_time") or prior.get("c3_time") or DEFAULT_AGENT_CONFIG["c3_time"]
-    c3_cloud_provider = _arg_value(args, "c3_cloud_provider")
-    if c3_cloud_provider is None:
-        c3_cloud_provider = prior.get("c3_cloud_provider")
-    c3_no_build = _arg_enabled(args, "c3_no_build") or bool(prior.get("c3_no_build", False))
+    c3_provider = _arg_value(args, "c3_provider")
+    if c3_provider is None:
+        c3_provider = prior.get("c3_provider")
+    if c3_provider == "":
+        c3_provider = None
+    c3_image = _arg_value(args, "c3_image")
+    if c3_image is None:
+        c3_image = prior.get("c3_image")
+    if c3_image == "":
+        c3_image = None
+    c3_cpu_image = (
+        _arg_value(args, "c3_cpu_image")
+        or prior.get("c3_cpu_image")
+        or DEFAULT_AGENT_CONFIG["c3_cpu_image"]
+    )
+    c3_gpu_image = (
+        _arg_value(args, "c3_gpu_image")
+        or prior.get("c3_gpu_image")
+        or DEFAULT_AGENT_CONFIG["c3_gpu_image"]
+    )
 
     if compute == "c3" and not yes:
         if _arg_value(args, "hardware") is None and _arg_value(args, "c3_hardware") is None:
             c3_hardware = prompt("C3 GPU hardware", c3_hardware)
         if _arg_value(args, "c3_time") is None:
             c3_time = prompt("C3 job walltime", c3_time)
-        if _arg_value(args, "c3_cloud_provider") is None:
-            c3_cloud_provider = prompt_optional("C3 cloud provider", c3_cloud_provider)
+        if _arg_value(args, "c3_provider") is None:
+            c3_provider = prompt_optional("C3 provider", c3_provider)
+        if _arg_value(args, "c3_image") is None:
+            c3_image = prompt_optional("C3 Docker image override", c3_image)
+        if c3_image is None:
+            if _arg_value(args, "c3_cpu_image") is None:
+                c3_cpu_image = prompt("C3 CPU Docker image", c3_cpu_image)
+            if _arg_value(args, "c3_gpu_image") is None:
+                c3_gpu_image = prompt("C3 GPU Docker image", c3_gpu_image)
 
     cfg = dict(prior)
+    cfg.pop("c3_cloud_provider", None)
+    cfg.pop("c3_no_build", None)
     cfg.update({
         "provider": provider,
         "model": model,
@@ -338,8 +365,10 @@ def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
         "compute": compute,
         "c3_hardware": c3_hardware,
         "c3_time": c3_time,
-        "c3_cloud_provider": c3_cloud_provider,
-        "c3_no_build": c3_no_build,
+        "c3_provider": c3_provider,
+        "c3_image": c3_image,
+        "c3_cpu_image": c3_cpu_image,
+        "c3_gpu_image": c3_gpu_image,
     })
     write_agent_config(cfg)
 
@@ -1388,8 +1417,10 @@ def add_agent_setup_args(parser: argparse.ArgumentParser, *, include_swarm_url: 
     parser.add_argument("--compute", choices=AGENT_COMPUTE_CHOICES, help="Benchmark compute backend.")
     parser.add_argument("--hardware", help="C3 GPU hardware, e.g. l40.")
     parser.add_argument("--c3-time", help="C3 job walltime, e.g. 02:00:00.")
-    parser.add_argument("--c3-cloud-provider", help="Optional C3 cloud provider.")
-    parser.add_argument("--c3-no-build", action="store_true", help="Reuse an existing C3 image.")
+    parser.add_argument("--c3-provider", help="Optional C3 CLI provider.")
+    parser.add_argument("--c3-image", help="Docker Hub image for all C3 jobs.")
+    parser.add_argument("--c3-cpu-image", help="Docker Hub image for CPU C3 jobs.")
+    parser.add_argument("--c3-gpu-image", help="Docker Hub image for GPU C3 jobs.")
     parser.add_argument("--skip-tacit", action="store_true", help="Do not prompt for tacit knowledge.")
     parser.add_argument("--yes", action="store_true", help="Accept defaults for any optional setup prompts.")
 
