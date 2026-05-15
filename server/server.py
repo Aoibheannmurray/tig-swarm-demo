@@ -289,6 +289,17 @@ async def periodic_stats():
             cutoff_ts = inactive_cutoff()
             active_challenge = await get_active_challenge()
             async with db.connect() as conn:
+                # Free up trajectories held by agents that have gone silent
+                # past the inactive cutoff. Without this sweep, the
+                # stagnation-reset path in /api/iterations is the only way
+                # a trajectory ever leaves `active` — so a crashed or
+                # disconnected agent's trajectory would stay flagged active
+                # forever, and their best algorithm would never reach the
+                # inactive pool that other agents adopt from.
+                await db.deactivate_inactive_agent_trajectories(
+                    conn, cutoff_ts, now(),
+                )
+                await conn.commit()
                 total_agents = await db.get_agent_count(conn, active_only=False)
                 # Per-challenge slices.
                 per_challenge: dict[str, dict] = {}

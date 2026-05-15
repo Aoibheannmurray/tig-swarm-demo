@@ -107,7 +107,7 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
     return `
       <div class="panel-inner knapsack-panel">
         <div class="panel-label">SELECTED · ITEM INTERACTIONS</div>
-        <div class="knapsack-agent-name" id="knapsack-agent-name"></div>
+        <div class="solution-agent-name" id="knapsack-agent-name"></div>
         ${this.navsScaffold()}
         <div class="knapsack-svg-wrap" id="knapsack-svg-wrap">
           <div class="kn-sidebar-caption" aria-hidden="true">CONTRIBUTION</div>

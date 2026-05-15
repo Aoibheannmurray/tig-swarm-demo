@@ -22,53 +22,60 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
   private lossBarEl!: HTMLElement;
   private noiseBarEl!: HTMLElement;
   private lossLabelEl!: HTMLElement;
+  private vizStackEl!: HTMLElement;
+  private bottomBarEl!: HTMLElement;
+  private lossSectionEl!: HTMLElement;
 
   protected scaffoldHtml(): string {
     return `
       <div class="panel-inner nn-panel">
         <div class="panel-label">NEURAL NET OPTIMIZER</div>
-        <div class="knapsack-agent-name" id="nn-agent-name"></div>
+        <div class="solution-agent-name" id="nn-agent-name"></div>
         ${this.navsScaffold()}
-        <div class="nn-viz-area" id="nn-viz-area">
-          <div class="nn-arch-diagram" id="nn-arch-diagram"></div>
-          <div class="nn-epochs-section">
-            <div class="nn-epochs-header">CONVERGENCE</div>
-            <div class="nn-epochs-bar-wrap">
-              <div class="nn-epochs-bar" id="nn-epochs-bar"></div>
-            </div>
-            <div class="nn-epochs-label" id="nn-epochs-label">---</div>
-          </div>
-          <div class="nn-loss-section" id="nn-loss-section" style="display:none">
-            <div class="nn-epochs-header">LOSS vs NOISE FLOOR</div>
-            <div class="nn-loss-bars">
-              <div class="nn-loss-row">
-                <span class="nn-loss-tag">model</span>
-                <div class="nn-loss-bar-wrap"><div class="nn-loss-bar nn-loss-bar-model" id="nn-loss-bar"></div></div>
+        <div class="nn-svg-wrap" id="nn-svg-wrap">
+          <div class="nn-viz-stack" id="nn-viz-stack">
+            <div class="nn-arch-diagram" id="nn-arch-diagram"></div>
+            <div class="nn-meters">
+              <div class="nn-meter">
+                <div class="nn-meter-head">CONVERGENCE</div>
+                <div class="nn-meter-bar-wrap"><div class="nn-meter-bar" id="nn-epochs-bar"></div></div>
+                <div class="nn-meter-label" id="nn-epochs-label">---</div>
               </div>
-              <div class="nn-loss-row">
-                <span class="nn-loss-tag">noise</span>
-                <div class="nn-loss-bar-wrap"><div class="nn-loss-bar nn-loss-bar-noise" id="nn-noise-bar"></div></div>
+              <div class="nn-meter" id="nn-loss-section" style="display:none">
+                <div class="nn-meter-head">LOSS vs NOISE FLOOR</div>
+                <div class="nn-loss-rows">
+                  <div class="nn-loss-row">
+                    <span class="nn-loss-tag">model</span>
+                    <div class="nn-loss-bar-wrap"><div class="nn-loss-bar nn-loss-bar-model" id="nn-loss-bar"></div></div>
+                  </div>
+                  <div class="nn-loss-row">
+                    <span class="nn-loss-tag">noise</span>
+                    <div class="nn-loss-bar-wrap"><div class="nn-loss-bar nn-loss-bar-noise" id="nn-noise-bar"></div></div>
+                  </div>
+                </div>
+                <div class="nn-meter-label" id="nn-loss-label">---</div>
               </div>
             </div>
-            <div class="nn-loss-label" id="nn-loss-label">---</div>
           </div>
           <div class="solution-empty-state" id="nn-empty-state">
             <div class="solution-empty-state-title">Challenge not started yet</div>
             <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
           </div>
         </div>
-        <div class="knapsack-value-box">
-          <div class="solution-sub-label">HIDDEN LAYERS</div>
-          <div class="solution-sub-value" id="nn-layers">---</div>
-        </div>
-        <div class="knapsack-items-box">
-          <div class="solution-sub-label">PARAMETERS</div>
-          <div class="solution-sub-value" id="nn-params">---</div>
-        </div>
-        <div class="solution-score">
-          <div class="solution-score-label">SCORE</div>
-          <div class="solution-score-value" id="nn-score">---</div>
-          <div class="solution-score-delta" id="nn-score-delta"></div>
+        <div class="nn-bottom-bar" id="nn-bottom-bar">
+          <div class="nn-stat">
+            <div class="nn-stat-label">HIDDEN LAYERS</div>
+            <div class="nn-stat-value" id="nn-layers">---</div>
+          </div>
+          <div class="nn-stat">
+            <div class="nn-stat-label">PARAMETERS</div>
+            <div class="nn-stat-value" id="nn-params">---</div>
+          </div>
+          <div class="nn-stat nn-stat-score">
+            <div class="nn-stat-label">SCORE</div>
+            <div class="nn-stat-value" id="nn-score">---</div>
+            <div class="nn-stat-delta" id="nn-score-delta"></div>
+          </div>
         </div>
       </div>
     `;
@@ -93,6 +100,9 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     this.lossBarEl = document.getElementById("nn-loss-bar")!;
     this.noiseBarEl = document.getElementById("nn-noise-bar")!;
     this.lossLabelEl = document.getElementById("nn-loss-label")!;
+    this.vizStackEl = document.getElementById("nn-viz-stack")!;
+    this.bottomBarEl = document.getElementById("nn-bottom-bar")!;
+    this.lossSectionEl = document.getElementById("nn-loss-section")!;
   }
 
   protected onReset(): void {
@@ -104,7 +114,18 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     this.lossBarEl.style.width = "0%";
     this.noiseBarEl.style.width = "0%";
     this.lossLabelEl.textContent = "---";
-    document.getElementById("nn-loss-section")!.style.display = "none";
+    this.lossSectionEl.style.display = "none";
+  }
+
+  // Empty state hides everything except the centred "challenge not started yet"
+  // copy — viz stack and bottom-bar stats collapse together so the panel reads
+  // as blank, not as a partially-filled chrome.
+  protected updateEmptyState() {
+    super.updateEmptyState();
+    const showEmpty = this.historyLoaded && this.historyEntries.length === 0;
+    const display = showEmpty ? "none" : "";
+    if (this.vizStackEl) this.vizStackEl.style.display = display;
+    if (this.bottomBarEl) this.bottomBarEl.style.display = display;
   }
 
   protected showInstance(data: NeuralnetData) {
@@ -128,12 +149,11 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
   }
 
   private renderLossComparison(data: NeuralnetData) {
-    const section = document.getElementById("nn-loss-section")!;
     if (data.noise_floor == null || data.model_loss == null) {
-      section.style.display = "none";
+      this.lossSectionEl.style.display = "none";
       return;
     }
-    section.style.display = "";
+    this.lossSectionEl.style.display = "";
     const nf = data.noise_floor;
     const ml = data.model_loss;
     const maxVal = Math.max(nf, ml, 1e-12);
@@ -162,7 +182,7 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     const pad = 40;
     const layerSpacing = (W - 2 * pad) / (nLayers - 1);
 
-    let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:100%">`;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
 
     const maxNodes = 6;
     const nodeR = 5;

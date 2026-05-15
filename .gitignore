@@ -30,5 +30,6 @@ tacit_knowledge_*.md
 tacit_knowledge_personal.md
 
 src/*/algorithm/mod.rs
+src/*/algorithm/kernels.cu
 tig-monorepo/
 prompts_log/

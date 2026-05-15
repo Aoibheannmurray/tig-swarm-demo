@@ -166,7 +166,7 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       // ~1Hz in hidden tabs, but the guard avoids wasted work either way.
       if (document.hidden) return;
       if (this.instanceKeys.length > 1) this.navigate(1);
-    }, 8000);
+    }, 24000);
 
     void this.fetchHistory();
   }

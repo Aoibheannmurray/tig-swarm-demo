@@ -34,7 +34,7 @@ const DEFAULT_DIR: Record<SortKey, SortDir> = {
 export class LeaderboardPanel implements Panel {
   private list!: HTMLElement;
   private currentEntries: LeaderboardEntry[] = [];
-  private sortKey: SortKey = "current_score";
+  private sortKey: SortKey = "best_ever_score";
   private sortDir: SortDir = "desc";
 
   init(container: HTMLElement) {

@@ -17,18 +17,22 @@ export const ROUTE_COLORS = PALETTE.slice(0, 10);
 
 const agentColorMap = new Map<string, string>();
 
-// Agent → palette color. Cached in a module-level Map so every panel on the
-// page resolves the same agent to the same slot regardless of render order —
-// that's what keeps the leaderboard dot, chart step, and diversity grid in
-// sync once a color is picked.
+// Neutral fallback used when no agent_id is associated with an event (admin
+// broadcasts, ungoverned system messages). Kept here so every panel shares
+// the same "no-agent" color instead of inventing its own.
+export const NEUTRAL_AGENT_COLOR = "var(--text-dim)";
+
+// Assign and cache an agent's color. The agent's *preferred* slot is the
+// FNV-1a hash of its id mod palette size, which keeps colors stable across
+// reloads in the common case. If the preferred slot is already claimed we
+// walk forward through the palette and take the first free slot — uniqueness
+// is guaranteed for the first PALETTE.length agents. Beyond that we accept
+// the hashed collision.
 //
-// The agent's *preferred* slot is the FNV-1a hash of its id mod palette size.
-// This preserves stability across reloads in the common case. When the
-// preferred slot is already claimed by a different agent, we walk forward
-// through the palette and take the first free slot — so uniqueness is
-// guaranteed for the first PALETTE.length agents. Beyond that the palette is
-// exhausted and we accept the hashed collision.
-export function getAgentColor(agentId: string): string {
+// Called by main.ts on agent_joined / leaderboard_update so every agent's
+// color is pinned at registration time, before any feed item or chart point
+// looks it up. Idempotent: re-registering an agent returns the cached color.
+export function registerAgentColor(agentId: string): string {
   const cached = agentColorMap.get(agentId);
   if (cached) return cached;
 
@@ -53,6 +57,15 @@ export function getAgentColor(agentId: string): string {
   }
   agentColorMap.set(agentId, color);
   return color;
+}
+
+// Resolve an agent_id to its palette color. Falls back to registerAgentColor
+// so panels that observe an agent before main.ts gets a chance to register it
+// still produce a stable, unique slot. Every panel routes through this so the
+// leaderboard dot, chart line, diversity row, and feed item all paint the
+// same agent the same color.
+export function getAgentColor(agentId: string): string {
+  return registerAgentColor(agentId);
 }
 
 export function getRouteColor(vehicleIndex: number): string {
