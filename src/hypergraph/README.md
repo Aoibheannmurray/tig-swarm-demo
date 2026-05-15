@@ -63,7 +63,7 @@ pub fn solve_challenge(
     module: Arc<CudaModule>,
     stream: Arc<CudaStream>,
     prop: &cudaDeviceProp,
-) -> anyhow::Result<Option<Solution>>
+) -> Result<()>
 ```
 
 - Call `save_solution()` whenever you find an improved solution -- only the last call is kept, and the solver may be killed at any time. Write anytime algorithms that save early and improve iteratively.

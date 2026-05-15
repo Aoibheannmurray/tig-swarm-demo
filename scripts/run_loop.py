@@ -75,6 +75,7 @@ from challenge_files import (
 )
 from server import (
     get_state,
+    is_agent_registered,
     post_message,
     publish_results,
     register_agent,
@@ -684,7 +685,24 @@ def main() -> int:
     if args.agent_id or configured_agent_id:
         agent_id = args.agent_id or configured_agent_id
         agent_name = args.agent_name or configured_agent_name or f"script-{agent_id[:8]}"
-        print(f"Resuming agent: {agent_name} ({agent_id})")
+        # Cached ids outlive their server (URL change without re-running
+        # setup; same URL but DB wiped/rebuilt). Probe up front so we don't
+        # burn an iteration that would 404 on publish.
+        if is_agent_registered(server, agent_id):
+            print(f"Resuming agent: {agent_name} ({agent_id})")
+        else:
+            print(
+                f"Cached agent_id {agent_id} is not registered on {server}. "
+                f"Registering a new agent."
+            )
+            requested_name = config.get("contributor_name") or configured_agent_name
+            register_config = dict(config)
+            if requested_name:
+                register_config["contributor_name"] = requested_name
+            agent_id, agent_name = register_agent(
+                server, register_config, provider=args.provider, model=model,
+            )
+            print(f"Registered as: {agent_name} ({agent_id})")
     else:
         agent_id, agent_name = register_agent(
             server, config, provider=args.provider, model=model,
@@ -798,9 +816,22 @@ def main() -> int:
         # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
         best_kernel = state.get("best_kernel_code") or ""
+        best_files = state.get("best_algorithm_files") or None
         files = ChallengeFiles(config)
         bootstrap = is_stub_code(best_code)
-        if best_code and not bootstrap:
+        if best_files:
+            # Multi-file seed: materialize sibling modules under
+            # src/{challenge}/algorithm/ alongside mod.rs. Iteration 0
+            # / fresh-start only — once the agent publishes, it goes
+            # back to the single-string path until the next reset.
+            algo_dir = (ROOT / config["algorithm_path"]).parent
+            algo_dir.mkdir(parents=True, exist_ok=True)
+            for rel, body in best_files.items():
+                out = algo_dir / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(body)
+            print(f"  [FILES] Wrote multi-file seed ({len(best_files)} files) to {algo_dir}")
+        elif best_code and not bootstrap:
             files.write(best_code, best_kernel)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
             if files.is_gpu and not best_kernel:

@@ -5,7 +5,43 @@ All build_*_prompt functions live here, plus hypothesis parsing.
 
 from __future__ import annotations
 
-from challenge_files import is_stub_code, read_tacit_knowledge
+from pathlib import Path
+
+from challenge_files import ROOT, is_stub_code, read_tacit_knowledge
+
+
+def _read_algorithm_siblings(config: dict) -> dict[str, str]:
+    """Return {relative_path: contents} for sibling *.rs modules in the
+    algorithm directory (excluding mod.rs itself). Empty when the
+    algorithm is single-file."""
+    algo_path = config.get("algorithm_path")
+    if not algo_path:
+        return {}
+    algo_dir = (ROOT / algo_path).parent
+    if not algo_dir.is_dir():
+        return {}
+    out: dict[str, str] = {}
+    for p in sorted(algo_dir.rglob("*.rs")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(algo_dir).as_posix()
+        if rel == "mod.rs":
+            continue
+        out[rel] = p.read_text()
+    return out
+
+
+def _format_sibling_modules(siblings: dict[str, str]) -> str:
+    """Render sibling *.rs modules as labeled code blocks (read-only context)."""
+    if not siblings:
+        return ""
+    parts = [
+        "\nSibling modules in src/<challenge>/algorithm/ (read-only context — "
+        "do NOT include these in your output, only edit mod.rs):"
+    ]
+    for rel, body in siblings.items():
+        parts.append(f"\n// --- {rel} ---\n```rust\n{body}\n```")
+    return "\n".join(parts)
 
 
 # ── Strategy tags ──────────────────────────────────────────────────
@@ -81,6 +117,9 @@ def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
         )
     else:
         parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
+        siblings = _read_algorithm_siblings(config)
+        if siblings:
+            parts.append(_format_sibling_modules(siblings))
         if is_gpu:
             kernel_code = state.get("best_kernel_code") or ""
             if kernel_code:
@@ -185,6 +224,14 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
         )
     else:
         parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
+        siblings = _read_algorithm_siblings(config)
+        if siblings:
+            parts.append(_format_sibling_modules(siblings))
+            parts.append(
+                "\nThe sibling modules above are vendored helpers — your "
+                "output must be ONLY the new mod.rs. The siblings persist "
+                "on disk unchanged across iterations."
+            )
 
     if is_gpu:
         kernel_code = state.get("best_kernel_code") or ""

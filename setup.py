@@ -260,6 +260,23 @@ def read_prior_agent_config() -> dict:
         return {}
 
 
+def clear_cached_agent_identity(reason: str) -> None:
+    """Drop agent_id/agent_name from agent.config.json.
+
+    Called when joining a different swarm URL: the cached id was issued by
+    the previous server and would 404 against the new one's /api/iterations
+    and /api/messages registration checks. The agent loop will register
+    fresh on the next run.
+    """
+    cfg = read_prior_agent_config()
+    if not cfg.get("agent_id") and not cfg.get("agent_name"):
+        return
+    cfg["agent_id"] = None
+    cfg["agent_name"] = None
+    print(f"  clearing cached agent_id/agent_name ({reason})")
+    write_agent_config(cfg)
+
+
 def _arg_value(args: argparse.Namespace | None, name: str):
     return getattr(args, name, None) if args is not None else None
 
@@ -417,19 +434,137 @@ def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
         )
 
 
-def read_initial_algorithms() -> dict[str, dict[str, str]]:
+def read_initial_algorithms() -> dict[str, dict]:
     """Read per-challenge initial algorithm files. Missing files map to
-    empty strings — agents start from a stub. Returns
-    {challenge: {"algorithm_code": ..., "kernel_code": ...}}."""
-    out: dict[str, dict[str, str]] = {}
+    empty strings — agents start from a stub.
+
+    Returns {challenge: {"algorithm_code": str, "kernel_code": str,
+    "algorithm_files": dict[str, str] | None}}.
+
+    Layout precedence: a directory at `initial_algorithms/{ch}/` wins
+    over a `{ch}.rs` file (multi-file seed). The legacy single-file path
+    keeps working — it just becomes one of two valid shapes."""
+    out: dict[str, dict] = {}
+    seed_root = ROOT / "initial_algorithms"
     for ch in CHALLENGES:
-        algo_path = ROOT / "initial_algorithms" / f"{ch}.rs"
-        kernel_path = ROOT / "initial_algorithms" / f"{ch}.cu"
-        out[ch] = {
-            "algorithm_code": algo_path.read_text() if algo_path.is_file() else "",
-            "kernel_code": kernel_path.read_text() if kernel_path.is_file() else "",
-        }
+        bundle_dir = seed_root / ch
+        algo_path = seed_root / f"{ch}.rs"
+        kernel_path = seed_root / f"{ch}.cu"
+        if bundle_dir.is_dir():
+            files: dict[str, str] = {}
+            for p in sorted(bundle_dir.rglob("*")):
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(bundle_dir).as_posix()
+                files[rel] = p.read_text()
+            mod_rs = files.get("mod.rs", "")
+            cu_keys = [k for k in files if k.endswith(".cu")]
+            kernel = files[cu_keys[0]] if len(cu_keys) == 1 else ""
+            out[ch] = {
+                "algorithm_code": mod_rs,
+                "kernel_code": kernel,
+                "algorithm_files": files or None,
+            }
+        else:
+            out[ch] = {
+                "algorithm_code": algo_path.read_text() if algo_path.is_file() else "",
+                "kernel_code": kernel_path.read_text() if kernel_path.is_file() else "",
+                "algorithm_files": None,
+            }
     return out
+
+
+def _mainnet_get(url: str, *, timeout: int = 8) -> object:
+    """GET + JSON-decode a mainnet API endpoint.
+
+    Sets a User-Agent header — bare `urllib.request.urlopen` ships
+    `Python-urllib/3.X` which the CDN in front of mainnet-api.tig.foundation
+    rejects with HTTP 403."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "tig-swarm-demo-setup",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def seed_challenges_from_mainnet(challenge_set: dict[str, dict]) -> None:
+    """Best-effort: pick the highest-adoption mainnet algorithm per challenge
+    and stage it under initial_algorithms/ via download_algorithm.py.
+
+    Network failures are warned-and-continued — never aborts run_create."""
+    # Imported lazily so the script still loads on hosts without scripts/
+    # on sys.path (download_algorithm only depends on stdlib).
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from download_algorithm import download_algorithm, DownloadError
+    except Exception as e:
+        print(f"  could not import download_algorithm.py: {e}; skipping seed.")
+        return
+
+    api = "https://mainnet-api.tig.foundation"
+    try:
+        block = _mainnet_get(f"{api}/get-block")["block"]
+        block_id = block["id"]
+        challenges_resp = _mainnet_get(f"{api}/get-challenges?block_id={block_id}")
+        algos_resp = _mainnet_get(f"{api}/get-algorithms?block_id={block_id}")
+    except Exception as e:
+        print(f"  mainnet unreachable ({e}); keeping existing initial_algorithms/.")
+        return
+
+    # challenge_id -> challenge_name (e.g. "satisfiability"). The upstream
+    # response carries the human-readable name under `config.name` (the
+    # `details.name` shape in the older tig.py reference is out of date).
+    id_to_name: dict[str, str] = {
+        c["id"]: c["config"]["name"] for c in challenges_resp["challenges"]
+    }
+
+    # `binarys` carries per-algorithm compile status; only seed from
+    # algorithms that successfully compiled upstream.
+    compile_ok: dict[str, bool] = {
+        b["algorithm_id"]: bool(b.get("details", {}).get("compile_success"))
+        for b in algos_resp.get("binarys", [])
+    }
+
+    # Group eligible algorithms by challenge name. "Eligible" = adopted at
+    # this block (block_data.adoption set + > 0) AND compiled successfully.
+    by_challenge: dict[str, list[dict]] = {}
+    for algo in algos_resp["codes"]:
+        cid = (algo.get("details") or {}).get("challenge_id")
+        ch_name = id_to_name.get(cid)
+        if not ch_name or not compile_ok.get(algo["id"]):
+            continue
+        try:
+            adoption = int((algo.get("block_data") or {}).get("adoption") or 0)
+        except (TypeError, ValueError):
+            adoption = 0
+        if adoption <= 0:
+            continue
+        by_challenge.setdefault(ch_name, []).append((adoption, algo))
+
+    for ch in challenge_set:
+        entries = by_challenge.get(ch) or []
+        if not entries:
+            print(f"  {ch}: no compiled mainnet algorithm found; leaving seed in place.")
+            continue
+        entries.sort(key=lambda e: e[0], reverse=True)
+        adoption, top = entries[0]
+        algo_name = (top.get("details") or {}).get("name")
+        if not algo_name:
+            print(f"  {ch}: top algorithm has no name field; skipping.")
+            continue
+        # Adoption is reported in 1e16-scaled fixed-point per the upstream
+        # convention; divide for a human-readable percentage.
+        print(
+            f"  {ch}: top algorithm '{algo_name}' (adoption {adoption / 1e16:.2f}%); downloading…"
+        )
+        try:
+            download_algorithm(ch, algo_name, force=True)
+        except DownloadError as e:
+            print(f"  {ch}: download of {algo_name} failed ({e}); leaving seed in place.")
 
 
 def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
@@ -495,6 +630,8 @@ def collect_per_challenge_configs(
         }
         if algo_data.get("kernel_code"):
             sub["initial_kernel_code"] = algo_data["kernel_code"]
+        if algo_data.get("algorithm_files"):
+            sub["initial_algorithm_files"] = algo_data["algorithm_files"]
         challenges[ch] = sub
     return challenges
 
@@ -858,6 +995,18 @@ def run_create(args: argparse.Namespace | None = None) -> int:
             default="Y",
         )
         use_defaults = use_defaults_ans.strip().lower() not in ("n", "no")
+
+    seed_from_mainnet = _arg_enabled(args, "seed_from_mainnet")
+    if not seed_from_mainnet and not yes:
+        ans = prompt(
+            "Seed all challenges with the current top-adoption mainnet "
+            "algorithm? [y/N]",
+            default="N",
+        )
+        seed_from_mainnet = ans.strip().lower() in ("y", "yes")
+    if seed_from_mainnet:
+        print("\nSeeding initial_algorithms/ from mainnet…")
+        seed_challenges_from_mainnet(challenge_set)
 
     initial_algorithms = read_initial_algorithms()
     challenges_cfg = collect_per_challenge_configs(
@@ -1245,6 +1394,11 @@ def run_join(server_url: str, args: argparse.Namespace | None = None) -> int:
     print("=" * 48)
 
     prior = read_prior_swarm_config()
+    prior_server_url = (prior or {}).get("server_url")
+    if prior_server_url and prior_server_url != server_url:
+        clear_cached_agent_identity(
+            f"switching swarms: {prior_server_url} -> {server_url}"
+        )
     challenge = None
     algorithm_path = None
     stagnation_threshold = 2
@@ -1403,6 +1557,10 @@ def add_create_setup_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--stagnation-threshold", type=int, help="Iterations before hints/inspiration.")
     parser.add_argument("--stagnation-limit", type=int, help="Iterations before trajectory reset; 0 disables.")
     parser.add_argument("--hypothesis-recall-threshold", type=int, help="Iterations before prior failed hypotheses are shown.")
+    parser.add_argument(
+        "--seed-from-mainnet", action="store_true",
+        help="Seed initial_algorithms/ with the current top-adoption mainnet algorithm per challenge.",
+    )
 
 
 def has_create_args(args: argparse.Namespace) -> bool:

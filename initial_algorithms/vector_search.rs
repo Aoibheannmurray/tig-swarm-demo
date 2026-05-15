@@ -29,7 +29,7 @@ pub fn solve_challenge(
     module: Arc<CudaModule>,
     stream: Arc<CudaStream>,
     prop: &cudaDeviceProp,
-) -> anyhow::Result<Option<Solution>> {
+) -> Result<()> {
     // If you need random numbers, recommend using SmallRng with challenge.seed:
     //      use rand::{rngs::SmallRng, Rng, SeedableRng};
     //      let mut rng = SmallRng::from_seed(challenge.seed);

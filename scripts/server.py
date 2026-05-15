@@ -88,6 +88,27 @@ def get_state(server: str, agent_id: str) -> dict:
     return server_get(f"{server}/api/state?agent_id={urllib.parse.quote(agent_id)}")
 
 
+def is_agent_registered(server: str, agent_id: str) -> bool:
+    """True iff `agent_id` exists in the swarm's agents table.
+
+    A cached agent_id can outlive its server: switching server URLs without
+    re-running setup, or the same server being rebuilt/wiped. The agent
+    loop's resume path uses this to detect the mismatch up front, before
+    burning an iteration that would 404 on publish.
+
+    Probes /api/state, which is cheap and always returns 200. The server's
+    `get_agent_name` returns the sentinel "unknown" when the id isn't in
+    the agents table (server/server.py: get_agent_name). On network errors
+    we conservatively return True so transient outages don't trigger an
+    unwanted re-registration.
+    """
+    try:
+        state = get_state(server, agent_id)
+    except _NET_ERRORS:
+        return True
+    return state.get("agent_name") not in (None, "", "unknown")
+
+
 def send_heartbeat(server: str, agent_id: str) -> None:
     try:
         server_post(

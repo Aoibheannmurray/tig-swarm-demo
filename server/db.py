@@ -182,7 +182,12 @@ CREATE TABLE IF NOT EXISTS challenge_configs (
     scoring_direction TEXT NOT NULL DEFAULT 'max',
     initial_algorithm_code TEXT NOT NULL DEFAULT '',
     initial_kernel_code TEXT NOT NULL DEFAULT '',
-    strategy_tags TEXT NOT NULL DEFAULT '[]'
+    strategy_tags TEXT NOT NULL DEFAULT '[]',
+    -- JSON map of {relative_path: file_contents} when the seed is a
+    -- multi-file algorithm bundle (e.g. mod.rs + sibling *.rs / *.cu).
+    -- NULL for single-file seeds, which fall through to the legacy
+    -- initial_algorithm_code + initial_kernel_code columns.
+    initial_algorithm_files TEXT
 );
 """
 
@@ -250,6 +255,8 @@ async def init_db() -> None:
         await _add_column(db, "agent_challenge_state", "total_input_tokens", "INTEGER DEFAULT 0")
         await _add_column(db, "agent_challenge_state", "total_output_tokens", "INTEGER DEFAULT 0")
         await _add_column(db, "agent_challenge_state", "total_estimated_cost", "REAL DEFAULT 0.0")
+        # Multi-file algorithm seed support (NULL = legacy single-file path).
+        await _add_column(db, "challenge_configs", "initial_algorithm_files", "TEXT")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -650,7 +657,8 @@ async def increment_agent_challenge_counters(
 
 _CHALLENGE_CONFIG_COLS = (
     "challenge, tracks, timeout, scoring_direction, "
-    "initial_algorithm_code, initial_kernel_code, strategy_tags"
+    "initial_algorithm_code, initial_kernel_code, strategy_tags, "
+    "initial_algorithm_files"
 )
 
 
@@ -684,9 +692,15 @@ async def upsert_challenge_config(
     initial_algorithm_code: str | None = None,
     initial_kernel_code: str | None = None,
     strategy_tags: str | None = None,
+    initial_algorithm_files: str | None = None,
+    clear_initial_algorithm_files: bool = False,
 ) -> None:
     """Partial upsert — only writes the fields the caller passes. Lets
-    `POST /api/swarm_config` accept one challenge's sub-config at a time."""
+    `POST /api/swarm_config` accept one challenge's sub-config at a time.
+
+    Pass `clear_initial_algorithm_files=True` to explicitly NULL the
+    multi-file map (used when a swarm reseeds with a single-file algorithm
+    after previously seeding with a directory bundle)."""
     # Ensure row exists.
     await conn.execute(
         "INSERT OR IGNORE INTO challenge_configs (challenge) VALUES (?)",
@@ -712,6 +726,11 @@ async def upsert_challenge_config(
     if strategy_tags is not None:
         sets.append("strategy_tags = ?")
         params.append(strategy_tags)
+    if clear_initial_algorithm_files:
+        sets.append("initial_algorithm_files = NULL")
+    elif initial_algorithm_files is not None:
+        sets.append("initial_algorithm_files = ?")
+        params.append(initial_algorithm_files)
     if not sets:
         return
     params.append(challenge)

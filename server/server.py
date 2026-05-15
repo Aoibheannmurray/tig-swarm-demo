@@ -117,6 +117,7 @@ async def get_challenge_config_cached(challenge: str) -> dict:
             "initial_algorithm_code": "",
             "initial_kernel_code": "",
             "strategy_tags": "[]",
+            "initial_algorithm_files": None,
         }
     else:
         cfg = row
@@ -130,16 +131,34 @@ def _invalidate_caches() -> None:
     _challenge_config_cache = None
 
 
-async def load_initial_algorithm(challenge: str) -> tuple[str, str]:
+async def load_initial_algorithm(challenge: str) -> tuple[str, str, dict[str, str] | None]:
     """Initial algorithm broadcast to every agent on a fresh trajectory for
     the given challenge: their first iteration on it, and again whenever a
     trajectory reset draws the "fresh start" slot from the per-challenge
-    inactive pool. Returns (algorithm_code, kernel_code)."""
+    inactive pool. Returns (algorithm_code, kernel_code, algorithm_files).
+
+    algorithm_files is a {relative_path: contents} map for multi-file
+    seeds (mod.rs + sibling modules); None for legacy single-file seeds.
+    When the file map is present, algorithm_code mirrors `mod.rs` so
+    legacy callers that only read the string still get the entry point."""
     cfg = await get_challenge_config_cached(challenge)
-    return (
-        cfg.get("initial_algorithm_code") or "",
-        cfg.get("initial_kernel_code") or "",
-    )
+    files_raw = cfg.get("initial_algorithm_files")
+    files: dict[str, str] | None = None
+    if files_raw:
+        try:
+            parsed = json.loads(files_raw) if isinstance(files_raw, str) else files_raw
+            if isinstance(parsed, dict) and parsed:
+                files = {str(k): str(v) for k, v in parsed.items()}
+        except Exception:
+            files = None
+    code = cfg.get("initial_algorithm_code") or ""
+    kernel = cfg.get("initial_kernel_code") or ""
+    if files:
+        code = files.get("mod.rs", code)
+        cu_keys = [k for k in files if k.endswith(".cu")]
+        if len(cu_keys) == 1:
+            kernel = files[cu_keys[0]] or kernel
+    return code, kernel, files
 
 
 async def get_direction(challenge: str | None = None) -> str:
@@ -608,8 +627,9 @@ async def get_state(
                 n_traj, total_deact = await db.trajectory_counts(conn, challenge)
                 go_fresh = not inactive_pool or n_traj * n_traj < total_deact
 
+                new_algorithm_files: dict[str, str] | None = None
                 if go_fresh:
-                    new_code, new_kernel_code = await load_initial_algorithm(challenge)
+                    new_code, new_kernel_code, new_algorithm_files = await load_initial_algorithm(challenge)
                     new_program_id = new_id()
                     trajectory_reset = {"type": "fresh_start"}
                 else:
@@ -648,6 +668,7 @@ async def get_state(
                 my_best = None
                 my_best_code = new_code
                 my_best_kernel_code = new_kernel_code
+                my_best_algorithm_files = new_algorithm_files
                 my_best_score = None
                 my_best_experiment_id = None
                 runs_since = 0
@@ -662,11 +683,14 @@ async def get_state(
                 # Re-read acs so subsequent reads see the reset state.
                 acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
             else:
+                my_best_algorithm_files: dict[str, str] | None = None
                 if my_best:
                     my_best_code = my_best["algorithm_code"]
                     my_best_kernel_code = my_best.get("kernel_code")
                 else:
-                    my_best_code, my_best_kernel_code = await load_initial_algorithm(challenge)
+                    my_best_code, my_best_kernel_code, my_best_algorithm_files = (
+                        await load_initial_algorithm(challenge)
+                    )
                 my_best_score = my_best["score"] if my_best else None
                 my_best_experiment_id = my_best["experiment_id"] if my_best else None
 
@@ -795,6 +819,12 @@ async def get_state(
             if is_gpu:
                 resp["best_kernel_code"] = my_best_kernel_code or None
                 resp["inspiration_kernel_code"] = inspiration_kernel_code or None
+            # Multi-file seed map (only set on iteration 0 / fresh-start
+            # resets — once the agent publishes their first iteration the
+            # current best lives in agent_bests as a single string, and
+            # sibling modules persist on disk untouched).
+            if my_best_algorithm_files:
+                resp["best_algorithm_files"] = my_best_algorithm_files
             return resp
 
         # ── Dashboard view (no agent_id) ──
@@ -834,7 +864,9 @@ async def get_state(
         else 0
     )
 
-    _initial_algo = (None, None) if served else await load_initial_algorithm(challenge)
+    _initial_algo = (
+        (None, None, None) if served else await load_initial_algorithm(challenge)
+    )
     return {
         "challenge": challenge,
         "baseline_score": baseline,
@@ -1808,6 +1840,11 @@ async def get_swarm_config():
             strategy_tags = []
         ch_name = row["challenge"]
         ch_def = challenges.CHALLENGES.get(ch_name)
+        files_blob = row.get("initial_algorithm_files")
+        try:
+            files_map = json.loads(files_blob) if files_blob else None
+        except Exception:
+            files_map = None
         available[ch_name] = {
             "tracks": tracks,
             "timeout": row.get("timeout") or (ch_def.default_timeout if ch_def else 30),
@@ -1818,6 +1855,8 @@ async def get_swarm_config():
             # can be large and is fetched separately from /api/initial_algorithm).
             "has_initial_algorithm": bool(row.get("initial_algorithm_code")),
             "has_initial_kernel_code": bool(row.get("initial_kernel_code")),
+            "has_initial_algorithm_files": bool(files_map),
+            "initial_algorithm_file_paths": sorted(files_map.keys()) if files_map else [],
             "is_gpu": ch_def.is_gpu if ch_def else False,
             "strategy_tags": strategy_tags,
         }
@@ -1840,14 +1879,21 @@ async def get_swarm_config():
 @app.get("/api/initial_algorithm")
 async def get_initial_algorithm(challenge: str | None = None):
     """Return the per-challenge initial algorithm code. Used by agents on
-    their first iteration and by the wizard for round-trip verification."""
+    their first iteration and by the wizard for round-trip verification.
+
+    For multi-file seeds, `algorithm_files` is the {relative_path: contents}
+    map and `algorithm_code` mirrors `mod.rs` for back-compat with callers
+    that only know the single-string shape."""
     challenge = await resolve_challenge(challenge)
-    cfg = await get_challenge_config_cached(challenge)
-    return {
+    code, kernel, files = await load_initial_algorithm(challenge)
+    payload = {
         "challenge": challenge,
-        "algorithm_code": cfg.get("initial_algorithm_code", "") or "",
-        "kernel_code": cfg.get("initial_kernel_code", "") or "",
+        "algorithm_code": code,
+        "kernel_code": kernel,
     }
+    if files:
+        payload["algorithm_files"] = files
+    return payload
 
 
 @app.post("/api/swarm_config")
@@ -1871,6 +1917,7 @@ async def update_swarm_config(req: SwarmConfigUpdate):
 
     async with db.connect() as conn:
         for ch, sub in challenges_payload.items():
+            files_field = sub.get("initial_algorithm_files")
             await db.upsert_challenge_config(
                 conn, ch,
                 tracks=json.dumps(sub["tracks"]) if sub.get("tracks") is not None else None,
@@ -1879,6 +1926,15 @@ async def update_swarm_config(req: SwarmConfigUpdate):
                 initial_algorithm_code=sub.get("initial_algorithm_code"),
                 initial_kernel_code=sub.get("initial_kernel_code"),
                 strategy_tags=json.dumps(sub["strategy_tags"]) if sub.get("strategy_tags") is not None else None,
+                # Distinguish "field not sent" (leave column alone) from
+                # "field explicitly cleared" (single-file reseed) — empty
+                # dict means caller wants to NULL the column.
+                initial_algorithm_files=(
+                    json.dumps(files_field) if files_field else None
+                ),
+                clear_initial_algorithm_files=(
+                    files_field is not None and not files_field
+                ),
             )
         if req.active_challenge:
             await db.set_active_challenge(conn, req.active_challenge)

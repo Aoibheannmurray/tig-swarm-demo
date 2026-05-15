@@ -117,6 +117,11 @@ class ChallengeSubConfig(BaseModel):
     initial_algorithm_code: str = ""
     initial_kernel_code: str = ""
     strategy_tags: Optional[list[str]] = None
+    # Multi-file seed: {relative_path: file_contents} for algorithms that
+    # ship as a directory (mod.rs + sibling *.rs / *.cu modules). When set,
+    # the agent materializes each entry under src/{challenge}/algorithm/
+    # on iteration 0; otherwise the legacy single-file path is used.
+    initial_algorithm_files: Optional[dict[str, str]] = None
 
 
 class SwarmConfigUpdate(AdminAuth):

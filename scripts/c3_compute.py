@@ -85,6 +85,20 @@ def _temporary_c3_files(config: dict, server: str, c3_time: str):
     kernel_cfg = config.get("kernel_path")
     kernel_p = ROOT / kernel_cfg if kernel_cfg else None
 
+    # Multi-file algorithm support: ship every sibling source file under the
+    # algorithm directory (mod.rs + helper *.rs modules) so seeds that
+    # reference `mod foo;` etc. compile remotely. Single-file algorithms
+    # collapse to just mod.rs as before.
+    algo_dir = algo_p.parent
+    algo_dir_rel = algo_dir.relative_to(ROOT).as_posix()
+    sibling_files: dict[str, str] = {}
+    if algo_dir.is_dir():
+        for p in sorted(algo_dir.rglob("*.rs")):
+            if not p.is_file():
+                continue
+            rel_to_dir = p.relative_to(algo_dir).as_posix()
+            sibling_files[rel_to_dir] = p.read_text()
+
     old_c3 = c3_path.read_text() if c3_path.exists() else None
 
     c3_config = f"""\
@@ -117,6 +131,13 @@ export TIG_SWARM_SERVER={_yaml_quote(server)}
 
 {_script_write_file_b64(config.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs"), algorithm_code)}
 """
+    # Replicate sibling *.rs modules under the same algorithm directory so
+    # multi-file seeds compile in the C3 sandbox. mod.rs is already covered
+    # by the algorithm_path write above, so skip it to avoid double-write.
+    for rel, body in sibling_files.items():
+        if rel == "mod.rs":
+            continue
+        runner += _script_write_file_b64(f"{algo_dir_rel}/{rel}", body)
     if kernel_cfg:
         runner += _script_write_file_b64(kernel_cfg, kernel_code)
     runner += f"""\
