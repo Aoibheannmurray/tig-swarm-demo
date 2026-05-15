@@ -25,7 +25,7 @@ python setup.py switch energy_arbitrage
 
 ## Contributor
 
-Requirements: Python 3 and Docker for local compute. C3 compute additionally needs the `c3` CLI and either `c3 login` or `C3_API_KEY`.
+Requirements: Python 3 and credentials for the LLM provider you choose. Benchmark backend requirements are covered in [Compute](#compute).
 
 **Recommended path — let the wizard set provider / model / compute:**
 
@@ -67,14 +67,66 @@ Change local runtime defaults later:
 python setup.py configure-agent --provider openai --model gpt-5 --compute c3 --hardware l40
 ```
 
-C3 Docker jobs default to public upstream Docker Hub images, so a fresh clone can run without access to any Sam/TIG-owned image:
+`run_loop.py` registers once, saves `agent_id` in `agent.config.json`, and resumes on later runs.
 
-| Swarm/challenge type | Default C3 image |
-|----------------------|------------------|
+## Compute
+
+TIG supports two benchmark backends: local Docker and remote compute. The selected backend is stored in `agent.config.json` and can be overridden for a single run with `scripts/run_loop.py` flags.
+
+### Local Docker
+
+Use local Docker when you want benchmarks to run on this machine.
+
+Requirements:
+- Docker
+- a local benchmark image
+
+Build the local benchmark image once:
+
+```bash
+docker build -f Dockerfile.cpu -t tig-swarm-cpu .
+
+# for GPU swarms/challenges:
+docker build -f Dockerfile.gpu -t tig-swarm-gpu .
+```
+
+Configure local compute:
+
+```bash
+python setup.py configure-agent --compute local
+```
+
+### Remote Compute
+
+Use remote compute when you want benchmarks to run on external infrastructure instead of this machine.
+
+C3 is currently the only built-in remote compute provider. A future provider with similar capabilities could be added if it can run a Docker image, upload the staged TIG workspace, execute the benchmark command, and return benchmark artifacts.
+
+Requirements for the built-in C3 provider:
+- `c3` CLI
+- either `c3 login` or `C3_API_KEY`
+
+```bash
+c3 whoami
+
+# or:
+export C3_API_KEY=...
+```
+
+Configure C3 remote compute:
+
+```bash
+python setup.py configure-agent --compute c3 --hardware l40
+```
+
+Remote C3 jobs default to public upstream Docker Hub images, so a fresh clone can run without access to any Sam/TIG-owned image:
+
+| Swarm/challenge type | Default image |
+|----------------------|---------------|
 | CPU                  | `rust:1-bookworm` |
 | GPU                  | `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` |
 
-Those public defaults are the most portable path, but they install missing packages and Python/Rust dependencies during job startup. For faster C3 deploys, build a TIG-specific image with the benchmark dependencies already installed, push it to Docker Hub, and point `--env` at that image:
+Those public defaults are the most portable path, but they install missing packages and Python/Rust dependencies during job startup. For faster remote deploys, build a TIG-specific image with the benchmark dependencies already installed, push it to Docker Hub, and point `--env` at that image:
 
 ```bash
 docker login
@@ -101,11 +153,8 @@ In regular use, `--env` should either be managed per contributor in their own `a
 Override configured values for one run (flags beat `agent.config.json`):
 
 ```bash
-python scripts/run_loop.py --provider google --model gemini-2.5-pro
 python scripts/run_loop.py --compute c3 --env <dockerhub-user>/tig-swarm-gpu:latest
 ```
-
-`run_loop.py` registers once, saves `agent_id` in `agent.config.json`, and resumes on later runs.
 
 ### Providers
 
@@ -157,14 +206,6 @@ python scripts/run_fleet.py --clean            # remove every fleet worktree and
 ```
 
 With `"compute": "c3"` per agent, benchmarking is offloaded — running N agents only multiplies LLM calls, not local CPU or Docker pressure.
-
-## Docker
-
-Local Docker benchmarking uses local image tags. Build the local benchmark image once (use `Dockerfile.gpu` for GPU swarms):
-
-```bash
-docker build -f Dockerfile.cpu -t tig-swarm-cpu .
-```
 
 ## Config Rule
 
