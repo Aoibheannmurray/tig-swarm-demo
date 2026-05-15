@@ -165,6 +165,11 @@ fn run_instance(
             let start = Instant::now();
             let solver_result = std::thread::scope(|s| {
                 let handle = s.spawn(|| {
+                    // The CUDA primary context is per-thread; only some
+                    // cudarc APIs (`alloc`, `launch`, ...) bind implicitly.
+                    // Bind here so any solver — including those that start
+                    // with a `memcpy_dtov` — works on this fresh thread.
+                    stream.context().bind_to_thread()?;
                     challenges::$c::algorithm::solve_challenge(
                         &instance,
                         &save_solution,
@@ -205,7 +210,7 @@ fn run_instance(
                                 "elapsed": elapsed,
                             });
                             append_viz_data!(json, challenge_name, instance, solution,
-                                            module, stream, prop, quality);
+                                            module, stream, &prop, quality);
                             println!("{}", json);
                         }
                         Err(e) => {

@@ -189,7 +189,16 @@ def _run_benchmark_local() -> tuple[dict | None, str]:
     try:
         return json.loads(result.stdout), ""
     except json.JSONDecodeError:
-        print(f"  Benchmark output not valid JSON:\n{result.stdout[:300]}", file=sys.stderr)
+        # NVIDIA CUDA images print a banner to stdout before our command
+        # runs. benchmark.py emits exactly one JSON object (indent=2) at
+        # the tail, so its outer "{" sits at column 0 — recover from there.
+        idx = result.stdout.rfind("\n{")
+        if idx >= 0:
+            try:
+                return json.loads(result.stdout[idx + 1 :]), ""
+            except json.JSONDecodeError:
+                pass
+        print(f"  Benchmark output not valid JSON:\n{result.stdout[-600:]}", file=sys.stderr)
         return None, "Benchmark output was not valid JSON"
 
 
