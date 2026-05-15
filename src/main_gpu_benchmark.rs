@@ -131,7 +131,8 @@ fn run_instance(
 
     macro_rules! dispatch_gpu {
         ($c:ident) => {{
-            use cudarc::driver::{CudaContext, Ptx};
+            use cudarc::driver::CudaContext;
+            use cudarc::nvrtc::Ptx;
             use cudarc::runtime::result::device::get_device_prop;
 
             let ctx = CudaContext::new(0)?;
