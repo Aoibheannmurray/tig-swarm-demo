@@ -57,17 +57,25 @@ def _arg_value(args: argparse.Namespace, name: str, default=None):
 
 
 def _select_docker_image(args: argparse.Namespace, config: dict) -> str:
-    explicit = _arg_value(args, "c3_image") or config.get("c3_image")
+    explicit = (
+        _arg_value(args, "env_image")
+        or config.get("env_image")
+        or config.get("c3_image")
+    )
     if explicit:
         return explicit
     if bool(config.get("is_gpu")):
         return (
-            _arg_value(args, "c3_gpu_image")
+            _arg_value(args, "env_gpu")
+            or _arg_value(args, "c3_gpu_image")
+            or config.get("env_gpu")
             or config.get("c3_gpu_image")
             or _DEFAULT_GPU_IMAGE
         )
     return (
-        _arg_value(args, "c3_cpu_image")
+        _arg_value(args, "env_cpu")
+        or _arg_value(args, "c3_cpu_image")
+        or config.get("env_cpu")
         or config.get("c3_cpu_image")
         or _DEFAULT_CPU_IMAGE
     )
@@ -434,7 +442,7 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
     cfg["c3_hardware"] = args.hardware.lower()
 
     image = _select_docker_image(args, cfg)
-    cfg["c3_image"] = image
+    cfg["env_image"] = image
 
     env = os.environ.copy()
     if c3_key and not c3_key.startswith("your_"):
