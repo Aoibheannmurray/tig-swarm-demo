@@ -1,9 +1,9 @@
 // Shared scaffolding for the per-challenge visualization panels.
 //
-// All five display panels (solution, gantt, knapsack, energy, sat) used to
-// duplicate ~80 lines of identical code: history entries, replay fetch,
-// instance rotation, empty-state toggle, agent-name rendering, score-delta
-// formatting, LIVE-button wiring. This base class owns all of that.
+// Every per-challenge panel in this folder extends DisplayPanelBase. The
+// base class owns the bits that used to duplicate across every panel:
+// history entries, replay fetch, instance rotation, empty-state toggle,
+// agent-name rendering, score-delta formatting, LIVE-button wiring.
 //
 // A subclass must implement:
 //   - idPrefix:        unique prefix for DOM ids (e.g. "sat", "knapsack")
@@ -23,7 +23,7 @@ import type { Panel, WSMessage } from "../types";
 import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
-import type { Challenge } from "../lib/challengeRegistry";
+import type { Challenge } from "./registry";
 
 export interface DisplayHistoryEntry<TInstances> {
   experiment_id: string;
@@ -58,6 +58,17 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   protected historyIndex = -1;
   protected historyLoaded = false;
   protected rotationTimer: ReturnType<typeof setInterval> | null = null;
+  // ResizeObservers (and similar) registered by subclasses via
+  // observeResize(); disconnected automatically in dispose() so a challenge
+  // switch doesn't leak observers attached to the previous panel's DOM.
+  private resizeObservers: ResizeObserver[] = [];
+
+  // Root .panel-inner element + the overlay we inject for the new-best
+  // flash animation. Both are set up in init() so every subclass gets
+  // the flash for free without touching its scaffoldHtml.
+  private panelInnerEl: HTMLElement | null = null;
+  private flashOverlayEl: HTMLElement | null = null;
+  private flashTimer: ReturnType<typeof setTimeout> | null = null;
 
   protected abstract idPrefix: string;
   protected abstract scaffoldHtml(): string;
@@ -67,6 +78,32 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   // Hooks — override as needed.
   protected onAfterApplyHistory(): void {}
   protected onReset(): void {}
+
+  // Universal scaffold for the BEST/LIVE history nav + instance nav. Each
+  // subclass drops `${this.navsScaffold()}` into its scaffoldHtml() so both
+  // nav rows render inside `.solution-navs`, which is absolutely positioned
+  // at the top-center of `.panel-inner` by the shared style.css rule.
+  protected navsScaffold(): string {
+    const p = this.idPrefix;
+    return `
+      <div class="solution-navs">
+        <div class="solution-history-nav" id="${p}-history-nav" style="display:none">
+          <button class="solution-nav-btn" id="${p}-hist-prev" title="Previous global best">&lsaquo;</button>
+          <span class="solution-history-label" id="${p}-history-label"></span>
+          <button class="solution-nav-btn" id="${p}-hist-next" title="Next global best">&rsaquo;</button>
+          <button class="solution-history-live" id="${p}-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
+        </div>
+        <div class="solution-nav" id="${p}-nav" style="display:none">
+          <button class="solution-nav-btn" id="${p}-prev">&lsaquo;</button>
+          <span class="solution-instance-label" id="${p}-instance-label"></span>
+          <button class="solution-nav-btn" id="${p}-next">&rsaquo;</button>
+        </div>
+      </div>
+    `;
+  }
+  // Called from dispose() — subclasses release their own per-instance
+  // listeners/observers (e.g. ResizeObserver) here.
+  protected onDispose(): void {}
 
   constructor(challenge: string) {
     this.challenge = challenge as Challenge;
@@ -86,6 +123,18 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   init(container: HTMLElement) {
     container.innerHTML = this.scaffoldHtml();
     this.attachRefs(container);
+
+    // Inject a transparent overlay over the panel-inner for the
+    // new-best flash. Appended last so it stacks above sibling content
+    // without needing per-panel z-index plumbing.
+    this.panelInnerEl = container.querySelector(".panel-inner") as HTMLElement | null;
+    if (this.panelInnerEl) {
+      const overlay = document.createElement("div");
+      overlay.className = "panel-flash-overlay";
+      overlay.setAttribute("aria-hidden", "true");
+      this.panelInnerEl.appendChild(overlay);
+      this.flashOverlayEl = overlay;
+    }
 
     // Generic button wiring. Subclasses must use the agreed id convention:
     //   {idPrefix}-prev, -next                     instance navigation
@@ -112,6 +161,10 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
     this.apiUrl = resolveApiUrl();
 
     this.rotationTimer = setInterval(() => {
+      // Skip rotation while the tab is hidden so we're not redrawing SVG
+      // into a non-visible page. Browsers already throttle setInterval to
+      // ~1Hz in hidden tabs, but the guard avoids wasted work either way.
+      if (document.hidden) return;
       if (this.instanceKeys.length > 1) this.navigate(1);
     }, 8000);
 
@@ -123,6 +176,43 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       clearInterval(this.rotationTimer);
       this.rotationTimer = null;
     }
+    if (this.flashTimer !== null) {
+      clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
+    for (const ro of this.resizeObservers) ro.disconnect();
+    this.resizeObservers = [];
+    this.onDispose();
+  }
+
+  // Briefly pulse the panel edges to signal that a new global best just
+  // arrived. Colour comes from the contributing agent (falls back to the
+  // theme's success green) so a glance at any panel tells you who pushed.
+  protected flashNewBest(agentColor?: string): void {
+    const overlay = this.flashOverlayEl;
+    if (!overlay) return;
+    if (this.flashTimer !== null) {
+      clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
+    overlay.classList.remove("flash-new-best");
+    overlay.style.setProperty("--flash-color", agentColor ?? "var(--green)");
+    // Force a reflow so re-adding the class restarts the animation when
+    // bests arrive back-to-back.
+    void overlay.offsetWidth;
+    overlay.classList.add("flash-new-best");
+    this.flashTimer = setTimeout(() => {
+      overlay.classList.remove("flash-new-best");
+      this.flashTimer = null;
+    }, 700);
+  }
+
+  // Subclass helper — registers a ResizeObserver that's auto-disconnected
+  // when the panel is disposed.
+  protected observeResize(target: Element, callback: () => void): void {
+    const ro = new ResizeObserver(callback);
+    ro.observe(target);
+    this.resizeObservers.push(ro);
   }
 
   protected async fetchHistory() {
@@ -145,6 +235,14 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       const existingIds = new Set(
         this.historyEntries.map((e) => e.experiment_id),
       );
+      // Remember which entry the user is looking at, so we can restore the
+      // index after the merge+sort possibly shifts it (e.g. older entries
+      // get prepended and push the current entry further down the list).
+      const wasAtLatest = this.isAtLatest();
+      const currentEntryId =
+        this.historyIndex >= 0
+          ? this.historyEntries[this.historyIndex]?.experiment_id
+          : undefined;
       const merged = [
         ...fetched.filter((e) => !existingIds.has(e.experiment_id)),
         ...this.historyEntries,
@@ -153,10 +251,14 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
         (a.created_at || "").localeCompare(b.created_at || ""),
       );
       this.historyEntries = merged;
-      const wasAtLatest = this.isAtLatest();
       if (wasAtLatest && this.historyEntries.length) {
         this.historyIndex = this.historyEntries.length - 1;
         this.applyHistoryEntry();
+      } else if (currentEntryId !== undefined) {
+        const restored = this.historyEntries.findIndex(
+          (e) => e.experiment_id === currentEntryId,
+        );
+        if (restored >= 0) this.historyIndex = restored;
       }
       this.historyLoaded = true;
       this.updateHistoryLabel();
@@ -215,12 +317,21 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
   // Default formatter: shows raw % delta with the sign of the score change.
   // VRP overrides this to flip sign (lower distance = improvement).
   protected formatScoreDelta(currentScore: number, prevScore: number) {
-    const pct =
-      prevScore !== 0
-        ? ((currentScore - prevScore) / Math.abs(prevScore)) * 100
-        : 0;
+    // A prevScore of exactly 0 — or near-zero machine-precision noise from
+    // mean-over-instances aggregation when every instance failed — would
+    // otherwise produce 1e16-style percentages that are meaningless. Snap
+    // those to ∞% so the dashboard says "we went from nothing to something"
+    // instead of a misleading huge number.
+    const delta = currentScore - prevScore;
+    const pct = prevScore !== 0 ? (delta / Math.abs(prevScore)) * 100 : Infinity;
+    if (!Number.isFinite(pct) || Math.abs(pct) > 1e6) {
+      const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
+      this.scoreDeltaEl.textContent = `${sign}∞% vs prev best`;
+      this.scoreDeltaEl.style.color = "var(--green)";
+      return;
+    }
     const sign = pct >= 0 ? "+" : "";
-    this.scoreDeltaEl.textContent = `${sign}${pct.toFixed(5)}% vs prev best`;
+    this.scoreDeltaEl.textContent = `${sign}${pct.toFixed(3)}% vs prev best`;
     this.scoreDeltaEl.style.color = "var(--green)";
   }
 
@@ -333,6 +444,9 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
         this.updateHistoryLabel();
         this.updateEmptyState();
       }
+      // Pulse the panel for genuinely new entries (replays of duplicates
+      // don't count — those just patch existing history slots).
+      this.flashNewBest(entry.agent_id ? getAgentColor(entry.agent_id) : undefined);
     }
   }
 }

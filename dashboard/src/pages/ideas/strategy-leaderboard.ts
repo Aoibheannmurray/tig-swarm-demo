@@ -1,7 +1,7 @@
-import type { Panel, WSMessage } from "../types";
-import { getAgentColor } from "../lib/colors";
-import { formatScore } from "../lib/format";
-import { getViewedChallenge } from "../lib/viewedChallenge";
+import type { Panel, WSMessage } from "../../types";
+import { getAgentColor } from "../../lib/colors";
+import { formatScore } from "../../lib/format";
+import { getViewedChallenge } from "../../lib/viewedChallenge";
 
 interface TopEntry {
   experiment_id: string;
@@ -106,12 +106,16 @@ export class StrategyLeaderboardPanel implements Panel {
       // Filter by viewed challenge so the strategy leaderboard reflects
       // only the selected challenge's iterations — not the swarm's
       // active_challenge fallback.
-      const ch = encodeURIComponent(getViewedChallenge());
+      const rawCh = getViewedChallenge();
       const res = await fetch(
-        `${this.apiUrl}/api/top_scores?limit=${MAX_ROWS}&challenge=${ch}`,
+        `${this.apiUrl}/api/top_scores?limit=${MAX_ROWS}&challenge=${encodeURIComponent(rawCh)}`,
       );
       if (!res.ok) return;
       const data: { entries: TopEntry[] } = await res.json();
+      // Drop a stale response if the user has switched challenges while
+      // the fetch was in flight — otherwise old rows leak into the new
+      // challenge's board.
+      if (rawCh !== getViewedChallenge()) return;
       for (const e of data.entries) {
         if (!this.entries.has(e.experiment_id)) {
           this.entries.set(e.experiment_id, e);

@@ -44,7 +44,7 @@ State isolation is enforced at the schema level:
 
 Two correctness invariants underpin the design:
 
-1. **The inactive-algorithm pool is per-challenge.** `pick_random_inactive(conn, challenge)` only returns algorithms tagged with the requested challenge — so a stagnating agent's "fresh start" can't be handed code from a different challenge that wouldn't compile against its `Challenge` / `Solution` types.
+1. **The inactive-algorithm pool is per-challenge.** `get_inactive_with_deactivations(conn, challenge)` only returns algorithms tagged with the requested challenge — so a stagnating agent's "fresh start" can't be handed code from a different challenge that wouldn't compile against its `Challenge` / `Solution` types.
 2. **Inspiration is filtered by per-challenge active agents.** The "active peers" set comes from `agent_challenge_state(*, challenge).last_active_at`, NOT from the global `agents.last_heartbeat`. An agent who's been on VRP for days but switched to SAT five minutes ago does NOT supply VRP inspiration to other VRP-resident agents.
 
 The owner switches the active challenge via admin-key-gated `POST /api/swarm_config { active_challenge }`. The server broadcasts `swarm_config_updated` over the WebSocket so live dashboards re-fetch; contributors pick up the new challenge on their next iteration via `python setup.py sync`. Only the owner can change the active challenge — contributors get a clear error from `setup.py switch` and rely on `sync` instead.
@@ -71,7 +71,18 @@ Challenge-specific details (types, tips, strategy tags) live in `CHALLENGE.md`, 
 
 ## How Agents Work
 
-Each agent is one contributor running `scripts/run_loop.py` against an LLM provider (Anthropic, OpenAI, Google, any OpenAI-compatible endpoint, or the local `claude` CLI in headless mode). The script clones this repo, reads `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop:
+Each agent is one contributor running `scripts/run_loop.py` against an LLM provider (Anthropic, OpenAI, Google, any OpenAI-compatible endpoint, or the local `claude` CLI in either one-shot or agent mode). The script clones this repo, reads `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop.
+
+### Two contributor modes
+
+- **Single-shot completion** (all API providers, plus `claude-code`). `run_loop.py` owns the whole workflow: hypothesis call → code call → write `mod.rs` → benchmark (with compile-fix and runtime-fix retry loops) → publish. The LLM is a stateless completer that returns a code blob; the Python driver does everything else.
+- **Agent mode** (`claude-code-agentic` or `codex-agentic`). `run_loop.py` shells one headless agent call per iteration inside a sandboxed git worktree. The agent reads state, edits the algorithm file in place via its Edit tool, runs `cargo check` itself, and writes `.swarm/hypothesis.json` before stopping. The Python driver still owns server I/O (state, heartbeat, publish) and the official benchmark; the agent's job is bounded to "edit algorithm files + write hypothesis." A background heartbeat thread fires every 60s during the agentic call so a multi-minute iteration doesn't drop the agent from the inspiration pool. Wall-clock-bounded by `--agentic-timeout` (default 900s).
+
+  The sandbox has two layers in both backends. The hard boundary is always the git worktree (`worktrees/<agent>/`) — the agent's cwd is the worktree, so it physically cannot reach outside (sibling agents, secrets, the main checkout, the user's home dir). The second layer is backend-specific:
+  - `claude-code-agentic`: fine-grained `.swarm/sandbox-settings.json` — Edit limited to the algorithm file (and `kernels.cu` if GPU) plus `.swarm/hypothesis.json`; Read scoped to the worktree by cwd; Bash limited to `cargo check/build/fmt/clippy`; WebFetch/WebSearch and any network-touching Bash command denied. The `claude` CLI enforces these per tool call.
+  - `codex-agentic`: coarser sandbox mode `workspace-write` (the only realistic option in `codex exec` for an editing agent) — gives the agent write access to the whole worktree with network access forced off. File-scope inside the worktree is enforced soft-style via `AGENTS.md` instructions; out-of-scope edits get silently dropped because the loop only copies the algorithm file back to the main checkout when scoring.
+
+The mode is selected per-contributor at setup time (writes `provider` in `agent.config.json`) and can be overridden per-run via `--provider`. All modes interact with the swarm server through the same protocol — published iterations look the same on the dashboard, just with different cost profiles (agent modes typically burn 5–20× the tokens of single-shot for the same iteration).
 
 ### 1. Register
 

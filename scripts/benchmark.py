@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
-Pulls swarm-wide config live from the server's `/api/swarm_config` (the
-server URL is whatever `swarm.config.json:server_url` was configured to by
-`python setup.py`). Falls back to the local `swarm.config.json` snapshot when
-the server is unreachable, so `python scripts/benchmark.py` works for
-offline iteration on `algorithm/mod.rs` edits. The config tells us the
-active challenge, per-track instance counts, and the per-instance solver
-timeout. We then build the right cargo binary, generate instances on first
-run (cached under `datasets/<challenge>/generated/`), and run
-solver + evaluator on each instance in parallel.
+Reads swarm-wide config from the local `swarm.config.json` snapshot
+(written by `setup.py join` and refreshed by `setup.py sync`). `setup.py
+sync` is the *only* moment a host-side challenge switch is picked up —
+deliberately, so that an in-flight edit→benchmark→publish iteration can
+finish on the challenge it started on. After loading local config, an
+advisory probe of `/api/swarm_config` warns if the host has rotated since
+the last sync; set `TIG_NO_SERVER_PROBE=1` to skip the probe. The config
+tells us the active challenge, per-track instance counts, and the
+per-instance solver timeout. We then build the right cargo binary,
+generate instances on first run (cached under
+`datasets/<challenge>/generated/`), and run solver + evaluator on each
+instance in parallel.
 
 # Scoring
 
@@ -113,45 +116,67 @@ SERVER = _resolve_server_url()
 
 
 def load_swarm_config() -> dict:
-    """Pull live swarm config from the server, falling back to local cache.
+    """Read the locked-in swarm config from local swarm.config.json.
 
-    The server is the source of truth (the owner can change the active
-    challenge mid-experiment). swarm.config.json is the offline fallback so
-    `python scripts/benchmark.py` works without a server reachable, which
-    is useful for ad-hoc local testing of `algorithm/mod.rs` edits.
+    Local is authoritative — `setup.py sync` is the only point at which a
+    host-side challenge switch is picked up. This is deliberate: once an
+    iteration starts (edit mod.rs → benchmark → publish), it must not be
+    silently retargeted to a different challenge between steps. After the
+    config is loaded, an advisory probe of `/api/swarm_config` warns if the
+    server has moved on, so the agent knows to re-sync at the top of the
+    next iteration.
+
+    Set `TIG_NO_SERVER_PROBE=1` to skip the advisory probe entirely (useful
+    for fully offline iteration).
     """
-    if SERVER:
-        try:
-            with urllib.request.urlopen(f"{SERVER}/api/swarm_config", timeout=4) as r:
-                data = json.load(r)
-            ch = data.get("active_challenge")
-            avail = data.get("available_challenges", {})
-            sub = avail.get(ch) if ch else None
-            if sub is not None:
-                # The agent-loop call sites (lines 1149+) read these as
-                # top-level keys. Flatten the active challenge's sub-config
-                # in once, here, instead of plumbing the nested shape
-                # through the rest of benchmark.py.
-                data["challenge"] = ch
-                data["tracks"] = sub.get("tracks") or {}
-                data["timeout"] = sub.get("timeout") or 5
-                data["scoring_direction"] = sub.get("scoring_direction") or "max"
-                data["is_gpu"] = sub.get("is_gpu", False)
-            return data
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
-            print(f"warning: couldn't reach {SERVER}/api/swarm_config ({e})", file=sys.stderr)
     cfg_path = ROOT_DIR / "swarm.config.json"
-    if cfg_path.exists():
+    if not cfg_path.exists():
+        print(
+            "error: no swarm.config.json — run `python setup.py join <URL>` "
+            "(or `python setup.py sync` if you already have one).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
         local = json.loads(cfg_path.read_text())
-        return {
-            "challenge": local.get("challenge"),
-            "tracks": local.get("tracks", {}),
-            "timeout": local.get("timeout", 30),
-            "scoring_direction": local.get("scoring_direction", "min"),
-            "is_gpu": local.get("is_gpu", False),
-        }
-    print("error: no swarm config available (server unreachable, no swarm.config.json)", file=sys.stderr)
-    sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"error: swarm.config.json is malformed ({e})", file=sys.stderr)
+        sys.exit(1)
+    ch = local.get("active_challenge") or local.get("challenge")
+    if not ch:
+        print(
+            "error: swarm.config.json has no active_challenge/challenge — "
+            "run `python setup.py sync`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    data = {
+        "challenge": ch,
+        "tracks": local.get("tracks", {}),
+        "timeout": local.get("timeout", 30),
+        "scoring_direction": local.get("scoring_direction", "min"),
+        "is_gpu": local.get("is_gpu", False),
+        "synced_at": local.get("synced_at"),
+    }
+    # Advisory probe: tell the user if the host has rotated since the last
+    # sync. Never overrides — local stays in charge.
+    if SERVER and os.environ.get("TIG_NO_SERVER_PROBE") != "1":
+        try:
+            with urllib.request.urlopen(
+                f"{SERVER}/api/swarm_config", timeout=2
+            ) as r:
+                live = json.load(r)
+            live_ch = live.get("active_challenge")
+            if live_ch and live_ch != ch:
+                print(
+                    f"warning: server's active_challenge={live_ch!r} differs "
+                    f"from local {ch!r} — run `python setup.py sync` to "
+                    f"update. Continuing on {ch!r}.",
+                    file=sys.stderr,
+                )
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+            pass  # probe is best-effort; silence is fine
+    return data
 
 
 # ── GPU challenge detection ────────────────────────────────────────
@@ -630,10 +655,13 @@ def _knapsack_parse_solution(sol_path: str) -> list[int] | None:
 def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
     """Build interaction-matrix viz payload from instance + solution files.
 
-    The matrix sent to the dashboard is K×K where K = len(selected items),
-    capped at MAX_VIZ_ITEMS to keep the payload and rendering tractable.
+    The matrix sent to the dashboard is K×K where K = min(num_selected,
+    MAX_VIZ_ITEMS). When num_selected exceeds the cap, the visible subset
+    is the top-K items ranked by marginal contribution (sum of pairwise
+    interactions with every other selected item) — so the densest cluster
+    is always on screen rather than an arbitrary slice by item ID.
     """
-    MAX_VIZ_ITEMS = 50
+    MAX_VIZ_ITEMS = 300
 
     items = _knapsack_parse_solution(sol_path)
     if items is None:
@@ -657,7 +685,27 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
         for j in sorted_items[idx_a + 1:]:
             total_value += interaction_values[i][j]
 
-    viz_items = sorted_items[:MAX_VIZ_ITEMS]
+    # True marginal contribution of each selected item: sum of its
+    # interactions with every other selected item. O(num_selected²) but
+    # ndarray/numpy isn't worth pulling in for this size — at 1250
+    # selected items it's ~1.5M ops.
+    all_marginals: dict[int, int] = {}
+    for i in sorted_items:
+        row = interaction_values[i]
+        m = 0
+        for j in sorted_items:
+            if j != i:
+                m += row[j]
+        all_marginals[i] = m
+
+    # Pick the K most-contributing items (and keep them sorted by ID for
+    # stable downstream indexing; the dashboard re-orders by cluster anyway).
+    if len(sorted_items) <= MAX_VIZ_ITEMS:
+        viz_items = sorted_items
+    else:
+        ranked = sorted(sorted_items, key=lambda i: -all_marginals[i])
+        viz_items = sorted(ranked[:MAX_VIZ_ITEMS])
+
     k = len(viz_items)
     sub_matrix = [[0] * k for _ in range(k)]
     for ri, i in enumerate(viz_items):
@@ -665,11 +713,16 @@ def _knapsack_extras(inst_path: str, sol_path: str) -> dict:
             if i != j:
                 sub_matrix[ri][rj] = interaction_values[i][j]
 
+    viz_weights = [weights[i] for i in viz_items]
+    viz_marginals = [all_marginals[i] for i in viz_items]
+
     return {
         "knapsack_data": {
             "num_selected": len(sorted_items),
             "num_items": n,
             "viz_items": viz_items,
+            "viz_weights": viz_weights,
+            "viz_marginals": viz_marginals,
             "interaction_values": sub_matrix,
             "total_value": max(0, total_value),
             "max_weight": max_weight,
@@ -807,15 +860,13 @@ def _sat_parse_solution(sol_path: str) -> list[bool] | None:
 def _sat_extras(inst_path: str, sol_path: str) -> dict:
     """Build the SAT viz payload from instance + solution.
 
-    Two complementary views are sent:
-      - assignment_bits: a "0"/"1" string of the variable assignment,
-        sub-sampled to <= MAX_VIZ_VARS so the payload stays tractable
-        even at n_vars=100k.
-      - clause_bins: 50 stacked-bar bins along the clause index axis,
-        each bin a 4-tuple (clauses with 0/1/2/3 satisfying literals).
+    SAT is a binary pass/fail challenge (`evaluate_solution` in
+    `src/satisfiability/mod.rs` returns 1M iff every clause is satisfied,
+    else 0), so we only need the pass/fail aggregate plus the variable
+    assignment to render the panel — `num_satisfied` vs `num_clauses`
+    drives the PASS/UNSAT banner, and `assignment_bits` drives the grid.
     """
     MAX_VIZ_VARS = 10000
-    NUM_BINS = 50
 
     vars_arr = _sat_parse_solution(sol_path)
     if vars_arr is None:
@@ -835,22 +886,16 @@ def _sat_extras(inst_path: str, sol_path: str) -> dict:
         return {"sat_data": None}
 
     m_clauses = len(clauses)
-    bin_size = max(1, m_clauses // NUM_BINS)
-    clause_bins = [[0, 0, 0, 0] for _ in range(NUM_BINS)]
     num_satisfied = 0
-    for ci, clause in enumerate(clauses):
-        bin_idx = min(ci // bin_size, NUM_BINS - 1)
-        sat_count = 0
+    for clause in clauses:
         for lit in clause:
             v_idx = abs(lit) - 1  # literals are 1-indexed
             if v_idx < 0 or v_idx >= n_vars:
                 continue
             val = vars_arr[v_idx]
             if (lit > 0 and val) or (lit < 0 and not val):
-                sat_count += 1
-        clause_bins[bin_idx][min(sat_count, 3)] += 1
-        if sat_count > 0:
-            num_satisfied += 1
+                num_satisfied += 1
+                break
 
     if n_vars <= MAX_VIZ_VARS:
         viz_assignment = vars_arr
@@ -868,7 +913,6 @@ def _sat_extras(inst_path: str, sol_path: str) -> dict:
             "viz_count": len(viz_assignment),
             "viz_stride": viz_stride,
             "assignment_bits": assignment_bits,
-            "clause_bins": clause_bins,
         }
     }
 
@@ -982,6 +1026,14 @@ def aggregate(results: list[dict]) -> dict:
 def main() -> int:
     print("Loading swarm config…", file=sys.stderr)
     cfg = load_swarm_config()
+    # Stamp the locked-in challenge once so the operator can spot an
+    # accidental edit of the wrong mod.rs vs. what's about to run.
+    synced = cfg.get("synced_at") or "unknown"
+    print(
+        f"Locked challenge: {cfg.get('challenge')} (local swarm.config.json, "
+        f"synced_at={synced}).",
+        file=sys.stderr,
+    )
 
     if not _INSIDE_DOCKER:
         return _reexec_in_docker(cfg)

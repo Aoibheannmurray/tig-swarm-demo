@@ -164,6 +164,40 @@ html, body {
   padding: 12px 16px;
 }
 
+/* New-best flash — overlay is injected into every .panel-inner by the
+   panel base class. Sits on top of the panel content but doesn't
+   interact (pointer-events: none). The flash-new-best class drives a
+   one-shot inset glow keyframe coloured by the contributing agent. */
+.panel-flash-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  border-radius: inherit;
+  opacity: 0;
+}
+
+.panel-flash-overlay.flash-new-best {
+  animation: panel-new-best-flash 700ms ease-out;
+}
+
+@keyframes panel-new-best-flash {
+  0% {
+    opacity: 0;
+    box-shadow: inset 0 0 0 0 var(--flash-color, var(--green));
+  }
+  15% {
+    opacity: 1;
+    box-shadow:
+      inset 0 0 0 2px var(--flash-color, var(--green)),
+      inset 0 0 28px 6px var(--flash-color, var(--green));
+  }
+  100% {
+    opacity: 0;
+    box-shadow: inset 0 0 0 0 transparent;
+  }
+}
+
 /* ── Dedicated single-panel pages (diversity.html, benchmark.html) ── */
 .dashboard-single {
   position: relative;
@@ -440,66 +474,6 @@ html, body {
 }
 
 
-/* ── QR Overlay ── */
-.qr-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(26, 26, 26, 0.55);
-  backdrop-filter: blur(8px);
-}
-
-.qr-card {
-  background: var(--bg-card);
-  border: 0.5px solid var(--border-subtle);
-  border-radius: 16px;
-  padding: 40px;
-  text-align: center;
-  box-shadow: 0 8px 24px rgba(26, 26, 26, 0.10);
-}
-
-.qr-title {
-  font-family: var(--display);
-  font-style: italic;
-  font-size: 28px;
-  font-weight: 500;
-  color: var(--ink);
-  margin-bottom: 24px;
-}
-
-.qr-canvas-wrap {
-  margin: 0 auto 20px;
-  display: flex;
-  justify-content: center;
-}
-
-.qr-canvas-wrap canvas {
-  border-radius: 4px;
-}
-
-.qr-url {
-  font-size: 13px;
-  color: var(--color-accent);
-  margin-bottom: 8px;
-  font-family: var(--mono);
-}
-
-.qr-instructions {
-  font-size: 12px;
-  color: var(--text-mid);
-  margin-bottom: 20px;
-}
-
-.qr-hint {
-  font-size: 9px;
-  color: var(--text-dim);
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-}
-
 /* ── Replay Overlay ── */
 .replay-overlay {
   position: fixed;
@@ -569,11 +543,18 @@ html, body {
   margin-top: 12px;
 }
 
-.qr-fallback {
-  font-size: 16px;
-  color: var(--color-accent);
-  padding: 40px 20px;
-  word-break: break-all;
+/* Default inset for every challenge's SVG canvas. Each panel's wrap is a
+ * flex centerer; padding here gives the chart breathing room inside the
+ * panel so it doesn't crowd the edges. Per-panel rules below can override
+ * this (e.g. energy uses a larger inset).
+ *
+ * margin-top reserves vertical clearance for the absolutely-positioned
+ * `.solution-navs` block (history + instance nav, ~58px tall starting at
+ * top: 12px). Without it the chart's top edge slides up under the second
+ * nav row on tall-square charts like knapsack / SAT. */
+[id$="-svg-wrap"] {
+  padding: 20px 32px;
+  margin-top: 24px;
 }
 
 /* ── Routes panel ── */
@@ -590,6 +571,23 @@ html, body {
   min-height: 15px;
   margin-bottom: 4px;
   letter-spacing: 0.02em;
+}
+
+.solution-navs {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.solution-navs > * {
+  pointer-events: auto;
 }
 
 .solution-svg-wrap {
@@ -668,14 +666,6 @@ html, body {
   margin-top: 2px;
 }
 
-.solution-score-bks {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-  font-weight: 500;
-}
-
 .solution-route-distance {
   position: absolute;
   bottom: 16px;
@@ -704,7 +694,6 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  margin: 4px 0 6px 0;
   z-index: 3;
 }
 
@@ -741,7 +730,6 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  margin: 2px 0 4px 0;
   z-index: 3;
 }
 
@@ -776,11 +764,11 @@ html, body {
 
 /* Flowing dash animation */
 .route-flowing {
-  animation: dashFlow 4s linear infinite;
+  animation: dashFlow 0.7s linear infinite;
 }
 
 @keyframes dashFlow {
-  to { stroke-dashoffset: -20; }
+  to { stroke-dashoffset: -25; }
 }
 
 .depot-pulse {
@@ -808,7 +796,6 @@ html, body {
   letter-spacing: 0.02em;
 }
 
-.knapsack-svg-wrap,
 .sat-svg-wrap {
   flex: 1 1 auto;
   min-height: 0;
@@ -818,8 +805,62 @@ html, body {
   position: relative;
 }
 
-.knapsack-panel svg,
 .sat-panel svg {
+  display: block;
+}
+
+/* Knapsack uses a custom scroll layout (fixed-px cells, sticky sidebar)
+   so it doesn't share the SAT-style centered-square wrapper above. */
+.knapsack-svg-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  position: relative;
+  /* Leave clearance for the absolutely-positioned VALUE / ITEMS / SCORE
+     readouts at the bottom of the panel. */
+  padding-bottom: 56px;
+}
+
+.knapsack-grid {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  /* Bias the visual centre slightly above the geometric centre of the wrap
+     (the wrap already reserves padding-bottom for the stats readouts). */
+  padding-bottom: 24px;
+}
+
+/* Caption for the marginal sidebar — sits at a fixed top-left of the
+   wrap so it doesn't enter the centred flow of the matrix. */
+.kn-sidebar-caption {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  color: rgba(26, 26, 26, 0.55);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.knapsack-panel #knapsack-sidebar-svg {
+  flex: 0 0 auto;
+  display: block;
+}
+
+.knapsack-matrix-hscroll {
+  /* Shrink-to-fit the matrix when it's narrower than the available space
+     (so the {sidebar + matrix} pair centres cleanly); scroll horizontally
+     when the matrix is wider than the panel. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.knapsack-panel #knapsack-matrix-svg {
   display: block;
 }
 
@@ -831,13 +872,18 @@ html, body {
   z-index: 2;
 }
 
-.knapsack-items-box {
-  position: absolute;
-  bottom: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  text-align: center;
-  z-index: 2;
+/* Compact readout line that pairs with .solution-sub-value but at a
+   smaller weight — useful when a panel wants a secondary stat stacked
+   above the main one (knapsack: SELECTED above VALUE; SAT: SHOWING above
+   CLAUSES). */
+.solution-sub-value-sm {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  margin-bottom: 4px;
 }
 
 /* Diverging legend strip — sits at top-right of the knapsack panel showing
@@ -900,6 +946,7 @@ html, body {
   align-items: center;
   justify-content: center;
   position: relative;
+  padding: 24px 56px;
 }
 
 .energy-panel svg {
@@ -912,6 +959,35 @@ html, body {
   left: 20px;
   text-align: left;
   z-index: 2;
+}
+
+/* Chart-fill-in animation: bars grow from the zero baseline (discharge up,
+ * charge down), staggered by their time index t (set inline as --t). Plays
+ * once whenever showInstance() rewrites the chart's innerHTML. */
+.energy-bar-up,
+.energy-bar-down {
+  transform-box: fill-box;
+  animation: energy-bar-grow 0.65s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 20ms);
+}
+.energy-bar-up   { transform-origin: 50% 100%; }
+.energy-bar-down { transform-origin: 50% 0%; }
+
+@keyframes energy-bar-grow {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+.energy-price-line {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+  /* Linear so the line tracks bar progression evenly; duration is set
+   * inline per-instance to span the full bar grow window. */
+  animation: energy-price-draw 2.1s linear forwards;
+}
+
+@keyframes energy-price-draw {
+  to { stroke-dashoffset: 0; }
 }
 
 /* ── Gantt panel (job scheduling) ── */
@@ -941,6 +1017,21 @@ html, body {
 
 .gantt-panel svg {
   display: block;
+}
+
+/* Time-order sweep: each bar grows from its left edge (its start_time
+ * anchor) to its full width, staggered by `--t` (bar.start / makespan,
+ * 0..1) across a 1.5s sweep. Plays once per showInstance redraw. */
+.gantt-bar {
+  transform-box: fill-box;
+  transform-origin: 0% 50%;
+  animation: gantt-bar-grow 0.8s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 2200ms);
+}
+
+@keyframes gantt-bar-grow {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
 }
 
 .gantt-makespan-box {

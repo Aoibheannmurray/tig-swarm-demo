@@ -1,4 +1,7 @@
-import * as d3 from "d3";
+import { max, min } from "d3-array";
+import { scaleLinear, scaleLog } from "d3-scale";
+import { select } from "d3-selection";
+import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
 import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
@@ -98,7 +101,7 @@ export class ChartPanel implements Panel {
     this.width = rect.width;
     this.height = rect.height - 48; // label + tab row
 
-    this.svg = d3.select("#chart-svg")
+    this.svg = select("#chart-svg")
       .attr("width", this.width)
       .attr("height", this.height);
 
@@ -460,16 +463,16 @@ export class ChartPanel implements Panel {
       return;
     }
 
-    const latestData = d3.max(this.globalData, (d) => d.time)!;
+    const latestData = max(this.globalData, (d) => d.time)!;
     const xPad = Math.max(latestData * 0.15, 5000);
-    const xScale = d3.scaleLinear()
+    const xScale = scaleLinear()
       .domain([0, latestData + xPad])
       .range([0, w]);
 
     const yDomain = this.getGlobalYDomain();
     if (!yDomain) return;
 
-    const yScale = d3.scaleLinear()
+    const yScale = scaleLinear()
       .domain(yDomain)
       .range([h, 0]);
 
@@ -539,7 +542,7 @@ export class ChartPanel implements Panel {
         .attr("stroke-opacity", 0.5);
 
       chartG.append("path")
-        .attr("d", d3.symbol(d3.symbolDiamond, 24)())
+        .attr("d", symbol(symbolDiamond, 24)())
         .attr("transform", `translate(${x},${y})`)
         .attr("fill", color)
         .attr("opacity", 0.9);
@@ -613,7 +616,7 @@ export class ChartPanel implements Panel {
     // very few horizontal pixels; iteration index lets every agent's line
     // span the full chart width regardless of when they registered.
     const xDomainEnd = Math.max(exps.length - 1, 1);
-    const xScale = d3.scaleLinear()
+    const xScale = scaleLinear()
       .domain([0, xDomainEnd])
       .range([0, w]);
 
@@ -624,8 +627,8 @@ export class ChartPanel implements Panel {
     // whose scores never became the global best) gets clipped off-chart
     // and looks like a flat line.
     const globalYDomain = this.getGlobalYDomain();
-    const minScore = d3.min(exps, (d) => d.score)!;
-    const maxScore = d3.max(exps, (d) => d.score)!;
+    const minScore = min(exps, (d) => d.score)!;
+    const maxScore = max(exps, (d) => d.score)!;
     const fallbackPad = Math.max(Math.abs(maxScore - minScore) * 0.15, 1);
     const yDomain: [number, number] = globalYDomain
       ? [
@@ -637,8 +640,8 @@ export class ChartPanel implements Panel {
     // when the domain crosses zero — early infeasible attempts can produce
     // negative quality scores under baseline-relative scoring.
     const yScale = (yDomain[0] > 0 && yDomain[1] > 0
-      ? d3.scaleLog()
-      : d3.scaleLinear())
+      ? scaleLog()
+      : scaleLinear())
       .domain(yDomain)
       .range([h, 0]);
 
@@ -699,14 +702,14 @@ export class ChartPanel implements Panel {
         // Star — agent was nudged with a tacit-knowledge hint on the prior
         // /api/state call.
         chartG.append("path")
-          .attr("d", d3.symbol(d3.symbolStar, 60)())
+          .attr("d", symbol(symbolStar, 60)())
           .attr("transform", `translate(${x0},${y0})`)
           .attr("fill", color).attr("opacity", 0.95)
           .attr("stroke", color).attr("stroke-width", 0.5);
       } else if (event === "inspiration") {
         // Square — agent was given another agent's code as inspiration.
         chartG.append("path")
-          .attr("d", d3.symbol(d3.symbolSquare, 50)())
+          .attr("d", symbol(symbolSquare, 50)())
           .attr("transform", `translate(${x0},${y0})`)
           .attr("fill", color).attr("opacity", 0.95)
           .attr("stroke", color).attr("stroke-width", 0.5);
@@ -779,12 +782,12 @@ export class ChartPanel implements Panel {
           .attr("stroke", color).attr("stroke-width", 1.4);
       } else if (item.kind === "tacit_knowledge") {
         legend.append("path")
-          .attr("d", d3.symbol(d3.symbolStar, 36)())
+          .attr("d", symbol(symbolStar, 36)())
           .attr("transform", `translate(${x0},${cy})`)
           .attr("fill", color).attr("opacity", 0.9);
       } else {
         legend.append("path")
-          .attr("d", d3.symbol(d3.symbolSquare, 30)())
+          .attr("d", symbol(symbolSquare, 30)())
           .attr("transform", `translate(${x0},${cy})`)
           .attr("fill", color).attr("opacity", 0.9);
       }
@@ -801,8 +804,8 @@ export class ChartPanel implements Panel {
 
   private getGlobalYDomain(): [number, number] | null {
     if (this.globalData.length < 1) return null;
-    const scoreMin = d3.min(this.globalData, (d) => d.score);
-    const scoreMax = d3.max(this.globalData, (d) => d.score);
+    const scoreMin = min(this.globalData, (d) => d.score);
+    const scoreMax = max(this.globalData, (d) => d.score);
     if (scoreMin == null || scoreMax == null) return null;
 
     const pad = Math.max(Math.abs(scoreMax - scoreMin) * 0.15, 1);

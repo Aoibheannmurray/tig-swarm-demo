@@ -1,6 +1,6 @@
-import { getAgentColor } from "../lib/colors";
-import type { Panel, WSMessage } from "../types";
-import { getViewedChallenge } from "../lib/viewedChallenge";
+import { getAgentColor } from "../../lib/colors";
+import type { Panel, WSMessage } from "../../types";
+import { getViewedChallenge } from "../../lib/viewedChallenge";
 
 interface InspirationData {
   agents: { agent_id: string; agent_name: string }[];

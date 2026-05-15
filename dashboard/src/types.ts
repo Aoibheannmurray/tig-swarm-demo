@@ -1,22 +1,3 @@
-export interface RoutePoint {
-  x: number;
-  y: number;
-  customer_id: number;
-}
-
-export interface VehicleRoute {
-  vehicle_id: number;
-  path: RoutePoint[];
-}
-
-export interface RouteData {
-  depot: { x: number; y: number };
-  routes: VehicleRoute[];
-}
-
-// solution_data from server: dict keyed by instance name
-export type AllRouteData = Record<string, RouteData>;
-
 export interface LeaderboardEntry {
   rank: number;
   agent_id: string;
@@ -43,6 +24,7 @@ export interface LeaderboardEntry {
 // in this union because the dispatch path treats them like any other event.
 export type WSMessage =
   | AgentJoined
+  | AgentRenamed
   | HypothesisProposed
   | HypothesisStatusChanged
   | ExperimentPublished
@@ -59,6 +41,17 @@ export interface AgentJoined {
   type: "agent_joined";
   agent_id: string;
   agent_name: string;
+  timestamp: string;
+}
+
+// Broadcast by POST /api/agents/{id}/rename. Dashboards listening should
+// update their agent_id → name lookup AND walk already-rendered feed items
+// so the displayed name updates in place without a reload.
+export interface AgentRenamed {
+  type: "agent_renamed";
+  agent_id: string;
+  old_name: string;
+  new_name: string;
   timestamp: string;
 }
 
@@ -128,7 +121,9 @@ export interface NewGlobalBest {
   // % improvement over the previous global best (null if first ever)
   incremental_improvement_pct: number | null;
   num_instances: number;
-  solution_data: AllRouteData | null;
+  // Shape varies by challenge — each per-challenge panel casts to its own
+  // Record<instance_name, TInstances> in DisplayPanelBase.handleNewGlobalBest.
+  solution_data: Record<string, unknown> | null;
   // Per-track mean quality for the new global best (see ExperimentPublished).
   track_scores?: Record<string, number> | null;
   timestamp: string;

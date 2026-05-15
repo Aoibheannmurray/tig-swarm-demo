@@ -61,12 +61,20 @@ def _resolve_admin_key(arg: str | None) -> str:
     )
 
 
+def _known_challenges() -> list[str]:
+    # Single source of truth for challenge names: import the server's registry
+    # so this script never drifts when a new challenge is added.
+    sys.path.insert(0, str(Path(__file__).parent.parent / "server"))
+    try:
+        from challenges import CHALLENGE_NAMES
+    finally:
+        sys.path.pop(0)
+    return list(CHALLENGE_NAMES)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reset a single challenge's leaderboard.")
-    parser.add_argument("challenge", choices=[
-        "satisfiability", "vehicle_routing", "knapsack",
-        "job_scheduling", "energy_arbitrage",
-    ])
+    parser.add_argument("challenge", choices=_known_challenges())
     parser.add_argument("--admin-key", default=None,
                         help="Admin key (defaults to $ADMIN_KEY or swarm.config.json).")
     args = parser.parse_args()
