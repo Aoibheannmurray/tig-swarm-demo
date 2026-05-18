@@ -101,7 +101,7 @@ DEFAULT_TRACKS_PER_CHALLENGE = {
     "satisfiability": {"n_vars=100000,ratio=4150": 2},
     "vehicle_routing": {"n_nodes=600": 2},
     "knapsack": {"n_items=1000,budget=10": 2},
-    "job_scheduling": {"n=20,s=HYBRID_FLOW_SHOP": 2},
+    "job_scheduling": {"n=20,s=FLOW_SHOP": 2},
     "energy_arbitrage": {"s=BASELINE": 2},
     "hypergraph": {"n_h_edges=10000": 2},
     "neuralnet_optimizer": {"n_hidden=4": 2},
@@ -501,9 +501,12 @@ def collect_per_challenge_configs(
             timeout = ch_def.default_timeout
         else:
             print(f"\n── {ch} ──")
+            ch_track_defaults = DEFAULT_TRACKS_PER_CHALLENGE.get(ch, {})
             for key in meta["track_keys"]:
                 tracks[key] = prompt_int(
-                    f"  instances for {key}", DEFAULT_INSTANCES_PER_TRACK, minimum=0
+                    f"  instances for {key}",
+                    ch_track_defaults.get(key, 0),
+                    minimum=0,
                 )
             timeout = prompt_int(
                 f"  per-instance timeout for {ch} (seconds)",
