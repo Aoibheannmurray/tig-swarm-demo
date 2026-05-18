@@ -1164,7 +1164,12 @@ def run_sync() -> int:
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     write_swarm_cache(refreshed)
 
-    if new_challenge == local_challenge:
+    # Don't early-return when CHALLENGE.md is missing: a fresh fleet worktree
+    # inherits .swarm-cache.json from the host clone (so local_challenge ==
+    # new_challenge) but CHALLENGE.md is gitignored and gets left behind,
+    # which would otherwise leave the LLM with an empty challenge spec.
+    challenge_md = ROOT / "CHALLENGE.md"
+    if new_challenge == local_challenge and challenge_md.exists():
         print(f"already in sync (active_challenge = {new_challenge}).")
         return 0
 
@@ -1173,6 +1178,9 @@ def run_sync() -> int:
         algorithm_path=new_algo_path, prior=cache,
     )
     write_challenge_md(new_challenge)
+    if new_challenge == local_challenge:
+        print(f"refreshed CHALLENGE.md (active_challenge unchanged: {new_challenge}).")
+        return 0
     print(f"\nSynced to {new_challenge} (was {local_challenge or '<none>'}).")
     print("  Your prior trajectory on this challenge (if any) will resume server-side.")
     print("  scripts/run_loop.py picks up the new CHALLENGE.md on its next iteration.")

@@ -45,6 +45,7 @@ _AGENT_CONFIG_KEYS = (
     # re-registering. Normal flow: run_loop.py writes these after the first
     # /api/agents/register call so restarts resume the same identity.
     "agent_id", "agent_name",
+    "log_prompts",
 )
 
 _PROVIDER_TO_DEFAULT_ENV = {

@@ -657,6 +657,12 @@ def main() -> int:
     args = parse_args()
     config = load_config()
     agent_config = load_agent_config()
+    # `setup.py sync` (called at the top of every iteration) rebuilds
+    # .swarm-cache.json from a server-field whitelist, so log_prompts can't
+    # live there. Read it from agent.config.json once and re-apply it after
+    # each load_config() inside the loop.
+    log_prompts = bool(agent_config.get("log_prompts"))
+    config["log_prompts"] = log_prompts
 
     args.provider = args.provider or agent_config.get("provider") or "anthropic"
     valid_providers = set(DEFAULT_MODELS) | {
@@ -805,6 +811,7 @@ def main() -> int:
         print("  [SYNC] Syncing challenge with server…")
         sync_challenge()
         config = load_config()
+        config["log_prompts"] = log_prompts
         challenge_md = read_challenge_md()
         print(f"  [SYNC] Challenge: {config.get('challenge', '?')}  GPU: {config.get('is_gpu', False)}")
 
