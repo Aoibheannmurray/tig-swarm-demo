@@ -10,8 +10,8 @@ Usage:
 
 The admin key was printed on first server boot and persisted in the
 server's `config` table; if you launched the swarm via setup.py it's also
-in `swarm.config.json` (key: `admin_key`). On Railway, it's the value of
-the ADMIN_KEY env var.
+in `swarm.admin.json` (key: `admin_key`). On Railway, it's the value of the
+ADMIN_KEY env var.
 """
 
 import argparse
@@ -22,12 +22,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+ROOT = Path(__file__).parent.parent
+
 
 def _resolve_server_url() -> str:
     env = os.environ.get("TIG_SWARM_SERVER")
     if env:
         return env.rstrip("/")
-    cfg = Path(__file__).parent.parent / "swarm.config.json"
+    cfg = ROOT / ".swarm-cache.json"
     if cfg.exists():
         try:
             url = json.loads(cfg.read_text()).get("server_url", "")
@@ -37,7 +39,7 @@ def _resolve_server_url() -> str:
             pass
     sys.exit(
         "admin_reset_challenge.py: server URL not configured. "
-        "Set TIG_SWARM_SERVER or run `python setup.py join <url>`."
+        "Set TIG_SWARM_SERVER or run `python setup.py sync`."
     )
 
 
@@ -47,7 +49,7 @@ def _resolve_admin_key(arg: str | None) -> str:
     env = os.environ.get("ADMIN_KEY")
     if env:
         return env
-    cfg = Path(__file__).parent.parent / "swarm.config.json"
+    cfg = ROOT / "swarm.admin.json"
     if cfg.exists():
         try:
             key = json.loads(cfg.read_text()).get("admin_key", "")
@@ -57,7 +59,7 @@ def _resolve_admin_key(arg: str | None) -> str:
             pass
     sys.exit(
         "admin_reset_challenge.py: admin key not provided. Pass --admin-key, "
-        "set ADMIN_KEY, or add `admin_key` to swarm.config.json."
+        "set ADMIN_KEY, or run `python setup.py create` to write swarm.admin.json."
     )
 
 
@@ -76,7 +78,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Reset a single challenge's leaderboard.")
     parser.add_argument("challenge", choices=_known_challenges())
     parser.add_argument("--admin-key", default=None,
-                        help="Admin key (defaults to $ADMIN_KEY or swarm.config.json).")
+                        help="Admin key (defaults to $ADMIN_KEY or swarm.admin.json).")
     args = parser.parse_args()
 
     server = _resolve_server_url()

@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Keep the server's `agents.name` in sync with this clone's local
-`swarm.config.json` `contributor_name`.
+"""Keep the server's `agents.name` in sync with this clone's local config.
 
-`setup.py join` (re-)prompts for a contributor name and writes it to
-`swarm.config.json`, but it does not talk to the server. The first time
-the iteration loop ran, `/api/agents/register` recorded whatever name
-was in the config then; if the user later re-ran `setup.py join` with a
-different name, the local config and the server's `agents.name` drift.
-That drift surfaces on the dashboard as the same agent_id appearing
-under two names in chat messages vs. experiment events.
+Reads the agent display name from `agent.config.json` (`name`, materialized
+from fleet.config.json by `scripts/run_fleet.py`). If the local name
+diverges from what the server has on file (e.g. the user renamed in their
+fleet config), POSTs a rename so the dashboard label catches up. Without
+this, the same agent_id could appear under two names in chat messages vs.
+experiment events.
 
 Usage:
     python3 scripts/sync_identity.py <agent_id>
@@ -36,7 +34,7 @@ ROOT = Path(__file__).parent.parent
 def _resolve_server_url() -> str:
     if os.environ.get("TIG_SWARM_SERVER"):
         return os.environ["TIG_SWARM_SERVER"].rstrip("/")
-    cfg_path = ROOT / "swarm.config.json"
+    cfg_path = ROOT / ".swarm-cache.json"
     if cfg_path.exists():
         try:
             url = json.loads(cfg_path.read_text()).get("server_url", "")
@@ -46,19 +44,21 @@ def _resolve_server_url() -> str:
             pass
     sys.exit(
         "sync_identity.py: server URL not configured. "
-        "Run `python setup.py join <swarm-url>` (or set TIG_SWARM_SERVER)."
+        "Run `python setup.py sync` (or set TIG_SWARM_SERVER)."
     )
 
 
 def _read_contributor_name() -> Optional[str]:
-    cfg_path = ROOT / "swarm.config.json"
+    """Read this agent's display name from the worktree's agent.config.json
+    (materialized from fleet.config.json's `name` field)."""
+    cfg_path = ROOT / "agent.config.json"
     if not cfg_path.exists():
         return None
     try:
-        name = (json.loads(cfg_path.read_text()).get("contributor_name") or "").strip()
-        return name or None
+        name = (json.loads(cfg_path.read_text()).get("name") or "").strip()
     except Exception:
         return None
+    return name or None
 
 
 def _post_rename(server: str, agent_id: str, new_name: str) -> bool:

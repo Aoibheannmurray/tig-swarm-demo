@@ -1,35 +1,39 @@
 #!/usr/bin/env python3
-"""TIG Swarm setup wizard.
+"""TIG Swarm host-admin CLI.
 
-Common modes:
+Contributors do not need this script — they edit fleet.config.json and run
+`python scripts/run_fleet.py`. This file is for host operations only.
 
-  python setup.py create      Owner: stand up a new swarm on Railway. Drives
+Subcommands:
+
+  python setup.py create      Host: stand up a new swarm on Railway. Drives
                               the `railway` CLI to create a project + service
                               + volume, sets env vars, deploys the server,
                               then pushes swarm-wide config (challenge, tracks,
-                              timeout, …) to the live URL. Prints a share link
-                              for contributors.
+                              timeout, …) to the live URL. Scaffolds a
+                              fleet.config.json so the host can immediately
+                              participate.
 
-  python setup.py             Interactive wizard. Choose host/contributor, then
-                              answer only the prompts not already supplied by
-                              command-line flags.
+  python setup.py switch <challenge>
+                              Host: change the active challenge. Broadcasts
+                              to all contributors (they auto-follow on their
+                              next iteration via `setup.py sync`).
 
-  python setup.py --swarm-url URL
-                              Contributor: point this clone at an existing
-                              swarm URL, configure local runtime defaults, and
-                              create a stub tacit_knowledge_personal.md for the
-                              agent's private hints.
+  python setup.py sync        Refresh .swarm-cache.json from the live server.
+                              Idempotent; called by scripts/run_loop.py at the
+                              top of every iteration.
 
-Re-running either mode is safe — `create` always provisions a brand-new
-Railway project (overwriting the local `.railway/` link), and contributor
-setup overwrites the same set of templated files.
+  python setup.py tacit [<agent-name>]
+                              Interactive helper to fill in an agent's tacit
+                              knowledge file. The one piece of the old wizard
+                              that survives (paste-a-block UX is awkward in
+                              JSON).
 
 Files this script reads / writes:
-  - README.md (templated: ${SERVER_URL} -> the chosen URL)
-  - swarm.config.json (owner-only mirror of what's stored on the server)
-  - agent.config.json (local script-loop runtime defaults; no API keys)
-  - CHALLENGE.md (per-challenge docs, from src/<challenge>/README.md)
-  - tacit_knowledge_personal.md (per-contributor, gitignored)
+  - README.md, CHALLENGE.md (templated with the active challenge)
+  - swarm.admin.json (host-only: admin_key, stagnation knobs)
+  - .swarm-cache.json (machine-managed mirror of /api/swarm_config)
+  - fleet.config.json (scaffolded by `create`; user-editable thereafter)
   - .railway/config.json (managed by the `railway` CLI; gitignored)
 """
 
@@ -51,21 +55,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 
-# Files that carry swarm-specific values (URL, active challenge name) the
-# wizard rewrites in-place.  benchmark.py and publish.py are intentionally
-# excluded — they contain challenge-generic code (function names, data keys,
-# docstrings for all five challenges) that must not be rewritten.  They read
-# the active challenge from swarm.config.json at runtime instead.
+# Files that carry swarm-specific values (URL, active challenge name) and
+# get rewritten in-place by `setup.py create` / `setup.py sync`. benchmark.py
+# and publish.py are intentionally excluded — they contain challenge-generic
+# code (function names, data keys, docstrings for all five challenges) that
+# must not be rewritten. They read the active challenge from .swarm-cache.json
+# at runtime instead.
 TEMPLATED_FILES = [
     ROOT / "README.md",
 ]
 
-# Heuristic URL patterns that the wizard treats as "the swarm URL" and
-# replaces with the new one. Catches the canonical Railway domain and raw
-# IP-form URLs from older self-host setups. Without this, a clone that has
-# a baked URL not matching prior swarm.config.json's `server_url` (e.g.
-# someone committed their templated state, or migrated between hosting
-# styles) silently fails to re-template.
+# Heuristic URL patterns treated as "the swarm URL" and rewritten when the
+# server URL changes. Catches the canonical Railway domain and raw IP-form
+# URLs from older self-host setups. Without this, a clone whose baked URL
+# doesn't match the current `.swarm-cache.json` server_url (e.g. someone
+# committed their templated state, or migrated between hosting styles) would
+# silently fail to re-template.
 _RAILWAY_URL_RE = re.compile(r"https?://[a-zA-Z0-9-]+\.up\.railway\.app")
 _RAW_IP_URL_RE = re.compile(r"https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?")
 
@@ -109,21 +114,6 @@ DEFAULT_TRACKS_PER_CHALLENGE = {
 }
 
 AGENT_CONFIG_PATH = ROOT / "agent.config.json"
-AGENT_PROVIDERS = [
-    "anthropic", "openai", "google",
-    "claude-code", "claude-code-agentic", "codex-agentic",
-]
-AGENT_COMPUTE_CHOICES = ["local", "c3"]
-DEFAULT_AGENT_CONFIG = {
-    "provider": "anthropic",
-    "model": None,
-    "api_base": None,
-    "compute": "local",
-    "c3_hardware": "l40",
-    "c3_time": "02:00:00",
-    "c3_provider": None,
-    "env": None,
-}
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -171,15 +161,6 @@ def prompt_int(label: str, default: int, minimum: int = 0) -> int:
         return v
 
 
-def prompt_optional(label: str, default: str | None = None) -> str | None:
-    suffix = f" [{default}]" if default else " [blank]"
-    ans = input(f"{label}{suffix}: ").strip()
-    if ans:
-        return ans
-    return default
-
-
-
 def _swap(text: str, placeholder: str, prior: str | None, new: str, is_url: bool = False) -> str:
     """Replace the placeholder and the previously-templated value with `new`.
 
@@ -203,7 +184,7 @@ def template_files(
     prior: dict | None = None,
 ) -> None:
     """Substitute swarm-specific placeholders into every tracked file that
-    contains them, using prior values from swarm.config.json to undo
+    contains them, using prior values from .swarm-cache.json to undo
     previously-templated state."""
     prior = prior or {}
     prior_url = prior.get("server_url")
@@ -225,39 +206,89 @@ def template_files(
             print(f"  templated {path.relative_to(ROOT)}")
 
 
-def write_swarm_config(cfg: dict) -> None:
-    out = ROOT / "swarm.config.json"
-    # Stamp every write — benchmark.py reads this to show when the local
-    # config was last refreshed, and to detect stale syncs vs. host-side
-    # challenge switches that have not yet been picked up by setup.py sync.
-    cfg["synced_at"] = datetime.now(timezone.utc).isoformat()
-    out.write_text(json.dumps(cfg, indent=2) + "\n")
-    print(f"  wrote {out.relative_to(ROOT)}")
+# Three role-scoped files replace the legacy swarm.config.json:
+#   swarm.admin.json  — host-only secrets and tuning (admin_key, stagnation knobs)
+#   .swarm-cache.json — machine-managed mirror of /api/swarm_config
+#   fleet.config.json — user-edited list of agents to spawn
+_ADMIN_FIELDS = (
+    "admin_key", "owner_name", "swarm_name", "challenges",
+    "stagnation_threshold", "stagnation_limit",
+    "hypothesis_recall_threshold",
+)
+_CACHE_FIELDS = (
+    "server_url", "active_challenge", "challenge", "swarm_type",
+    "tracks", "timeout", "scoring_direction",
+    "algorithm_path", "kernel_path", "is_gpu",
+    # write_swarm_cache stamps synced_at itself, so the field is set even
+    # when cfg doesn't carry one in.
+    "synced_at",
+)
 
 
-def write_agent_config(cfg: dict) -> None:
-    AGENT_CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
-    print(f"  wrote {AGENT_CONFIG_PATH.relative_to(ROOT)}")
+def write_swarm_admin(cfg: dict) -> None:
+    """Slice the host-only fields out of `cfg` and write them to
+    swarm.admin.json. Skips silently when no admin fields are present."""
+    payload = {k: cfg[k] for k in _ADMIN_FIELDS if k in cfg}
+    if not payload:
+        return
+    (ROOT / "swarm.admin.json").write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def read_prior_swarm_config() -> dict | None:
-    out = ROOT / "swarm.config.json"
-    if not out.exists():
-        return None
-    try:
-        return json.loads(out.read_text())
-    except Exception:
-        return None
+def write_swarm_cache(cfg: dict) -> None:
+    """Slice the server-derived fields out of `cfg` and write them to
+    .swarm-cache.json. Stamps `synced_at` so benchmark.py can show freshness."""
+    payload = {k: cfg[k] for k in _CACHE_FIELDS if k in cfg}
+    if not payload:
+        return
+    payload["synced_at"] = datetime.now(timezone.utc).isoformat()
+    (ROOT / ".swarm-cache.json").write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def read_prior_agent_config() -> dict:
-    if not AGENT_CONFIG_PATH.exists():
+def read_swarm_cache() -> dict:
+    path = ROOT / ".swarm-cache.json"
+    if not path.exists():
         return {}
     try:
-        data = json.loads(AGENT_CONFIG_PATH.read_text())
+        data = json.loads(path.read_text())
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except json.JSONDecodeError:
         return {}
+
+
+def read_swarm_admin() -> dict:
+    path = ROOT / "swarm.admin.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def resolve_server_url() -> str | None:
+    """Find server_url in the new layout. Tries .swarm-cache.json first,
+    then agent.config.json (worktree), then fleet.config.json (root). Returns
+    None when nothing is configured yet."""
+    cache = read_swarm_cache()
+    if cache.get("server_url"):
+        return cache["server_url"]
+    if AGENT_CONFIG_PATH.exists():
+        try:
+            agent = json.loads(AGENT_CONFIG_PATH.read_text())
+            if isinstance(agent, dict) and agent.get("server_url"):
+                return agent["server_url"]
+        except json.JSONDecodeError:
+            pass
+    fleet_path = ROOT / "fleet.config.json"
+    if fleet_path.exists():
+        try:
+            fleet = json.loads(fleet_path.read_text())
+            if isinstance(fleet, dict) and fleet.get("server_url"):
+                return fleet["server_url"]
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 def _arg_value(args: argparse.Namespace | None, name: str):
@@ -266,208 +297,6 @@ def _arg_value(args: argparse.Namespace | None, name: str):
 
 def _arg_enabled(args: argparse.Namespace | None, name: str) -> bool:
     return bool(getattr(args, name, False)) if args is not None else False
-
-
-def ensure_local_docker_image(is_gpu: bool, yes: bool, skip_build: bool) -> None:
-    """Build the benchmark Docker image used by `--compute local` if missing.
-
-    Streams `docker build` output to the terminal so a slow first build shows
-    progress instead of looking hung. Soft-fails when Docker isn't installed
-    or the build returns non-zero — the wizard prints how to retry and keeps
-    going, since the user may finish setup on this machine but run benchmarks
-    elsewhere.
-    """
-    image = "tig-swarm-gpu" if is_gpu else "tig-swarm-cpu"
-    dockerfile = "Dockerfile.gpu" if is_gpu else "Dockerfile.cpu"
-    build_cmd = f"docker build -f {dockerfile} -t {image} ."
-
-    if skip_build:
-        print(
-            f"\n  Skipping Docker image build for '{image}' (--skip-docker-build).\n"
-            f"  Build it later with:  {build_cmd}"
-        )
-        return
-
-    if shutil.which("docker") is None:
-        print(
-            f"\n  ⚠  `docker` not found on PATH; can't build '{image}' here.\n"
-            f"     Install Docker, then run:  {build_cmd}\n"
-            f"     (or rerun with --compute c3 to use remote compute instead)"
-        )
-        return
-
-    inspect = sp.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True, text=True,
-    )
-    if inspect.returncode == 0:
-        print(f"\n  Docker image '{image}' already built — skipping build.")
-        return
-
-    if not yes:
-        answer = prompt(
-            f"\nBuild Docker image '{image}' now? Required for --compute local [Y/n]",
-            "Y",
-        ).strip().lower()
-        if answer not in ("", "y", "yes"):
-            print(f"  Skipped. Build later with:  {build_cmd}")
-            return
-
-    print(
-        f"\n  Building Docker image '{image}' from {dockerfile}…\n"
-        f"  First builds typically take a few minutes; output streams below.\n"
-    )
-    result = sp.run(["docker", "build", "-f", dockerfile, "-t", image, "."], cwd=ROOT)
-    if result.returncode == 0:
-        print(f"\n  Built '{image}'.")
-    else:
-        print(
-            f"\n  ⚠  Docker build failed (exit {result.returncode}). Retry manually:\n"
-            f"     {build_cmd}"
-        )
-
-
-def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
-    """Create/update local script-loop runtime defaults.
-
-    API keys intentionally stay out of this file. `scripts/run_loop.py` reads
-    provider/model/compute from here, then resolves secrets from environment
-    variables at runtime.
-    """
-    prior = {**DEFAULT_AGENT_CONFIG, **read_prior_agent_config()}
-    yes = _arg_enabled(args, "yes")
-
-    provider = _arg_value(args, "provider") or prior.get("provider") or DEFAULT_AGENT_CONFIG["provider"]
-    if not yes and _arg_value(args, "provider") is None:
-        provider = prompt_choice(
-            "\nScript-loop LLM provider",
-            AGENT_PROVIDERS,
-            default=provider if provider in AGENT_PROVIDERS else DEFAULT_AGENT_CONFIG["provider"],
-        )
-
-    model = _arg_value(args, "model")
-    if model is None:
-        model = prior.get("model")
-        if not yes:
-            model = prompt_optional("Model override", model)
-    if model == "":
-        model = None
-
-    api_base = _arg_value(args, "api_base")
-    if api_base is None:
-        api_base = prior.get("api_base")
-        if not yes and provider == "openai":
-            api_base = prompt_optional("OpenAI-compatible API base", api_base)
-    if api_base == "":
-        api_base = None
-
-    compute = _arg_value(args, "compute") or prior.get("compute") or DEFAULT_AGENT_CONFIG["compute"]
-    if not yes and _arg_value(args, "compute") is None:
-        compute = prompt_choice(
-            "Benchmark compute backend",
-            AGENT_COMPUTE_CHOICES,
-            default=compute if compute in AGENT_COMPUTE_CHOICES else DEFAULT_AGENT_CONFIG["compute"],
-        )
-
-    c3_hardware = (
-        _arg_value(args, "hardware")
-        or _arg_value(args, "c3_hardware")
-        or prior.get("c3_hardware")
-        or DEFAULT_AGENT_CONFIG["c3_hardware"]
-    )
-    c3_time = _arg_value(args, "c3_time") or prior.get("c3_time") or DEFAULT_AGENT_CONFIG["c3_time"]
-    c3_provider = _arg_value(args, "c3_provider")
-    if c3_provider is None:
-        c3_provider = prior.get("c3_provider")
-    if c3_provider == "":
-        c3_provider = None
-    swarm_prior = read_prior_swarm_config() or {}
-    prior_is_gpu = bool(swarm_prior.get("is_gpu") or swarm_prior.get("swarm_type") == "gpu")
-    env = _arg_value(args, "env")
-    if env is None:
-        env = prior.get("env") or prior.get("env_image") or prior.get("c3_image")
-    if env is None:
-        env = (
-            prior.get("env_gpu") or prior.get("c3_gpu_image")
-            if prior_is_gpu
-            else prior.get("env_cpu") or prior.get("c3_cpu_image")
-        )
-    if env == "":
-        env = None
-
-    if compute == "c3" and not yes:
-        if _arg_value(args, "hardware") is None and _arg_value(args, "c3_hardware") is None:
-            c3_hardware = prompt("C3 GPU hardware", c3_hardware)
-        if _arg_value(args, "c3_time") is None:
-            c3_time = prompt("C3 job walltime", c3_time)
-        if _arg_value(args, "c3_provider") is None:
-            c3_provider = prompt_optional("C3 provider", c3_provider)
-        if _arg_value(args, "env") is None:
-            env = prompt_optional("C3 Docker environment image", env)
-
-    cfg = dict(prior)
-    cfg.pop("c3_cloud_provider", None)
-    cfg.pop("c3_no_build", None)
-    cfg.pop("c3_image", None)
-    cfg.pop("c3_cpu_image", None)
-    cfg.pop("c3_gpu_image", None)
-    cfg.pop("env_image", None)
-    cfg.pop("env_cpu", None)
-    cfg.pop("env_gpu", None)
-    cfg.update({
-        "provider": provider,
-        "model": model,
-        "api_base": api_base,
-        "compute": compute,
-        "c3_hardware": c3_hardware,
-        "c3_time": c3_time,
-        "c3_provider": c3_provider,
-        "env": env,
-    })
-    write_agent_config(cfg)
-
-    if compute == "local":
-        ensure_local_docker_image(
-            is_gpu=prior_is_gpu,
-            yes=yes,
-            skip_build=_arg_enabled(args, "skip_docker_build"),
-        )
-
-    # Show what the dashboard will display for this agent. Mirrors
-    # scripts/server.py::derive_llm_label so the wizard's preview matches
-    # what register_agent will actually send. (Kept inline rather than
-    # imported because setup.py runs from the repo root and doesn't put
-    # scripts/ on sys.path.)
-    if model:
-        derived_label = (
-            f"{model} ({provider})"
-            if provider in ("claude-code-agentic", "codex-agentic")
-            else model
-        )
-    else:
-        derived_label = provider
-    print(f"\n  Dashboard label: {derived_label}")
-    print("  (auto-derived from provider + model; override with --llm-label)")
-
-    # Warn rather than fail — the user may be configuring on a different
-    # machine than the one that will run the loop. run_loop.py re-checks
-    # at startup and exits cleanly there if the CLI is still missing.
-    _PROVIDER_CLI = {
-        "claude-code": ("claude", "Claude Code (https://docs.claude.com/en/docs/claude-code)"),
-        "claude-code-agentic": ("claude", "Claude Code (https://docs.claude.com/en/docs/claude-code)"),
-        "codex-agentic": ("codex", "OpenAI Codex CLI (https://github.com/openai/codex)"),
-    }
-    cli_pair = _PROVIDER_CLI.get(provider)
-    if cli_pair is not None:
-        cli_name, doc_hint = cli_pair
-        if shutil.which(cli_name) is None:
-            print(
-                f"\n  ⚠  `{cli_name}` CLI not found on PATH. Install {doc_hint}\n"
-                f"     to use --provider {provider}.\n"
-                "     run_loop.py will exit at startup until it's installed."
-            )
-
-    return cfg
 
 
 def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
@@ -503,7 +332,7 @@ def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
         print(
             f"  could not reach {server_url} ({e}). Start the server and re-run "
-            f"this setup, or POST swarm.config.json yourself once it's up."
+            f"`python setup.py create`, or POST /api/swarm_config yourself once it's up."
         )
 
 
@@ -524,9 +353,8 @@ def read_initial_algorithms() -> dict[str, dict[str, str]]:
 
 def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
     """Pull a challenge's tracks/timeout/scoring_direction from the live
-    server. Used by switch / sync / contributor setup to mirror the active challenge's
-    sub-config to top-level swarm.config.json keys so benchmark.py's
-    offline fallback keeps working."""
+    server. Used by switch / sync to mirror the active challenge's sub-config
+    into .swarm-cache.json so benchmark.py's offline fallback keeps working."""
     try:
         with urllib.request.urlopen(
             f"{server_url.rstrip('/')}/api/swarm_config", timeout=4,
@@ -592,15 +420,6 @@ def collect_per_challenge_configs(
     return challenges
 
 
-def open_in_editor(path: Path) -> None:
-    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
-    print(f"  opening {path.relative_to(ROOT)} in {editor} (Ctrl-X to exit nano)…")
-    try:
-        os.system(f"{editor} {path}")
-    except Exception as e:
-        print(f"  could not launch editor: {e}; edit {path} by hand")
-
-
 def write_challenge_md(challenge: str) -> None:
     src = ROOT / "src" / challenge / "README.md"
     dst = ROOT / "CHALLENGE.md"
@@ -614,8 +433,8 @@ def write_challenge_md(challenge: str) -> None:
 def tacit_header(stagnation_threshold: int = 2) -> str:
     """Standard header text written into the personal tacit-knowledge file.
     Parameterised on stagnation_threshold so the >= condition matches the
-    swarm's actual config (the server reads stagnation_threshold from the
-    same swarm.config.json the wizard writes)."""
+    swarm's actual config (the server reads it from swarm.admin.json on the
+    host, POSTed at `setup.py create` time)."""
     return (
         "# Personal tacit knowledge\n\n"
         "Hints only **your local agent** sees. Never sent to the server.\n"
@@ -631,21 +450,6 @@ def tacit_header(stagnation_threshold: int = 2) -> str:
         "stay useful even if the swarm switches to a different challenge later.\n\n"
         "## Strategies\n\n"
     )
-
-
-def init_personal_tacit_knowledge(stagnation_threshold: int = 2) -> Path:
-    """Create the contributor's private tacit_knowledge file if missing.
-    The agent later renames it to tacit_knowledge_<agent_name>.md after it
-    learns its own name from POST /api/agents/register."""
-    path = ROOT / "tacit_knowledge_personal.md"
-    if path.exists():
-        return path
-    path.write_text(
-        tacit_header(stagnation_threshold)
-        + "- (replace this with your own hint, or run setup again)\n"
-    )
-    print(f"  created {path.relative_to(ROOT)} (gitignored — edit it any time)")
-    return path
 
 
 def gather_tacit_knowledge(tk_path: Path, stagnation_threshold: int = 2) -> None:
@@ -711,6 +515,80 @@ def gather_tacit_knowledge(tk_path: Path, stagnation_threshold: int = 2) -> None
         return
     tk_path.write_text(tacit_header(stagnation_threshold) + text + "\n")
     print(f"  wrote your strategies to {tk_path.relative_to(ROOT)}")
+
+
+def run_tacit(agent_name: str | None = None) -> int:
+    """Interactive tacit-knowledge helper. The one piece of the old wizard
+    that survives: paste-a-block UX is awkward to express in JSON, so the
+    file pointed to by the fleet entry's `tacit_knowledge` field is what
+    the user edits via this command.
+
+    With no argument, picks the first agent in fleet.config.json (or the
+    only one if there's exactly one). With an argument, picks that named
+    agent. Creates the tacit file if missing and hooks it back into
+    fleet.config.json's `tacit_knowledge` field if currently unset."""
+    fleet_path = ROOT / "fleet.config.json"
+    if not fleet_path.exists():
+        print(
+            "fleet.config.json not found — run `python setup.py create` (host) "
+            "or copy fleet.config.example.json (contributor) first."
+        )
+        return 1
+    try:
+        fleet = json.loads(fleet_path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"fleet.config.json is malformed: {e}")
+        return 1
+    agents = fleet.get("agents") or []
+    if not agents:
+        print("fleet.config.json has no agents.")
+        return 1
+
+    if agent_name:
+        match = next((a for a in agents if a.get("name") == agent_name), None)
+        if not match:
+            print(f"agent {agent_name!r} not found in fleet.config.json.")
+            print(f"available: {', '.join(a.get('name', '?') for a in agents)}")
+            return 1
+    elif len(agents) == 1:
+        match = agents[0]
+    else:
+        names = [a.get("name", "?") for a in agents]
+        print(
+            "fleet has multiple agents; pass one of: "
+            f"{', '.join(names)}"
+        )
+        return 1
+
+    tk_rel = match.get("tacit_knowledge") or f"tacit_knowledge_{match['name']}.md"
+    tk_path = Path(tk_rel)
+    if not tk_path.is_absolute():
+        tk_path = ROOT / tk_path
+
+    # The stagnation threshold lives in swarm.admin.json on the host and is
+    # not visible to a plain contributor — use the documented default.
+    stagnation_threshold = read_swarm_admin().get("stagnation_threshold", 2)
+    if not tk_path.exists():
+        tk_path.parent.mkdir(parents=True, exist_ok=True)
+        tk_path.write_text(
+            tacit_header(stagnation_threshold)
+            + "- (replace this with your own hint, or run setup again)\n"
+        )
+        print(f"  created {tk_path.relative_to(ROOT)} (gitignored)")
+
+    gather_tacit_knowledge(tk_path, stagnation_threshold)
+
+    # Hook the file path back into the fleet entry if it wasn't already set,
+    # so run_fleet.py's _seed_worktree will copy it into the worktree.
+    if not match.get("tacit_knowledge"):
+        try:
+            rel = str(tk_path.relative_to(ROOT))
+        except ValueError:
+            rel = str(tk_path)
+        match["tacit_knowledge"] = rel
+        fleet_path.write_text(json.dumps(fleet, indent=2) + "\n")
+        print(f"  linked tacit_knowledge → {rel} in fleet.config.json")
+    return 0
 
 
 # ── Railway CLI helpers ──────────────────────────────────────────────
@@ -997,12 +875,6 @@ def run_create(args: argparse.Namespace | None = None) -> int:
             3, minimum=1,
         )
 
-    tk_path = init_personal_tacit_knowledge(stagnation_threshold)
-    if yes or _arg_enabled(args, "skip_tacit"):
-        print(f"  leaving {tk_path.relative_to(ROOT)} as-is")
-    else:
-        gather_tacit_knowledge(tk_path, stagnation_threshold)
-
     admin_key = secrets.token_urlsafe(16)
 
     railway_dir = ROOT / ".railway"
@@ -1034,8 +906,8 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     if not _wait_for_server(server_url):
         print(
             "  warning: server did not respond at /api/swarm_config within 60s.\n"
-            "  Check `railway logs` for errors. You can re-run\n"
-            f"  `python setup.py --swarm-url {server_url}` once it's up to finish wiring."
+            "  Check `railway logs` for errors. Once it's up, the URL will be\n"
+            f"  reachable at {server_url} — point fleet.config.json's server_url at it."
         )
 
     n_with_code = sum(1 for v in initial_algorithms.values() if v.get("algorithm_code", "").strip())
@@ -1045,7 +917,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
 
     # Top-level `tracks` and `timeout` mirror the active challenge's
     # sub-config so `scripts/benchmark.py`'s offline fallback (which reads
-    # swarm.config.json when the server is unreachable) keeps working.
+    # .swarm-cache.json when the server is unreachable) keeps working.
     active_sub = challenges_cfg[active_challenge]
     active_def = _CHALLENGE_REGISTRY[active_challenge]
     cfg = {
@@ -1075,16 +947,17 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print("  pushing swarm config to the server…")
     push_config_to_server(server_url, admin_key, cfg)
 
-    prior = read_prior_swarm_config()
     print("\nWriting local files…")
     template_files(
         server_url,
         challenge=active_challenge,
         algorithm_path=cfg["algorithm_path"],
-        prior=prior,
+        prior=read_swarm_cache(),
     )
     write_challenge_md(active_challenge)
-    write_swarm_config(cfg)
+    write_swarm_admin(cfg)
+    write_swarm_cache(cfg)
+    _scaffold_fleet_config(server_url)
     repo_url = "<this-repo-url>"
     try:
         result = sp.run(
@@ -1111,24 +984,51 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print("\n  Share this with anyone who wants to contribute:\n")
     print(f"    git clone {repo_url}")
     print(f"    cd {repo_dir_hint}")
-    print(f"    python setup.py --swarm-url {server_url}")
+    print("    # edit fleet.config.json — point server_url at:")
+    print(f"    #   {server_url}")
+    print("    python scripts/run_fleet.py")
     print("\n  Admin key (keep private — gates /api/admin/*):")
     print(f"    {admin_key}")
+    print("\n  Your own clone has been scaffolded with fleet.config.json —")
+    print("  edit the agent entry then run `python scripts/run_fleet.py` to participate.")
     print("\n  Manage the service in Railway: https://railway.com/dashboard")
     print()
     return 0
+
+
+def _scaffold_fleet_config(server_url: str) -> None:
+    """After `setup.py create`, leave the host with a working fleet.config.json
+    so they can immediately participate via `python scripts/run_fleet.py`.
+    Skipped if a fleet.config.json already exists — never clobbers user edits."""
+    path = ROOT / "fleet.config.json"
+    if path.exists():
+        print(f"  fleet.config.json already present — leaving as-is")
+        return
+    starter = {
+        "server_url": server_url,
+        "agents": [
+            {
+                "name": os.environ.get("USER", "agent-1"),
+                "provider": "anthropic",
+                "model": "claude-opus-4-7",
+                "api_key_env": "ANTHROPIC_API_KEY",
+                "compute": "local",
+            }
+        ],
+    }
+    path.write_text(json.dumps(starter, indent=2) + "\n")
+    print(f"  scaffolded {path.relative_to(ROOT)} (one agent — edit before launching)")
 
 
 # ── Switch / sync subcommands ─────────────────────────────────────────
 
 
 def run_switch(challenge: str) -> int:
-    """Owner-only: change the swarm's active challenge.
+    """Host-only: change the swarm's active challenge.
 
-    POSTs the new active_challenge to /api/swarm_config (admin-key gated),
-    re-templates the owner's local files so they can also work on the new
-    challenge, and updates swarm.config.json. Contributors auto-follow on
-    their next iteration via `setup.py sync` (Step 0 of the agent loop).
+    POSTs to /api/swarm_config (admin-key gated), then refreshes the local
+    .swarm-cache.json and re-templates CHALLENGE.md. Contributors auto-follow
+    on their next iteration via `setup.py sync`.
 
     Switching is restricted to challenges of the same type (CPU/GPU) as
     the swarm was created with."""
@@ -1136,12 +1036,18 @@ def run_switch(challenge: str) -> int:
         print(f"unknown challenge: {challenge}")
         print(f"choose from: {', '.join(CHALLENGES)}")
         return 1
-    prior = read_prior_swarm_config()
-    if not prior:
-        print("no swarm.config.json found — run `python setup.py create` (host) "
-              "or `python setup.py --swarm-url <URL>` (contributor) first.")
+    admin = read_swarm_admin()
+    if not admin.get("admin_key"):
+        print("swarm.admin.json not found — `setup.py switch` is host-only; "
+              "run `python setup.py create` first.")
         return 1
-    swarm_type = prior.get("swarm_type", "cpu")
+    server_url = resolve_server_url()
+    if not server_url:
+        print("no server_url found — run `python setup.py create` first.")
+        return 1
+    admin_key = admin["admin_key"]
+    cache = read_swarm_cache()
+    swarm_type = cache.get("swarm_type", "cpu")
     is_gpu_swarm = swarm_type == "gpu"
     target_is_gpu = _CHALLENGE_REGISTRY[challenge].is_gpu
     if target_is_gpu != is_gpu_swarm:
@@ -1150,18 +1056,6 @@ def run_switch(challenge: str) -> int:
         print(f"This is a {label} swarm — cannot switch to "
               f"{'GPU' if target_is_gpu else 'CPU'} challenge '{challenge}'.")
         print(f"Available challenges: {', '.join(allowed)}")
-        return 1
-    if prior.get("role") != "owner":
-        print("Only the swarm owner can change the active challenge.")
-        print(f"Ask the swarm owner to run `python setup.py switch {challenge}`.")
-        print("Your local clone will auto-follow the owner's choice when "
-              "you next run `python setup.py sync`.")
-        return 2
-    server_url = prior.get("server_url")
-    admin_key = prior.get("admin_key")
-    if not server_url or not admin_key:
-        print("missing server_url or admin_key in swarm.config.json — "
-              "re-run `setup.py create`.")
         return 1
 
     # 1. POST the new active_challenge to the server.
@@ -1180,36 +1074,36 @@ def run_switch(challenge: str) -> int:
         print(f"  could not reach {server_url} ({e}); aborting switch.")
         return 1
 
-    # 2. Re-template the owner's local clone so they can also work on the new challenge.
+    # 2. Refresh the local cache + CHALLENGE.md so the host can also work on
+    #    the new challenge from their own clone.
     new_algo_path = f"src/{challenge}/algorithm/mod.rs"
     ch_def = _CHALLENGE_REGISTRY[challenge]
-    # Mirror the new challenge's sub-config to top-level so benchmark.py's
-    # offline fallback uses the right tracks/timeout.
     sub = fetch_challenge_sub_config(server_url, challenge)
     template_files(
         server_url, challenge=challenge,
-        algorithm_path=new_algo_path, prior=prior,
+        algorithm_path=new_algo_path, prior=cache,
     )
     write_challenge_md(challenge)
-    cfg = dict(prior)
-    cfg["active_challenge"] = challenge
-    cfg["challenge"] = challenge
-    cfg["algorithm_path"] = new_algo_path
+    refreshed = {
+        "server_url": server_url,
+        "swarm_type": swarm_type,
+        "active_challenge": challenge,
+        "challenge": challenge,
+        "algorithm_path": new_algo_path,
+    }
     if ch_def.is_gpu:
-        cfg["kernel_path"] = f"src/{challenge}/algorithm/kernels.cu"
-        cfg["is_gpu"] = True
-    else:
-        cfg.pop("kernel_path", None)
-        cfg.pop("is_gpu", None)
+        refreshed["kernel_path"] = f"src/{challenge}/algorithm/kernels.cu"
+        refreshed["is_gpu"] = True
     if sub:
-        cfg["tracks"] = sub.get("tracks", {})
-        cfg["timeout"] = sub.get("timeout", 5)
-        cfg["scoring_direction"] = sub.get("scoring_direction", "max")
-    write_swarm_config(cfg)
+        refreshed["tracks"] = sub.get("tracks", {})
+        refreshed["timeout"] = sub.get("timeout", 5)
+        refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
+    write_swarm_cache(refreshed)
 
+    prior_challenge = cache.get("active_challenge")
     print(f"\nActive challenge → {challenge} (broadcast to all contributors).")
-    if prior.get("active_challenge") and prior["active_challenge"] != challenge:
-        print(f"  Prior trajectories on {prior['active_challenge']} are preserved")
+    if prior_challenge and prior_challenge != challenge:
+        print(f"  Prior trajectories on {prior_challenge} are preserved")
         print(f"  server-side and resume on switch-back.")
     print("  All contributors auto-follow on their next iteration —")
     print("  scripts/run_loop.py runs `setup.py sync` at the top of each loop.")
@@ -1217,22 +1111,24 @@ def run_switch(challenge: str) -> int:
 
 
 def run_sync() -> int:
-    """Contributor (or owner): pull live config from the server and re-template
-    the local clone if the active_challenge has changed since last sync.
+    """Pull live config from the server and refresh .swarm-cache.json.
 
-    Idempotent — no-op when in sync. Called by the agent loop at Step 0 so
-    the contributor's local files auto-follow the owner's challenge choice."""
-    prior = read_prior_swarm_config()
-    if not prior:
-        print("no swarm.config.json found — run `python setup.py --swarm-url <URL>` first.")
-        return 1
-    server_url = prior.get("server_url")
+    Idempotent — re-templates CHALLENGE.md only when active_challenge changes.
+    Called by scripts/run_loop.py at the top of every iteration so a host's
+    challenge switch propagates to running contributors automatically.
+    """
+    server_url = resolve_server_url()
     if not server_url:
-        print("missing server_url in swarm.config.json — re-run setup.")
+        print(
+            "no server_url found — run `python setup.py create` (host) or "
+            "edit fleet.config.json (contributor)."
+        )
         return 1
+    server_url = server_url.rstrip("/")
+
     try:
         with urllib.request.urlopen(
-            f"{server_url.rstrip('/')}/api/swarm_config", timeout=4
+            f"{server_url}/api/swarm_config", timeout=4
         ) as r:
             live = json.load(r)
     except Exception as e:
@@ -1243,38 +1139,41 @@ def run_sync() -> int:
     if not new_challenge:
         print("server returned no active_challenge; nothing to sync.")
         return 0
-    local_challenge = prior.get("active_challenge") or prior.get("challenge")
+
+    cache = read_swarm_cache()
+    local_challenge = cache.get("active_challenge") or cache.get("challenge")
+
+    # Build the refreshed cache payload from live server state.
+    new_algo_path = f"src/{new_challenge}/algorithm/mod.rs"
+    ch_def = _CHALLENGE_REGISTRY.get(new_challenge)
+    sub = fetch_challenge_sub_config(server_url, new_challenge)
+    refreshed = {
+        "server_url": server_url,
+        "active_challenge": new_challenge,
+        "challenge": new_challenge,
+        "algorithm_path": new_algo_path,
+    }
+    if live.get("swarm_type"):
+        refreshed["swarm_type"] = live["swarm_type"]
+    if ch_def and ch_def.is_gpu:
+        refreshed["kernel_path"] = f"src/{new_challenge}/algorithm/kernels.cu"
+        refreshed["is_gpu"] = True
+    if sub:
+        refreshed["tracks"] = sub.get("tracks", {})
+        refreshed["timeout"] = sub.get("timeout", 5)
+        refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
+    write_swarm_cache(refreshed)
+
     if new_challenge == local_challenge:
         print(f"already in sync (active_challenge = {new_challenge}).")
         return 0
 
-    new_algo_path = f"src/{new_challenge}/algorithm/mod.rs"
-    ch_def = _CHALLENGE_REGISTRY.get(new_challenge)
-    sub = fetch_challenge_sub_config(server_url, new_challenge)
     template_files(
         server_url, challenge=new_challenge,
-        algorithm_path=new_algo_path, prior=prior,
+        algorithm_path=new_algo_path, prior=cache,
     )
     write_challenge_md(new_challenge)
-    cfg = dict(prior)
-    cfg["active_challenge"] = new_challenge
-    cfg["challenge"] = new_challenge
-    cfg["algorithm_path"] = new_algo_path
-    live_swarm_type = live.get("swarm_type")
-    if live_swarm_type:
-        cfg["swarm_type"] = live_swarm_type
-    if ch_def and ch_def.is_gpu:
-        cfg["kernel_path"] = f"src/{new_challenge}/algorithm/kernels.cu"
-        cfg["is_gpu"] = True
-    else:
-        cfg.pop("kernel_path", None)
-        cfg.pop("is_gpu", None)
-    if sub:
-        cfg["tracks"] = sub.get("tracks", {})
-        cfg["timeout"] = sub.get("timeout", 5)
-        cfg["scoring_direction"] = sub.get("scoring_direction", "max")
-    write_swarm_config(cfg)
-    print(f"\nSynced to {new_challenge} (was {local_challenge}).")
+    print(f"\nSynced to {new_challenge} (was {local_challenge or '<none>'}).")
     print("  Your prior trajectory on this challenge (if any) will resume server-side.")
     print("  scripts/run_loop.py picks up the new CHALLENGE.md on its next iteration.")
     return 0
@@ -1282,216 +1181,7 @@ def run_sync() -> int:
 
 
 
-def _prompt_contributor_identity(
-    prior: dict | None,
-    args: argparse.Namespace | None = None,
-) -> tuple[str | None, str | None]:
-    """Ask the contributor for an optional display name.
-
-    The dashboard LLM label is no longer prompted — it's auto-derived
-    from `provider` + `model` in agent.config.json at registration time
-    (see scripts/server.py::derive_llm_label). The only way to set an
-    explicit, hand-picked label is to pass `--llm-label` here, which we
-    persist into swarm.config.json as `contributor_llm`. If neither
-    `--llm-label` nor a prior `contributor_llm` is set we return None,
-    and register_agent falls back to the auto-derivation.
-    """
-    yes = _arg_enabled(args, "yes")
-    prior_name = (prior or {}).get("contributor_name") or ""
-    prior_llm = (prior or {}).get("contributor_llm")
-    arg_name = _arg_value(args, "agent_name")
-    arg_llm = _arg_value(args, "llm_label")
-
-    # Explicit --llm-label always wins; otherwise preserve any pre-existing
-    # contributor_llm in swarm.config.json (so this wizard run doesn't
-    # silently downgrade a user's hand-set label).
-    label = arg_llm if arg_llm is not None else prior_llm
-
-    if yes:
-        return (
-            arg_name if arg_name is not None else (prior_name or None),
-            label,
-        )
-
-    if arg_name is not None:
-        return arg_name or None, label
-
-    print(
-        "\n── Your identity (optional) ──\n"
-        "Pick a display name for your agent — Enter to let the server\n"
-        "generate one. The dashboard LLM label is auto-derived from your\n"
-        "provider + model (use `--llm-label` to override).\n"
-    )
-    name_default = prior_name or "(let server generate)"
-    raw_name = input(f"Agent name [{name_default}]: ").strip()
-    if raw_name == "" and prior_name:
-        chosen_name = prior_name
-    elif raw_name == "":
-        chosen_name = None
-    else:
-        chosen_name = raw_name
-    return chosen_name, label
-
-
-def run_join(server_url: str, args: argparse.Namespace | None = None) -> int:
-    print(f"TIG Swarm — joining {server_url}")
-    print("=" * 48)
-
-    prior = read_prior_swarm_config()
-    challenge = None
-    algorithm_path = None
-    stagnation_threshold = 2
-    swarm_type = "cpu"
-    try:
-        with urllib.request.urlopen(f"{server_url.rstrip('/')}/api/swarm_config", timeout=4) as r:
-            swarm = json.load(r)
-        challenge = swarm.get("active_challenge") or swarm.get("challenge")
-        stagnation_threshold = swarm.get("stagnation_threshold", 2)
-        swarm_type = swarm.get("swarm_type", "cpu")
-        if challenge:
-            algorithm_path = f"src/{challenge}/algorithm/mod.rs"
-    except Exception as e:
-        print(f"  couldn't fetch swarm config from {server_url}: {e}")
-        print("  CHALLENGE.md will only have the URL templated; rerun this command once the server is up.")
-
-    contributor_name, contributor_llm = _prompt_contributor_identity(prior, args)
-
-    type_label = "GPU" if swarm_type == "gpu" else "CPU"
-    print(f"  swarm type: {type_label}")
-
-    template_files(
-        server_url,
-        challenge=challenge,
-        algorithm_path=algorithm_path,
-        prior=prior,
-    )
-    if challenge:
-        write_challenge_md(challenge)
-
-    # Stash a minimal record so a future re-run can swap the URL/challenge
-    # without leaving stale strings in the templated files. `active_challenge`
-    # is the field `setup.py sync` checks on every agent iteration to detect
-    # owner-driven challenge switches.
-    cfg_out = {
-        "server_url": server_url,
-        "role": "contributor",
-        "swarm_type": swarm_type,
-        "active_challenge": challenge or (prior or {}).get("active_challenge"),
-        "challenge": challenge or (prior or {}).get("challenge"),
-        "algorithm_path": algorithm_path or (prior or {}).get("algorithm_path"),
-        # Identity persisted across runs. The agent loop's register curl
-        # reads these from swarm.config.json and forwards them to
-        # /api/agents/register so the dashboard can show the LLM type
-        # alongside the agent's name.
-        "contributor_name": contributor_name,
-        "contributor_llm": contributor_llm,
-    }
-    if challenge:
-        ch_def = _CHALLENGE_REGISTRY.get(challenge)
-        if ch_def and ch_def.is_gpu:
-            cfg_out["kernel_path"] = f"src/{challenge}/algorithm/kernels.cu"
-            cfg_out["is_gpu"] = True
-    # Mirror the active challenge's sub-config to top-level so benchmark.py's
-    # offline fallback finds the right tracks/timeout.
-    if challenge:
-        sub = fetch_challenge_sub_config(server_url, challenge)
-        if sub:
-            cfg_out["tracks"] = sub.get("tracks", {})
-            cfg_out["timeout"] = sub.get("timeout", 5)
-            cfg_out["scoring_direction"] = sub.get("scoring_direction", "max")
-    write_swarm_config(cfg_out)
-
-    tk_path = init_personal_tacit_knowledge(stagnation_threshold)
-    if _arg_enabled(args, "yes") or _arg_enabled(args, "skip_tacit"):
-        print(f"  leaving {tk_path.relative_to(ROOT)} as-is")
-    else:
-        gather_tacit_knowledge(tk_path, stagnation_threshold)
-
-    configure_agent_runtime(args)
-
-    print(
-        "\nDone — this clone is now wired into the swarm. Start the optimization\n"
-        "loop with scripts/run_loop.py:\n"
-        "\n     export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY, GOOGLE_API_KEY\n"
-        "     python scripts/run_loop.py\n"
-        "\nOr use your local `claude` CLI in headless mode (no API key needed):\n"
-        "\n     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7\n"
-        "\nFor full agent mode (tools, file edits in a sandboxed worktree —\n"
-        "subscription only, much higher token use per iteration):\n"
-        "\n     python scripts/run_loop.py --provider claude-code-agentic --model claude-opus-4-7\n"
-        "     python scripts/run_loop.py --provider codex-agentic         # OpenAI Codex CLI\n"
-        "\nDefaults come from agent.config.json (provider, model, compute). The\n"
-        "loop saves its agent_id there after first registration so it resumes\n"
-        "automatically on later runs.\n"
-        "Edit tacit_knowledge_personal.md any time with private hints — they\n"
-        "only ever live on your machine.\n"
-        "\nWhen the swarm owner switches the active challenge, run_loop.py's\n"
-        "Step 0 (`python setup.py sync`) picks up the change automatically on\n"
-        "the next iteration.\n"
-    )
-    return 0
-
-
-def run_configure_agent(args: argparse.Namespace | None = None) -> int:
-    """Configure local script-loop defaults, connecting to a swarm first when a
-    swarm URL is supplied or no local swarm config exists."""
-    prior = read_prior_swarm_config()
-    server_url = _arg_value(args, "swarm_url")
-    if server_url:
-        return run_join(server_url, args)
-    if not prior:
-        if _arg_enabled(args, "yes"):
-            print("no swarm.config.json found and --swarm-url was not provided.")
-            return 1
-        server_url = prompt("Swarm URL")
-        return run_join(server_url, args)
-
-    updated = False
-    if _arg_value(args, "agent_name") is not None:
-        prior["contributor_name"] = _arg_value(args, "agent_name") or None
-        updated = True
-    if _arg_value(args, "llm_label") is not None:
-        prior["contributor_llm"] = _arg_value(args, "llm_label")
-        updated = True
-    elif _arg_value(args, "provider") is not None and "contributor_llm" in prior:
-        # Provider changed and there's a stale explicit label from an older
-        # wizard run (or a previous --llm-label). Drop it so register_agent
-        # falls through to auto-derivation from the new provider+model.
-        del prior["contributor_llm"]
-        updated = True
-    if updated:
-        write_swarm_config(prior)
-
-    configure_agent_runtime(args)
-    print("\nAgent runtime config updated. Run `python scripts/run_loop.py` to start.")
-    return 0
-
-
 # ── Entrypoint ──────────────────────────────────────────────────────
-
-
-def add_agent_setup_args(parser: argparse.ArgumentParser, *, include_swarm_url: bool) -> None:
-    if include_swarm_url:
-        parser.add_argument("--swarm-url", help="Swarm URL to configure this clone against.")
-    parser.add_argument("--agent-name", help="Contributor display name for the dashboard.")
-    parser.add_argument("--llm-label", help="Dashboard LLM label, independent of provider.")
-    parser.add_argument("--provider", choices=AGENT_PROVIDERS, help="Script-loop LLM provider.")
-    parser.add_argument("--model", help="Script-loop model override.")
-    parser.add_argument("--api-base", help="OpenAI-compatible API base URL.")
-    parser.add_argument("--compute", choices=AGENT_COMPUTE_CHOICES, help="Benchmark compute backend.")
-    parser.add_argument("--hardware", help="C3 GPU hardware, e.g. l40.")
-    parser.add_argument("--c3-time", help="C3 job walltime, e.g. 02:00:00.")
-    parser.add_argument("--c3-provider", help="Optional C3 CLI provider.")
-    parser.add_argument("--env", help="Docker Hub environment image for C3 jobs.")
-    parser.add_argument("--env-image", dest="env", help=argparse.SUPPRESS)
-    parser.add_argument("--c3-image", dest="env", help=argparse.SUPPRESS)
-    parser.add_argument("--env-cpu", dest="env", help=argparse.SUPPRESS)
-    parser.add_argument("--c3-cpu-image", dest="env", help=argparse.SUPPRESS)
-    parser.add_argument("--env-gpu", dest="env", help=argparse.SUPPRESS)
-    parser.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
-    parser.add_argument("--skip-tacit", action="store_true", help="Do not prompt for tacit knowledge.")
-    parser.add_argument("--skip-docker-build", action="store_true", help="Don't auto-build the local benchmark Docker image when --compute local.")
-    parser.add_argument("--yes", action="store_true", help="Accept defaults for any optional setup prompts.")
 
 
 def add_create_setup_args(parser: argparse.ArgumentParser) -> None:
@@ -1503,39 +1193,27 @@ def add_create_setup_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--stagnation-threshold", type=int, help="Iterations before hints/inspiration.")
     parser.add_argument("--stagnation-limit", type=int, help="Iterations before trajectory reset; 0 disables.")
     parser.add_argument("--hypothesis-recall-threshold", type=int, help="Iterations before prior failed hypotheses are shown.")
-
-
-def has_create_args(args: argparse.Namespace) -> bool:
-    return any(
-        _arg_value(args, name) is not None
-        for name in (
-            "workspace", "swarm_name", "swarm_type", "active_challenge",
-            "stagnation_threshold", "stagnation_limit",
-            "hypothesis_recall_threshold",
-        )
-    ) or _arg_enabled(args, "use_defaults")
+    parser.add_argument("--yes", action="store_true", help="Accept defaults for any optional prompts.")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="setup.py")
-    add_agent_setup_args(parser, include_swarm_url=True)
-    add_create_setup_args(parser)
+    parser = argparse.ArgumentParser(
+        prog="setup.py",
+        description=(
+            "Host-admin tool for the TIG swarm. Contributors edit "
+            "fleet.config.json and run scripts/run_fleet.py — they do not "
+            "need setup.py."
+        ),
+    )
     sub = parser.add_subparsers(dest="mode")
     create = sub.add_parser(
         "create",
-        help="Owner: provision a new swarm on Railway (drives the railway CLI).",
+        help="Host: provision a new swarm on Railway (drives the railway CLI).",
     )
-    add_agent_setup_args(create, include_swarm_url=False)
     add_create_setup_args(create)
-    configure = sub.add_parser(
-        "configure-agent",
-        help="Configure local script-loop runtime defaults; connects when --swarm-url is supplied.",
-    )
-    add_agent_setup_args(configure, include_swarm_url=True)
     switch = sub.add_parser(
         "switch",
-        help=("Owner: change the swarm's active challenge "
-              "(broadcast to all contributors)."),
+        help="Host: change the swarm's active challenge (broadcast to all contributors).",
     )
     switch.add_argument(
         "challenge", choices=list(CHALLENGES.keys()),
@@ -1543,51 +1221,37 @@ def main() -> int:
     )
     sub.add_parser(
         "sync",
-        help=("Contributor: pull live config from the server and re-template "
-              "this clone if the active challenge changed (idempotent; "
-              "called by the agent loop at Step 0)."),
+        help=("Refresh .swarm-cache.json from the live server (idempotent; "
+              "called by scripts/run_loop.py at the top of each iteration)."),
+    )
+    tacit = sub.add_parser(
+        "tacit",
+        help="Interactive helper to fill in an agent's tacit_knowledge file.",
+    )
+    tacit.add_argument(
+        "agent_name", nargs="?",
+        help="Name of the fleet agent to edit (default: only agent in fleet.config.json).",
     )
     args = parser.parse_args()
 
-    if args.mode is None:
-        if args.swarm_url:
-            return run_join(args.swarm_url, args)
-        if has_create_args(args):
-            rc = run_create(args)
-            if rc == 0:
-                configure_agent_runtime(args)
-            return rc
-        if args.yes:
-            print("No mode selected. Pass --swarm-url to configure non-interactively, "
-                  "or use `create` or `configure-agent`.")
-            return 1
-        choice = prompt_choice(
-            "What do you want to set up?",
-            ["contributor", "host", "configure-agent"],
-            default="contributor",
-        )
-        if choice == "host":
-            rc = run_create(args)
-            if rc == 0:
-                configure_agent_runtime(args)
-            return rc
-        if choice == "configure-agent":
-            return run_configure_agent(args)
-        server_url = prompt("Swarm URL")
-        return run_join(server_url, args)
-
     if args.mode == "create":
-        rc = run_create(args)
-        if rc == 0:
-            configure_agent_runtime(args)
-        return rc
-    if args.mode == "configure-agent":
-        return run_configure_agent(args)
+        return run_create(args)
     if args.mode == "switch":
         return run_switch(args.challenge)
     if args.mode == "sync":
         return run_sync()
-    parser.print_help()
+    if args.mode == "tacit":
+        return run_tacit(args.agent_name)
+
+    print(
+        "setup.py is the host-admin tool.\n"
+        "  contributors:  edit fleet.config.json, then run "
+        "`python scripts/run_fleet.py`.\n"
+        "  hosts:         `python setup.py create` to provision a new swarm.\n"
+        "  switch challenge:  `python setup.py switch <challenge>`.\n"
+        "  edit tacit knowledge:  `python setup.py tacit [<agent-name>]`.",
+        file=sys.stderr,
+    )
     return 1
 
 

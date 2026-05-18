@@ -27,7 +27,7 @@ _KERNEL_SEPARATOR_RE = re.compile(
 def algo_path(config: dict) -> Path:
     ap = config.get("algorithm_path")
     if not ap:
-        sys.exit("swarm.config.json missing `algorithm_path` — run `setup.py sync`.")
+        sys.exit(".swarm-cache.json missing `algorithm_path` — run `setup.py sync`.")
     return ROOT / ap
 
 

@@ -63,28 +63,27 @@ def derive_llm_label(provider: str | None, model: str | None) -> str:
 
 
 def register_agent(
-    server: str, config: dict | None = None,
+    server: str,
     *, provider: str | None = None, model: str | None = None,
     requested_name: str | None = None,
+    name: str | None = None,
 ) -> tuple[str, str]:
     """Register an agent. Forwards a dashboard label as `llm_type`.
 
-    Label resolution order: an explicit `contributor_llm` in swarm.config
-    (set by `setup.py --llm-label` or hand-edited) wins; otherwise we
-    derive it from the live provider+model so the dashboard always
-    tracks what's actually running.
+    Identity resolution (in order):
+      - `requested_name` wins (used on re-registration to keep the same
+        identity when the server has lost the original row).
+      - explicit `name` kwarg (from agent.config.json's `name`, materialized
+        from fleet.config.json).
 
-    Name resolution: an explicit `requested_name` (used on re-registration
-    to keep the same identity when the server has lost the original row)
-    wins over `config["contributor_name"]`.
+    Dashboard label is auto-derived from provider+model.
     """
     body: dict = {}
-    name = (requested_name or "").strip() or (config or {}).get("contributor_name")
-    if name:
-        body["agent_name"] = name
+    resolved_name = (requested_name or "").strip() or (name or "").strip()
+    if resolved_name:
+        body["agent_name"] = resolved_name
 
-    explicit = (config or {}).get("contributor_llm")
-    body["llm_type"] = explicit or derive_llm_label(provider, model)
+    body["llm_type"] = derive_llm_label(provider, model)
 
     data = server_post(f"{server}/api/agents/register", body)
     return data["agent_id"], data["agent_name"]

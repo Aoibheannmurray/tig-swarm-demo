@@ -147,7 +147,7 @@ def _create_workspace(stage: Path, config: dict, server: str) -> dict:
     for script in (ROOT / "scripts").glob("*.py"):
         _copy_required(script, scripts_stage / script.name)
 
-    (stage / "swarm.config.json").write_text(
+    (stage / ".swarm-cache.json").write_text(
         json.dumps(staged_config, indent=2, sort_keys=True) + "\n"
     )
     return staged_config

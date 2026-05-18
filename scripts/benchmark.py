@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run the active challenge's benchmark and emit JSON for publish.py.
 
-Reads swarm-wide config from the local `swarm.config.json` snapshot
-(written by `setup.py join` and refreshed by `setup.py sync`). `setup.py
-sync` is the *only* moment a host-side challenge switch is picked up —
+Reads swarm-wide config from the local `.swarm-cache.json` snapshot
+(written by `setup.py sync`). `setup.py sync` is the *only* moment a
+host-side challenge switch is picked up —
 deliberately, so that an in-flight edit→benchmark→publish iteration can
 finish on the challenge it started on. After loading local config, an
 advisory probe of `/api/swarm_config` warns if the host has rotated since
@@ -99,7 +99,7 @@ GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 def _resolve_server_url() -> str:
     if os.environ.get("TIG_SWARM_SERVER"):
         return os.environ["TIG_SWARM_SERVER"].rstrip("/")
-    cfg_path = Path(__file__).parent.parent / "swarm.config.json"
+    cfg_path = ROOT_DIR / ".swarm-cache.json"
     if cfg_path.exists():
         try:
             url = json.loads(cfg_path.read_text()).get("server_url", "")
@@ -116,7 +116,7 @@ SERVER = _resolve_server_url()
 
 
 def load_swarm_config() -> dict:
-    """Read the locked-in swarm config from local swarm.config.json.
+    """Read the locked-in swarm config from local .swarm-cache.json.
 
     Local is authoritative — `setup.py sync` is the only point at which a
     host-side challenge switch is picked up. This is deliberate: once an
@@ -129,23 +129,22 @@ def load_swarm_config() -> dict:
     Set `TIG_NO_SERVER_PROBE=1` to skip the advisory probe entirely (useful
     for fully offline iteration).
     """
-    cfg_path = ROOT_DIR / "swarm.config.json"
+    cfg_path = ROOT_DIR / ".swarm-cache.json"
     if not cfg_path.exists():
         print(
-            "error: no swarm.config.json — run `python setup.py join <URL>` "
-            "(or `python setup.py sync` if you already have one).",
+            "error: no .swarm-cache.json — run `python setup.py sync` first.",
             file=sys.stderr,
         )
         sys.exit(1)
     try:
         local = json.loads(cfg_path.read_text())
     except json.JSONDecodeError as e:
-        print(f"error: swarm.config.json is malformed ({e})", file=sys.stderr)
+        print(f"error: .swarm-cache.json is malformed ({e})", file=sys.stderr)
         sys.exit(1)
     ch = local.get("active_challenge") or local.get("challenge")
     if not ch:
         print(
-            "error: swarm.config.json has no active_challenge/challenge — "
+            "error: .swarm-cache.json has no active_challenge — "
             "run `python setup.py sync`.",
             file=sys.stderr,
         )
@@ -1030,7 +1029,7 @@ def main() -> int:
     # accidental edit of the wrong mod.rs vs. what's about to run.
     synced = cfg.get("synced_at") or "unknown"
     print(
-        f"Locked challenge: {cfg.get('challenge')} (local swarm.config.json, "
+        f"Locked challenge: {cfg.get('challenge')} (.swarm-cache.json, "
         f"synced_at={synced}).",
         file=sys.stderr,
     )

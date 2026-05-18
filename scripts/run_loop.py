@@ -145,9 +145,12 @@ def _call_llm_logged(
 
 
 def load_config() -> dict:
-    cfg_path = ROOT / "swarm.config.json"
+    cfg_path = ROOT / ".swarm-cache.json"
     if not cfg_path.exists():
-        sys.exit("swarm.config.json not found. Run `python setup.py` first.")
+        sys.exit(
+            ".swarm-cache.json not found. Run `python setup.py sync` first "
+            "(scripts/run_loop.py normally calls it at the top of every iteration)."
+        )
     return json.loads(cfg_path.read_text())
 
 
@@ -163,25 +166,6 @@ def load_agent_config() -> dict:
 
 def write_agent_config(config: dict) -> None:
     AGENT_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
-
-
-def write_swarm_config(config: dict) -> None:
-    (ROOT / "swarm.config.json").write_text(json.dumps(config, indent=2) + "\n")
-
-
-def persist_contributor_name_if_unset(name: str) -> None:
-    """Cache the registered display name in swarm.config.json so future
-    runs can re-register with the same name even if agent.config.json is
-    deleted or the server forgets the id. Only writes when the field is
-    currently empty, so a hand-set `contributor_name` is never clobbered.
-    """
-    if not (name or "").strip():
-        return
-    cfg = load_config()
-    if (cfg.get("contributor_name") or "").strip():
-        return
-    cfg["contributor_name"] = name
-    write_swarm_config(cfg)
 
 
 def sync_challenge() -> None:
@@ -486,7 +470,7 @@ def _seed_worktree_files(
     The worktree is gitignored at `src/<challenge>/algorithm/mod.rs` so on a
     fresh worktree there's no mod.rs at all — the loop has to put one
     there before the agent runs. Same for kernels.cu on GPU challenges.
-    Also copies swarm.config.json across (benchmark.py reads it).
+    Also copies .swarm-cache.json across (benchmark.py reads it).
     """
     best_code = state.get("best_algorithm_code") or ""
     best_kernel = state.get("best_kernel_code") or ""
@@ -702,9 +686,14 @@ def main() -> int:
     api_key = resolve_api_key(args.provider, args.api_key)
     model = args.model or DEFAULT_MODELS.get(args.provider, "")
 
-    server = config.get("server_url", "").rstrip("/")
+    # server_url is materialized into agent.config.json by run_fleet from the
+    # top-level fleet.config.json entry.
+    server = (agent_config.get("server_url") or "").rstrip("/")
     if not server:
-        sys.exit("No server_url in swarm.config.json. Run setup.py first.")
+        sys.exit(
+            "No server_url in agent.config.json. Did run_fleet.py spawn this "
+            "worktree, or was agent.config.json hand-edited?"
+        )
     if args.compute == "c3":
         if shutil.which("c3") is None:
             sys.exit("c3 CLI not found. Install it from https://docs.cthree.cloud/.")
@@ -734,17 +723,17 @@ def main() -> int:
                 f"re-registering as {agent_name!r}…"
             )
             agent_id, agent_name = register_agent(
-                server, config, provider=args.provider, model=model,
+                server, provider=args.provider, model=model,
                 requested_name=agent_name,
+                name=agent_config.get("name"),
             )
             print(f"Re-registered as: {agent_name} ({agent_id})")
     else:
         agent_id, agent_name = register_agent(
-            server, config, provider=args.provider, model=model,
+            server, provider=args.provider, model=model,
+            name=agent_config.get("name"),
         )
         print(f"Registered as: {agent_name} ({agent_id})")
-
-    persist_contributor_name_if_unset(agent_name)
 
     updated_agent_config = dict(agent_config)
     updated_agent_config.pop("c3_cloud_provider", None)
@@ -834,9 +823,9 @@ def main() -> int:
             time.sleep(_ITERATION_BACKOFF_SECS)
             continue
 
-        # If the local contributor_name (re-)prompted by setup.py join
-        # differs from the server's agents.name, POST a rename. Cheap:
-        # piggybacks on the state we already fetched.
+        # If the agent's local `name` (from agent.config.json, materialized
+        # from fleet.config.json) differs from the server's agents.name, POST
+        # a rename. Cheap: piggybacks on the state we already fetched.
         try:
             from sync_identity import sync_identity_with_state
             renamed = sync_identity_with_state(server, agent_id, state)
