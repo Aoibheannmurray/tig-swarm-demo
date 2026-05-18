@@ -298,7 +298,15 @@ export class TrajectoriesPanel {
         for (const p of t.score_history) allTimes.push(new Date(p.created_at));
       }
       const ext = extent(allTimes) as [Date, Date];
-      xDomain = [ext[0].getTime(), ext[1].getTime()];
+      const startMs = ext[0].getTime();
+      const endMs = ext[1].getTime();
+      // Pad the right edge so the active-trajectory extension below is
+      // visible. Without this, xDomain[1] equals the last data point's
+      // timestamp, so the step-after hold has zero width and the latest
+      // score renders as only an endpoint dot — making the ALL view look
+      // stale vs the per-trajectory view (which already pads by 5%).
+      const span = Math.max(endMs - startMs, 1);
+      xDomain = [startMs, endMs + span * 0.05];
     }
 
     const allScores: number[] = [];
