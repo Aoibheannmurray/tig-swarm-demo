@@ -76,6 +76,7 @@ from challenge_files import (
     validate_code,
 )
 from server import (
+    agent_exists,
     get_state,
     post_message,
     publish_results,
@@ -162,6 +163,25 @@ def load_agent_config() -> dict:
 
 def write_agent_config(config: dict) -> None:
     AGENT_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+
+
+def write_swarm_config(config: dict) -> None:
+    (ROOT / "swarm.config.json").write_text(json.dumps(config, indent=2) + "\n")
+
+
+def persist_contributor_name_if_unset(name: str) -> None:
+    """Cache the registered display name in swarm.config.json so future
+    runs can re-register with the same name even if agent.config.json is
+    deleted or the server forgets the id. Only writes when the field is
+    currently empty, so a hand-set `contributor_name` is never clobbered.
+    """
+    if not (name or "").strip():
+        return
+    cfg = load_config()
+    if (cfg.get("contributor_name") or "").strip():
+        return
+    cfg["contributor_name"] = name
+    write_swarm_config(cfg)
 
 
 def sync_challenge() -> None:
@@ -700,12 +720,31 @@ def main() -> int:
     if args.agent_id or configured_agent_id:
         agent_id = args.agent_id or configured_agent_id
         agent_name = args.agent_name or configured_agent_name or f"script-{agent_id[:8]}"
-        print(f"Resuming agent: {agent_name} ({agent_id})")
+        # Validate before resuming. If the server doesn't have a row for
+        # this id (DB reset/redeploy, switched swarms, or a first-run
+        # interruption left a stale id locally), re-register with the
+        # same display name so the contributor keeps their identity.
+        # Multi-agent coordination keys off agent_id only — renaming or
+        # re-registering one contributor is invisible to everyone else.
+        if agent_exists(server, agent_id):
+            print(f"Resuming agent: {agent_name} ({agent_id})")
+        else:
+            print(
+                f"  [REGISTER] Stored agent_id {agent_id} not on server; "
+                f"re-registering as {agent_name!r}…"
+            )
+            agent_id, agent_name = register_agent(
+                server, config, provider=args.provider, model=model,
+                requested_name=agent_name,
+            )
+            print(f"Re-registered as: {agent_name} ({agent_id})")
     else:
         agent_id, agent_name = register_agent(
             server, config, provider=args.provider, model=model,
         )
         print(f"Registered as: {agent_name} ({agent_id})")
+
+    persist_contributor_name_if_unset(agent_name)
 
     updated_agent_config = dict(agent_config)
     updated_agent_config.pop("c3_cloud_provider", None)
