@@ -97,10 +97,16 @@ export class ChartPanel implements Panel {
     this.tabPrevEl.addEventListener("click", () => this.cycleTab(-1));
     this.tabNextEl.addEventListener("click", () => this.cycleTab(1));
 
+    // Measure the SVG itself, not the parent panel — the SVG is `flex: 1`
+    // so the browser has already sized it to fit the remaining space after
+    // the panel label, tabs row, and panel padding. The previous
+    // `parent.height - 48` underestimated the chrome (closer to ~78px on
+    // the mainpage), so the SVG coordinate space extended below the
+    // visible flex box and the bottom-most y-tick label got clipped.
     const svgEl = document.getElementById("chart-svg")!;
-    const rect = svgEl.parentElement!.getBoundingClientRect();
+    const rect = svgEl.getBoundingClientRect();
     this.width = rect.width;
-    this.height = rect.height - 48; // label + tab row
+    this.height = rect.height;
 
     this.svg = select("#chart-svg")
       .attr("width", this.width)
@@ -125,13 +131,13 @@ export class ChartPanel implements Panel {
     }
 
     const observer = new ResizeObserver(() => {
-      const newRect = svgEl.parentElement!.getBoundingClientRect();
+      const newRect = svgEl.getBoundingClientRect();
       this.width = newRect.width;
-      this.height = newRect.height - 48;
+      this.height = newRect.height;
       this.svg.attr("width", this.width).attr("height", this.height);
       this.redraw();
     });
-    observer.observe(svgEl.parentElement!);
+    observer.observe(svgEl);
 
     this.renderTabLabel();
   }
