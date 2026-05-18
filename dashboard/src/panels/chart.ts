@@ -5,6 +5,7 @@ import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
 import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
+import { getViewedChallenge } from "../lib/viewedChallenge";
 import type { Panel, WSMessage } from "../types";
 
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
@@ -291,7 +292,16 @@ export class ChartPanel implements Panel {
     if (existing?.loaded) return;
 
     try {
-      const res = await fetch(`${this.apiUrl}/api/agent_experiments?agent_id=${encodeURIComponent(agentId)}`);
+      // Pin to the viewed challenge — without this, the server falls back
+      // to its active challenge (resolve_challenge in server.py), so an
+      // agent viewed on a non-active challenge returns zero experiments
+      // and the per-agent tab shows "no attempts yet from <name>".
+      const challenge = getViewedChallenge();
+      const res = await fetch(
+        `${this.apiUrl}/api/agent_experiments` +
+          `?agent_id=${encodeURIComponent(agentId)}` +
+          `&challenge=${encodeURIComponent(challenge)}`,
+      );
       if (!res.ok) return;
       const data: {
         agent_id: string;
