@@ -65,7 +65,7 @@ export class StatsPanel implements Panel {
             <span class="stat-value" id="stat-agents-val">0</span>
           </div>
           <div class="stat-chip" id="stat-experiments">
-            <span class="stat-label">EXPERIMENTS</span>
+            <span class="stat-label">RUNS</span>
             <span class="stat-value" id="stat-experiments-val">0</span>
           </div>
           <div class="stat-chip" id="stat-agents-total">
