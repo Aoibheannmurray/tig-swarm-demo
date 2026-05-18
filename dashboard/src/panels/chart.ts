@@ -821,10 +821,13 @@ export class ChartPanel implements Panel {
     const scoreMax = max(this.globalData, (d) => d.score);
     if (scoreMin == null || scoreMax == null) return null;
 
+    // Pad both sides symmetrically. Previously yMin was clamped to >= 1
+    // because the y-axis used scaleLog, but now that we always use
+    // scaleLinear that floor inverts the domain whenever all scores are
+    // negative (e.g. job_scheduling at -4k..-2k) — every point ends up
+    // rendered below the visible chart.
     const pad = Math.max(Math.abs(scoreMax - scoreMin) * 0.15, 1);
-    const yMin = Math.max(1, scoreMin - pad);
-    const yMax = scoreMax + pad;
-    return [yMin, yMax];
+    return [scoreMin - pad, scoreMax + pad];
   }
 }
 
