@@ -436,15 +436,17 @@ export class ChartPanel implements Panel {
     //           clearance above the chart for a label sitting at y = 0.
     //   bottom: tick labels baseline at h + fs + 6, descender ~fs/4 below,
     //           plus a few px breathing room.
-    //   left:   y-axis labels (text-anchor=end at x = -8) can be ~8 chars
-    //           wide on log-scaled scores ("100.00M"); at ~0.55em/char
-    //           that's ~4.4·fs.
+    //   left:   y-axis labels (text-anchor=end at x = -8) can run up to
+    //           ~9 chars on negative log-magnitude scores ("-100.00M");
+    //           at ~0.6em/char that's ~5.4·fs. The previous 5.0·fs / 52px
+    //           floor sized for the positive-only case and clipped the
+    //           leading minus sign on the small mainpage chart.
     //   right:  half-strokes from end-of-data lines plus a small buffer.
     const m = {
       top: Math.max(28, fs + 12),
       right: Math.max(16, Math.round(fs * 2)),
       bottom: Math.max(28, fs + 18),
-      left: Math.max(52, Math.round(fs * 5)),
+      left: Math.max(60, Math.round(fs * 6)),
     };
     const w = Math.max(0, this.width - m.left - m.right);
     const h = Math.max(0, this.height - m.top - m.bottom);
