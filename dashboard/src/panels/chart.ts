@@ -1,5 +1,5 @@
 import { max, min } from "d3-array";
-import { scaleLinear, scaleLog } from "d3-scale";
+import { scaleLinear } from "d3-scale";
 import { select } from "d3-selection";
 import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
 import { getAgentColor, token } from "../lib/colors";
@@ -636,12 +636,7 @@ export class ChartPanel implements Panel {
           Math.max(globalYDomain[1], maxScore + fallbackPad),
         ]
       : [minScore - fallbackPad, maxScore + fallbackPad];
-    // scaleLog requires strictly positive values. Fall back to linear
-    // when the domain crosses zero — early infeasible attempts can produce
-    // negative quality scores under baseline-relative scoring.
-    const yScale = (yDomain[0] > 0 && yDomain[1] > 0
-      ? scaleLog()
-      : scaleLinear())
+    const yScale = scaleLinear()
       .domain(yDomain)
       .range([h, 0]);
 
