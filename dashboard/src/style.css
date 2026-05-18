@@ -288,6 +288,14 @@ html, body {
   -webkit-user-drag: none;
 }
 
+/* Dashboard masthead only — 20% larger than the shared sizing above so
+   the top-left logo carries the page; the per-page headers (ideas,
+   diversity, benchmark, trajectories) keep the smaller default. */
+.stats-logo .stats-mark {
+  width: 31px;
+  height: 53px;
+}
+
 .stats-wordmark {
   display: flex;
   flex-direction: column;
