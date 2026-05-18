@@ -38,6 +38,7 @@ interface TrajectoriesResponse {
 }
 
 import { PALETTE, token } from "../../lib/colors";
+import { getViewedChallenge } from "../../lib/viewedChallenge";
 
 function trajColor(index: number): string {
   return PALETTE[index % PALETTE.length];
@@ -166,7 +167,13 @@ export class TrajectoriesPanel {
 
   private async fetchData() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/trajectories`);
+      // Pin to the viewed challenge — otherwise the server defaults to its
+      // active challenge and the page always shows that one's trajectories,
+      // regardless of what the user picked in the selector.
+      const challenge = getViewedChallenge();
+      const res = await fetch(
+        `${this.apiUrl}/api/trajectories?challenge=${encodeURIComponent(challenge)}`,
+      );
       if (!res.ok) return;
       this.data = await res.json();
       this.render();
