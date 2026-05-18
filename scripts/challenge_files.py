@@ -222,6 +222,13 @@ def parse_multi_file_response(text: str, default_path: str = "mod.rs") -> dict[s
     ``default_path``. That lets the multi-file parser also accept the old
     single-file response shape — useful when the LLM forgets the header
     on a one-file edit.
+
+    Chatty-LLM safety: when headers ARE present, any text before the first
+    header is treated as chat preamble and DISCARDED, not assigned to
+    ``default_path``. Claude/GPT routinely ignore "no preamble" rules and
+    emit a brief "Looking at this task, I'll …" before the first header;
+    mapping that prose to mod.rs would silently overwrite a valid baseline
+    mod.rs with English text and break the next compile.
     """
     text = text.strip()
     m = _FENCED_BLOCK_RE.search(text)
@@ -241,12 +248,8 @@ def parse_multi_file_response(text: str, default_path: str = "mod.rs") -> dict[s
         return {default_path: body.strip()} if body.strip() else {}
 
     out: dict[str, str] = {}
-    # Anything before the first header is treated as mod.rs unless empty.
-    prefix = text[: matches[0].start()].strip()
-    if prefix:
-        prefix_body = _strip_fences(prefix)
-        if prefix_body.strip():
-            out[default_path] = prefix_body.strip()
+    # Headers present → drop the prefix (it's chat preamble). See the
+    # chatty-LLM safety note in the docstring above.
     for i, m in enumerate(matches):
         path = m.group("path").strip().strip("\"'")
         start = m.end()

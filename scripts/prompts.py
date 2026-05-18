@@ -216,9 +216,9 @@ Rules:
     1. Still contain `fn solve_challenge(` with the exact signature
        shown in the challenge spec above. The entry point may live in
        `mod.rs` OR in a sibling (e.g. `solver.rs` for job_scheduling,
-       where `mod.rs` is just `pub use solver::{solve_challenge, ...};`).
+       where `mod.rs` is just `pub use solver::{{solve_challenge, ...}};`).
     2. Bring parent-scope types into scope, via ANY of: `use super::*;`,
-       `use super::{Challenge, Solution, ...};`, or fully-qualified
+       `use super::{{Challenge, Solution, ...}};`, or fully-qualified
        `super::Challenge` paths. Without this the build fails.
   Check the file map shown above to see which file currently owns the
   entry point — keep it there unless you intentionally move it (in which
