@@ -55,10 +55,10 @@ Each agent gets its own git worktree under `worktrees/<name>/`, its own `agent_i
   "server_url": "https://new-production-d15a.up.railway.app",
   "agents": [
     {
-      "name": "agent-1",
-      "provider": "anthropic",
-      "model": "claude-sonnet-4-6",
-      "api_key_env": "ANTHROPIC_API_KEY",
+      "name": "phil",
+      "provider": "openai",
+      "model": "gpt-5",
+      "api_key_env": "OPENAI_API_KEY",
       "compute": "local"
     }
   ]
