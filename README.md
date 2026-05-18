@@ -57,7 +57,7 @@ Each agent gets its own git worktree under `worktrees/<name>/`, its own `agent_i
     {
       "name": "phil",
       "provider": "openai",
-      "model": "gpt-5",
+      "model": "gpt-5.5",
       "api_key_env": "OPENAI_API_KEY",
       "compute": "local"
     }
