@@ -211,15 +211,33 @@ Example (an iteration that tweaks operators.rs and drops gene_pool.rs):
     // === delete: gene_pool.rs ===
 
 Rules:
+- ENTRY-POINT INVARIANTS — the file that defines `fn solve_challenge(`
+  must, after your edits:
+    1. Still contain `fn solve_challenge(` with the exact signature
+       shown in the challenge spec above. The entry point may live in
+       `mod.rs` OR in a sibling (e.g. `solver.rs` for job_scheduling,
+       where `mod.rs` is just `pub use solver::{solve_challenge, ...};`).
+    2. Bring parent-scope types into scope, via ANY of: `use super::*;`,
+       `use super::{Challenge, Solution, ...};`, or fully-qualified
+       `super::Challenge` paths. Without this the build fails.
+  Check the file map shown above to see which file currently owns the
+  entry point — keep it there unless you intentionally move it (in which
+  case emit BOTH the new owner AND a mod.rs that re-exports it).
+- mod.rs INVARIANTS (apply ONLY if you choose to emit mod.rs):
+    1. NEVER use `// === delete: mod.rs ===` — mod.rs is the module
+       root and must exist.
+    2. If mod.rs owns the entry point, it must satisfy the entry-point
+       invariants above. If a sibling owns it, mod.rs just needs to
+       declare the relevant `pub mod foo;` and re-export.
+  If your hypothesis does NOT require changing mod.rs, simply OMIT it
+  from your response and the existing valid mod.rs will be preserved.
 - Files you DO NOT mention are KEPT UNCHANGED. Do not re-emit a file just
   to leave it alone — that wastes tokens and risks introducing bugs.
 - A file under a `// === file: ===` header is REPLACED with the body you
   supply. Bodies must be complete files, not patches or snippets.
-- `mod.rs` must keep `fn solve_challenge(` with `use super::*;` as the
-  first import. You may emit it under a `// === file: mod.rs ===` header
-  to change it, or omit it to leave it alone. NEVER delete mod.rs.
 - New sibling `.rs` files are allowed — wire them via `mod foo;` in mod.rs
-  (you'll need to emit a new mod.rs in the same response).
+  (you'll need to emit a new mod.rs in the same response, following the
+  mod.rs invariants above).
 - Paths are relative to the algorithm directory (e.g. `mod.rs`,
   `builder.rs`, `helpers/foo.rs`). Do NOT use absolute paths or `..`.
 - No preamble, no prose between or after the headers, no markdown fences.

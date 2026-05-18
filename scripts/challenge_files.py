@@ -319,7 +319,15 @@ def parse_gpu_code(text: str) -> tuple[str, str]:
 
 
 def validate_code(code: str) -> str | None:
-    """Basic sanity check on LLM-generated code.
+    """Basic sanity check on a single-file (mod.rs) LLM response.
+
+    For single-file challenges, mod.rs IS the algorithm and must contain
+    ``use super::*;`` (parent types like ``Challenge`` / ``Solution`` are
+    not in scope otherwise) plus ``fn solve_challenge(``.
+
+    For multi-file challenges use :func:`validate_files` instead — the
+    entry point may live in a sibling (e.g. ``solver.rs`` for
+    job_scheduling) and mod.rs is mostly module wiring.
 
     Returns None if valid, or an error description."""
     if "use super::*;" not in code:
@@ -331,6 +339,57 @@ def validate_code(code: str) -> str | None:
             "Code still contains `unimplemented!()` or `todo!()` — "
             "you must provide a complete working implementation."
         )
+    return None
+
+
+def validate_files(files: dict[str, str]) -> str | None:
+    """Sanity check on the merged multi-file algorithm set.
+
+    Operates on the file map AFTER the LLM's diff has been layered over
+    the baseline — so we're validating the algorithm the build will see,
+    not just the files the LLM emitted this turn.
+
+    Rules:
+    1. ``fn solve_challenge(`` must appear in at least one file. The
+       entry point may live in any file (e.g. ``mod.rs`` for
+       vehicle_routing, ``solver.rs`` for job_scheduling).
+    2. The file owning the entry point must bring parent-scope types
+       into scope, via ``use super::*;``, ``use super::{...};``, or a
+       fully-qualified ``super::Type`` reference. Without this the
+       build fails because ``Challenge`` / ``Solution`` aren't in scope.
+    3. No file in the set may still contain ``unimplemented!()`` or
+       ``todo!()`` — those mark stub code that can't produce solutions.
+
+    Returns None if valid, or an error description.
+    """
+    if not files:
+        return "No algorithm files — the merged file set is empty."
+
+    entry_points = [p for p, body in files.items() if "fn solve_challenge(" in body]
+    if not entry_points:
+        return (
+            "`fn solve_challenge(` not found in any file — the entry "
+            "point must exist somewhere in the algorithm directory "
+            "(e.g. mod.rs or solver.rs)."
+        )
+
+    entry = entry_points[0]
+    body = files[entry]
+    if not any(tok in body for tok in ("use super::*;", "use super::{", "super::")):
+        return (
+            f"`{entry}` defines `fn solve_challenge(` but has no `super::` "
+            f"reference — parent types like Challenge / Solution won't be "
+            f"in scope. Add `use super::*;`, `use super::{{...}};`, or use "
+            f"fully-qualified `super::Type` paths."
+        )
+
+    for path, body in files.items():
+        if "unimplemented!" in body or "todo!" in body:
+            return (
+                f"`{path}` still contains `unimplemented!()` or `todo!()` "
+                "— provide a complete working implementation."
+            )
+
     return None
 
 

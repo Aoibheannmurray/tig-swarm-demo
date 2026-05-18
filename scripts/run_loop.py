@@ -75,6 +75,7 @@ from challenge_files import (
     read_algorithm_dir,
     read_challenge_md,
     validate_code,
+    validate_files,
     write_algorithm_dir,
 )
 from server import (
@@ -234,12 +235,24 @@ def _generate_code(
             user_prompt = build_code_user_prompt(state, hypothesis, config)
         else:
             print(f"  [LLM] Code retry {attempt}/{max_attempts - 1}: {violation}")
-            user_prompt = (
-                build_code_user_prompt(state, hypothesis, config)
-                + f"\n\nYour previous response was rejected: {violation}\n"
-                "Fix the issue and return the complete source."
-                + (files.separator_suffix() if not multi_file else "")
-            )
+            if multi_file:
+                retry_suffix = (
+                    f"\n\nYour previous response was rejected: {violation}\n"
+                    "Re-emit in the same multi-file DIFF format (only the "
+                    "files you want to change under `// === file: <path> ===`; "
+                    "omitted files stay unchanged). The file owning "
+                    "`fn solve_challenge(` must keep that function AND a "
+                    "`super::` reference so parent types stay in scope. "
+                    "Files you don't need to change should be OMITTED — "
+                    "they'll be preserved from the baseline."
+                )
+            else:
+                retry_suffix = (
+                    f"\n\nYour previous response was rejected: {violation}\n"
+                    "Fix the issue and return the complete source."
+                    + files.separator_suffix()
+                )
+            user_prompt = build_code_user_prompt(state, hypothesis, config) + retry_suffix
         try:
             code_response, usage = _call_llm_logged(
                 "code", config,
@@ -284,11 +297,16 @@ def _generate_code(
             print("  [LLM] Empty code response — skipping iteration")
             break
 
-        # validate_code checks mod.rs invariants (use super::*;,
-        # fn solve_challenge() presence, no unimplemented!()) — applies
-        # identically to single-file and multi-file (where it targets
-        # mod.rs as the entry point).
-        violation = validate_code(parsed)
+        # Validate the algorithm the build will see. Single-file mode
+        # checks mod.rs against the strict invariants (`use super::*;`,
+        # `fn solve_challenge(`, no stubs). Multi-file mode validates
+        # the MERGED set so the entry point can live in any file (e.g.
+        # solver.rs for job_scheduling) — see validate_files for the
+        # full rule list.
+        if multi_file:
+            violation = validate_files(files_dict)
+        else:
+            violation = validate_code(parsed)
         if violation:
             print(f"  [LLM] Validation failed: {violation}")
             continue
@@ -934,7 +952,12 @@ def main() -> int:
             title = hypothesis.get("title", "untitled")
             print(f"  [AGENTIC] Hypothesis: [{tag}] {title}")
 
-            if not code:
+            # Multi-file algorithms may legitimately have an empty / pure
+            # re-export mod.rs (e.g. job_scheduling's mod.rs is just
+            # `pub use solver::{solve_challenge, help};`). The real check
+            # is whether the agent left ANY algorithm files on disk.
+            agent_multi_file = any(rel != "mod.rs" for rel in new_files_dict)
+            if not code and not agent_multi_file:
                 print("  [AGENTIC] Agent left no algorithm file — restoring best")
                 if best_files:
                     write_algorithm_dir(best_files, challenge_algo_dir(config))
@@ -944,7 +967,10 @@ def main() -> int:
                              f"[{tag}] {title} — agent produced no code")
                 continue
 
-            violation = validate_code(code)
+            if agent_multi_file:
+                violation = validate_files(new_files_dict)
+            else:
+                violation = validate_code(code)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
                 if best_files:
