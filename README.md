@@ -79,21 +79,22 @@ Use local Docker when you want benchmarks to run on this machine.
 
 Requirements:
 - Docker
-- a local benchmark image
 
-Build the local benchmark image once:
+Configure local compute — the wizard auto-builds the benchmark image
+(`tig-swarm-cpu`, or `tig-swarm-gpu` for GPU swarms) on first run:
+
+```bash
+python setup.py configure-agent --compute local
+```
+
+Pass `--skip-docker-build` to opt out (e.g. on a machine where you'll only
+configure but not benchmark). If you ever need to rebuild manually:
 
 ```bash
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 
 # for GPU swarms/challenges:
 docker build -f Dockerfile.gpu -t tig-swarm-gpu .
-```
-
-Configure local compute:
-
-```bash
-python setup.py configure-agent --compute local
 ```
 
 ### Remote Compute

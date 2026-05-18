@@ -268,6 +268,65 @@ def _arg_enabled(args: argparse.Namespace | None, name: str) -> bool:
     return bool(getattr(args, name, False)) if args is not None else False
 
 
+def ensure_local_docker_image(is_gpu: bool, yes: bool, skip_build: bool) -> None:
+    """Build the benchmark Docker image used by `--compute local` if missing.
+
+    Streams `docker build` output to the terminal so a slow first build shows
+    progress instead of looking hung. Soft-fails when Docker isn't installed
+    or the build returns non-zero — the wizard prints how to retry and keeps
+    going, since the user may finish setup on this machine but run benchmarks
+    elsewhere.
+    """
+    image = "tig-swarm-gpu" if is_gpu else "tig-swarm-cpu"
+    dockerfile = "Dockerfile.gpu" if is_gpu else "Dockerfile.cpu"
+    build_cmd = f"docker build -f {dockerfile} -t {image} ."
+
+    if skip_build:
+        print(
+            f"\n  Skipping Docker image build for '{image}' (--skip-docker-build).\n"
+            f"  Build it later with:  {build_cmd}"
+        )
+        return
+
+    if shutil.which("docker") is None:
+        print(
+            f"\n  ⚠  `docker` not found on PATH; can't build '{image}' here.\n"
+            f"     Install Docker, then run:  {build_cmd}\n"
+            f"     (or rerun with --compute c3 to use remote compute instead)"
+        )
+        return
+
+    inspect = sp.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True, text=True,
+    )
+    if inspect.returncode == 0:
+        print(f"\n  Docker image '{image}' already built — skipping build.")
+        return
+
+    if not yes:
+        answer = prompt(
+            f"\nBuild Docker image '{image}' now? Required for --compute local [Y/n]",
+            "Y",
+        ).strip().lower()
+        if answer not in ("", "y", "yes"):
+            print(f"  Skipped. Build later with:  {build_cmd}")
+            return
+
+    print(
+        f"\n  Building Docker image '{image}' from {dockerfile}…\n"
+        f"  First builds typically take a few minutes; output streams below.\n"
+    )
+    result = sp.run(["docker", "build", "-f", dockerfile, "-t", image, "."], cwd=ROOT)
+    if result.returncode == 0:
+        print(f"\n  Built '{image}'.")
+    else:
+        print(
+            f"\n  ⚠  Docker build failed (exit {result.returncode}). Retry manually:\n"
+            f"     {build_cmd}"
+        )
+
+
 def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
     """Create/update local script-loop runtime defaults.
 
@@ -366,6 +425,13 @@ def configure_agent_runtime(args: argparse.Namespace | None = None) -> dict:
         "env": env,
     })
     write_agent_config(cfg)
+
+    if compute == "local":
+        ensure_local_docker_image(
+            is_gpu=prior_is_gpu,
+            yes=yes,
+            skip_build=_arg_enabled(args, "skip_docker_build"),
+        )
 
     # Show what the dashboard will display for this agent. Mirrors
     # scripts/server.py::derive_llm_label so the wizard's preview matches
@@ -1424,6 +1490,7 @@ def add_agent_setup_args(parser: argparse.ArgumentParser, *, include_swarm_url: 
     parser.add_argument("--env-gpu", dest="env", help=argparse.SUPPRESS)
     parser.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     parser.add_argument("--skip-tacit", action="store_true", help="Do not prompt for tacit knowledge.")
+    parser.add_argument("--skip-docker-build", action="store_true", help="Don't auto-build the local benchmark Docker image when --compute local.")
     parser.add_argument("--yes", action="store_true", help="Accept defaults for any optional setup prompts.")
 
 
