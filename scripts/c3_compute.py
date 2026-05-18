@@ -126,7 +126,7 @@ def _create_workspace(stage: Path, config: dict, server: str) -> dict:
     staged_config = dict(config)
     staged_config["server_url"] = server
 
-    for name in ("Cargo.toml", "Cargo.lock"):
+    for name in ("Cargo.toml", "Cargo.lock", "requirements.txt"):
         _copy_required(ROOT / name, stage / name)
 
     src_stage = stage / "src"
@@ -221,13 +221,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   export PATH="${{HOME:-/root}}/.cargo/bin:/root/.cargo/bin:${{PATH}}"
 fi
 
-if ! python3 - >/dev/null 2>&1 <<'PY'
-import blake3
-import requests
-PY
-then
-  PIP_ROOT_USER_ACTION=ignore python3 -m pip install --break-system-packages -q blake3 requests
-fi
+PIP_ROOT_USER_ACTION=ignore python3 -m pip install --break-system-packages -q -r requirements.txt
 {gpu_check}
 status=0
 python3 scripts/benchmark.py \\
