@@ -1,8 +1,9 @@
 """LLM provider backends — raw urllib, no SDK dependencies.
 
-Supports Anthropic (Claude), OpenAI (GPT / o-series), and Google (Gemini).
-The --api-base flag on the OpenAI provider works with any OpenAI-compatible
-endpoint (Together, Groq, DeepSeek, Ollama, etc.).
+Supports Anthropic (Claude), OpenAI (GPT / o-series), Google (Gemini), and
+Venice (https://venice.ai). The --api-base flag on the OpenAI provider works
+with any OpenAI-compatible endpoint (Together, Groq, DeepSeek, Ollama, etc.).
+Venice is a first-class shortcut for `provider: openai` + Venice's base URL.
 
 Each call_* function returns ``(text, usage)`` where ``usage`` is a dict
 with ``input_tokens`` and ``output_tokens`` (both int, 0 when unavailable).
@@ -21,7 +22,10 @@ DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o",
     "google": "gemini-2.5-flash",
+    "venice": "zai-org-glm-5",
 }
+
+VENICE_API_BASE = "https://api.venice.ai/api/v1"
 
 Usage = dict[str, int]  # {"input_tokens": N, "output_tokens": N}
 
@@ -149,6 +153,13 @@ def call_openai(
     api_base: str | None = None,
 ) -> tuple[str, Usage]:
     base = (api_base or "https://api.openai.com").rstrip("/")
+    # Tolerate api_base supplied with or without a trailing /v1. Third-party
+    # docs (Venice, etc.) usually quote the /v1-suffixed URL — pasting that
+    # straight in shouldn't double up the version segment.
+    chat_url = (
+        f"{base}/chat/completions" if base.endswith("/v1")
+        else f"{base}/v1/chat/completions"
+    )
     new_api = _needs_new_api(model)
     token_param = "max_completion_tokens" if new_api else "max_tokens"
     messages = (
@@ -159,7 +170,7 @@ def call_openai(
          {"role": "user", "content": prompt}]
     )
     data = _post_json(
-        f"{base}/v1/chat/completions",
+        chat_url,
         {
             "model": model,
             "messages": messages,
@@ -237,6 +248,8 @@ def call_llm(
         return call_anthropic(system, prompt, model, api_key)
     if provider == "openai":
         return call_openai(system, prompt, model, api_key, api_base)
+    if provider == "venice":
+        return call_openai(system, prompt, model, api_key, api_base or VENICE_API_BASE)
     if provider == "google":
         return call_google(system, prompt, model, api_key)
     raise ValueError(f"Unknown provider: {provider}")

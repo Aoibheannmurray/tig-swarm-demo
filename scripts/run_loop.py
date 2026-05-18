@@ -643,6 +643,7 @@ def resolve_api_key(provider: str, api_key: str | None) -> str:
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",
+        "venice": "VENICE_API_KEY",
     }
     key = os.environ.get(env_map[provider], "")
     if not key:

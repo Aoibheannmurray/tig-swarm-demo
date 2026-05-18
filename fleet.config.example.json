@@ -44,6 +44,13 @@
       "provider": "codex-agentic",
       "compute": "c3",
       "hardware": "l40"
+    },
+    {
+      "name": "venice-1",
+      "provider": "venice",
+      "model": "zai-org-glm-5",
+      "api_key_env": "VENICE_API_KEY",
+      "compute": "local"
     }
   ]
 }

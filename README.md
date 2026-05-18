@@ -169,6 +169,7 @@ With `"compute": "c3"` per agent, benchmarking is offloaded — running N agents
 | `anthropic`           | `ANTHROPIC_API_KEY`                                                             |
 | `openai`              | `OPENAI_API_KEY` (also `"api_base": "<url>"` for any OpenAI-compatible endpoint) |
 | `google`              | `GOOGLE_API_KEY`                                                                |
+| `venice`              | `VENICE_API_KEY` (Venice.ai — OpenAI-compatible, base URL baked in)             |
 | `claude-code`         | `claude` CLI login (no API key needed)                                          |
 | `claude-code-agentic` | `claude` CLI login                                                              |
 | `codex-agentic`       | `codex login`                                                                   |
