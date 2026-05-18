@@ -161,6 +161,12 @@ class StateResponse(_ResponseBase):
     is_gpu: Optional[bool] = None
     best_algorithm_code: Optional[str] = None
     best_kernel_code: Optional[str] = None
+    # Multi-file algorithm snapshot: {relative_path: contents} for
+    # algorithms shipped as a directory of `.rs` modules. Present iff the
+    # agent's current best (or, on first iteration, the swarm seed) is
+    # multi-file. best_algorithm_code mirrors files["mod.rs"] so legacy
+    # single-file consumers still work without reading this field.
+    best_algorithm_files: Optional[dict[str, str]] = None
     best_experiment_id: Optional[str] = None
     my_best_score: Optional[float] = None
     my_runs: Optional[int] = None
@@ -170,6 +176,9 @@ class StateResponse(_ResponseBase):
     hypothesis_recall_message: Optional[str] = None
     inspiration_code: Optional[str] = None
     inspiration_kernel_code: Optional[str] = None
+    # Multi-file companion to inspiration_code, set when the peer whose
+    # best is being served as inspiration was itself multi-file.
+    inspiration_algorithm_files: Optional[dict[str, str]] = None
     inspiration_agent_name: Optional[str] = None
     stagnation_hint: Optional[str] = None
     trajectory_reset: Optional[dict] = None

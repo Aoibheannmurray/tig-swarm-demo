@@ -12,7 +12,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from challenge_files import read_algorithm, read_optional, kernel_path
+from challenge_files import (
+    read_algorithm,
+    read_algorithm_dir,
+    read_optional,
+    kernel_path,
+)
 
 # Network-level errors that we'll log-and-swallow on fire-and-forget calls
 # like heartbeats/messages. Programmer errors (KeyError, TypeError, etc.)
@@ -139,6 +144,13 @@ def publish_results(
 ) -> dict:
     code = read_algorithm(config)
     kernel_code = read_optional(kernel_path(config))
+    # Snapshot the whole algorithm directory and ship it alongside the
+    # legacy single-string algorithm_code. Only set algorithm_files when
+    # the directory actually has siblings beyond mod.rs — otherwise we'd
+    # spam single-file challenges with redundant {"mod.rs": ...} payloads
+    # whose contents already live in algorithm_code.
+    files = read_algorithm_dir(config)
+    has_siblings = any(rel != "mod.rs" for rel in files)
     payload = {
         "agent_id": agent_id,
         "title": mutation.get("title", ""),
@@ -157,6 +169,8 @@ def publish_results(
     }
     if kernel_code:
         payload["kernel_code"] = kernel_code
+    if has_siblings:
+        payload["algorithm_files"] = files
     if bench.get("challenge_metrics") is not None:
         payload["challenge_metrics"] = bench["challenge_metrics"]
     return server_post(f"{server}/api/iterations", payload)

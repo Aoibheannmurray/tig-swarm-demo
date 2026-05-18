@@ -131,6 +131,24 @@ def _invalidate_caches() -> None:
     _challenge_config_cache = None
 
 
+def _parse_algorithm_files(raw: str | dict | None) -> dict[str, str] | None:
+    """Parse the JSON-encoded algorithm_files column from any of the DB
+    snapshot tables (agent_bests, experiments, inactive_algorithms). Returns
+    None for NULL / empty / malformed values so callers fall through to the
+    legacy single-string algorithm_code path."""
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()} or None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict) or not parsed:
+        return None
+    return {str(k): str(v) for k, v in parsed.items()}
+
+
 async def load_initial_algorithm(challenge: str) -> tuple[str, str, dict[str, str] | None]:
     """Initial algorithm broadcast to every agent on a fresh trajectory for
     the given challenge: their first iteration on it, and again whenever a
@@ -636,6 +654,9 @@ async def get_state(
                     picked = random.choice(inactive_pool)
                     new_code = picked["algorithm_code"]
                     new_kernel_code = picked.get("kernel_code")
+                    new_algorithm_files = _parse_algorithm_files(
+                        picked.get("algorithm_files")
+                    )
                     new_program_id = picked.get("program_id") or new_id()
                     await db.remove_inactive(conn, picked["id"])
                     trajectory_reset = {
@@ -648,11 +669,15 @@ async def get_state(
                         await db.increment_trajectory_agents(conn, new_traj_id)
 
                 # Now deposit the stagnated code into the per-challenge pool.
+                # Carry the multi-file snapshot along so an adopted-inactive
+                # draw from this row later restores all modules, not just
+                # mod.rs.
                 await db.deposit_inactive(
                     conn, agent_id, challenge,
                     my_best["algorithm_code"], my_best["score"], timestamp,
                     trajectory_id=cur_traj_id, program_id=old_program_id,
                     kernel_code=my_best.get("kernel_code"),
+                    algorithm_files=my_best.get("algorithm_files"),
                 )
 
                 await db.clear_agent_best(conn, agent_id, challenge)
@@ -687,6 +712,13 @@ async def get_state(
                 if my_best:
                     my_best_code = my_best["algorithm_code"]
                     my_best_kernel_code = my_best.get("kernel_code")
+                    # Multi-file snapshot of the agent's current best, set
+                    # by /api/iterations when this row was upserted. None
+                    # for single-file challenges; we fall through to
+                    # algorithm_code as before.
+                    my_best_algorithm_files = _parse_algorithm_files(
+                        my_best.get("algorithm_files")
+                    )
                 else:
                     my_best_code, my_best_kernel_code, my_best_algorithm_files = (
                         await load_initial_algorithm(challenge)
@@ -732,6 +764,7 @@ async def get_state(
             # challenge is stale.
             inspiration_code = None
             inspiration_kernel_code = None
+            inspiration_algorithm_files: dict[str, str] | None = None
             inspiration_agent_name = None
             stagnation_hint = None
             n_stagnation = swarm_setting(config, "stagnation_threshold")
@@ -761,6 +794,9 @@ async def get_state(
                     chosen = random.choice(all_bests)
                     inspiration_code = chosen["algorithm_code"]
                     inspiration_kernel_code = chosen.get("kernel_code")
+                    inspiration_algorithm_files = _parse_algorithm_files(
+                        chosen.get("algorithm_files")
+                    )
                     inspiration_agent_name = await get_agent_name(
                         conn, chosen["agent_id"]
                     )
@@ -819,12 +855,14 @@ async def get_state(
             if is_gpu:
                 resp["best_kernel_code"] = my_best_kernel_code or None
                 resp["inspiration_kernel_code"] = inspiration_kernel_code or None
-            # Multi-file seed map (only set on iteration 0 / fresh-start
-            # resets — once the agent publishes their first iteration the
-            # current best lives in agent_bests as a single string, and
-            # sibling modules persist on disk untouched).
+            # Multi-file algorithm snapshot — present iff the agent's
+            # current best (or, on iteration 0 / fresh-start, the swarm
+            # seed) is multi-file. best_algorithm_code mirrors mod.rs for
+            # back-compat with single-file consumers.
             if my_best_algorithm_files:
                 resp["best_algorithm_files"] = my_best_algorithm_files
+            if inspiration_algorithm_files:
+                resp["inspiration_algorithm_files"] = inspiration_algorithm_files
             return resp
 
         # ── Dashboard view (no agent_id) ──
@@ -1039,16 +1077,25 @@ async def create_iteration(req: IterationCreate):
         iter_output_tokens = req.output_tokens or 0
         iter_estimated_cost = req.estimated_cost or 0.0
 
+        # Multi-file algorithm snapshot — JSON-encoded on the wire and in
+        # the DB. None on single-file challenges; readers fall through to
+        # algorithm_code in that case.
+        algorithm_files_json = (
+            json.dumps(req.algorithm_files) if req.algorithm_files else None
+        )
+
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
+                algorithm_files,
                 score, feasible,
                 challenge_metrics, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
                 trajectory_id, received_hint, inspiration_source_id,
                 input_tokens, output_tokens, estimated_cost, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
+             algorithm_files_json,
              req.score,
              1 if req.feasible else 0, challenge_metrics_json,
              req.notes, solution_data_json, track_scores_json,
@@ -1099,6 +1146,7 @@ async def create_iteration(req: IterationCreate):
                 updated_at=timestamp, trajectory_id=trajectory_id,
                 track_scores=track_scores_json,
                 kernel_code=req.kernel_code,
+                algorithm_files=algorithm_files_json,
             )
         else:
             await db.increment_agent_challenge_counters(

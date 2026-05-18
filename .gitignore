@@ -29,7 +29,6 @@ datasets/*/generated/
 tacit_knowledge_*.md
 tacit_knowledge_personal.md
 
-src/*/algorithm/mod.rs
-src/*/algorithm/kernels.cu
+src/*/algorithm/
 tig-monorepo/
 prompts_log/

@@ -20,7 +20,7 @@ Deploys a Railway swarm, writes `swarm.config.json`, prints the dashboard URL an
 Switch the active challenge later:
 
 ```bash
-python setup.py switch knapsack
+python setup.py switch vehicle_routing
 ```
 
 ## Contributor

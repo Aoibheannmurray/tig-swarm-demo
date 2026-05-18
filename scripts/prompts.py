@@ -170,7 +170,9 @@ def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
 # ── Code generation prompts ────────────────────────────────────────
 
 
-def build_code_system_prompt(challenge_md: str, config: dict) -> str:
+def build_code_system_prompt(
+    challenge_md: str, config: dict, *, multi_file: bool = False,
+) -> str:
     challenge = config.get("challenge", "unknown")
     is_gpu = bool(config.get("is_gpu"))
     timeout = config.get("timeout", 30)
@@ -182,6 +184,47 @@ def build_code_system_prompt(challenge_md: str, config: dict) -> str:
         f"keep improving and re-saving — the last saved solution is evaluated. If no "
         f"solution was saved when the deadline hits, the instance counts as infeasible."
     )
+    if multi_file:
+        return f"""\
+You are optimizing a multi-file Rust algorithm for the "{challenge}" challenge.
+
+{challenge_md}
+{time_guidance}
+
+OUTPUT FORMAT (strict, multi-file DIFF):
+The algorithm is a directory of `.rs` files. Output ONLY the files you want
+to add or replace, each preceded by a header of exactly this form:
+
+    // === file: <relative_path> ===
+    <complete contents of that file>
+
+To remove an existing file, use a delete header instead (no body):
+
+    // === delete: <relative_path> ===
+
+Example (an iteration that tweaks operators.rs and drops gene_pool.rs):
+
+    // === file: operators.rs ===
+    use super::*;
+    // ... full operators.rs contents ...
+
+    // === delete: gene_pool.rs ===
+
+Rules:
+- Files you DO NOT mention are KEPT UNCHANGED. Do not re-emit a file just
+  to leave it alone — that wastes tokens and risks introducing bugs.
+- A file under a `// === file: ===` header is REPLACED with the body you
+  supply. Bodies must be complete files, not patches or snippets.
+- `mod.rs` must keep `fn solve_challenge(` with `use super::*;` as the
+  first import. You may emit it under a `// === file: mod.rs ===` header
+  to change it, or omit it to leave it alone. NEVER delete mod.rs.
+- New sibling `.rs` files are allowed — wire them via `mod foo;` in mod.rs
+  (you'll need to emit a new mod.rs in the same response).
+- Paths are relative to the algorithm directory (e.g. `mod.rs`,
+  `builder.rs`, `helpers/foo.rs`). Do NOT use absolute paths or `..`.
+- No preamble, no prose between or after the headers, no markdown fences.
+- An empty response (no headers at all) means "no change" — only do this
+  if your hypothesis genuinely requires no code change."""
     if is_gpu:
         return f"""\
 You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
@@ -213,6 +256,7 @@ prose, no markdown fences (```), no commentary before or after the code.
 def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
     parts: list[str] = []
     is_gpu = bool(config.get("is_gpu"))
+    multi_file_map = state.get("best_algorithm_files") or None
 
     code = state.get("best_algorithm_code") or ""
     bootstrap = is_stub_code(code)
@@ -222,6 +266,21 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
             "implementation from scratch. Call save_solution() whenever you "
             "find an improved solution."
         )
+    elif multi_file_map:
+        # Multi-file mode (diff): show every current file so the LLM can
+        # see the full state, but it only re-emits the files it wants to
+        # change. Omitted files are kept; explicit deletes use a
+        # `// === delete: <path> ===` header.
+        parts.append(
+            f"Current algorithm — {len(multi_file_map)} file(s) under the "
+            f"algorithm directory, shown below for context. Output ONLY the "
+            f"files you want to change (full contents under `// === file: "
+            f"<path> ===`) and/or remove (under `// === delete: <path> "
+            f"===`). Files you do not mention will be KEPT UNCHANGED.\n"
+        )
+        for rel in sorted(multi_file_map):
+            body = multi_file_map[rel]
+            parts.append(f"// === file: {rel} ===\n```rust\n{body}\n```")
     else:
         parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
         siblings = _read_algorithm_siblings(config)
@@ -233,7 +292,7 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
                 "on disk unchanged across iterations."
             )
 
-    if is_gpu:
+    if is_gpu and not multi_file_map:
         kernel_code = state.get("best_kernel_code") or ""
         if kernel_code:
             parts.append(f"\nCurrent CUDA kernels (kernels.cu):\n```cuda\n{kernel_code}\n```")
@@ -245,6 +304,19 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
             "\nReturn BOTH files separated by: // --- kernels.cu ---"
             "\nThe Rust file (with fn solve_challenge) comes first, then the separator, then the CUDA file."
         )
+
+    # Inspiration's multi-file shape is rendered with the same headers so
+    # the LLM sees the same layout it must echo back. Single-string
+    # inspiration_code is rendered by callers that need it (this prompt
+    # only carries it through hypothesis).
+    insp_files = state.get("inspiration_algorithm_files") or None
+    if insp_files and state.get("stagnation_hint") == "inspiration":
+        agent = state.get("inspiration_agent_name") or "another agent"
+        parts.append(
+            f"\nStudy this approach from {agent} for ideas (adapt, do NOT copy wholesale):\n"
+        )
+        for rel in sorted(insp_files):
+            parts.append(f"// === file: {rel} ===\n```rust\n{insp_files[rel]}\n```")
 
     title = hypothesis.get("title", "")
     description = hypothesis.get("description", "")

@@ -59,22 +59,36 @@ _SETTINGS_RELPATH = ".swarm/sandbox-settings.json"
 def _build_sandbox_settings(config: dict) -> dict:
     """Permissions for the Claude Code sandbox.
 
-    Allow: Edit on the algorithm file (and CUDA kernels if GPU) + the
-    hypothesis file. Read globally inside the worktree. Bash limited to
-    `cargo check` / `cargo build` so the agent can self-validate
-    compilation but can't shell out to the network or stomp the
-    filesystem.
+    Allow: Edit + Write on any `.rs` / `.cu` file under the algorithm
+    directory (so the agent can edit existing siblings, add new modules,
+    and add new CUDA kernel files), plus the hypothesis file. Read
+    globally inside the worktree. Bash limited to `cargo check` /
+    `cargo build` so the agent can self-validate compilation but can't
+    shell out to the network or stomp the filesystem. A narrow
+    `rm`/`mv` allowance under the algorithm directory lets the agent
+    delete or rename sibling modules during a refactor.
 
-    Deny: Write (force Edit, no new files), WebFetch/WebSearch, any Bash
-    command that touches the network, git remote state, or filesystem
-    deletion/permissions.
+    Deny: Write outside the algorithm directory, WebFetch/WebSearch,
+    any Bash command that touches the network, git remote state, or
+    filesystem deletion/permissions outside the algorithm scope.
     """
     algo_relpath = config["algorithm_path"]
     kernel_relpath = config.get("kernel_path")
+    # Algorithm directory, repo-relative. We scope Edit/Write/rm/mv
+    # globs to this prefix so the agent has full add/remove freedom
+    # inside it but can't touch anything outside.
+    algo_dir_rel = str(Path(algo_relpath).parent).replace("\\", "/").rstrip("/") or "."
 
     allow = [
-        f"Edit({algo_relpath})",
+        # Multi-file edit + write + create under the algorithm dir.
+        # Edit() patterns cover edits to existing files; Write() covers
+        # new files the agent adds (e.g. a fresh `helpers/spatial.rs`).
+        f"Edit({algo_dir_rel}/**/*.rs)",
+        f"Write({algo_dir_rel}/**/*.rs)",
+        f"Edit({algo_dir_rel}/**/*.cu)",
+        f"Write({algo_dir_rel}/**/*.cu)",
         f"Edit({_HYPOTHESIS_RELPATH})",
+        f"Write({_HYPOTHESIS_RELPATH})",
         "Read(**)",
         "Glob(**)",
         "Grep(**)",
@@ -82,8 +96,18 @@ def _build_sandbox_settings(config: dict) -> dict:
         "Bash(cargo build:*)",
         "Bash(cargo fmt:*)",
         "Bash(cargo clippy:*)",
+        # Narrow rm/mv allowance lets the agent delete or rename sibling
+        # modules under the algorithm dir (e.g. during a refactor that
+        # consolidates helpers). Anything else is still denied below.
+        f"Bash(rm:{algo_dir_rel}/*)",
+        f"Bash(rm:{algo_dir_rel}/**)",
+        f"Bash(mv:{algo_dir_rel}/*)",
+        f"Bash(mv:{algo_dir_rel}/**)",
     ]
     if kernel_relpath:
+        # Repo-rooted kernel path (e.g. cuda/kernels.cu) when the kernel
+        # lives outside the algorithm directory. Single-file edit
+        # allowance, no Write — there's only one canonical location.
         allow.append(f"Edit({kernel_relpath})")
 
     # Deny anything that could exfiltrate, push to a remote, escalate, or
@@ -91,7 +115,6 @@ def _build_sandbox_settings(config: dict) -> dict:
     # list because allow-only-matching-prefixes still lets unrelated
     # commands through if the harness defaults to permissive Bash.
     deny = [
-        "Write(**)",
         "WebFetch",
         "WebSearch",
         "Bash(curl:*)",
@@ -115,11 +138,9 @@ def _build_sandbox_settings(config: dict) -> dict:
         "Bash(git stash:*)",
         "Bash(git add:*)",
         "Bash(gh:*)",
-        "Bash(rm:*)",
         "Bash(sudo:*)",
         "Bash(chmod:*)",
         "Bash(chown:*)",
-        "Bash(mv:*)",
         "Bash(cp:*)",
         "Bash(dd:*)",
         "Bash(mkfs:*)",
@@ -137,12 +158,23 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     """
     challenge = config.get("challenge", "unknown")
     algo_relpath = config["algorithm_path"]
+    algo_dir_rel = str(Path(algo_relpath).parent).replace("\\", "/").rstrip("/") or "."
     kernel_relpath = config.get("kernel_path")
     timeout = config.get("timeout", 30)
 
-    files_section = f"- `{algo_relpath}` — the algorithm file. EDIT this."
-    if kernel_relpath:
-        files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
+    files_section = (
+        f"- Any `.rs` file under `{algo_dir_rel}/` — the algorithm directory.\n"
+        f"  - `{algo_dir_rel}/mod.rs` MUST remain and MUST contain "
+        f"`fn solve_challenge(`.\n"
+        f"  - You may EDIT existing siblings, ADD new ones (wire via "
+        f"`mod foo;` in mod.rs), or REMOVE them.\n"
+        f"- Any `.cu` file under `{algo_dir_rel}/` — CUDA kernels for GPU "
+        f"challenges.\n"
+    )
+    if kernel_relpath and Path(kernel_relpath).parent.as_posix() != algo_dir_rel:
+        # GPU challenges where the kernel file lives outside the algorithm
+        # dir (legacy layout) — surface it separately.
+        files_section += f"- `{kernel_relpath}` — CUDA kernels. EDIT this if needed.\n"
 
     return f"""\
 # Swarm contributor — agentic mode
@@ -164,12 +196,11 @@ communication with the coordination server — your job is bounded.
 
 ## Files you may edit
 
-{files_section}
-- `.swarm/hypothesis.json` — write your hypothesis here before stopping.
+{files_section}- `.swarm/hypothesis.json` — write your hypothesis here before stopping.
 
 You may **read** anything in the worktree (the challenge module, sibling
 source files, README, ARCHITECTURE.md). You may NOT edit anything outside
-the list above — the sandbox will reject attempts.
+`{algo_dir_rel}/` — the sandbox will reject attempts.
 
 ## Hypothesis file schema
 
@@ -319,12 +350,21 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     """
     challenge = config.get("challenge", "unknown")
     algo_relpath = config["algorithm_path"]
+    algo_dir_rel = str(Path(algo_relpath).parent).replace("\\", "/").rstrip("/") or "."
     kernel_relpath = config.get("kernel_path")
     timeout = config.get("timeout", 30)
 
-    files_section = f"- `{algo_relpath}` — the algorithm file. EDIT this."
-    if kernel_relpath:
-        files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
+    files_section = (
+        f"- Any `.rs` file under `{algo_dir_rel}/` — the algorithm directory.\n"
+        f"  - `{algo_dir_rel}/mod.rs` MUST remain and MUST contain "
+        f"`fn solve_challenge(`.\n"
+        f"  - You may EDIT existing siblings, ADD new ones (wire via "
+        f"`mod foo;` in mod.rs), or REMOVE them.\n"
+        f"- Any `.cu` file under `{algo_dir_rel}/` — CUDA kernels for GPU "
+        f"challenges.\n"
+    )
+    if kernel_relpath and Path(kernel_relpath).parent.as_posix() != algo_dir_rel:
+        files_section += f"- `{kernel_relpath}` — CUDA kernels. EDIT this if needed.\n"
 
     return f"""\
 # Swarm contributor — Codex agent mode
@@ -346,15 +386,14 @@ communication with the coordination server — your job is bounded.
 
 ## Files you may edit
 
-{files_section}
-- `.swarm/hypothesis.json` — write your hypothesis here before stopping.
+{files_section}- `.swarm/hypothesis.json` — write your hypothesis here before stopping.
 
 The sandbox is `workspace-write` — you technically have write access to
-the whole worktree. **Do not use it.** The driver only copies the
-algorithm file(s) back to the main checkout when scoring — any other
-edits you make get silently discarded, so editing Cargo.toml, src/lib.rs,
-or any other file is a waste of your turns and will cause your
-hypothesis to underperform.
+the whole worktree. **Do not use it.** The driver only copies files under
+`{algo_dir_rel}/` back to the main checkout when scoring — any edits
+outside that directory get silently discarded, so editing Cargo.toml,
+src/lib.rs, or any other file is a waste of your turns and will cause
+your hypothesis to underperform.
 
 ## Hypothesis file schema
 

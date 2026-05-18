@@ -87,6 +87,69 @@ def is_stub_code(code: str) -> bool:
     return "unimplemented!" in code or "todo!" in code
 
 
+# ── Multi-file algorithm directory helpers ─────────────────────────
+
+
+def algo_dir(config: dict) -> Path:
+    """Directory holding the active algorithm's mod.rs + sibling modules.
+
+    Always the parent of `algorithm_path` — even for single-file challenges
+    this is well-defined; the directory just only contains mod.rs in that
+    case. Lets the rest of the helpers stay file-set-agnostic.
+    """
+    return algo_path(config).parent
+
+
+def read_algorithm_dir(config: dict) -> dict[str, str]:
+    """Snapshot every `.rs` / `.cu` file under the algorithm directory as a
+    {relative_path: contents} dict (paths relative to the algorithm dir,
+    e.g. ``"mod.rs"``, ``"builder.rs"``, ``"kernels.cu"``). Returns ``{}``
+    when the directory doesn't exist yet.
+
+    Used at publish time so the iteration's full multi-file snapshot
+    rides the wire alongside the legacy single-string ``algorithm_code``.
+    """
+    d = algo_dir(config)
+    if not d.exists():
+        return {}
+    out: dict[str, str] = {}
+    for p in sorted(d.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.suffix not in (".rs", ".cu"):
+            continue
+        rel = p.relative_to(d).as_posix()
+        out[rel] = p.read_text()
+    return out
+
+
+def write_algorithm_dir(files: dict[str, str], algo_dir_path: Path) -> None:
+    """Write a multi-file algorithm dict to disk under ``algo_dir_path``,
+    *and* delete any pre-existing `.rs` / `.cu` files in that directory
+    that are not in ``files``.
+
+    Cleanup matters because the directory persists across iterations:
+    without it, a trajectory reset that drops `helper.rs` would leave a
+    stale orphan whose ``mod helper;`` is no longer declared in mod.rs —
+    typically a hard cargo error, sometimes a silent compile of dead code
+    that masks the agent's actual edits.
+    """
+    algo_dir_path.mkdir(parents=True, exist_ok=True)
+    keep = {rel.replace("\\", "/") for rel in files}
+    for existing in algo_dir_path.rglob("*"):
+        if not existing.is_file():
+            continue
+        if existing.suffix not in (".rs", ".cu"):
+            continue
+        rel = existing.relative_to(algo_dir_path).as_posix()
+        if rel not in keep:
+            existing.unlink()
+    for rel, body in files.items():
+        out = algo_dir_path / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(body)
+
+
 # ── Response parsing ───────────────────────────────────────────────
 
 
@@ -102,6 +165,26 @@ def _strip_fences(text: str) -> str:
 
 
 _FENCED_BLOCK_RE = re.compile(r"```(?:[\w+-]*)\s*\n(.*?)\n```", re.DOTALL)
+
+# Per-file header used by the multi-file LLM output format. Generalises the
+# GPU `// --- kernels.cu ---` pattern; relative path captured in group 1.
+# Accepts trailing `===` decoration and either `//` or `/*…*/` comment
+# styles so an LLM that misremembers the delimiter still parses.
+_FILE_HEADER_RE = re.compile(
+    r"^[ \t]*(?://|/\*)[ \t]*=+[ \t]*file:[ \t]*(?P<path>[^=\s][^=]*?)"
+    r"[ \t]*=+[ \t]*(?:\*/)?[ \t]*$",
+    re.MULTILINE,
+)
+
+# Explicit delete marker used in diff-mode multi-file responses. Lets the
+# LLM remove a file without having to remember which other files it must
+# keep (the "omit = unchanged" semantic means there's no other way to
+# express a deletion).
+_DELETE_HEADER_RE = re.compile(
+    r"^[ \t]*(?://|/\*)[ \t]*=+[ \t]*delete:[ \t]*(?P<path>[^=\s][^=]*?)"
+    r"[ \t]*=+[ \t]*(?:\*/)?[ \t]*$",
+    re.MULTILINE,
+)
 
 
 def parse_code(text: str) -> str:
@@ -119,6 +202,105 @@ def parse_code(text: str) -> str:
     if idx > 0:
         text = text[idx:]
     return text.strip()
+
+
+def parse_multi_file_response(text: str, default_path: str = "mod.rs") -> dict[str, str]:
+    """Split a multi-file LLM response into ``{rel_path: contents}``.
+
+    Expected format — one header per file, contents follow until the next
+    header or end of text::
+
+        // === file: mod.rs ===
+        use super::*;
+        ...
+
+        // === file: builder.rs ===
+        ...
+
+    Back-compat: if no header is found, the entire response (after fence
+    stripping + `use super::*;` anchoring) becomes the value at
+    ``default_path``. That lets the multi-file parser also accept the old
+    single-file response shape — useful when the LLM forgets the header
+    on a one-file edit.
+    """
+    text = text.strip()
+    m = _FENCED_BLOCK_RE.search(text)
+    if m and not _FILE_HEADER_RE.search(text):
+        # Pure single-block response wrapped in a markdown fence — unwrap
+        # before searching for headers. If the response *contains* headers
+        # we leave the fence in place; the section parser will strip per
+        # block.
+        text = m.group(1).strip()
+
+    matches = list(_FILE_HEADER_RE.finditer(text))
+    if not matches:
+        body = _strip_fences(text)
+        idx = body.find("use super::*;")
+        if idx > 0:
+            body = body[idx:]
+        return {default_path: body.strip()} if body.strip() else {}
+
+    out: dict[str, str] = {}
+    # Anything before the first header is treated as mod.rs unless empty.
+    prefix = text[: matches[0].start()].strip()
+    if prefix:
+        prefix_body = _strip_fences(prefix)
+        if prefix_body.strip():
+            out[default_path] = prefix_body.strip()
+    for i, m in enumerate(matches):
+        path = m.group("path").strip().strip("\"'")
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = _strip_fences(text[start:end])
+        if body.strip():
+            out[path] = body.strip()
+    return out
+
+
+def parse_multi_file_diff(
+    text: str, default_path: str = "mod.rs",
+) -> tuple[dict[str, str], set[str]]:
+    """Parse a diff-style multi-file response into ``(changes, deletes)``.
+
+    Same header grammar as ``parse_multi_file_response`` plus an explicit
+    delete marker::
+
+        // === file: builder.rs ===     # add or replace builder.rs
+        ...full file contents...
+
+        // === delete: gene_pool.rs === # remove gene_pool.rs
+
+    Semantics (caller responsibility): files NOT mentioned in either
+    header set are kept unchanged. ``changes`` and ``deletes`` are
+    disjoint — a path appearing in both is treated as a change (the file
+    block wins, the delete is dropped) so a model that mis-orders headers
+    doesn't accidentally wipe a file it also rewrote.
+
+    Back-compat: if no headers of either kind are found, the entire
+    response is returned as ``{default_path: text}`` with no deletes —
+    same as the old single-file fallback.
+    """
+    text_clean = text.strip()
+    m = _FENCED_BLOCK_RE.search(text_clean)
+    if m and not _FILE_HEADER_RE.search(text_clean) and not _DELETE_HEADER_RE.search(text_clean):
+        text_clean = m.group(1).strip()
+
+    deletes: set[str] = set()
+    for dm in _DELETE_HEADER_RE.finditer(text_clean):
+        path = dm.group("path").strip().strip("\"'")
+        if path:
+            deletes.add(path)
+
+    # Strip delete-header lines before file parsing — otherwise a delete
+    # marker that appears before the first `// === file: ===` header gets
+    # captured as the mod.rs prefix body.
+    file_only_text = _DELETE_HEADER_RE.sub("", text)
+    changes = parse_multi_file_response(file_only_text, default_path=default_path)
+
+    # If a path appears in both, the change wins and the delete is dropped
+    # — so a mis-ordered response can't silently wipe a file it rewrote.
+    deletes -= changes.keys()
+    return changes, deletes
 
 
 def parse_gpu_code(text: str) -> tuple[str, str]:

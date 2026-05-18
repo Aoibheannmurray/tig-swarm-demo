@@ -60,6 +60,13 @@ class IterationCreate(BaseModel):
     strategy_tag: str = "other"
     algorithm_code: str = ""
     kernel_code: Optional[str] = None
+    # Full multi-file algorithm snapshot for this iteration, keyed by
+    # path relative to the algorithm directory (e.g. "mod.rs",
+    # "builder.rs", "config.rs"). None for single-file challenges, in
+    # which case algorithm_code is the sole source of truth. When set,
+    # algorithm_code is expected to mirror algorithm_files["mod.rs"]
+    # so legacy callers reading only the string continue to work.
+    algorithm_files: Optional[dict[str, str]] = None
     score: float
     feasible: bool = True
     notes: str = ""

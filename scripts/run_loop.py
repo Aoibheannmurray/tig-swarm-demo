@@ -69,9 +69,13 @@ from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
 from challenge_files import (
     ChallengeFiles,
+    algo_dir as challenge_algo_dir,
     is_stub_code,
+    parse_multi_file_diff,
+    read_algorithm_dir,
     read_challenge_md,
     validate_code,
+    write_algorithm_dir,
 )
 from server import (
     get_state,
@@ -207,15 +211,22 @@ def _generate_code(
     args: argparse.Namespace, model: str, api_key: str,
     state: dict, hypothesis: dict, config: dict,
     challenge_md: str, files: ChallengeFiles,
-) -> tuple[str | None, str | None, int, int]:
+) -> tuple[str | None, str | None, dict[str, str] | None, int, int]:
     """LLM code generation with retry on validation failure.
 
-    Returns (code, kernel, input_tokens, output_tokens).
+    Returns ``(code, kernel, files_dict, input_tokens, output_tokens)``.
+
+    - ``files_dict`` is the parsed multi-file map when ``state`` carries
+      ``best_algorithm_files`` (i.e. the agent is on a multi-file
+      algorithm); ``None`` otherwise. When non-None, ``code`` mirrors
+      ``files_dict["mod.rs"]`` so callers that only need the entry point
+      still work.
     """
     input_tokens = 0
     output_tokens = 0
     max_attempts = 3
     violation = ""
+    multi_file = bool(state.get("best_algorithm_files"))
 
     for attempt in range(max_attempts):
         if attempt == 0:
@@ -227,13 +238,13 @@ def _generate_code(
                 build_code_user_prompt(state, hypothesis, config)
                 + f"\n\nYour previous response was rejected: {violation}\n"
                 "Fix the issue and return the complete source."
-                + files.separator_suffix()
+                + (files.separator_suffix() if not multi_file else "")
             )
         try:
             code_response, usage = _call_llm_logged(
                 "code", config,
                 args.provider, model, api_key,
-                build_code_system_prompt(challenge_md, config),
+                build_code_system_prompt(challenge_md, config, multi_file=multi_file),
                 user_prompt,
                 args.api_base,
             )
@@ -243,20 +254,48 @@ def _generate_code(
             print(f"  [LLM] CODE GENERATION FAILED: {e}")
             break
 
-        parsed, parsed_kernel = files.parse_response(code_response)
-        print(f"  [LLM] {files.describe_parse(parsed, parsed_kernel)}")
+        if multi_file:
+            changes, deletes = parse_multi_file_diff(code_response)
+            baseline = dict(state.get("best_algorithm_files") or {})
+            # Apply the diff: drop deletes, layer changes over baseline.
+            files_dict = {k: v for k, v in baseline.items() if k not in deletes}
+            files_dict.update(changes)
+            parsed = files_dict.get("mod.rs", "")
+            # Kernels live inside the file map for multi-file challenges.
+            cu_keys = [k for k in files_dict if k.endswith(".cu")]
+            parsed_kernel = files_dict[cu_keys[0]] if len(cu_keys) == 1 else ""
+            unchanged = len(baseline) - len(changes & baseline.keys()) - len(deletes & baseline.keys())
+            added = len(changes.keys() - baseline.keys())
+            replaced = len(changes.keys() & baseline.keys())
+            removed = len(deletes & baseline.keys())
+            print(
+                f"  [LLM] Got multi-file diff "
+                f"({added} added, {replaced} replaced, {removed} deleted, "
+                f"{unchanged} unchanged) — {len(files_dict)} files total"
+            )
+            if not changes and not deletes:
+                print("  [LLM] Diff is empty — no code change this iteration, skipping")
+                break
+        else:
+            parsed, parsed_kernel = files.parse_response(code_response)
+            files_dict = None
+            print(f"  [LLM] {files.describe_parse(parsed, parsed_kernel)}")
         if not parsed:
             print("  [LLM] Empty code response — skipping iteration")
             break
 
+        # validate_code checks mod.rs invariants (use super::*;,
+        # fn solve_challenge() presence, no unimplemented!()) — applies
+        # identically to single-file and multi-file (where it targets
+        # mod.rs as the entry point).
         violation = validate_code(parsed)
         if violation:
             print(f"  [LLM] Validation failed: {violation}")
             continue
         print(f"  [LLM] Code validated OK")
-        return parsed, parsed_kernel, input_tokens, output_tokens
+        return parsed, parsed_kernel, files_dict, input_tokens, output_tokens
 
-    return None, None, input_tokens, output_tokens
+    return None, None, None, input_tokens, output_tokens
 
 
 def _try_compile_fix(
@@ -465,18 +504,33 @@ def _seed_worktree_files(
     The worktree is gitignored at `src/<challenge>/algorithm/mod.rs` so on a
     fresh worktree there's no mod.rs at all — the loop has to put one
     there before the agent runs. Same for kernels.cu on GPU challenges.
+
+    When the agent's current best is multi-file (state carries
+    ``best_algorithm_files``), we write the entire module set and prune
+    any orphan `.rs`/`.cu` files left over from a prior iteration on a
+    different module shape. Otherwise we fall through to the legacy
+    single-file write.
+
     Also copies swarm.config.json across (benchmark.py reads it).
     """
     best_code = state.get("best_algorithm_code") or ""
     best_kernel = state.get("best_kernel_code") or ""
+    best_files = state.get("best_algorithm_files") or None
     algo_rel = config["algorithm_path"]
-    algo_path = workdir / algo_rel
-    algo_path.parent.mkdir(parents=True, exist_ok=True)
-    if best_code:
-        algo_path.write_text(best_code)
+    wt_algo_dir = (workdir / algo_rel).parent
+
+    if best_files:
+        write_algorithm_dir(best_files, wt_algo_dir)
+    else:
+        wt_algo_dir.mkdir(parents=True, exist_ok=True)
+        if best_code:
+            (workdir / algo_rel).write_text(best_code)
 
     kernel_rel = config.get("kernel_path")
-    if files.is_gpu and kernel_rel and best_kernel:
+    if files.is_gpu and kernel_rel and best_kernel and not best_files:
+        # When best_files is set, kernels.cu (if any) is already in the
+        # dict and got written by write_algorithm_dir. Only fall back to
+        # the single-string path when we don't have the multi-file map.
         kp = workdir / kernel_rel
         kp.parent.mkdir(parents=True, exist_ok=True)
         kp.write_text(best_kernel)
@@ -486,16 +540,36 @@ def _seed_worktree_files(
 
 def _read_worktree_files(
     workdir: Path, files: ChallengeFiles, config: dict,
-) -> tuple[str, str]:
-    """Read whatever the agent left on disk in the worktree."""
-    algo_path = workdir / config["algorithm_path"]
-    code = algo_path.read_text() if algo_path.exists() else ""
+) -> tuple[str, str, dict[str, str]]:
+    """Read whatever the agent left on disk in the worktree.
+
+    Returns ``(mod_code, kernel_code, files_dict)``:
+    - ``mod_code`` mirrors ``files_dict["mod.rs"]`` for legacy callers.
+    - ``kernel_code`` mirrors the kernel entry when GPU, else "".
+    - ``files_dict`` is the full ``{relative_path: contents}`` snapshot
+      of the worktree's algorithm directory (every `.rs`/`.cu` file).
+    """
+    algo_rel = config["algorithm_path"]
+    wt_algo_dir = (workdir / algo_rel).parent
+    files_dict: dict[str, str] = {}
+    if wt_algo_dir.exists():
+        for p in sorted(wt_algo_dir.rglob("*")):
+            if not p.is_file() or p.suffix not in (".rs", ".cu"):
+                continue
+            files_dict[p.relative_to(wt_algo_dir).as_posix()] = p.read_text()
+    code = files_dict.get("mod.rs", "")
     kernel = ""
     if files.is_gpu and config.get("kernel_path"):
+        # kernel_path is repo-relative; resolve under the worktree, then
+        # rebase to algo_dir-relative to look it up in files_dict.
         kp = workdir / config["kernel_path"]
-        if kp.exists():
-            kernel = kp.read_text()
-    return code, kernel
+        try:
+            kernel = files_dict.get(kp.relative_to(wt_algo_dir).as_posix(), "")
+        except ValueError:
+            # kernel lives outside the algorithm dir — read it directly.
+            if kp.exists():
+                kernel = kp.read_text()
+    return code, kernel, files_dict
 
 
 def _run_agentic_iteration(
@@ -504,13 +578,18 @@ def _run_agentic_iteration(
     agent_id: str, agent_name: str,
     workdir: Path, backend: agentic_backends.AgenticBackend,
     challenge_md: str, files: ChallengeFiles,
-) -> tuple[dict, str, str, agentic_backends.AgenticResult]:
-    """One tooled-agent iteration. Returns (hypothesis, code, kernel, result).
+) -> tuple[dict, str, str, dict[str, str], agentic_backends.AgenticResult]:
+    """One tooled-agent iteration.
 
-    Hypothesis is always non-None: when the agent forgot to write
-    `.swarm/hypothesis.json` the caller gets a synthesized fallback so the
-    iteration can still publish. Code/kernel are whatever's on disk in the
-    worktree when the agent exits; the caller validates and benchmarks.
+    Returns ``(hypothesis, code, kernel, files_dict, result)``:
+    - ``hypothesis`` is always non-None: when the agent forgot to write
+      ``.swarm/hypothesis.json`` the caller gets a synthesized fallback so
+      the iteration can still publish.
+    - ``code`` mirrors ``files_dict["mod.rs"]``.
+    - ``kernel`` mirrors the kernel entry on GPU challenges, else ``""``.
+    - ``files_dict`` is the full ``{rel_path: contents}`` snapshot of the
+      worktree's algorithm dir — the caller copies this into the main
+      checkout before benchmarking + publishing.
     """
     backend.prepare(workdir, challenge_md, config)
     _seed_worktree_files(workdir, state, files, config)
@@ -542,8 +621,8 @@ def _run_agentic_iteration(
         print("  [AGENTIC] No .swarm/hypothesis.json — synthesizing from stdout")
         hypothesis = agentic_sandbox.synthesize_hypothesis_from_stdout(result.stdout)
 
-    code, kernel = _read_worktree_files(workdir, files, config)
-    return hypothesis, code, kernel, result
+    code, kernel, files_dict = _read_worktree_files(workdir, files, config)
+    return hypothesis, code, kernel, files_dict, result
 
 
 # ── CLI ────────────────────────────────────────────────────────────
@@ -820,17 +899,15 @@ def main() -> int:
         files = ChallengeFiles(config)
         bootstrap = is_stub_code(best_code)
         if best_files:
-            # Multi-file seed: materialize sibling modules under
-            # src/{challenge}/algorithm/ alongside mod.rs. Iteration 0
-            # / fresh-start only — once the agent publishes, it goes
-            # back to the single-string path until the next reset.
-            algo_dir = (ROOT / config["algorithm_path"]).parent
-            algo_dir.mkdir(parents=True, exist_ok=True)
-            for rel, body in best_files.items():
-                out = algo_dir / rel
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(body)
-            print(f"  [FILES] Wrote multi-file seed ({len(best_files)} files) to {algo_dir}")
+            # Multi-file best: materialize the full module set under
+            # src/{challenge}/algorithm/. Fires every iteration where the
+            # agent's current best (or, on iteration 0 / fresh-start, the
+            # swarm seed) is multi-file. write_algorithm_dir prunes any
+            # orphan .rs/.cu files left behind by a prior trajectory so
+            # stale `mod foo;` declarations don't break cargo.
+            d = challenge_algo_dir(config)
+            write_algorithm_dir(best_files, d)
+            print(f"  [FILES] Wrote multi-file best ({len(best_files)} files) to {d}")
         elif best_code and not bootstrap:
             files.write(best_code, best_kernel)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
@@ -849,7 +926,7 @@ def main() -> int:
             # itself, and writes .swarm/hypothesis.json before stopping.
             # Tokens aren't surfaced by the CLI so usage stays 0.
             assert backend is not None and workdir is not None
-            hypothesis, code, new_kernel, _agentic_result = _run_agentic_iteration(
+            hypothesis, code, new_kernel, new_files_dict, _agentic_result = _run_agentic_iteration(
                 args, state, config, server, agent_id, agent_name,
                 workdir, backend, challenge_md, files,
             )
@@ -859,7 +936,9 @@ def main() -> int:
 
             if not code:
                 print("  [AGENTIC] Agent left no algorithm file — restoring best")
-                if best_code:
+                if best_files:
+                    write_algorithm_dir(best_files, challenge_algo_dir(config))
+                elif best_code:
                     files.write(best_code, best_kernel)
                 post_message(server, agent_name, agent_id,
                              f"[{tag}] {title} — agent produced no code")
@@ -868,19 +947,28 @@ def main() -> int:
             violation = validate_code(code)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
-                if best_code:
+                if best_files:
+                    write_algorithm_dir(best_files, challenge_algo_dir(config))
+                elif best_code:
                     files.write(best_code, best_kernel)
                 post_message(server, agent_name, agent_id,
                              f"[{tag}] {title} — validation failed: {violation}")
                 continue
 
             # Copy the worktree's edited code into the main checkout so the
-            # official benchmark sees it. No compile-fix retry: the agent
-            # ran `cargo check` itself before stopping. If the official
-            # build still fails (e.g. feature-flag mismatch the agent
-            # missed), we restore and continue without escalating.
-            files.write(code, new_kernel)
-            print(f"  [FILES] {files.describe_write(code, new_kernel)}")
+            # official benchmark sees it. For multi-file algorithms we
+            # mirror the entire algorithm dir (including any new/removed
+            # siblings the agent introduced); single-file challenges fall
+            # through to the legacy single-mod.rs write. No compile-fix
+            # retry: the agent ran `cargo check` itself before stopping.
+            # If the official build still fails (e.g. feature-flag mismatch
+            # the agent missed), we restore and continue without escalating.
+            if any(rel != "mod.rs" for rel in new_files_dict):
+                write_algorithm_dir(new_files_dict, challenge_algo_dir(config))
+                print(f"  [FILES] Wrote multi-file algorithm ({len(new_files_dict)} files)")
+            else:
+                files.write(code, new_kernel)
+                print(f"  [FILES] {files.describe_write(code, new_kernel)}")
 
             compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
             print(f"  [BENCH] Running benchmark on {compute_label}…")
@@ -890,7 +978,9 @@ def main() -> int:
             if bench is None:
                 print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
                 print(f"  [BENCH] Restoring previous code and continuing")
-                if best_code:
+                if best_files:
+                    write_algorithm_dir(best_files, challenge_algo_dir(config))
+                elif best_code:
                     files.write(best_code, best_kernel)
                 post_message(server, agent_name, agent_id,
                              f"[{tag}] {title} — benchmark failed (build error?)")
@@ -946,7 +1036,7 @@ def main() -> int:
                 print(f"         {desc[:120]}")
 
             # ── LLM code generation ────────────────────────────
-            code, new_kernel, gen_in, gen_out = _generate_code(
+            code, new_kernel, new_files_dict, gen_in, gen_out = _generate_code(
                 args, model, api_key, state, hypothesis, config,
                 challenge_md, files,
             )
@@ -973,26 +1063,43 @@ def main() -> int:
             else:
                 print("  [FILES] First algorithm (no prior code)")
 
-            files.write(code, new_kernel)
-            print(f"  [FILES] {files.describe_write(code, new_kernel)}")
+            if new_files_dict is not None:
+                write_algorithm_dir(new_files_dict, challenge_algo_dir(config))
+                print(f"  [FILES] Wrote multi-file algorithm ({len(new_files_dict)} files)")
+            else:
+                files.write(code, new_kernel)
+                print(f"  [FILES] {files.describe_write(code, new_kernel)}")
 
             # ── Benchmark with compile-error retry ─────────────
+            # Compile- and runtime-fix retries operate on mod.rs only, so
+            # they can corrupt a multi-file algorithm by rewriting mod.rs
+            # against stale siblings. For multi-file iterations we skip
+            # the retry path: if the build fails, restore the entire
+            # algorithm directory from the prior best.
             compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
             print(f"  [BENCH] Running benchmark on {compute_label}…")
             post_message(server, agent_name, agent_id, f"Trying [{tag}] {title}")
             send_heartbeat(server, agent_id)
 
-            bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
-                args, model, api_key, config, server, challenge_md,
-                files,
-            )
+            if new_files_dict is not None:
+                bench, build_err = run_benchmark(args, config, server)
+                code_changed = False
+                fix_in = 0
+                fix_out = 0
+            else:
+                bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
+                    args, model, api_key, config, server, challenge_md,
+                    files,
+                )
             iter_input_tokens += fix_in
             iter_output_tokens += fix_out
 
             if bench is None:
                 print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
                 print(f"  [BENCH] Restoring previous code and continuing")
-                if best_code:
+                if best_files:
+                    write_algorithm_dir(best_files, challenge_algo_dir(config))
+                elif best_code:
                     files.write(best_code, best_kernel)
                 post_message(server, agent_name, agent_id,
                              f"[{tag}] {title} — benchmark failed (build error?)")
@@ -1010,8 +1117,15 @@ def main() -> int:
                     print(f"          {e}")
 
             # ── Runtime error retry ────────────────────────────
+            # Same reasoning as compile-fix: the runtime-fix prompt
+            # operates on mod.rs only, so skip it for multi-file
+            # iterations. A bad multi-file solution just publishes the
+            # infeasible result and the next iteration tries again.
             runtime_errors = bench.get("errors") or []
-            if runtime_errors and not bench.get("feasible"):
+            if (
+                runtime_errors and not bench.get("feasible")
+                and new_files_dict is None
+            ):
                 bench, rt_changed, rt_in, rt_out = _fix_runtime_errors(
                     args, model, api_key, config, server, agent_id, challenge_md,
                     files, bench, best_code, best_kernel,

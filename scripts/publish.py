@@ -82,6 +82,21 @@ def main():
         sys.exit(f"publish.py: algorithm file not found: {algo_path}")
     code = algo_path.read_text()
 
+    # Walk the algorithm directory for any sibling .rs / .cu files. When
+    # there are siblings beyond mod.rs we include the full multi-file
+    # snapshot in the POST body so the server records the whole module
+    # set, not just the single string. Single-file challenges leave
+    # algorithm_files unset and the server treats the iteration as
+    # legacy single-string content.
+    algo_dir = algo_path.parent
+    algo_files: dict[str, str] = {}
+    if algo_dir.is_dir():
+        for p in sorted(algo_dir.rglob("*")):
+            if not p.is_file() or p.suffix not in (".rs", ".cu"):
+                continue
+            algo_files[p.relative_to(algo_dir).as_posix()] = p.read_text()
+    has_siblings = any(rel != "mod.rs" for rel in algo_files)
+
     payload = {
         "agent_id": agent_id,
         "title": title,
@@ -97,6 +112,8 @@ def main():
     }
     if kernel_path and kernel_path.exists():
         payload["kernel_code"] = kernel_path.read_text()
+    if has_siblings:
+        payload["algorithm_files"] = algo_files
     # Opaque per-challenge roll-up. Only present for challenges whose
     # benchmark.py registered an aggregator (e.g. VRP emits num_vehicles +
     # total_distance here). Absent for everyone else.

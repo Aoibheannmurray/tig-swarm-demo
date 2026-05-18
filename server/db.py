@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS agent_bests (
     experiment_id TEXT NOT NULL,
     algorithm_code TEXT NOT NULL,
     kernel_code TEXT,
+    -- JSON map of {relative_path: file_contents} for multi-file algorithm
+    -- snapshots (mod.rs + sibling *.rs modules). NULL for single-file
+    -- bests; in that case readers fall through to algorithm_code only.
+    -- When set, algorithm_code mirrors algorithm_files["mod.rs"] for
+    -- back-compat with legacy callers that only look at the string.
+    algorithm_files TEXT,
     score REAL NOT NULL,
     feasible INTEGER NOT NULL DEFAULT 1,
     -- Opaque per-challenge roll-up JSON. The server stores it verbatim and
@@ -63,6 +69,10 @@ CREATE TABLE IF NOT EXISTS experiments (
     hypothesis_id TEXT,
     algorithm_code TEXT DEFAULT '',
     kernel_code TEXT,
+    -- Full multi-file algorithm snapshot for this iteration (JSON map of
+    -- {relative_path: file_contents}). NULL for single-file challenges;
+    -- see agent_bests.algorithm_files for the per-best counterpart.
+    algorithm_files TEXT,
     score REAL NOT NULL,
     feasible INTEGER DEFAULT 1,
     -- See agent_bests.challenge_metrics — same opaque per-challenge dict.
@@ -119,6 +129,12 @@ CREATE TABLE IF NOT EXISTS inactive_algorithms (
     challenge TEXT NOT NULL,
     algorithm_code TEXT NOT NULL,
     kernel_code TEXT,
+    -- Multi-file snapshot of the deposited best (JSON map of
+    -- {relative_path: file_contents}). NULL when the deposited best was a
+    -- single-file algorithm. Carried through trajectory recycling so that
+    -- an adopted-inactive draw restores the full module set, not just
+    -- mod.rs.
+    algorithm_files TEXT,
     score REAL,
     deposited_at TEXT NOT NULL,
     trajectory_id TEXT,
@@ -257,6 +273,13 @@ async def init_db() -> None:
         await _add_column(db, "agent_challenge_state", "total_estimated_cost", "REAL DEFAULT 0.0")
         # Multi-file algorithm seed support (NULL = legacy single-file path).
         await _add_column(db, "challenge_configs", "initial_algorithm_files", "TEXT")
+        # Multi-file algorithm snapshots flow end-to-end: per-iteration in
+        # experiments, per-agent-best in agent_bests, per-trajectory-deposit
+        # in inactive_algorithms. NULL on every row means "legacy single
+        # file" — callers fall through to algorithm_code.
+        await _add_column(db, "experiments", "algorithm_files", "TEXT")
+        await _add_column(db, "agent_bests", "algorithm_files", "TEXT")
+        await _add_column(db, "inactive_algorithms", "algorithm_files", "TEXT")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -316,8 +339,8 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
 
 _AGENT_BESTS_COLS = (
     "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
-    "kernel_code, score, feasible, challenge_metrics, solution_data, "
-    "track_scores, updated_at"
+    "kernel_code, algorithm_files, score, feasible, challenge_metrics, "
+    "solution_data, track_scores, updated_at"
 )
 
 
@@ -334,7 +357,8 @@ async def get_global_best(
     order = _direction_order(direction)
     cursor = await conn.execute(
         "SELECT id as experiment_id, id, agent_id, challenge, "
-        "algorithm_code, kernel_code, score, feasible, challenge_metrics, "
+        "algorithm_code, kernel_code, algorithm_files, "
+        "score, feasible, challenge_metrics, "
         "solution_data, track_scores, created_at as updated_at, "
         "trajectory_id "
         "FROM experiments WHERE feasible = 1 AND challenge = ? "
@@ -371,16 +395,19 @@ async def upsert_agent_best(
     trajectory_id: str | None = None,
     track_scores: str | None = None,
     kernel_code: str | None = None,
+    algorithm_files: str | None = None,
 ) -> None:
     await conn.execute(
         """INSERT INTO agent_bests
-           (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
+           (agent_id, challenge, experiment_id, algorithm_code, kernel_code,
+            algorithm_files, score, feasible,
             challenge_metrics, solution_data, track_scores, updated_at, trajectory_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
              kernel_code = excluded.kernel_code,
+             algorithm_files = excluded.algorithm_files,
              score = excluded.score,
              feasible = excluded.feasible,
              challenge_metrics = excluded.challenge_metrics,
@@ -388,7 +415,8 @@ async def upsert_agent_best(
              track_scores = excluded.track_scores,
              updated_at = excluded.updated_at,
              trajectory_id = excluded.trajectory_id""",
-        (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score,
+        (agent_id, challenge, experiment_id, algorithm_code, kernel_code,
+         algorithm_files, score,
          1 if feasible else 0, challenge_metrics,
          solution_data, track_scores, updated_at, trajectory_id),
     )
@@ -426,7 +454,8 @@ async def list_agent_bests(
         params.append(inactive_cutoff)
     query = (
         "SELECT ab.agent_id, ab.challenge, ab.experiment_id as id, ab.experiment_id, "
-        "       ab.algorithm_code, ab.kernel_code, ab.score, ab.feasible, "
+        "       ab.algorithm_code, ab.kernel_code, ab.algorithm_files, "
+        "       ab.score, ab.feasible, "
         "       ab.challenge_metrics, ab.solution_data, ab.updated_at "
         f"FROM agent_bests ab{join_clause} WHERE " + " AND ".join(where) +
         f" ORDER BY ab.score {order}"
@@ -763,12 +792,15 @@ async def deposit_inactive(
     trajectory_id: str | None = None,
     program_id: str | None = None,
     kernel_code: str | None = None,
+    algorithm_files: str | None = None,
 ) -> int:
     cursor = await conn.execute(
         "INSERT INTO inactive_algorithms "
-        "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id),
+        "  (agent_id, challenge, algorithm_code, kernel_code, algorithm_files, "
+        "   score, deposited_at, trajectory_id, program_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, challenge, algorithm_code, kernel_code, algorithm_files,
+         score, deposited_at, trajectory_id, program_id),
     )
     return cursor.lastrowid
 
@@ -795,7 +827,8 @@ async def get_inactive_with_deactivations(
     conn: aiosqlite.Connection, challenge: str
 ) -> list[dict]:
     cursor = await conn.execute(
-        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, ia.score, "
+        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, "
+        "  ia.algorithm_files, ia.score, "
         "  ia.trajectory_id, ia.program_id, "
         "  COALESCE(t.num_deactivations, 1) as num_deactivations "
         "FROM inactive_algorithms ia "
@@ -902,6 +935,7 @@ async def deactivate_inactive_agent_trajectories(
                 best["algorithm_code"], best["score"], timestamp,
                 trajectory_id=traj_id, program_id=program_id,
                 kernel_code=best.get("kernel_code"),
+                algorithm_files=best.get("algorithm_files"),
             )
             await clear_agent_best(conn, agent_id, challenge)
 
