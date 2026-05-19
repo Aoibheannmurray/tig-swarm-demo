@@ -32,7 +32,20 @@ export const NEUTRAL_AGENT_COLOR = "var(--text-dim)";
 // Called by main.ts on agent_joined / leaderboard_update so every agent's
 // color is pinned at registration time, before any feed item or chart point
 // looks it up. Idempotent: re-registering an agent returns the cached color.
+//
+// Empty/missing agent ids are NOT cached — otherwise the empty string would
+// claim a palette slot (FNV-1a of "") and every subsequent agent that
+// happens to hash there would get bumped forward, silently corrupting the
+// stable-color mapping. Returns NEUTRAL_AGENT_COLOR for empty input so the
+// UI still renders something, and warns so upstream bugs (missing agent_id
+// on a message) surface in the console instead of as a colored dot.
 export function registerAgentColor(agentId: string): string {
+  if (!agentId) {
+    if (typeof console !== "undefined") {
+      console.warn("[colors] getAgentColor called with empty agentId — returning neutral");
+    }
+    return NEUTRAL_AGENT_COLOR;
+  }
   const cached = agentColorMap.get(agentId);
   if (cached) return cached;
 

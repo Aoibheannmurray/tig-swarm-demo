@@ -203,6 +203,11 @@ async function loadInitialState(apiUrl: string, challenge: string) {
     const stateRes = await fetch(`${apiUrl}/api/state${q}`);
     if (!stateRes.ok) return;
     const state = await stateRes.json();
+    // Drop the response if the user switched challenges while /api/state was
+    // in flight — otherwise we'd dispatch a batch of synthesised messages
+    // (stats_update, new_global_best, experiments, hypotheses) belonging to
+    // the previous challenge into the freshly-reset panels.
+    if (challenge !== getViewedChallenge()) return;
     const hypothesisCount =
       state.hypotheses_count ?? (state.recent_hypotheses?.length || 0);
 
@@ -354,6 +359,10 @@ async function loadInitialState(apiUrl: string, challenge: string) {
         if (challenge !== getViewedChallenge()) return;
         rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
         for (const row of rows) {
+          // Re-check per row: the user can switch challenges mid-dispatch
+          // (200 rows × a handleMessage each is not instant). Without this,
+          // the tail of an old batch leaks into the new view.
+          if (challenge !== getViewedChallenge()) return;
           if (row.msg_type === "agent_joined") {
             handleMessage({
               type: "agent_joined",

@@ -39,6 +39,11 @@ export class StatsPanel implements Panel {
   // the `.solution-score-value` element. Comparing by reference catches
   // that and lets us rebind to the new node.
   private boundScoreEl: HTMLElement | null = null;
+  // Single pending retry timer for attachScoreClick. attachScoreClick is
+  // called from init, reset, and new_global_best — without this, three
+  // concurrent retry chains can stack 60+ setTimeouts before the score
+  // element appears.
+  private scoreRetryHandle: ReturnType<typeof setTimeout> | null = null;
   private apiUrl = "";
   private viewedChallenge = "";
 
@@ -115,10 +120,23 @@ export class StatsPanel implements Panel {
   // node changes. Solution panels initialise after stats, so retry
   // briefly until the element exists.
   private attachScoreClick(retries = 20) {
+    // Cancel any prior retry chain. Without this, init/reset/new_global_best
+    // each spawn an independent setTimeout chain that races to find the same
+    // element. They eventually short-circuit via boundScoreEl, but only
+    // after wasting up to 20×100ms of ticks each.
+    if (this.scoreRetryHandle !== null) {
+      clearTimeout(this.scoreRetryHandle);
+      this.scoreRetryHandle = null;
+    }
     const scoreParent = document.querySelector(".solution-score") as HTMLElement | null;
     const scoreVal = scoreParent?.querySelector(".solution-score-value") as HTMLElement | null;
     if (!scoreParent || !scoreVal) {
-      if (retries > 0) setTimeout(() => this.attachScoreClick(retries - 1), 100);
+      if (retries > 0) {
+        this.scoreRetryHandle = setTimeout(() => {
+          this.scoreRetryHandle = null;
+          this.attachScoreClick(retries - 1);
+        }, 100);
+      }
       return;
     }
     if (this.boundScoreEl === scoreVal) {

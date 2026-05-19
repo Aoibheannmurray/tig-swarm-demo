@@ -324,6 +324,12 @@ export class ChartPanel implements Panel {
         }[];
       } = await res.json();
 
+      // Drop the response if the user switched challenges while the fetch
+      // was in flight. `reset` clears agentProgress/pendingAgentExperiments
+      // synchronously on switch — without this guard we'd write a stale
+      // entry back into the freshly-cleared map.
+      if (getViewedChallenge() !== challenge) return;
+
       const registeredAt = data.registered_at
         ? new Date(data.registered_at).getTime()
         : Date.now();
