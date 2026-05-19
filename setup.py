@@ -267,12 +267,15 @@ def read_swarm_admin() -> dict:
 
 
 def resolve_server_url() -> str | None:
-    """Find server_url in the new layout. Tries .swarm-cache.json first,
-    then agent.config.json (worktree), then fleet.config.json (root). Returns
-    None when nothing is configured yet."""
-    cache = read_swarm_cache()
-    if cache.get("server_url"):
-        return cache["server_url"]
+    """Find server_url in the new layout. Tries agent.config.json (worktree)
+    first, then fleet.config.json (root), then .swarm-cache.json as a
+    last-resort fallback. Returns None when nothing is configured yet.
+
+    The user-edited configs win over the cache because the cache is a payload
+    mirror of /api/swarm_config from a *specific* server — if the user points
+    the swarm at a new URL, a leftover cache from the old swarm must not keep
+    redirecting sync back to the dead server.
+    """
     if AGENT_CONFIG_PATH.exists():
         try:
             agent = json.loads(AGENT_CONFIG_PATH.read_text())
@@ -288,6 +291,9 @@ def resolve_server_url() -> str | None:
                 return fleet["server_url"]
         except json.JSONDecodeError:
             pass
+    cache = read_swarm_cache()
+    if cache.get("server_url"):
+        return cache["server_url"]
     return None
 
 
@@ -1337,6 +1343,13 @@ def run_sync() -> int:
         return 0
 
     cache = read_swarm_cache()
+    # If the cache was written against a different server, it's a leftover from
+    # a prior swarm (e.g. fleet.config.json was repointed). Treat it as absent
+    # so we don't take the early-return below and don't feed its stale
+    # prior_url into template_files (which would mis-rewrite URLs).
+    cache_server = (cache.get("server_url") or "").rstrip("/")
+    if cache_server and cache_server != server_url:
+        cache = {}
     local_challenge = cache.get("active_challenge") or cache.get("challenge")
 
     # Build the refreshed cache payload from live server state.
