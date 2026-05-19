@@ -13,6 +13,7 @@ from pathlib import Path
 from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
+    AdminSeedInactive,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
@@ -1760,6 +1761,52 @@ async def admin_reset_challenge(req: AdminResetChallenge):
         "challenge": challenge,
         "best_history_deleted": best_history_deleted,
         "agent_bests_deleted": agent_bests_deleted,
+    }
+
+
+SEED_INACTIVE_SUPPORTED = ("knapsack", "satisfiability")
+
+
+@app.post("/api/admin/seed_inactive")
+async def admin_seed_inactive(req: AdminSeedInactive):
+    """Insert an externally-sourced algorithm into the inactive_algorithms
+    pool. The next stagnated agent on this challenge that does NOT qualify
+    for a fresh start (i.e. inactive pool is non-empty AND n_trajectories²
+    >= total_deactivations) picks it up via the existing `adopted_inactive`
+    branch in server.py — at which point it is removed from the pool
+    (consume-once semantics).
+
+    Restricted to challenges whose mainnet algorithm format matches the
+    swarm's single-file expectation. The host-side wizard enforces the
+    same set; this is defense-in-depth so a stray curl can't seed an
+    unsupported challenge with a payload that would break adoption."""
+    await verify_admin(req)
+    if req.challenge not in SEED_INACTIVE_SUPPORTED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"seed_inactive is supported for {list(SEED_INACTIVE_SUPPORTED)} "
+                f"only (got {req.challenge!r})"
+            ),
+        )
+    if not req.algorithm_code.strip():
+        raise HTTPException(status_code=400, detail="algorithm_code is empty")
+    timestamp = now()
+    async with db.connect() as conn:
+        agent_id = await db.ensure_synthetic_agent(
+            conn, req.source_label, timestamp,
+        )
+        inactive_id = await db.deposit_inactive(
+            conn, agent_id, req.challenge,
+            req.algorithm_code, None, timestamp,
+            kernel_code=req.kernel_code,
+        )
+        await conn.commit()
+    return {
+        "seeded": True,
+        "challenge": req.challenge,
+        "inactive_id": inactive_id,
+        "source": req.source_label,
     }
 
 

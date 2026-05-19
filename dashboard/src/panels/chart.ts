@@ -1,10 +1,11 @@
 import { max, min } from "d3-array";
-import { scaleLinear, scaleLog } from "d3-scale";
+import { scaleLinear } from "d3-scale";
 import { select } from "d3-selection";
 import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
 import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
+import { getViewedChallenge } from "../lib/viewedChallenge";
 import type { Panel, WSMessage } from "../types";
 
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
@@ -96,10 +97,16 @@ export class ChartPanel implements Panel {
     this.tabPrevEl.addEventListener("click", () => this.cycleTab(-1));
     this.tabNextEl.addEventListener("click", () => this.cycleTab(1));
 
+    // Measure the SVG itself, not the parent panel — the SVG is `flex: 1`
+    // so the browser has already sized it to fit the remaining space after
+    // the panel label, tabs row, and panel padding. The previous
+    // `parent.height - 48` underestimated the chrome (closer to ~78px on
+    // the mainpage), so the SVG coordinate space extended below the
+    // visible flex box and the bottom-most y-tick label got clipped.
     const svgEl = document.getElementById("chart-svg")!;
-    const rect = svgEl.parentElement!.getBoundingClientRect();
+    const rect = svgEl.getBoundingClientRect();
     this.width = rect.width;
-    this.height = rect.height - 48; // label + tab row
+    this.height = rect.height;
 
     this.svg = select("#chart-svg")
       .attr("width", this.width)
@@ -124,13 +131,13 @@ export class ChartPanel implements Panel {
     }
 
     const observer = new ResizeObserver(() => {
-      const newRect = svgEl.parentElement!.getBoundingClientRect();
+      const newRect = svgEl.getBoundingClientRect();
       this.width = newRect.width;
-      this.height = newRect.height - 48;
+      this.height = newRect.height;
       this.svg.attr("width", this.width).attr("height", this.height);
       this.redraw();
     });
-    observer.observe(svgEl.parentElement!);
+    observer.observe(svgEl);
 
     this.renderTabLabel();
   }
@@ -291,7 +298,16 @@ export class ChartPanel implements Panel {
     if (existing?.loaded) return;
 
     try {
-      const res = await fetch(`${this.apiUrl}/api/agent_experiments?agent_id=${encodeURIComponent(agentId)}`);
+      // Pin to the viewed challenge — without this, the server falls back
+      // to its active challenge (resolve_challenge in server.py), so an
+      // agent viewed on a non-active challenge returns zero experiments
+      // and the per-agent tab shows "no attempts yet from <name>".
+      const challenge = getViewedChallenge();
+      const res = await fetch(
+        `${this.apiUrl}/api/agent_experiments` +
+          `?agent_id=${encodeURIComponent(agentId)}` +
+          `&challenge=${encodeURIComponent(challenge)}`,
+      );
       if (!res.ok) return;
       const data: {
         agent_id: string;
@@ -426,15 +442,17 @@ export class ChartPanel implements Panel {
     //           clearance above the chart for a label sitting at y = 0.
     //   bottom: tick labels baseline at h + fs + 6, descender ~fs/4 below,
     //           plus a few px breathing room.
-    //   left:   y-axis labels (text-anchor=end at x = -8) can be ~8 chars
-    //           wide on log-scaled scores ("100.00M"); at ~0.55em/char
-    //           that's ~4.4·fs.
+    //   left:   y-axis labels (text-anchor=end at x = -8) can run up to
+    //           ~9 chars on negative log-magnitude scores ("-100.00M");
+    //           at ~0.6em/char that's ~5.4·fs. The previous 5.0·fs / 52px
+    //           floor sized for the positive-only case and clipped the
+    //           leading minus sign on the small mainpage chart.
     //   right:  half-strokes from end-of-data lines plus a small buffer.
     const m = {
       top: Math.max(28, fs + 12),
       right: Math.max(16, Math.round(fs * 2)),
       bottom: Math.max(28, fs + 18),
-      left: Math.max(52, Math.round(fs * 5)),
+      left: Math.max(60, Math.round(fs * 6)),
     };
     const w = Math.max(0, this.width - m.left - m.right);
     const h = Math.max(0, this.height - m.top - m.bottom);
@@ -636,12 +654,7 @@ export class ChartPanel implements Panel {
           Math.max(globalYDomain[1], maxScore + fallbackPad),
         ]
       : [minScore - fallbackPad, maxScore + fallbackPad];
-    // scaleLog requires strictly positive values. Fall back to linear
-    // when the domain crosses zero — early infeasible attempts can produce
-    // negative quality scores under baseline-relative scoring.
-    const yScale = (yDomain[0] > 0 && yDomain[1] > 0
-      ? scaleLog()
-      : scaleLinear())
+    const yScale = scaleLinear()
       .domain(yDomain)
       .range([h, 0]);
 
@@ -808,10 +821,13 @@ export class ChartPanel implements Panel {
     const scoreMax = max(this.globalData, (d) => d.score);
     if (scoreMin == null || scoreMax == null) return null;
 
+    // Pad both sides symmetrically. Previously yMin was clamped to >= 1
+    // because the y-axis used scaleLog, but now that we always use
+    // scaleLinear that floor inverts the domain whenever all scores are
+    // negative (e.g. job_scheduling at -4k..-2k) — every point ends up
+    // rendered below the visible chart.
     const pad = Math.max(Math.abs(scoreMax - scoreMin) * 0.15, 1);
-    const yMin = Math.max(1, scoreMin - pad);
-    const yMax = scoreMax + pad;
-    return [yMin, yMax];
+    return [scoreMin - pad, scoreMax + pad];
   }
 }
 

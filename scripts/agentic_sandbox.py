@@ -103,16 +103,20 @@ def ensure_worktree(name: str, *, branch_prefix: str = _AGENTIC_BRANCH_PREFIX) -
 
 
 def seed_worktree_config(workdir: Path) -> None:
-    """Copy swarm.config.json from the main checkout into the worktree.
+    """Copy .swarm-cache.json from the main checkout into the agentic worktree.
 
-    The agent doesn't read this — but `scripts/benchmark.py` does when the
-    loop runs it with cwd=workdir. agent.config.json is intentionally NOT
-    copied: agent identity stays in the main checkout, the worktree is just
-    a workspace.
+    The agent doesn't read it — but `scripts/benchmark.py` does when the loop
+    runs it with cwd=workdir. agent.config.json is intentionally NOT copied:
+    agent identity stays in the main checkout, the worktree is just a workspace.
+
+    When run as a fleet child, `workdir` equals `ROOT` (the fleet worktree is
+    the agent's workspace — see resolve_workdir). The src/dst paths collapse
+    onto the same file, so the copy is a no-op.
     """
-    src = ROOT / "swarm.config.json"
-    if src.exists():
-        shutil.copy2(src, workdir / "swarm.config.json")
+    src = ROOT / ".swarm-cache.json"
+    dst = workdir / ".swarm-cache.json"
+    if src.exists() and src.resolve() != dst.resolve():
+        shutil.copy2(src, dst)
 
 
 def reset_iteration_state(workdir: Path) -> None:

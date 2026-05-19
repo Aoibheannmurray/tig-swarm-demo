@@ -90,6 +90,26 @@ class AdminResetChallenge(AdminAuth):
     challenge: "ChallengeName"
 
 
+class AdminSeedInactive(AdminAuth):
+    """Owner-only: deposit an externally-sourced algorithm into the
+    `inactive_algorithms` pool so the next stagnated agent that doesn't
+    qualify for a fresh start adopts it (server.py's `adopted_inactive`
+    path). Used at swarm-create time to seed the pool with the current
+    top-earning TIG mainnet algorithm.
+
+    Restricted server-side to {knapsack, satisfiability} — the only
+    challenges whose mainnet algorithms ship as a single mod.rs (+ optional
+    kernels.cu), which is what the `agent_bests` / `inactive_algorithms`
+    wire format expects today.
+    """
+    challenge: "ChallengeName"
+    algorithm_code: str
+    kernel_code: Optional[str] = None
+    # Free-form label for the synthetic agent the pool entry is attributed
+    # to (e.g. "tig-foundation"). The server creates the agent on first use.
+    source_label: str = "tig-foundation"
+
+
 # Swarm-wide configuration set by the owner via the setup wizard.
 # challenge: which TIG challenge this swarm is optimizing.
 # tracks: keys are track labels (e.g. "n_nodes=600"), values are instance counts.

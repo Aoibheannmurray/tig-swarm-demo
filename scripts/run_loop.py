@@ -15,6 +15,7 @@ Usage:
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
     python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+    python scripts/run_loop.py --provider anthropic --compute c3 --env rust:1-bookworm
     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
     # Resume a specific previous agent
@@ -36,7 +37,8 @@ Picking a model (--model):
 Provider/model/compute defaults come from agent.config.json when present.
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
---c3-api-key, or existing `c3 login` credentials.
+--c3-api-key, or existing `c3 login` credentials. C3 Docker jobs use public
+Docker Hub images, configured with --env.
 
 claude-code provider:
     Shells out to your local `claude -p` binary instead of hitting an HTTP
@@ -74,6 +76,7 @@ from challenge_files import (
     validate_code,
 )
 from server import (
+    agent_exists,
     get_state,
     post_message,
     publish_results,
@@ -142,9 +145,12 @@ def _call_llm_logged(
 
 
 def load_config() -> dict:
-    cfg_path = ROOT / "swarm.config.json"
+    cfg_path = ROOT / ".swarm-cache.json"
     if not cfg_path.exists():
-        sys.exit("swarm.config.json not found. Run `python setup.py` first.")
+        sys.exit(
+            ".swarm-cache.json not found. Run `python setup.py sync` first "
+            "(scripts/run_loop.py normally calls it at the top of every iteration)."
+        )
     return json.loads(cfg_path.read_text())
 
 
@@ -181,8 +187,8 @@ def _run_benchmark_local() -> tuple[dict | None, str]:
         capture_output=True, text=True, cwd=ROOT,
     )
     if result.returncode != 0:
-        err = result.stderr[-2000:]
-        print(f"  Benchmark failed:\n{err}", file=sys.stderr)
+        err = result.stderr or result.stdout or "Benchmark failed"
+        print(f"  Benchmark failed:\n{err[-2000:]}", file=sys.stderr)
         return None, err
     try:
         return json.loads(result.stdout), ""
@@ -269,7 +275,7 @@ def _try_compile_fix(
     Returns (success, input_tokens, output_tokens).
     """
     code, kernel = files.read()
-    fix_prompt = build_compile_fix_prompt(code, kernel, build_err[-1500:], files.is_gpu)
+    fix_prompt = build_compile_fix_prompt(code, kernel, build_err, files.is_gpu)
     try:
         fix_response, usage = _call_llm_logged(
             "compile_fix", config,
@@ -464,7 +470,7 @@ def _seed_worktree_files(
     The worktree is gitignored at `src/<challenge>/algorithm/mod.rs` so on a
     fresh worktree there's no mod.rs at all — the loop has to put one
     there before the agent runs. Same for kernels.cu on GPU challenges.
-    Also copies swarm.config.json across (benchmark.py reads it).
+    Also copies .swarm-cache.json across (benchmark.py reads it).
     """
     best_code = state.get("best_algorithm_code") or ""
     best_kernel = state.get("best_kernel_code") or ""
@@ -600,13 +606,19 @@ def parse_args() -> argparse.Namespace:
         help="C3 job walltime for each benchmark job (default: 02:00:00)",
     )
     p.add_argument(
-        "--c3-cloud-provider",
-        help="Optional C3 CLI cloud provider passed as `c3 deploy -p ...`",
+        "--c3-provider",
+        help="Optional C3 CLI provider passed as `c3 deploy -p ...`",
     )
     p.add_argument(
-        "--c3-no-build", action="store_true",
-        help="Pass --no-build to c3 deploy, requiring a cached Docker image",
+        "--env",
+        help="Docker Hub environment image for C3 jobs; overrides built-in defaults",
     )
+    p.add_argument("--env-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--env-cpu", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-cpu-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--env-gpu", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument(
         "--agentic-timeout", type=int, default=900,
@@ -631,6 +643,7 @@ def resolve_api_key(provider: str, api_key: str | None) -> str:
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",
+        "venice": "VENICE_API_KEY",
     }
     key = os.environ.get(env_map[provider], "")
     if not key:
@@ -645,6 +658,12 @@ def main() -> int:
     args = parse_args()
     config = load_config()
     agent_config = load_agent_config()
+    # `setup.py sync` (called at the top of every iteration) rebuilds
+    # .swarm-cache.json from a server-field whitelist, so log_prompts can't
+    # live there. Read it from agent.config.json once and re-apply it after
+    # each load_config() inside the loop.
+    log_prompts = bool(agent_config.get("log_prompts"))
+    config["log_prompts"] = log_prompts
 
     args.provider = args.provider or agent_config.get("provider") or "anthropic"
     valid_providers = set(DEFAULT_MODELS) | {
@@ -658,17 +677,30 @@ def main() -> int:
     args.compute = args.compute or agent_config.get("compute") or "local"
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
-    args.c3_cloud_provider = args.c3_cloud_provider or agent_config.get("c3_cloud_provider")
-    args.c3_no_build = args.c3_no_build or bool(agent_config.get("c3_no_build", False))
+    args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
+    args.env = args.env or agent_config.get("env")
+    if args.env is None:
+        args.env = agent_config.get("env_image") or agent_config.get("c3_image")
+    if args.env is None:
+        args.env = (
+            agent_config.get("env_gpu") or agent_config.get("c3_gpu_image")
+            if bool(config.get("is_gpu"))
+            else agent_config.get("env_cpu") or agent_config.get("c3_cpu_image")
+        )
     if args.compute not in ("local", "c3"):
         sys.exit(f"Unknown compute provider: {args.compute}")
 
     api_key = resolve_api_key(args.provider, args.api_key)
     model = args.model or DEFAULT_MODELS.get(args.provider, "")
 
-    server = config.get("server_url", "").rstrip("/")
+    # server_url is materialized into agent.config.json by run_fleet from the
+    # top-level fleet.config.json entry.
+    server = (agent_config.get("server_url") or "").rstrip("/")
     if not server:
-        sys.exit("No server_url in swarm.config.json. Run setup.py first.")
+        sys.exit(
+            "No server_url in agent.config.json. Did run_fleet.py spawn this "
+            "worktree, or was agent.config.json hand-edited?"
+        )
     if args.compute == "c3":
         if shutil.which("c3") is None:
             sys.exit("c3 CLI not found. Install it from https://docs.cthree.cloud/.")
@@ -684,14 +716,41 @@ def main() -> int:
     if args.agent_id or configured_agent_id:
         agent_id = args.agent_id or configured_agent_id
         agent_name = args.agent_name or configured_agent_name or f"script-{agent_id[:8]}"
-        print(f"Resuming agent: {agent_name} ({agent_id})")
+        # Validate before resuming. If the server doesn't have a row for
+        # this id (DB reset/redeploy, switched swarms, or a first-run
+        # interruption left a stale id locally), re-register with the
+        # same display name so the contributor keeps their identity.
+        # Multi-agent coordination keys off agent_id only — renaming or
+        # re-registering one contributor is invisible to everyone else.
+        if agent_exists(server, agent_id):
+            print(f"Resuming agent: {agent_name} ({agent_id})")
+        else:
+            print(
+                f"  [REGISTER] Stored agent_id {agent_id} not on server; "
+                f"re-registering as {agent_name!r}…"
+            )
+            agent_id, agent_name = register_agent(
+                server, provider=args.provider, model=model,
+                requested_name=agent_name,
+                name=agent_config.get("name"),
+            )
+            print(f"Re-registered as: {agent_name} ({agent_id})")
     else:
         agent_id, agent_name = register_agent(
-            server, config, provider=args.provider, model=model,
+            server, provider=args.provider, model=model,
+            name=agent_config.get("name"),
         )
         print(f"Registered as: {agent_name} ({agent_id})")
 
     updated_agent_config = dict(agent_config)
+    updated_agent_config.pop("c3_cloud_provider", None)
+    updated_agent_config.pop("c3_no_build", None)
+    updated_agent_config.pop("c3_image", None)
+    updated_agent_config.pop("c3_cpu_image", None)
+    updated_agent_config.pop("c3_gpu_image", None)
+    updated_agent_config.pop("env_image", None)
+    updated_agent_config.pop("env_cpu", None)
+    updated_agent_config.pop("env_gpu", None)
     runtime_defaults = {
         "provider": args.provider,
         "model": args.model,
@@ -699,8 +758,8 @@ def main() -> int:
         "compute": args.compute,
         "c3_hardware": args.hardware,
         "c3_time": args.c3_time,
-        "c3_cloud_provider": args.c3_cloud_provider,
-        "c3_no_build": args.c3_no_build,
+        "c3_provider": args.c3_provider,
+        "env": args.env,
     }
     for key, value in runtime_defaults.items():
         updated_agent_config.setdefault(key, value)
@@ -710,6 +769,16 @@ def main() -> int:
     })
     write_agent_config(updated_agent_config)
 
+    # Refresh .swarm-cache.json + CHALLENGE.md against the live server before
+    # the start-up banner prints `Challenge: ...`. Without this, a worktree
+    # whose cache predates a host-side `setup.py switch` would announce the
+    # old challenge until the first iteration's sync runs — confusing to read
+    # and easy to mis-trust. The per-iteration sync below still handles
+    # mid-run challenge switches.
+    print("  [SYNC] Syncing challenge with server…")
+    sync_challenge()
+    config = load_config()
+    config["log_prompts"] = log_prompts
     challenge_md = read_challenge_md()
 
     # Agentic mode (claude-code-agentic): tooled headless Claude Code inside a
@@ -732,6 +801,8 @@ def main() -> int:
 
     print(f"Provider: {args.provider}  Model: {model}")
     compute_desc = f"c3/{args.hardware.lower()}" if args.compute == "c3" else args.compute
+    if args.compute == "c3" and args.env:
+        compute_desc += f" image={args.env}"
     print(f"Compute: {compute_desc}")
     print(f"Challenge: {config.get('challenge', '?')}")
     print(f"Server: {server}")
@@ -751,6 +822,7 @@ def main() -> int:
         print("  [SYNC] Syncing challenge with server…")
         sync_challenge()
         config = load_config()
+        config["log_prompts"] = log_prompts
         challenge_md = read_challenge_md()
         print(f"  [SYNC] Challenge: {config.get('challenge', '?')}  GPU: {config.get('is_gpu', False)}")
 
@@ -769,9 +841,9 @@ def main() -> int:
             time.sleep(_ITERATION_BACKOFF_SECS)
             continue
 
-        # If the local contributor_name (re-)prompted by setup.py join
-        # differs from the server's agents.name, POST a rename. Cheap:
-        # piggybacks on the state we already fetched.
+        # If the agent's local `name` (from agent.config.json, materialized
+        # from fleet.config.json) differs from the server's agents.name, POST
+        # a rename. Cheap: piggybacks on the state we already fetched.
         try:
             from sync_identity import sync_identity_with_state
             renamed = sync_identity_with_state(server, agent_id, state)

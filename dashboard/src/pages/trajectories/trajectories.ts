@@ -38,6 +38,7 @@ interface TrajectoriesResponse {
 }
 
 import { PALETTE, token } from "../../lib/colors";
+import { getViewedChallenge } from "../../lib/viewedChallenge";
 
 function trajColor(index: number): string {
   return PALETTE[index % PALETTE.length];
@@ -166,7 +167,13 @@ export class TrajectoriesPanel {
 
   private async fetchData() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/trajectories`);
+      // Pin to the viewed challenge — otherwise the server defaults to its
+      // active challenge and the page always shows that one's trajectories,
+      // regardless of what the user picked in the selector.
+      const challenge = getViewedChallenge();
+      const res = await fetch(
+        `${this.apiUrl}/api/trajectories?challenge=${encodeURIComponent(challenge)}`,
+      );
       if (!res.ok) return;
       this.data = await res.json();
       this.render();
@@ -291,7 +298,15 @@ export class TrajectoriesPanel {
         for (const p of t.score_history) allTimes.push(new Date(p.created_at));
       }
       const ext = extent(allTimes) as [Date, Date];
-      xDomain = [ext[0].getTime(), ext[1].getTime()];
+      const startMs = ext[0].getTime();
+      const endMs = ext[1].getTime();
+      // Pad the right edge so the active-trajectory extension below is
+      // visible. Without this, xDomain[1] equals the last data point's
+      // timestamp, so the step-after hold has zero width and the latest
+      // score renders as only an endpoint dot — making the ALL view look
+      // stale vs the per-trajectory view (which already pads by 5%).
+      const span = Math.max(endMs - startMs, 1);
+      xDomain = [startMs, endMs + span * 0.05];
     }
 
     const allScores: number[] = [];

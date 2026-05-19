@@ -63,22 +63,27 @@ def derive_llm_label(provider: str | None, model: str | None) -> str:
 
 
 def register_agent(
-    server: str, config: dict | None = None,
+    server: str,
     *, provider: str | None = None, model: str | None = None,
+    requested_name: str | None = None,
+    name: str | None = None,
 ) -> tuple[str, str]:
     """Register an agent. Forwards a dashboard label as `llm_type`.
 
-    Label resolution order: an explicit `contributor_llm` in swarm.config
-    (set by `setup.py --llm-label` or hand-edited) wins; otherwise we
-    derive it from the live provider+model so the dashboard always
-    tracks what's actually running.
+    Identity resolution (in order):
+      - `requested_name` wins (used on re-registration to keep the same
+        identity when the server has lost the original row).
+      - explicit `name` kwarg (from agent.config.json's `name`, materialized
+        from fleet.config.json).
+
+    Dashboard label is auto-derived from provider+model.
     """
     body: dict = {}
-    if config and config.get("contributor_name"):
-        body["agent_name"] = config["contributor_name"]
+    resolved_name = (requested_name or "").strip() or (name or "").strip()
+    if resolved_name:
+        body["agent_name"] = resolved_name
 
-    explicit = (config or {}).get("contributor_llm")
-    body["llm_type"] = explicit or derive_llm_label(provider, model)
+    body["llm_type"] = derive_llm_label(provider, model)
 
     data = server_post(f"{server}/api/agents/register", body)
     return data["agent_id"], data["agent_name"]
@@ -86,6 +91,21 @@ def register_agent(
 
 def get_state(server: str, agent_id: str) -> dict:
     return server_get(f"{server}/api/state?agent_id={urllib.parse.quote(agent_id)}")
+
+
+def agent_exists(server: str, agent_id: str) -> bool:
+    """True if the server still has an `agents` row for this id.
+
+    Probes via /api/state — the server returns `agent_name="unknown"`
+    when there's no row for the supplied id (see `get_agent_name` in the
+    server package). On transport failure we return True so a flaky
+    network doesn't trigger a spurious re-register.
+    """
+    try:
+        state = get_state(server, agent_id)
+    except _NET_ERRORS:
+        return True
+    return (state.get("agent_name") or "").strip() != "unknown"
 
 
 def send_heartbeat(server: str, agent_id: str) -> None:

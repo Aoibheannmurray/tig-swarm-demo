@@ -16,8 +16,8 @@ runtime.txt
 server/static/
 
 # Per-deploy / per-contributor state — never committed
-swarm.config.json
-agent.config.json
+.swarm-cache.json
+swarm.admin.json
 fleet.config.json
 worktrees/
 AGENTS.md

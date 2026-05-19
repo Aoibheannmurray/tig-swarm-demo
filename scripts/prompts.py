@@ -76,8 +76,10 @@ def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
     bootstrap = is_stub_code(code)
     if bootstrap:
         parts.append(
-            "No working algorithm yet — the current code is a stub. "
-            "Propose an initial implementation strategy from scratch."
+            "Current algorithm (mod.rs) is a stub — propose an initial "
+            "implementation strategy from scratch. The stub below shows the "
+            "exact `solve_challenge` signature any implementation must keep.\n"
+            f"```rust\n{code}\n```"
         )
     else:
         parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
@@ -179,9 +181,11 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
     bootstrap = is_stub_code(code)
     if bootstrap:
         parts.append(
-            "No working algorithm yet — write a complete solve_challenge "
-            "implementation from scratch. Call save_solution() whenever you "
-            "find an improved solution."
+            "Current algorithm (mod.rs) is a stub — replace it with a complete "
+            "implementation. Keep the exact `solve_challenge` signature shown "
+            "below (parameter names and types), and call the `save_solution` "
+            "closure parameter whenever you find an improved solution.\n"
+            f"```rust\n{code}\n```"
         )
     else:
         parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
@@ -396,7 +400,9 @@ def build_agentic_user_prompt(state: dict, config: dict) -> str:
             "\n## Bootstrap iteration\n"
             "The algorithm on disk is a stub (`unimplemented!()`). Write a "
             "complete `solve_challenge` implementation from scratch — don't "
-            "tweak, replace."
+            "tweak, replace. Read the stub first to lock in the exact "
+            "`solve_challenge` signature (parameter names and types) before "
+            "writing anything."
         )
 
     prior = state.get("prior_hypotheses") or []

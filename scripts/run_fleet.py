@@ -40,12 +40,19 @@ WORKTREES_DIR = ROOT / "worktrees"
 _AGENT_CONFIG_KEYS = (
     "provider", "model", "api_base", "compute",
     "c3_hardware", "c3_time", "c3_cloud_provider", "c3_no_build",
+    # Honor hand-set agent_id / agent_name in a fleet entry — useful if a user
+    # wants to point a new clone at an existing dashboard agent without
+    # re-registering. Normal flow: run_loop.py writes these after the first
+    # /api/agents/register call so restarts resume the same identity.
+    "agent_id", "agent_name",
+    "log_prompts",
 )
 
 _PROVIDER_TO_DEFAULT_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
+    "venice": "VENICE_API_KEY",
 }
 
 _COLORS = ["\033[36m", "\033[33m", "\033[35m", "\033[32m", "\033[34m", "\033[31m"]
@@ -55,7 +62,7 @@ _RESET = "\033[0m"
 # ── Config ─────────────────────────────────────────────────────────
 
 
-def _load_fleet() -> list[dict]:
+def _load_fleet() -> tuple[str, list[dict]]:
     if not FLEET_CONFIG_PATH.exists():
         sys.exit(
             f"fleet.config.json not found at {FLEET_CONFIG_PATH}.\n"
@@ -66,6 +73,13 @@ def _load_fleet() -> list[dict]:
     if not agents:
         sys.exit("fleet.config.json has no agents.")
 
+    server_url = data.get("server_url") or ""
+    if not server_url:
+        sys.exit(
+            "fleet.config.json is missing top-level `server_url`. "
+            "Add it (the host who ran `setup.py create` has the URL)."
+        )
+
     names: list[str] = []
     for entry in agents:
         name = entry.get("name")
@@ -74,7 +88,7 @@ def _load_fleet() -> list[dict]:
         names.append(name)
     if len(set(names)) != len(names):
         sys.exit("fleet.config.json has duplicate agent names.")
-    return agents
+    return server_url, agents
 
 
 # ── Git worktree helpers ───────────────────────────────────────────
@@ -124,21 +138,31 @@ def _ensure_worktree(name: str) -> Path:
     return path
 
 
-def _seed_worktree(path: Path, agent: dict) -> None:
-    """Write swarm/agent config and optional tacit knowledge into the worktree.
+def _seed_worktree(path: Path, agent: dict, fleet_server_url: str) -> None:
+    """Materialize one fleet entry into a worktree's agent.config.json and
+    seed .swarm-cache.json from the host clone if one is present.
 
-    Preserves any persisted agent_id from earlier fleet runs so the same swarm
-    identity is reused across restarts.
+    agent.config.json is the source of truth run_loop.py reads — identity,
+    provider/model/compute, and the persisted agent_id once /api/agents/register
+    has returned it. The cache copy is best-effort: the first iteration's
+    `setup.py sync` will populate the worktree's .swarm-cache.json regardless,
+    so a missing root cache just means benchmark.py can't run until after that
+    first sync.
     """
-    root_swarm = ROOT / "swarm.config.json"
-    wt_swarm = path / "swarm.config.json"
-    if not wt_swarm.exists():
-        if not root_swarm.exists():
-            sys.exit(
-                "swarm.config.json missing in repo root. "
-                "Run `python setup.py` first."
-            )
-        shutil.copy2(root_swarm, wt_swarm)
+    root_cache = ROOT / ".swarm-cache.json"
+    wt_cache = path / ".swarm-cache.json"
+    if root_cache.exists() and not wt_cache.exists():
+        # Only seed when the root cache mirrors the fleet's current server.
+        # Otherwise it's a leftover from a prior swarm and would feed a stale
+        # server_url straight into setup.py sync. A skipped seed just means
+        # benchmark.py waits one extra iteration for the first sync to land.
+        try:
+            cached = json.loads(root_cache.read_text())
+            cached_url = (cached.get("server_url") or "").rstrip("/")
+        except (json.JSONDecodeError, OSError):
+            cached_url = ""
+        if cached_url and cached_url == fleet_server_url.rstrip("/"):
+            shutil.copy2(root_cache, wt_cache)
 
     wt_agent = path / "agent.config.json"
     existing: dict = {}
@@ -158,6 +182,12 @@ def _seed_worktree(path: Path, agent: dict) -> None:
     # reads "c3_hardware" first and falls back to "hardware", so normalize.
     if "hardware" in agent and "c3_hardware" not in agent:
         merged["c3_hardware"] = agent["hardware"]
+    # Materialize identity + server_url so run_loop.py can read everything it
+    # needs from agent.config.json alone.
+    merged["name"] = agent["name"]
+    merged["server_url"] = fleet_server_url
+    if agent.get("tacit_knowledge"):
+        merged["tacit_knowledge"] = agent["tacit_knowledge"]
     wt_agent.write_text(json.dumps(merged, indent=2) + "\n")
 
     tacit = agent.get("tacit_knowledge")
@@ -251,7 +281,11 @@ def cmd_clean(agents: list[dict]) -> int:
     return 0
 
 
-def cmd_run(agents: list[dict], only: list[str] | None) -> int:
+def cmd_run(
+    agents: list[dict],
+    only: list[str] | None,
+    server_url: str,
+) -> int:
     if only:
         names = {a["name"] for a in agents}
         unknown = [n for n in only if n not in names]
@@ -270,7 +304,7 @@ def cmd_run(agents: list[dict], only: list[str] | None) -> int:
         name = agent["name"]
         print(f"  [fleet] preparing {name}…")
         path = _ensure_worktree(name)
-        _seed_worktree(path, agent)
+        _seed_worktree(path, agent, server_url)
 
         env = os.environ.copy()
         target, value = key_envs[i]
@@ -351,12 +385,12 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    agents = _load_fleet()
+    server_url, agents = _load_fleet()
     if args.list:
         return cmd_list(agents)
     if args.clean:
         return cmd_clean(agents)
-    return cmd_run(agents, args.only)
+    return cmd_run(agents, args.only, server_url)
 
 
 if __name__ == "__main__":

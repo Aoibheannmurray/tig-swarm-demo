@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{arg, value_parser, Command};
-use std::cell::Cell;
+use std::sync::Mutex;
 use std::time::Instant;
 use tig_challenges as challenges;
 
@@ -131,7 +131,8 @@ fn run_instance(
 
     macro_rules! dispatch_gpu {
         ($c:ident) => {{
-            use cudarc::driver::{CudaContext, Ptx};
+            use cudarc::driver::CudaContext;
+            use cudarc::nvrtc::Ptx;
             use cudarc::runtime::result::device::get_device_prop;
 
             let ctx = CudaContext::new(0)?;
@@ -155,9 +156,9 @@ fn run_instance(
                 &prop,
             )?;
 
-            let saved: Cell<Option<challenges::$c::Solution>> = Cell::new(None);
+            let saved: Mutex<Option<challenges::$c::Solution>> = Mutex::new(None);
             let save_solution = |solution: &challenges::$c::Solution| -> Result<()> {
-                saved.set(Some(solution.clone()));
+                *saved.lock().unwrap() = Some(solution.clone());
                 Ok(())
             };
 
@@ -187,7 +188,8 @@ fn run_instance(
 
             let elapsed = start.elapsed().as_secs_f64();
 
-            match saved.take() {
+            let saved_solution = saved.lock().unwrap().take();
+            match saved_solution {
                 Some(solution) => {
                     match instance.evaluate_solution(
                         &solution,
