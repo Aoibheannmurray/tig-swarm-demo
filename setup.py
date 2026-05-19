@@ -384,15 +384,26 @@ def seed_inactive_pool_from_mainnet(
     server_url: str, admin_key: str, challenges: set[str],
 ) -> None:
     """For each requested challenge in `SEED_INACTIVE_SUPPORTED`, find the
-    current top-adoption mainnet algorithm, download its source via
-    scripts/download_algorithm.py, and POST it to /api/admin/seed_inactive
+    current top-adoption mainnet algorithm, fetch its source in-memory via
+    ``download_algorithm.fetch_algorithm`` (deliberately NOT
+    ``download_algorithm`` — we never want to mutate the host's
+    ``initial_algorithms/`` directory as a side effect of seeding the
+    server's inactive pool), and POST it to ``/api/admin/seed_inactive``
     so the swarm's first stagnation-with-adoption event picks it up.
+
+    The inactive pool's wire format carries a single algorithm_code blob
+    (+ optional kernel), so we require the upstream bundle to contain
+    exactly one ``mod.rs`` and at most one ``*.cu`` file. Anything else
+    (README.md, multi-module .rs files) is grounds to skip — the schema
+    can't represent it. Non-code companions (e.g. README.md) on an
+    otherwise-single-file algorithm are silently ignored rather than
+    blocking the seed.
 
     Best-effort throughout: network failures, unknown algorithms, and
     server errors are warned-and-skipped rather than aborting setup."""
     sys.path.insert(0, str(ROOT / "scripts"))
     try:
-        from download_algorithm import download_algorithm, DownloadError
+        from download_algorithm import fetch_algorithm, DownloadError
     except Exception as e:
         print(f"  could not import download_algorithm.py: {e}; skipping seed.")
         return
@@ -409,31 +420,25 @@ def seed_inactive_pool_from_mainnet(
         algo_name, adoption = top
         print(
             f"  {ch}: top algorithm '{algo_name}' "
-            f"(adoption {adoption / 1e16:.2f}%); downloading…"
+            f"(adoption {adoption / 1e16:.2f}%); fetching…"
         )
         try:
-            staged = download_algorithm(ch, algo_name, force=True)
+            files = fetch_algorithm(ch, algo_name)
         except DownloadError as e:
-            print(f"  {ch}: download of {algo_name} failed ({e}); skipping seed.")
+            print(f"  {ch}: fetch of {algo_name} failed ({e}); skipping seed.")
             continue
 
-        # download_algorithm stages either initial_algorithms/{ch}.rs (single
-        # file) or initial_algorithms/{ch}/ (multi-file). For knapsack and
-        # satisfiability we expect the single-file path; if upstream surprises
-        # us with a directory, skip rather than guessing a flatten strategy.
-        if staged.is_dir():
+        rs_files = sorted(p for p in files if p.endswith(".rs"))
+        cu_files = sorted(p for p in files if p.endswith(".cu"))
+        if rs_files != ["mod.rs"] or len(cu_files) > 1:
             print(
-                f"  {ch}: upstream {algo_name} is multi-file — "
-                f"inactive-pool seeding only supports single-file algorithms; skipping."
+                f"  {ch}: upstream {algo_name} is multi-module "
+                f"(.rs={rs_files}, .cu={cu_files}) — inactive-pool seeding "
+                f"requires a single mod.rs + at most one .cu; skipping."
             )
             continue
-        try:
-            algorithm_code = staged.read_text()
-        except OSError as e:
-            print(f"  {ch}: could not read staged {staged} ({e}); skipping seed.")
-            continue
-        kernel_path = staged.with_suffix(".cu")
-        kernel_code = kernel_path.read_text() if kernel_path.is_file() else None
+        algorithm_code = files["mod.rs"]
+        kernel_code = files[cu_files[0]] if cu_files else None
 
         payload = {
             "admin_key": admin_key,

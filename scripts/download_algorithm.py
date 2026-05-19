@@ -196,18 +196,38 @@ def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
 # ── Public API ────────────────────────────────────────────────────────
 
 
+def fetch_algorithm(
+    challenge: str, algorithm: str, *, ref: str | None = None,
+) -> dict[str, str]:
+    """Fetch + clean an algorithm from upstream. Returns
+    ``{relative_path: cleaned_content}``. Does NOT write to disk — use
+    ``download_algorithm`` for that.
+
+    Separated from ``download_algorithm`` so callers that want to inspect
+    or transmit the source without persisting it locally (e.g. the swarm's
+    ``setup.py --seed-inactive-pool`` flow, which POSTs the code straight
+    to the server) don't have the side effect of mutating
+    ``initial_algorithms/``.
+    """
+    branch = ref or f"{challenge}/{algorithm}"
+    print(f"  fetch_algorithm: {challenge}/{algorithm} (ref={branch})")
+    files = _walk_contents(challenge, algorithm, branch)
+    if not files:
+        raise DownloadError(f"upstream returned no files for {challenge}/{algorithm}")
+    return {p: _clean(p, challenge, c) for p, c in files.items()}
+
+
 def download_algorithm(
     challenge: str, algorithm: str, *, force: bool, ref: str | None = None,
 ) -> Path:
     """Fetch + clean + stage. Returns the path written under initial_algorithms/."""
-    branch = ref or f"{challenge}/{algorithm}"
-    print(f"  download_algorithm: {challenge}/{algorithm} (ref={branch})")
-    files = _walk_contents(challenge, algorithm, branch)
-    if not files:
-        raise DownloadError(f"upstream returned no files for {challenge}/{algorithm}")
-    staged = _stage(challenge, files, force)
+    cleaned = fetch_algorithm(challenge, algorithm, ref=ref)
+    # _stage re-cleans internally; passing pre-cleaned content is idempotent
+    # because the regexes only rewrite `use tig_challenges::...` lines that
+    # the fetch pass has already replaced with `use super::*;`.
+    staged = _stage(challenge, cleaned, force)
     rel = staged.relative_to(ROOT)
-    print(f"    staged {len(files)} file(s) -> {rel}")
+    print(f"    staged {len(cleaned)} file(s) -> {rel}")
     return staged
 
 
