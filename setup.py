@@ -987,14 +987,13 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print(f"  Swarm type:  {type_label}")
     print(f"  Active challenge:  {active_challenge}")
     print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
-    print("\n  Share this with anyone who wants to contribute:\n")
-    print(f"    git clone {repo_url}")
-    print(f"    cd {repo_dir_hint}")
-    print("    # edit fleet.config.json — set:")
-    print(f"    #   server_url      = {server_url}")
-    print(f"    #   swarm_password  = {swarm_password}")
-    print("    python scripts/run_fleet.py")
-    print("\n  Swarm password (share with contributors — gates participant writes):")
+    print("\n  Onboard each contributor with:\n")
+    print("    python setup.py invite <username>")
+    print("    # prints their username + per-contributor swarm_password.")
+    print("    # Share both with them; they paste into fleet.config.json with the")
+    print(f"    # URL ({server_url}) and run `python scripts/run_fleet.py`.")
+    print("\n  Base password (keep private — used by `setup.py invite` to derive")
+    print("  per-contributor passwords; rotating it kicks every contributor):")
     print(f"    {swarm_password}")
     print("\n  Admin key (keep private — gates /api/admin/*):")
     print(f"    {admin_key}")
@@ -1250,6 +1249,14 @@ def main() -> int:
         "agent_name", nargs="?",
         help="Name of the fleet agent to edit (default: only agent in fleet.config.json).",
     )
+    invite = sub.add_parser(
+        "invite",
+        help="Host: issue a per-contributor swarm password (username + derived hash).",
+    )
+    invite.add_argument(
+        "username",
+        help="Contributor's username (anything identifying them — paste into fleet.config.json).",
+    )
     args = parser.parse_args()
 
     if args.mode == "create":
@@ -1260,17 +1267,52 @@ def main() -> int:
         return run_sync()
     if args.mode == "tacit":
         return run_tacit(args.agent_name)
+    if args.mode == "invite":
+        return run_invite(args.username)
 
     print(
         "setup.py is the host-admin tool.\n"
         "  contributors:  edit fleet.config.json, then run "
         "`python scripts/run_fleet.py`.\n"
         "  hosts:         `python setup.py create` to provision a new swarm.\n"
-        "  switch challenge:  `python setup.py switch <challenge>`.\n"
+        "  invite a contributor:  `python setup.py invite <username>`.\n"
+        "  switch challenge:      `python setup.py switch <challenge>`.\n"
         "  edit tacit knowledge:  `python setup.py tacit [<agent-name>]`.",
         file=sys.stderr,
     )
     return 1
+
+
+def run_invite(username: str) -> int:
+    """Issue a per-contributor swarm password by computing
+    sha256(username + ':' + base_password). Prints the username + derived
+    hash for the host to share out-of-band with the contributor."""
+    import hashlib
+    username = (username or "").strip()
+    if not username:
+        print("invite: username must be non-empty", file=sys.stderr)
+        return 1
+    admin = read_swarm_admin()
+    base = (admin.get("swarm_password") or "").strip()
+    if not base:
+        print(
+            "invite: no swarm_password in swarm.admin.json — "
+            "run `setup.py create` first (host machine only).",
+            file=sys.stderr,
+        )
+        return 1
+    derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
+    server_url = admin.get("server_url") or read_swarm_cache().get("server_url") or "<paste server URL>"
+    print()
+    print(f"  Contributor:    {username}")
+    print(f"  Server URL:     {server_url}")
+    print(f"  swarm_password: {derived}")
+    print()
+    print("  Share the three values above with the contributor.")
+    print("  They paste server_url, username, and swarm_password into")
+    print("  their fleet.config.json, then run `python scripts/run_fleet.py`.")
+    print()
+    return 0
 
 
 if __name__ == "__main__":

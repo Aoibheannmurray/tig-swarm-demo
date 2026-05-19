@@ -62,7 +62,7 @@ _RESET = "\033[0m"
 # ── Config ─────────────────────────────────────────────────────────
 
 
-def _load_fleet() -> tuple[str, str, list[dict]]:
+def _load_fleet() -> tuple[str, str, str, list[dict]]:
     if not FLEET_CONFIG_PATH.exists():
         sys.exit(
             f"fleet.config.json not found at {FLEET_CONFIG_PATH}.\n"
@@ -80,12 +80,20 @@ def _load_fleet() -> tuple[str, str, list[dict]]:
             "Add it (the host who ran `setup.py create` has the URL)."
         )
 
+    username = (data.get("username") or "").strip()
+    if not username:
+        sys.exit(
+            "fleet.config.json is missing top-level `username`. "
+            "Ask the host to run `python setup.py invite <your-name>` and "
+            "paste the username + swarm_password they send you."
+        )
+
     swarm_password = (data.get("swarm_password") or "").strip()
     if not swarm_password:
         sys.exit(
             "fleet.config.json is missing top-level `swarm_password`. "
-            "Add it (the host who ran `setup.py create` has the password "
-            "they share alongside the URL)."
+            "Ask the host to run `python setup.py invite <your-name>` — "
+            "they'll send you a derived password to paste here."
         )
 
     names: list[str] = []
@@ -96,7 +104,7 @@ def _load_fleet() -> tuple[str, str, list[dict]]:
         names.append(name)
     if len(set(names)) != len(names):
         sys.exit("fleet.config.json has duplicate agent names.")
-    return server_url, swarm_password, agents
+    return server_url, username, swarm_password, agents
 
 
 # ── Git worktree helpers ───────────────────────────────────────────
@@ -147,7 +155,8 @@ def _ensure_worktree(name: str) -> Path:
 
 
 def _seed_worktree(
-    path: Path, agent: dict, fleet_server_url: str, fleet_swarm_password: str,
+    path: Path, agent: dict,
+    fleet_server_url: str, fleet_username: str, fleet_swarm_password: str,
 ) -> None:
     """Materialize one fleet entry into a worktree's agent.config.json and
     seed .swarm-cache.json from the host clone if one is present.
@@ -182,10 +191,11 @@ def _seed_worktree(
     # reads "c3_hardware" first and falls back to "hardware", so normalize.
     if "hardware" in agent and "c3_hardware" not in agent:
         merged["c3_hardware"] = agent["hardware"]
-    # Materialize identity + server_url + swarm_password so run_loop.py can
+    # Materialize identity + server_url + credentials so run_loop.py can
     # read everything it needs from agent.config.json alone.
     merged["name"] = agent["name"]
     merged["server_url"] = fleet_server_url
+    merged["username"] = fleet_username
     merged["swarm_password"] = fleet_swarm_password
     if agent.get("tacit_knowledge"):
         merged["tacit_knowledge"] = agent["tacit_knowledge"]
@@ -286,6 +296,7 @@ def cmd_run(
     agents: list[dict],
     only: list[str] | None,
     server_url: str,
+    username: str,
     swarm_password: str,
 ) -> int:
     if only:
@@ -306,7 +317,7 @@ def cmd_run(
         name = agent["name"]
         print(f"  [fleet] preparing {name}…")
         path = _ensure_worktree(name)
-        _seed_worktree(path, agent, server_url, swarm_password)
+        _seed_worktree(path, agent, server_url, username, swarm_password)
 
         env = os.environ.copy()
         target, value = key_envs[i]
@@ -387,12 +398,12 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    server_url, swarm_password, agents = _load_fleet()
+    server_url, username, swarm_password, agents = _load_fleet()
     if args.list:
         return cmd_list(agents)
     if args.clean:
         return cmd_clean(agents)
-    return cmd_run(agents, args.only, server_url, swarm_password)
+    return cmd_run(agents, args.only, server_url, username, swarm_password)
 
 
 if __name__ == "__main__":

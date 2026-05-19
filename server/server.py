@@ -207,15 +207,40 @@ async def verify_admin(req: AdminAuth) -> None:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
 
+def _derive_user_password(username: str, base_password: str) -> str:
+    """Per-contributor password = sha256(username + ':' + base_password).
+
+    The server stores only the base password (config.swarm_password); the
+    host computes each contributor's derived password via
+    `python setup.py invite <username>` and shares it with them out-of-band.
+    Same shape `hashlib` digest used by the invite command, so the two
+    must match exactly.
+    """
+    import hashlib
+    return hashlib.sha256(f"{username}:{base_password}".encode()).hexdigest()
+
+
 async def verify_swarm_password(
+    x_username: str | None = Header(default=None, alias="X-Username"),
     x_swarm_password: str | None = Header(default=None, alias="X-Swarm-Password"),
-) -> None:
-    # Gates /api/agents/register only — the "join" endpoint. Subsequent
-    # writes use a per-agent token issued at register (see verify_agent_token).
+) -> str:
+    """Gates /api/agents/register (the join endpoint). Returns the
+    contributor's username so the handler can stamp it on the new agent.
+    Subsequent writes use the per-agent token (see verify_agent_token).
+    """
+    if not x_username or not x_swarm_password:
+        raise HTTPException(
+            status_code=403,
+            detail="Missing X-Username or X-Swarm-Password header",
+        )
     config = await get_config_cached()
-    expected = config.get("swarm_password")
-    if not expected or x_swarm_password != expected:
-        raise HTTPException(status_code=403, detail="Invalid swarm password")
+    base = config.get("swarm_password")
+    if not base:
+        raise HTTPException(status_code=403, detail="Swarm not configured")
+    expected = _derive_user_password(x_username, base)
+    if not secrets.compare_digest(x_swarm_password, expected):
+        raise HTTPException(status_code=403, detail="Invalid credentials")
+    return x_username
 
 
 async def verify_agent_token(
@@ -400,8 +425,11 @@ async def periodic_stats():
 
 # ── Agent endpoints ──
 
-@app.post("/api/agents/register", response_model=AgentResponse, dependencies=[Depends(verify_swarm_password)])
-async def register_agent(req: RegisterRequest):
+@app.post("/api/agents/register", response_model=AgentResponse)
+async def register_agent(
+    req: RegisterRequest,
+    contributor_username: str = Depends(verify_swarm_password),
+):
     agent_id = new_id()
     agent_token = secrets.token_urlsafe(24)
     timestamp = now()
@@ -425,9 +453,9 @@ async def register_agent(req: RegisterRequest):
 
     async with db.connect() as conn:
         await conn.execute(
-            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type, token) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type, agent_token),
+            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type, token, contributor_username) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type, agent_token, contributor_username),
         )
         config = await db.get_config(conn)
         # Persist a join event so the dashboard's live feed can replay it

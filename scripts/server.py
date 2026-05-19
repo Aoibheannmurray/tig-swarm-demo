@@ -26,14 +26,18 @@ _NET_ERRORS = (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSEr
 def server_post(
     url: str, payload: dict, timeout: int = 10,
     *,
+    username: str | None = None,
     swarm_password: str | None = None,
     agent_token: str | None = None,
 ) -> dict:
-    # `swarm_password` gates /api/agents/register; `agent_token` gates every
-    # other participant-write endpoint. The two are intentionally separate
-    # headers so a client mixing them up gets a 403 rather than silently
-    # using the wrong credential.
+    # `username` + `swarm_password` gate /api/agents/register (the server
+    # recomputes sha256(username + ':' + base_password) and compares).
+    # `agent_token` gates every other participant-write endpoint. The two
+    # credential shapes are intentionally separate headers so a client
+    # mixing them up gets a 403 rather than silently using the wrong one.
     headers = {"Content-Type": "application/json"}
+    if username:
+        headers["X-Username"] = username
     if swarm_password:
         headers["X-Swarm-Password"] = swarm_password
     if agent_token:
@@ -81,14 +85,15 @@ def register_agent(
     *, provider: str | None = None, model: str | None = None,
     requested_name: str | None = None,
     name: str | None = None,
+    username: str | None = None,
     swarm_password: str | None = None,
 ) -> tuple[str, str, str]:
     """Register an agent. Forwards a dashboard label as `llm_type`.
 
-    Returns (agent_id, agent_name, agent_token). The token is the
-    per-agent secret used on every subsequent write call — caller is
-    responsible for persisting it (run_loop.py writes it into
-    agent.config.json so restarts can resume without rejoining).
+    Sends X-Username + X-Swarm-Password — the server validates that the
+    derived password (sha256(username + ':' + base)) matches the value
+    issued by `setup.py invite`. Returns (agent_id, agent_name,
+    agent_token); the token gates every subsequent write call.
 
     Identity resolution (in order):
       - `requested_name` wins (used on re-registration to keep the same
@@ -107,6 +112,7 @@ def register_agent(
 
     data = server_post(
         f"{server}/api/agents/register", body,
+        username=username,
         swarm_password=swarm_password,
     )
     return data["agent_id"], data["agent_name"], data["agent_token"]

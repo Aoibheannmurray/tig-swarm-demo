@@ -250,6 +250,10 @@ async def init_db() -> None:
         # non-register participant-write endpoint instead of the swarm
         # password (which is only consumed at register).
         await _add_column(db, "agents", "token", "TEXT")
+        # Contributor username stamped at register. Lets the dashboard
+        # group agents by owner. Derived from the X-Username header at
+        # register time; not modifiable after the fact.
+        await _add_column(db, "agents", "contributor_username", "TEXT")
         # Migrations for token tracking columns on existing databases.
         await _add_column(db, "experiments", "input_tokens", "INTEGER DEFAULT 0")
         await _add_column(db, "experiments", "output_tokens", "INTEGER DEFAULT 0")

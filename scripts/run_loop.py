@@ -702,11 +702,13 @@ def main() -> int:
             "worktree, or was agent.config.json hand-edited?"
         )
     swarm_password = (agent_config.get("swarm_password") or "").strip()
-    if not swarm_password:
+    username = (agent_config.get("username") or "").strip()
+    if not swarm_password or not username:
         sys.exit(
-            "No swarm_password in agent.config.json. Add `swarm_password` to "
-            "fleet.config.json (paste the value the host shared with the URL) "
-            "and respawn the fleet."
+            "Missing username or swarm_password in agent.config.json. "
+            "Both are required to register — ask the host to run "
+            "`python setup.py invite <your-name>` and paste both into "
+            "fleet.config.json, then respawn the fleet."
         )
     if args.compute == "c3":
         if shutil.which("c3") is None:
@@ -745,6 +747,7 @@ def main() -> int:
                 server, provider=args.provider, model=model,
                 requested_name=agent_name,
                 name=agent_config.get("name"),
+                username=username,
                 swarm_password=swarm_password,
             )
             print(f"Re-registered as: {agent_name} ({agent_id})")
@@ -754,6 +757,7 @@ def main() -> int:
         agent_id, agent_name, agent_token = register_agent(
             server, provider=args.provider, model=model,
             name=agent_config.get("name"),
+            username=username,
             swarm_password=swarm_password,
         )
         print(f"Registered as: {agent_name} ({agent_id})")
