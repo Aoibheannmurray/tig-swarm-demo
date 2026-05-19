@@ -299,6 +299,169 @@ def _arg_enabled(args: argparse.Namespace | None, name: str) -> bool:
     return bool(getattr(args, name, False)) if args is not None else False
 
 
+# Challenges whose mainnet algorithm format (single mod.rs + optional
+# kernels.cu) matches what the swarm's inactive_algorithms pool expects.
+# Server enforces the same set; host-side it gates the wizard prompt so
+# we don't ask about challenges we can't actually seed.
+SEED_INACTIVE_SUPPORTED: set[str] = {"knapsack", "satisfiability"}
+
+_MAINNET_API = "https://mainnet-api.tig.foundation"
+
+
+def _mainnet_get(url: str, *, timeout: int = 8) -> object:
+    """GET + JSON-decode a mainnet API endpoint.
+
+    Bare `urllib.request.urlopen` ships `Python-urllib/3.X` which the CDN
+    in front of mainnet-api.tig.foundation rejects with HTTP 403, so we
+    set an explicit User-Agent."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "tig-swarm-demo-setup",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def _top_mainnet_algorithm(challenge: str) -> tuple[str, int] | None:
+    """Return `(algorithm_name, adoption_fp)` for the highest-adoption
+    successfully-compiled mainnet algorithm on `challenge`, or None if
+    none qualifies / the API is unreachable.
+
+    `adoption_fp` is the raw 1e16-scaled fixed-point integer the API
+    returns; divide by 1e16 for a percentage."""
+    try:
+        block = _mainnet_get(f"{_MAINNET_API}/get-block")["block"]
+        block_id = block["id"]
+        challenges_resp = _mainnet_get(
+            f"{_MAINNET_API}/get-challenges?block_id={block_id}"
+        )
+        algos_resp = _mainnet_get(
+            f"{_MAINNET_API}/get-algorithms?block_id={block_id}"
+        )
+    except Exception as e:
+        print(f"  mainnet unreachable ({e})")
+        return None
+
+    # challenge_id -> challenge_name. The upstream response carries the
+    # human-readable name under `config.name`.
+    id_to_name: dict[str, str] = {
+        c["id"]: c["config"]["name"] for c in challenges_resp["challenges"]
+    }
+    target_cid = next((cid for cid, name in id_to_name.items() if name == challenge), None)
+    if target_cid is None:
+        return None
+
+    # Only consider algorithms that compiled successfully upstream.
+    compile_ok: dict[str, bool] = {
+        b["algorithm_id"]: bool(b.get("details", {}).get("compile_success"))
+        for b in algos_resp.get("binarys", [])
+    }
+
+    best: tuple[str, int] | None = None
+    for algo in algos_resp["codes"]:
+        if (algo.get("details") or {}).get("challenge_id") != target_cid:
+            continue
+        if not compile_ok.get(algo["id"]):
+            continue
+        try:
+            adoption = int((algo.get("block_data") or {}).get("adoption") or 0)
+        except (TypeError, ValueError):
+            adoption = 0
+        if adoption <= 0:
+            continue
+        name = (algo.get("details") or {}).get("name")
+        if not name:
+            continue
+        if best is None or adoption > best[1]:
+            best = (name, adoption)
+    return best
+
+
+def seed_inactive_pool_from_mainnet(
+    server_url: str, admin_key: str, challenges: set[str],
+) -> None:
+    """For each requested challenge in `SEED_INACTIVE_SUPPORTED`, find the
+    current top-adoption mainnet algorithm, download its source via
+    scripts/download_algorithm.py, and POST it to /api/admin/seed_inactive
+    so the swarm's first stagnation-with-adoption event picks it up.
+
+    Best-effort throughout: network failures, unknown algorithms, and
+    server errors are warned-and-skipped rather than aborting setup."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from download_algorithm import download_algorithm, DownloadError
+    except Exception as e:
+        print(f"  could not import download_algorithm.py: {e}; skipping seed.")
+        return
+
+    targets = sorted(challenges & SEED_INACTIVE_SUPPORTED)
+    if not targets:
+        return
+
+    for ch in targets:
+        top = _top_mainnet_algorithm(ch)
+        if top is None:
+            print(f"  {ch}: no compiled mainnet algorithm found; skipping seed.")
+            continue
+        algo_name, adoption = top
+        print(
+            f"  {ch}: top algorithm '{algo_name}' "
+            f"(adoption {adoption / 1e16:.2f}%); downloading…"
+        )
+        try:
+            staged = download_algorithm(ch, algo_name, force=True)
+        except DownloadError as e:
+            print(f"  {ch}: download of {algo_name} failed ({e}); skipping seed.")
+            continue
+
+        # download_algorithm stages either initial_algorithms/{ch}.rs (single
+        # file) or initial_algorithms/{ch}/ (multi-file). For knapsack and
+        # satisfiability we expect the single-file path; if upstream surprises
+        # us with a directory, skip rather than guessing a flatten strategy.
+        if staged.is_dir():
+            print(
+                f"  {ch}: upstream {algo_name} is multi-file — "
+                f"inactive-pool seeding only supports single-file algorithms; skipping."
+            )
+            continue
+        try:
+            algorithm_code = staged.read_text()
+        except OSError as e:
+            print(f"  {ch}: could not read staged {staged} ({e}); skipping seed.")
+            continue
+        kernel_path = staged.with_suffix(".cu")
+        kernel_code = kernel_path.read_text() if kernel_path.is_file() else None
+
+        payload = {
+            "admin_key": admin_key,
+            "challenge": ch,
+            "algorithm_code": algorithm_code,
+            "kernel_code": kernel_code,
+            "source_label": "tig-foundation",
+        }
+        req = urllib.request.Request(
+            f"{server_url.rstrip('/')}/api/admin/seed_inactive",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = json.load(resp)
+            print(
+                f"  {ch}: seeded inactive pool "
+                f"(inactive_id={body.get('inactive_id')}, source={body.get('source')})"
+            )
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:200]
+            print(f"  {ch}: server rejected seed (HTTP {e.code}: {detail}); skipping.")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"  {ch}: could not reach {server_url} ({e}); skipping seed.")
+
+
 def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
     """POST multi-challenge swarm config to a running server. Best-effort:
     if the server isn't running yet, skip gracefully and tell the user how
@@ -830,6 +993,30 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         )
         use_defaults = use_defaults_ans.strip().lower() not in ("n", "no")
 
+    # Optional: seed the server's inactive_algorithms pool with the current
+    # top-earning TIG mainnet algorithm. Restricted to {knapsack,
+    # satisfiability} because those are the only challenges whose mainnet
+    # algorithm format slots cleanly into the single-file inactive pool.
+    # Resolved here so we honor --yes / --seed-inactive-pool / wizard input,
+    # but the actual fetch + POST is deferred until after the server is up.
+    seedable = SEED_INACTIVE_SUPPORTED & set(challenge_set.keys())
+    seed_inactive_pool = _arg_enabled(args, "seed_inactive_pool")
+    if seedable and not seed_inactive_pool and not yes:
+        ans = prompt(
+            f"Seed the inactive trajectory pool with the current top-earning "
+            f"TIG mainnet algorithm for {', '.join(sorted(seedable))}? [y/N]",
+            default="N",
+        )
+        seed_inactive_pool = ans.strip().lower() in ("y", "yes")
+    if seed_inactive_pool and not seedable:
+        # Host passed the flag on a swarm that doesn't include either
+        # supported challenge — warn rather than silently ignoring.
+        print(
+            "  --seed-inactive-pool requested but neither knapsack nor "
+            "satisfiability is in this swarm; nothing to seed."
+        )
+        seed_inactive_pool = False
+
     initial_algorithms = read_initial_algorithms()
     challenges_cfg = collect_per_challenge_configs(
         initial_algorithms, use_defaults=use_defaults, challenge_set=challenge_set,
@@ -946,6 +1133,10 @@ def run_create(args: argparse.Namespace | None = None) -> int:
 
     print("  pushing swarm config to the server…")
     push_config_to_server(server_url, admin_key, cfg)
+
+    if seed_inactive_pool:
+        print("\nSeeding inactive trajectory pool from TIG mainnet…")
+        seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
 
     print("\nWriting local files…")
     template_files(
@@ -1202,6 +1393,14 @@ def add_create_setup_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--stagnation-limit", type=int, help="Iterations before trajectory reset; 0 disables.")
     parser.add_argument("--hypothesis-recall-threshold", type=int, help="Iterations before prior failed hypotheses are shown.")
     parser.add_argument("--yes", action="store_true", help="Accept defaults for any optional prompts.")
+    parser.add_argument(
+        "--seed-inactive-pool", action="store_true",
+        help=(
+            "After deploy, seed the server's inactive_algorithms pool with the "
+            "current top-earning TIG mainnet algorithm for knapsack and/or "
+            "satisfiability (only these two challenges are supported)."
+        ),
+    )
 
 
 def main() -> int:
