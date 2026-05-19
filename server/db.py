@@ -734,6 +734,34 @@ async def set_active_challenge(conn: aiosqlite.Connection, challenge: str) -> No
     )
 
 
+async def ensure_synthetic_agent(
+    conn: aiosqlite.Connection, name: str, timestamp: str,
+) -> str:
+    """Look up (or create) a synthetic agent row keyed by `name`. Used for
+    pool entries that need an `agent_id` FK but don't originate from a real
+    swarm contributor (e.g. seeds from the TIG mainnet).
+
+    The synthetic row sets `last_heartbeat` to the creation time and never
+    updates it, so it naturally falls outside `active_only=True` queries
+    (leaderboards, inspiration) and won't compete with real agents.
+    """
+    cursor = await conn.execute(
+        "SELECT id FROM agents WHERE name = ?", (name,),
+    )
+    row = await cursor.fetchone()
+    if row:
+        return row["id"]
+    import uuid
+    agent_id = uuid.uuid4().hex[:12]
+    await conn.execute(
+        "INSERT INTO agents "
+        "  (id, name, registered_at, last_heartbeat, status, llm_type) "
+        "VALUES (?, ?, ?, ?, 'idle', ?)",
+        (agent_id, name, timestamp, timestamp, "tig-mainnet-seed"),
+    )
+    return agent_id
+
+
 async def deposit_inactive(
     conn: aiosqlite.Connection,
     agent_id: str,

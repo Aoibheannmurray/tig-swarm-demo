@@ -67,6 +67,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import math
@@ -325,26 +326,82 @@ def _docker_image_for(cfg: dict) -> tuple[str, str]:
     return "tig-swarm-cpu", "Dockerfile.cpu"
 
 
-def _check_docker_image(image: str, dockerfile: str) -> None:
-    """Verify a Docker image exists locally, or exit with a clear message."""
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
+def _daemon_running() -> bool:
+    return subprocess.run(
+        ["docker", "info"], capture_output=True
+    ).returncode == 0
+
+
+def _ensure_docker_daemon() -> None:
+    """Ensure the Docker daemon is reachable, launching the app if not."""
+    if _daemon_running():
+        return
+
+    print("Docker daemon not running — attempting to start…", file=sys.stderr)
+    if sys.platform == "darwin":
+        launched = any(
+            subprocess.run(["open", "-a", app], capture_output=True).returncode == 0
+            for app in ("Docker", "OrbStack")
+        )
+        if not launched:
+            print(
+                "error: could not launch Docker Desktop or OrbStack — start it manually.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    elif sys.platform.startswith("linux"):
+        # Best-effort: Docker Desktop on Linux registers a user-level service.
+        # System dockerd usually needs sudo, which we don't have here.
+        subprocess.run(
+            ["systemctl", "--user", "start", "docker-desktop"],
+            capture_output=True,
+        )
+    else:
         print(
-            f"error: Docker image '{image}' not found.\n"
-            f"Build it first:\n\n"
-            f"  docker build -f {dockerfile} -t {image} .\n",
+            f"error: don't know how to auto-start Docker on {sys.platform} — start it manually.",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        if _daemon_running():
+            print("Docker daemon is ready.", file=sys.stderr)
+            return
+        time.sleep(2)
+    print(
+        "error: Docker daemon did not become ready within 90s — start it manually.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _ensure_docker_image(image: str, dockerfile: str) -> None:
+    """Ensure the local Docker image exists, building it if missing."""
+    if subprocess.run(
+        ["docker", "image", "inspect", image], capture_output=True
+    ).returncode == 0:
+        return
+    print(
+        f"Docker image '{image}' not found — building from {dockerfile}…",
+        file=sys.stderr,
+    )
+    build = subprocess.run(
+        ["docker", "build", "-f", dockerfile, "-t", image, str(ROOT_DIR)],
+    )
+    if build.returncode != 0:
+        print(
+            f"error: docker build failed (exit {build.returncode}).",
+            file=sys.stderr,
+        )
+        sys.exit(build.returncode)
 
 
 def _reexec_in_docker(cfg: dict) -> int:
     """Re-launch benchmark.py inside the appropriate Docker container."""
     image, dockerfile = _docker_image_for(cfg)
-    _check_docker_image(image, dockerfile)
+    _ensure_docker_daemon()
+    _ensure_docker_image(image, dockerfile)
 
     gpu_flags = ["--gpus", "all"] if is_gpu_challenge(cfg) else []
     env_flags = ["-e", "TIG_IN_DOCKER=1"]

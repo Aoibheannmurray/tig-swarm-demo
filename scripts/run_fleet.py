@@ -152,7 +152,17 @@ def _seed_worktree(path: Path, agent: dict, fleet_server_url: str) -> None:
     root_cache = ROOT / ".swarm-cache.json"
     wt_cache = path / ".swarm-cache.json"
     if root_cache.exists() and not wt_cache.exists():
-        shutil.copy2(root_cache, wt_cache)
+        # Only seed when the root cache mirrors the fleet's current server.
+        # Otherwise it's a leftover from a prior swarm and would feed a stale
+        # server_url straight into setup.py sync. A skipped seed just means
+        # benchmark.py waits one extra iteration for the first sync to land.
+        try:
+            cached = json.loads(root_cache.read_text())
+            cached_url = (cached.get("server_url") or "").rstrip("/")
+        except (json.JSONDecodeError, OSError):
+            cached_url = ""
+        if cached_url and cached_url == fleet_server_url.rstrip("/"):
+            shutil.copy2(root_cache, wt_cache)
 
     wt_agent = path / "agent.config.json"
     existing: dict = {}
