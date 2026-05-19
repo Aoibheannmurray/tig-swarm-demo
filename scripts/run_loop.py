@@ -769,6 +769,16 @@ def main() -> int:
     })
     write_agent_config(updated_agent_config)
 
+    # Refresh .swarm-cache.json + CHALLENGE.md against the live server before
+    # the start-up banner prints `Challenge: ...`. Without this, a worktree
+    # whose cache predates a host-side `setup.py switch` would announce the
+    # old challenge until the first iteration's sync runs — confusing to read
+    # and easy to mis-trust. The per-iteration sync below still handles
+    # mid-run challenge switches.
+    print("  [SYNC] Syncing challenge with server…")
+    sync_challenge()
+    config = load_config()
+    config["log_prompts"] = log_prompts
     challenge_md = read_challenge_md()
 
     # Agentic mode (claude-code-agentic): tooled headless Claude Code inside a
