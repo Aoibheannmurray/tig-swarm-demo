@@ -34,6 +34,29 @@ def _resolve_server_url() -> str:
 SERVER = _resolve_server_url()
 
 
+def _resolve_agent_token() -> str:
+    """Read the agent token from agent.config.json. The token is persisted
+    by run_loop.py after the first successful /api/agents/register; gates
+    every non-register write. publish.py refuses to run without it because
+    /api/iterations requires X-Agent-Token."""
+    cfg_path = ROOT / "agent.config.json"
+    if cfg_path.exists():
+        try:
+            tok = (json.loads(cfg_path.read_text()).get("agent_token") or "").strip()
+            if tok:
+                return tok
+        except Exception:
+            pass
+    sys.exit(
+        "publish.py: agent_token missing from agent.config.json. "
+        "Run `python scripts/run_loop.py` once first so the agent registers "
+        "with the swarm and the token gets persisted."
+    )
+
+
+AGENT_TOKEN = _resolve_agent_token()
+
+
 def _resolve_algo_path() -> tuple[Path, Path | None]:
     """Determine the active challenge's algorithm and optional kernel file
     from .swarm-cache.json. Returns (algorithm_path, kernel_path_or_None)."""
@@ -71,7 +94,7 @@ def main():
     # collision), publish continues — the user can fix the name later.
     try:
         from sync_identity import sync_identity
-        sync_identity(SERVER, agent_id)
+        sync_identity(SERVER, agent_id, agent_token=AGENT_TOKEN)
     except Exception as e:
         print(f"[publish] identity sync skipped: {e}", file=sys.stderr)
 
@@ -121,7 +144,10 @@ def main():
     req = urllib.request.Request(
         f"{SERVER}/api/iterations",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "X-Agent-Token": AGENT_TOKEN,
+        },
         method="POST",
     )
 

@@ -61,13 +61,33 @@ def _read_contributor_name() -> Optional[str]:
     return name or None
 
 
-def _post_rename(server: str, agent_id: str, new_name: str) -> bool:
+def _read_agent_token() -> Optional[str]:
+    """Read the agent token from agent.config.json. The token is persisted
+    by run_loop.py after the first successful /api/agents/register call;
+    it's the per-agent secret that gates every non-register write."""
+    cfg_path = ROOT / "agent.config.json"
+    if not cfg_path.exists():
+        return None
+    try:
+        tok = (json.loads(cfg_path.read_text()).get("agent_token") or "").strip()
+    except Exception:
+        return None
+    return tok or None
+
+
+def _post_rename(
+    server: str, agent_id: str, new_name: str,
+    *, agent_token: Optional[str] = None,
+) -> bool:
     """POST /api/agents/{id}/rename. Returns True on success, False on
     non-fatal failure (e.g. 409 collision). Raises on transport errors."""
+    headers = {"Content-Type": "application/json"}
+    if agent_token:
+        headers["X-Agent-Token"] = agent_token
     req = urllib.request.Request(
         f"{server}/api/agents/{agent_id}/rename",
         data=json.dumps({"agent_name": new_name}).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -89,6 +109,7 @@ def sync_identity_with_state(
     state: dict,
     *,
     desired_name: Optional[str] = None,
+    agent_token: Optional[str] = None,
 ) -> Optional[str]:
     """Reconcile server's agents.name (from a /api/state response) with the
     local contributor_name. Returns the new name if a rename happened,
@@ -105,12 +126,15 @@ def sync_identity_with_state(
         f"{desired_name!r} — POSTing rename.",
         file=sys.stderr,
     )
-    if _post_rename(server, agent_id, desired_name):
+    if _post_rename(server, agent_id, desired_name, agent_token=agent_token):
         return desired_name
     return None
 
 
-def sync_identity(server: str, agent_id: str) -> Optional[str]:
+def sync_identity(
+    server: str, agent_id: str,
+    *, agent_token: Optional[str] = None,
+) -> Optional[str]:
     """Standalone entry point: GET /api/state, compare, POST rename if
     needed. Returns the new name if a rename happened, None otherwise."""
     desired = _read_contributor_name()
@@ -123,7 +147,10 @@ def sync_identity(server: str, agent_id: str) -> Optional[str]:
     except Exception as e:
         print(f"[sync_identity] state fetch failed: {e}", file=sys.stderr)
         return None
-    return sync_identity_with_state(server, agent_id, state, desired_name=desired)
+    return sync_identity_with_state(
+        server, agent_id, state,
+        desired_name=desired, agent_token=agent_token,
+    )
 
 
 def main() -> int:
@@ -132,7 +159,7 @@ def main() -> int:
         return 1
     agent_id = sys.argv[1]
     server = _resolve_server_url()
-    renamed = sync_identity(server, agent_id)
+    renamed = sync_identity(server, agent_id, agent_token=_read_agent_token())
     if renamed:
         print(f"renamed to {renamed!r}")
     else:

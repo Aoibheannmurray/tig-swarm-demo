@@ -211,7 +211,7 @@ def template_files(
 #   .swarm-cache.json — machine-managed mirror of /api/swarm_config
 #   fleet.config.json — user-edited list of agents to spawn
 _ADMIN_FIELDS = (
-    "admin_key", "owner_name", "swarm_name", "challenges",
+    "admin_key", "swarm_password", "owner_name", "swarm_name", "challenges",
     "stagnation_threshold", "stagnation_limit",
     "hypothesis_recall_threshold",
 )
@@ -876,6 +876,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         )
 
     admin_key = secrets.token_urlsafe(16)
+    swarm_password = secrets.token_urlsafe(16)
 
     railway_dir = ROOT / ".railway"
     if railway_dir.exists():
@@ -890,7 +891,11 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print(f"  service: {service.get('name', swarm_name)}")
 
     print("  setting environment variables…")
-    _railway_set_variables(swarm_name, {"DATA_DIR": "/data", "ADMIN_KEY": admin_key})
+    _railway_set_variables(swarm_name, {
+        "DATA_DIR": "/data",
+        "ADMIN_KEY": admin_key,
+        "SWARM_PASSWORD": swarm_password,
+    })
 
     print("  attaching /data volume…")
     _railway_add_volume(swarm_name, "/data")
@@ -925,6 +930,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         "owner_name": os.environ.get("USER", "owner"),
         "server_url": server_url,
         "admin_key": admin_key,
+        "swarm_password": swarm_password,
         "role": "owner",
         "swarm_type": swarm_type,
         "active_challenge": active_challenge,
@@ -957,7 +963,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     write_challenge_md(active_challenge)
     write_swarm_admin(cfg)
     write_swarm_cache(cfg)
-    _scaffold_fleet_config(server_url)
+    _scaffold_fleet_config(server_url, swarm_password)
     repo_url = "<this-repo-url>"
     try:
         result = sp.run(
@@ -984,9 +990,12 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print("\n  Share this with anyone who wants to contribute:\n")
     print(f"    git clone {repo_url}")
     print(f"    cd {repo_dir_hint}")
-    print("    # edit fleet.config.json — point server_url at:")
-    print(f"    #   {server_url}")
+    print("    # edit fleet.config.json — set:")
+    print(f"    #   server_url      = {server_url}")
+    print(f"    #   swarm_password  = {swarm_password}")
     print("    python scripts/run_fleet.py")
+    print("\n  Swarm password (share with contributors — gates participant writes):")
+    print(f"    {swarm_password}")
     print("\n  Admin key (keep private — gates /api/admin/*):")
     print(f"    {admin_key}")
     print("\n  Your own clone has been scaffolded with fleet.config.json —")
@@ -996,7 +1005,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     return 0
 
 
-def _scaffold_fleet_config(server_url: str) -> None:
+def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:
     """After `setup.py create`, leave the host with a working fleet.config.json
     so they can immediately participate via `python scripts/run_fleet.py`.
     Skipped if a fleet.config.json already exists — never clobbers user edits."""
@@ -1006,6 +1015,7 @@ def _scaffold_fleet_config(server_url: str) -> None:
         return
     starter = {
         "server_url": server_url,
+        "swarm_password": swarm_password,
         "agents": [
             {
                 "name": os.environ.get("USER", "agent-1"),

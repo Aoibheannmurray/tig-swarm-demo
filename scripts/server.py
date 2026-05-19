@@ -23,10 +23,24 @@ _NET_ERRORS = (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSEr
 # ── HTTP helpers ───────────────────────────────────────────────────
 
 
-def server_post(url: str, payload: dict, timeout: int = 10) -> dict:
+def server_post(
+    url: str, payload: dict, timeout: int = 10,
+    *,
+    swarm_password: str | None = None,
+    agent_token: str | None = None,
+) -> dict:
+    # `swarm_password` gates /api/agents/register; `agent_token` gates every
+    # other participant-write endpoint. The two are intentionally separate
+    # headers so a client mixing them up gets a 403 rather than silently
+    # using the wrong credential.
+    headers = {"Content-Type": "application/json"}
+    if swarm_password:
+        headers["X-Swarm-Password"] = swarm_password
+    if agent_token:
+        headers["X-Agent-Token"] = agent_token
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers=headers, method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
@@ -67,8 +81,14 @@ def register_agent(
     *, provider: str | None = None, model: str | None = None,
     requested_name: str | None = None,
     name: str | None = None,
-) -> tuple[str, str]:
+    swarm_password: str | None = None,
+) -> tuple[str, str, str]:
     """Register an agent. Forwards a dashboard label as `llm_type`.
+
+    Returns (agent_id, agent_name, agent_token). The token is the
+    per-agent secret used on every subsequent write call — caller is
+    responsible for persisting it (run_loop.py writes it into
+    agent.config.json so restarts can resume without rejoining).
 
     Identity resolution (in order):
       - `requested_name` wins (used on re-registration to keep the same
@@ -85,8 +105,11 @@ def register_agent(
 
     body["llm_type"] = derive_llm_label(provider, model)
 
-    data = server_post(f"{server}/api/agents/register", body)
-    return data["agent_id"], data["agent_name"]
+    data = server_post(
+        f"{server}/api/agents/register", body,
+        swarm_password=swarm_password,
+    )
+    return data["agent_id"], data["agent_name"], data["agent_token"]
 
 
 def get_state(server: str, agent_id: str) -> dict:
@@ -108,22 +131,29 @@ def agent_exists(server: str, agent_id: str) -> bool:
     return (state.get("agent_name") or "").strip() != "unknown"
 
 
-def send_heartbeat(server: str, agent_id: str) -> None:
+def send_heartbeat(
+    server: str, agent_id: str,
+    *, agent_token: str | None = None,
+) -> None:
     try:
         server_post(
             f"{server}/api/agents/{urllib.parse.quote(agent_id)}/heartbeat",
             {"status": "working"}, timeout=5,
+            agent_token=agent_token,
         )
     except _NET_ERRORS as e:
         print(f"  [WARN] heartbeat failed: {e}", file=sys.stderr)
 
 
-def post_message(server: str, agent_name: str, agent_id: str, content: str) -> None:
+def post_message(
+    server: str, agent_name: str, agent_id: str, content: str,
+    *, agent_token: str | None = None,
+) -> None:
     try:
         server_post(f"{server}/api/messages", {
             "agent_name": agent_name, "agent_id": agent_id,
             "content": content, "msg_type": "agent",
-        }, timeout=5)
+        }, timeout=5, agent_token=agent_token)
     except _NET_ERRORS as e:
         print(f"  [WARN] post_message failed: {e}", file=sys.stderr)
 
@@ -135,6 +165,7 @@ def publish_results(
     server: str, agent_id: str, bench: dict, mutation: dict, config: dict,
     *, input_tokens: int = 0, output_tokens: int = 0,
     estimated_cost: float = 0.0,
+    agent_token: str | None = None,
 ) -> dict:
     code = read_algorithm(config)
     kernel_code = read_optional(kernel_path(config))
@@ -158,4 +189,7 @@ def publish_results(
         payload["kernel_code"] = kernel_code
     if bench.get("challenge_metrics") is not None:
         payload["challenge_metrics"] = bench["challenge_metrics"]
-    return server_post(f"{server}/api/iterations", payload)
+    return server_post(
+        f"{server}/api/iterations", payload,
+        agent_token=agent_token,
+    )

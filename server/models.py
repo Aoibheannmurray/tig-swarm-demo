@@ -150,6 +150,7 @@ class MessageCreate(BaseModel):
 class AgentResponse(BaseModel):
     agent_id: str
     agent_name: str
+    agent_token: str
     registered_at: str
     config: dict
 
