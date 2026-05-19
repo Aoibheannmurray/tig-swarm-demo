@@ -91,16 +91,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("solution-score")!;
-    this.scoreDeltaEl = document.getElementById("solution-score-delta")!;
     this.routeDistanceEl = document.getElementById("solution-route-distance")!;
-    this.instanceLabelEl = document.getElementById("solution-instance-label")!;
-    this.navEl = document.getElementById("solution-nav")!;
-    this.agentNameEl = document.getElementById("solution-agent-name")!;
-    this.historyNavEl = document.getElementById("solution-history-nav")!;
-    this.historyLabelEl = document.getElementById("solution-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("solution-hist-live")!;
-    this.emptyStateEl = document.getElementById("solution-empty-state")!;
 
     this.svg = select("#solution-svg");
     this.svg

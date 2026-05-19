@@ -6,6 +6,7 @@ import { StrategyLeaderboardPanel } from "./strategy-leaderboard";
 import { ChallengeSelectorPanel } from "../../panels/challenge-selector";
 import { loadSwarmConfig, handleWsEvent as handleSwarmConfigEvent } from "../../lib/swarmConfig";
 import { getViewedChallenge, onViewedChallengeChange } from "../../lib/viewedChallenge";
+import { isMessageForChallenge } from "../../lib/messageScope";
 import type { WSMessage } from "../../types";
 
 const { wsUrl, apiUrl } = getDashboardUrls();
@@ -23,21 +24,8 @@ const strategyLb = new StrategyLeaderboardPanel();
 const strategyMount = document.getElementById("strategy-lb-mount");
 if (strategyMount) strategyLb.init(strategyMount);
 
-const CHALLENGE_SCOPED: Record<string, true> = {
-  experiment_published: true,
-  hypothesis_proposed: true,
-  new_global_best: true,
-  leaderboard_update: true,
-  chat_message: true,
-  trajectory_reset: true,
-  hypothesis_status_changed: true,
-};
-
 function handleMessage(msg: WSMessage) {
-  const m = msg as any;
-  if (CHALLENGE_SCOPED[m.type] && m.challenge && m.challenge !== getViewedChallenge()) {
-    return;
-  }
+  if (!isMessageForChallenge(msg, getViewedChallenge())) return;
   handleSwarmConfigEvent(apiUrl, msg);
   challengeSelector.handleMessage(msg);
   ideasTree.handleMessage(msg);
@@ -46,8 +34,8 @@ function handleMessage(msg: WSMessage) {
 
 onViewedChallengeChange(() => {
   // Reset and re-load for the new challenge.
-  ideasTree.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
-  strategyLb.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
+  ideasTree.handleMessage({ type: "reset", timestamp: new Date().toISOString() });
+  strategyLb.handleMessage({ type: "reset", timestamp: new Date().toISOString() });
   void loadInitialState(apiUrl);
 });
 

@@ -651,6 +651,42 @@ def resolve_api_key(provider: str, api_key: str | None) -> str:
     return key
 
 
+def preflight_llm_check(
+    provider: str, model: str, api_key: str, api_base: str | None,
+) -> None:
+    """Verify the LLM endpoint is reachable with the provided key/model BEFORE
+    we register the agent on the swarm.
+
+    Without this, an agent with a bad API key (revoked, misspelt env var,
+    wrong provider for the key, model not enabled on the account, hard rate
+    limit) registers fine, broadcasts agent_joined to every dashboard, then
+    fails every iteration in a tight retry loop. The dashboard ends up
+    showing ghost agents that have never published anything — confusing for
+    swarm hosts trying to read the AGENTS counter against the leaderboard.
+
+    Skipped for providers that don't go through call_llm (claude-code uses
+    a CLI + subscription auth; the agentic providers run their backend's
+    CLI directly and surface auth errors at first invocation)."""
+    if provider in ("claude-code", "claude-code-agentic", "codex-agentic"):
+        return
+    print(f"  [LLM] Pre-flight check via {provider}/{model}…")
+    try:
+        call_llm(
+            provider, model, api_key,
+            "You are a smoke test responder.",
+            "Reply with the single word OK.",
+            api_base,
+        )
+    except Exception as e:
+        sys.exit(
+            f"LLM pre-flight failed for {provider}/{model}: {e}\n"
+            f"Fix the API key / model / provider settings and try again. "
+            f"The agent has NOT been registered, so nothing was posted to "
+            f"the swarm dashboard."
+        )
+    print("  [LLM] Pre-flight OK")
+
+
 # ── Main loop ──────────────────────────────────────────────────────
 
 
@@ -713,6 +749,11 @@ def main() -> int:
     if args.compute == "c3":
         if shutil.which("c3") is None:
             sys.exit("c3 CLI not found. Install it from https://docs.cthree.cloud/.")
+
+    # Pre-flight the LLM BEFORE touching the swarm. If this fails, the script
+    # exits without calling register_agent — no agent_joined broadcast, no
+    # phantom row in the dashboard's AGENTS counter.
+    preflight_llm_check(args.provider, model, api_key, args.api_base)
 
     # Register or resume. agent.config.json is local-only, so it is safe to
     # persist the swarm agent id + token there for automatic restarts.
@@ -790,6 +831,16 @@ def main() -> int:
     })
     write_agent_config(updated_agent_config)
 
+    # Refresh .swarm-cache.json + CHALLENGE.md against the live server before
+    # the start-up banner prints `Challenge: ...`. Without this, a worktree
+    # whose cache predates a host-side `setup.py switch` would announce the
+    # old challenge until the first iteration's sync runs — confusing to read
+    # and easy to mis-trust. The per-iteration sync below still handles
+    # mid-run challenge switches.
+    print("  [SYNC] Syncing challenge with server…")
+    sync_challenge()
+    config = load_config()
+    config["log_prompts"] = log_prompts
     challenge_md = read_challenge_md()
 
     # Agentic mode (claude-code-agentic): tooled headless Claude Code inside a
@@ -914,9 +965,9 @@ def main() -> int:
                 print("  [AGENTIC] Agent left no algorithm file — restoring best")
                 if best_code:
                     files.write(best_code, best_kernel)
-                post_message(server, agent_name, agent_id,
-                             f"[{tag}] {title} — agent produced no code",
-                             agent_token=agent_token)
+                # Local-only failure: don't broadcast to the swarm feed.
+                # A backend that consistently produces no code would otherwise
+                # spam every dashboard viewer once per iteration.
                 continue
 
             violation = validate_code(code)
@@ -924,9 +975,6 @@ def main() -> int:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
                 if best_code:
                     files.write(best_code, best_kernel)
-                post_message(server, agent_name, agent_id,
-                             f"[{tag}] {title} — validation failed: {violation}",
-                             agent_token=agent_token)
                 continue
 
             # Copy the worktree's edited code into the main checkout so the
@@ -947,9 +995,6 @@ def main() -> int:
                 print(f"  [BENCH] Restoring previous code and continuing")
                 if best_code:
                     files.write(best_code, best_kernel)
-                post_message(server, agent_name, agent_id,
-                             f"[{tag}] {title} — benchmark failed (build error?)",
-                             agent_token=agent_token)
                 continue
 
             track_scores = bench.get("track_scores", {})
@@ -987,10 +1032,13 @@ def main() -> int:
                 iter_input_tokens += hyp_usage["input_tokens"]
                 iter_output_tokens += hyp_usage["output_tokens"]
             except Exception as e:
+                # Local-only: LLM transport errors (rate limit, out of tokens,
+                # provider 5xx) used to broadcast a chat message to the swarm
+                # feed every time. That spammed every dashboard viewer when
+                # an agent exhausted quota and entered a fast retry loop.
+                # The local print + heartbeat absence is enough signal for
+                # the contributor; the swarm doesn't need to hear about it.
                 print(f"  [LLM] HYPOTHESIS FAILED: {e}")
-                post_message(server, agent_name, agent_id,
-                             f"LLM call failed: {type(e).__name__}",
-                             agent_token=agent_token)
                 time.sleep(_ITERATION_BACKOFF_SECS)
                 continue
 
@@ -1052,9 +1100,6 @@ def main() -> int:
                 print(f"  [BENCH] Restoring previous code and continuing")
                 if best_code:
                     files.write(best_code, best_kernel)
-                post_message(server, agent_name, agent_id,
-                             f"[{tag}] {title} — benchmark failed (build error?)",
-                             agent_token=agent_token)
                 continue
 
             track_scores = bench.get("track_scores", {})
@@ -1080,9 +1125,7 @@ def main() -> int:
                 code_changed = code_changed or rt_changed
 
             if bench is None:
-                post_message(server, agent_name, agent_id,
-                             f"[{tag}] {title} — benchmark failed after runtime fix",
-                             agent_token=agent_token)
+                print(f"  [BENCH] Benchmark failed after runtime fix — skipping iteration")
                 continue
 
             # ── Re-describe hypothesis if code changed ─────────

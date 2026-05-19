@@ -50,7 +50,7 @@ function handleMessage(msg: WSMessage) {
 }
 
 onViewedChallengeChange((c) => {
-  const resetMsg = { type: "reset", timestamp: new Date().toISOString() } as any;
+  const resetMsg: WSMessage = { type: "reset", timestamp: new Date().toISOString() };
   panel.handleMessage(resetMsg);
   inspirationPanel.handleMessage(resetMsg);
   // Each panel's setChallenge clears its rendered state and triggers a

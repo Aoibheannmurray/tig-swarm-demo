@@ -145,19 +145,10 @@ export class KnapsackPanel extends DisplayPanelBase<AllKnapsackData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("knapsack-score")!;
-    this.scoreDeltaEl = document.getElementById("knapsack-score-delta")!;
     this.valueEl = document.getElementById("knapsack-value")!;
     this.itemsEl = document.getElementById("knapsack-items")!;
     this.legendMinEl = document.getElementById("knapsack-legend-min")!;
     this.legendMaxEl = document.getElementById("knapsack-legend-max")!;
-    this.instanceLabelEl = document.getElementById("knapsack-instance-label")!;
-    this.navEl = document.getElementById("knapsack-nav")!;
-    this.agentNameEl = document.getElementById("knapsack-agent-name")!;
-    this.historyNavEl = document.getElementById("knapsack-history-nav")!;
-    this.historyLabelEl = document.getElementById("knapsack-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("knapsack-hist-live")!;
-    this.emptyStateEl = document.getElementById("knapsack-empty-state")!;
 
     this.sidebarSvg = select("#knapsack-sidebar-svg") as any;
     this.matrixSvg = select("#knapsack-matrix-svg") as any;

@@ -97,16 +97,7 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("gantt-score")!;
-    this.scoreDeltaEl = document.getElementById("gantt-score-delta")!;
     this.makespanEl = document.getElementById("gantt-makespan")!;
-    this.instanceLabelEl = document.getElementById("gantt-instance-label")!;
-    this.navEl = document.getElementById("gantt-nav")!;
-    this.agentNameEl = document.getElementById("gantt-agent-name")!;
-    this.historyNavEl = document.getElementById("gantt-history-nav")!;
-    this.historyLabelEl = document.getElementById("gantt-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("gantt-hist-live")!;
-    this.emptyStateEl = document.getElementById("gantt-empty-state")!;
 
     this.svg = select("#gantt-svg") as any;
     this.svg

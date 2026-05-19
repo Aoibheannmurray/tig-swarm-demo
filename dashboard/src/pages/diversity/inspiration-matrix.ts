@@ -45,6 +45,14 @@ export class InspirationMatrixPanel implements Panel {
   }
 
   setChallenge(_c: string) {
+    // Cancel any pending throttled fetch from the previous challenge. Without
+    // this, a timer queued just before the switch fires after the switch and
+    // triggers a redundant fetch (it self-corrects via the getViewedChallenge
+    // check inside fetchAndRender, but the round-trip is still wasted).
+    if (this.throttleTimer) {
+      clearTimeout(this.throttleTimer);
+      this.throttleTimer = null;
+    }
     this.lastFetch = 0;
     this.fetchAndRender();
   }

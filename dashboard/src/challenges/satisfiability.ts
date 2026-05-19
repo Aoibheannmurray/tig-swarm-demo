@@ -94,18 +94,9 @@ export class SatPanel extends DisplayPanelBase<AllSatData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("sat-score")!;
-    this.scoreDeltaEl = document.getElementById("sat-score-delta")!;
     this.satEl = document.getElementById("sat-sat")!;
     this.satLabelEl = document.getElementById("sat-sat-label")!;
     this.varsEl = document.getElementById("sat-vars")!;
-    this.instanceLabelEl = document.getElementById("sat-instance-label")!;
-    this.navEl = document.getElementById("sat-nav")!;
-    this.agentNameEl = document.getElementById("sat-agent-name")!;
-    this.historyNavEl = document.getElementById("sat-history-nav")!;
-    this.historyLabelEl = document.getElementById("sat-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("sat-hist-live")!;
-    this.emptyStateEl = document.getElementById("sat-empty-state")!;
 
     this.svg = select("#sat-svg") as any;
     this.svg
