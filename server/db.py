@@ -528,11 +528,21 @@ async def compute_leaderboard(
 async def get_challenge_total_agents(
     conn: aiosqlite.Connection, challenge: str
 ) -> int:
-    """Count of distinct agents that have ever fetched state for or published
-    on this challenge. Sourced from agent_challenge_state (one row per
-    agent×challenge), which is created lazily on first /api/state hit."""
+    """Count of distinct agents that have actually PUBLISHED at least one
+    experiment on this challenge.
+
+    Was previously sourced from agent_challenge_state, which is created
+    lazily on the first /api/state hit — so any agent that registered,
+    fetched state once, then died (LLM API error before its first publish,
+    bad config, crashed worker) showed up in this count forever. That
+    diverged from compute_leaderboard, which already filters to "agents
+    that have published at least once" — meaning the dashboard's AGENTS
+    counter could read higher than the rows in its own leaderboard.
+
+    Sourcing from experiments fixes that divergence: an agent only counts
+    once it has done useful work."""
     cur = await conn.execute(
-        "SELECT COUNT(*) as c FROM agent_challenge_state WHERE challenge = ?",
+        "SELECT COUNT(DISTINCT agent_id) as c FROM experiments WHERE challenge = ?",
         (challenge,),
     )
     row = await cur.fetchone()
