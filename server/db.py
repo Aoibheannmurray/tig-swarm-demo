@@ -207,6 +207,9 @@ CREATE INDEX IF NOT EXISTS idx_best_history_challenge ON best_history(challenge,
 CREATE INDEX IF NOT EXISTS idx_msg_challenge_created ON messages(challenge, created_at);
 CREATE INDEX IF NOT EXISTS idx_acs_challenge ON agent_challenge_state(challenge);
 CREATE INDEX IF NOT EXISTS idx_acs_active ON agent_challenge_state(challenge, last_active_at);
+-- Covers get_baseline_score: WHERE feasible=1 AND challenge=? ORDER BY created_at ASC LIMIT 1.
+-- Called from periodic_stats per-challenge, /api/state per fetch, /api/iterations per publish.
+CREATE INDEX IF NOT EXISTS idx_exp_baseline ON experiments(challenge, feasible, created_at);
 """
 
 DEFAULT_CONFIG = {
@@ -239,6 +242,12 @@ async def _add_column(db, table: str, column: str, typedef: str) -> None:
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
+        # WAL mode is durable across connections — set once at startup, the
+        # journal_mode persists in the DB file. Lets readers (dashboard WS,
+        # /api/state) proceed concurrently with the single writer instead of
+        # blocking on every commit, which matters as soon as the swarm has
+        # >1 contributor.
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(SCHEMA)
         await db.executescript(SCHEMA_INDEXES)
         await db.commit()
@@ -280,9 +289,22 @@ async def init_db() -> None:
 
 @asynccontextmanager
 async def connect():
-    """Context manager for DB connections — ensures cleanup on error."""
+    """Context manager for DB connections — ensures cleanup on error.
+
+    Per-connection PRAGMAs:
+      - busy_timeout=5000: wait up to 5s for a contended write lock instead
+        of failing immediately with SQLITE_BUSY. Under concurrent publish +
+        periodic_stats load this avoids spurious 500s.
+      - foreign_keys=ON: SQLite ships with FK enforcement OFF by default; the
+        schema declares FKs (agent_bests.agent_id → agents.id, etc.) so we
+        actually enforce them.
+      - journal_mode=WAL is set once globally in init_db() — it's a database-
+        level setting that persists in the file, not per-connection.
+    """
     conn = await aiosqlite.connect(DB_PATH)
     conn.row_factory = aiosqlite.Row
+    await conn.execute("PRAGMA busy_timeout=5000")
+    await conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
     finally:
@@ -899,11 +921,30 @@ async def deactivate_inactive_agent_trajectories(
         (cutoff_ts,),
     )
     rows = [dict(r) for r in await cursor.fetchall()]
+    processed = 0
     for row in rows:
         agent_id = row["agent_id"]
         challenge = row["challenge"]
         traj_id = row["current_trajectory_id"]
         program_id = row["current_program_id"]
+
+        # Compare-and-swap: atomically clear the trajectory pointer ONLY if
+        # the agent is still inactive AND still owns the same trajectory we
+        # saw in the snapshot. Without this guard, a heartbeat or /api/state
+        # call landing between the snapshot SELECT and this UPDATE would
+        # have its trajectory clipped despite the agent being live again.
+        # rowcount == 0 means the agent slipped out from under us; skip
+        # all side-effects for this row.
+        guard = await conn.execute(
+            "UPDATE agent_challenge_state "
+            "SET current_trajectory_id = NULL, current_program_id = NULL "
+            "WHERE agent_id = ? AND challenge = ? "
+            "  AND last_active_at < ? AND current_trajectory_id = ?",
+            (agent_id, challenge, cutoff_ts, traj_id),
+        )
+        if (guard.rowcount or 0) == 0:
+            continue
+        processed += 1
 
         other_live = await (await conn.execute(
             "SELECT 1 FROM agent_challenge_state "
@@ -923,15 +964,7 @@ async def deactivate_inactive_agent_trajectories(
                 kernel_code=best.get("kernel_code"),
             )
             await clear_agent_best(conn, agent_id, challenge)
-
-        await update_agent_challenge_state(
-            conn, agent_id, challenge,
-            set_fields={
-                "current_trajectory_id": None,
-                "current_program_id": None,
-            },
-        )
-    return len(rows)
+    return processed
 
 
 async def reactivate_trajectory(
