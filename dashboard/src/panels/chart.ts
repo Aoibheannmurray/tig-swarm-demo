@@ -462,6 +462,7 @@ export class ChartPanel implements Panel {
     });
 
     const xTicks = xScale.ticks(6);
+    const fmtElapsed = makeElapsedFormatter(latestData + xPad);
     xTicks.forEach((tick) => {
       chartG.append("text")
         .attr("x", xScale(tick))
@@ -470,7 +471,7 @@ export class ChartPanel implements Panel {
         .attr("font-size", `${fs}px`)
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "middle")
-        .text(formatElapsed(tick));
+        .text(fmtElapsed(tick));
     });
   }
 
@@ -713,9 +714,48 @@ function pickEventKind(
   return null;
 }
 
-function formatElapsed(ms: number): string {
-  const totalSec = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
+// Pick a tick-formatter for elapsed-time x-axes based on the total span
+// the axis covers. Returns a closure so every tick is formatted in the
+// same unit family — picking per-tick would mix units (e.g. "59:00" and
+// "1h00m") on one axis and look bad.
+//
+//   span < 1 min   → "Xs"           (e.g. "30s")
+//   span < 1 hour  → "M:SS"         (e.g. "12:30")
+//   span < 1 day   → "Hh Mm" / "Hh" (e.g. "2h30m", "6h")
+//   span ≥ 1 day   → "Dd Hh" / "Dd" (e.g. "1d6h", "3d")
+//
+// Without this, a swarm running for days renders ticks as "4320:00",
+// "4500:00", etc. — minutes-only, requiring the viewer to divide by 1440
+// in their head to recover "3 days, 3 days 2 hours, ...".
+function makeElapsedFormatter(domainMs: number): (ms: number) => string {
+  const SEC = 1000;
+  const MIN = 60 * SEC;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+
+  if (domainMs < MIN) {
+    return (ms) => `${Math.max(0, Math.round(ms / SEC))}s`;
+  }
+  if (domainMs < HOUR) {
+    return (ms) => {
+      const totalSec = Math.max(0, Math.floor(ms / SEC));
+      const m = Math.floor(totalSec / 60);
+      const s = totalSec % 60;
+      return `${m}:${s.toString().padStart(2, "0")}`;
+    };
+  }
+  if (domainMs < DAY) {
+    return (ms) => {
+      const totalMin = Math.max(0, Math.floor(ms / MIN));
+      const h = Math.floor(totalMin / 60);
+      const m = totalMin % 60;
+      return m === 0 ? `${h}h` : `${h}h${m}m`;
+    };
+  }
+  return (ms) => {
+    const totalHr = Math.max(0, Math.floor(ms / HOUR));
+    const d = Math.floor(totalHr / 24);
+    const h = totalHr % 24;
+    return h === 0 ? `${d}d` : `${d}d${h}h`;
+  };
 }
