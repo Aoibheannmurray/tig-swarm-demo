@@ -5,7 +5,7 @@ import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
 import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
-import { getViewedChallenge } from "../lib/viewedChallenge";
+import { AgentProgressStore, type AgentExperiment } from "./agentProgressStore";
 import type { Panel, WSMessage } from "../types";
 
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
@@ -30,30 +30,6 @@ type Tab =
   | { type: "global" }
   | { type: "agent"; agentId: string; agentName: string };
 
-interface AgentExperiment {
-  time: number;
-  score: number;
-  feasible: boolean;
-  experimentId?: string;
-  // Per-iteration metadata fed back from /api/agent_experiments — used to
-  // mark events on the per-agent progress plot:
-  //  - trajectoryId   → group of consecutive experiments sharing a trajectory
-  //  - trajectoryDeactivated → last experiment on a trajectory that became
-  //                            inactive (cross marker)
-  //  - receivedHint   → "tacit_knowledge" (star) / "inspiration" (square)
-  trajectoryId?: string | null;
-  trajectoryDeactivated?: boolean;
-  receivedHint?: "tacit_knowledge" | "inspiration" | null;
-}
-
-interface AgentProgress {
-  registeredAt: number; // epoch ms
-  experiments: AgentExperiment[]; // time = ms since registeredAt
-  experimentIds: Set<string>;
-  loaded: boolean;
-  lastEventTime: number; // epoch ms of most recent appended experiment
-}
-
 export class ChartPanel implements Panel {
   private svg!: any;
   private g!: any;
@@ -67,10 +43,7 @@ export class ChartPanel implements Panel {
   private tabs: Tab[] = [{ type: "global" }];
   private currentTabIndex = 0;
 
-  private agentProgress = new Map<string, AgentProgress>();
-  // Live experiment events that arrive before /api/agent_experiments has
-  // finished loading for a given agent.
-  private pendingAgentExperiments = new Map<string, any[]>();
+  private progressStore = new AgentProgressStore();
 
   private tabLabelEl!: HTMLElement;
   private tabPrevEl!: HTMLElement;
@@ -183,8 +156,7 @@ export class ChartPanel implements Panel {
     if (msg.type === "reset") {
       this.globalData = [];
       this.globalStartTime = 0;
-      this.agentProgress.clear();
-      this.pendingAgentExperiments.clear();
+      this.progressStore.clear();
       this.tabs = [{ type: "global" }];
       this.currentTabIndex = 0;
       this.renderTabLabel();
@@ -214,7 +186,7 @@ export class ChartPanel implements Panel {
     this.renderTabLabel();
     const tab = this.currentTab();
     if (tab.type === "agent") {
-      this.ensureAgentLoaded(tab.agentId).then(() => {
+      this.progressStore.load(this.apiUrl, tab.agentId).then(() => {
         if (this.currentTab().type === "agent"
             && (this.currentTab() as any).agentId === tab.agentId) {
           this.redraw();
@@ -292,123 +264,14 @@ export class ChartPanel implements Panel {
   }
 
   // ── Per-agent chart data ──
+  // Cache + fetch + pending-merge lives in AgentProgressStore. The chart
+  // only needs to (a) trigger a load when an agent tab is opened, and
+  // (b) feed live events in. Redraw decisions stay here because they depend
+  // on which tab is currently visible.
 
-  private async ensureAgentLoaded(agentId: string): Promise<void> {
-    const existing = this.agentProgress.get(agentId);
-    if (existing?.loaded) return;
-
-    try {
-      // Pin to the viewed challenge — without this, the server falls back
-      // to its active challenge (resolve_challenge in server.py), so an
-      // agent viewed on a non-active challenge returns zero experiments
-      // and the per-agent tab shows "no attempts yet from <name>".
-      const challenge = getViewedChallenge();
-      const res = await fetch(
-        `${this.apiUrl}/api/agent_experiments` +
-          `?agent_id=${encodeURIComponent(agentId)}` +
-          `&challenge=${encodeURIComponent(challenge)}`,
-      );
-      if (!res.ok) return;
-      const data: {
-        agent_id: string;
-        agent_name: string | null;
-        registered_at: string | null;
-        experiments: {
-          id?: string;
-          score: number;
-          feasible: boolean;
-          created_at: string;
-          trajectory_id?: string | null;
-          received_hint?: "tacit_knowledge" | "inspiration" | null;
-          trajectory_deactivated?: boolean;
-        }[];
-      } = await res.json();
-
-      // Drop the response if the user switched challenges while the fetch
-      // was in flight. `reset` clears agentProgress/pendingAgentExperiments
-      // synchronously on switch — without this guard we'd write a stale
-      // entry back into the freshly-cleared map.
-      if (getViewedChallenge() !== challenge) return;
-
-      const registeredAt = data.registered_at
-        ? new Date(data.registered_at).getTime()
-        : Date.now();
-
-      const experiments: AgentExperiment[] = data.experiments.map((e) => ({
-        time: Math.max(0, new Date(e.created_at).getTime() - registeredAt),
-        score: e.score,
-        feasible: e.feasible,
-        experimentId: e.id,
-        trajectoryId: e.trajectory_id ?? null,
-        trajectoryDeactivated: !!e.trajectory_deactivated,
-        receivedHint: e.received_hint ?? null,
-      }));
-
-      const experimentIds = new Set(
-        experiments
-          .map((e) => e.experimentId)
-          .filter((id): id is string => Boolean(id))
-      );
-
-      const lastEventTime = data.experiments.length
-        ? new Date(data.experiments[data.experiments.length - 1].created_at).getTime()
-        : 0;
-
-      const progress: AgentProgress = {
-        registeredAt,
-        experiments,
-        experimentIds,
-        loaded: true,
-        lastEventTime,
-      };
-
-      // Merge any live events that landed while the history request was in-flight.
-      const pending = this.pendingAgentExperiments.get(agentId) || [];
-      for (const msg of pending) {
-        this.appendToAgentProgress(progress, msg);
-      }
-      this.pendingAgentExperiments.delete(agentId);
-
-      this.agentProgress.set(agentId, progress);
-    } catch {
-      // leave unloaded; next tab visit will retry
-    }
-  }
-
-  private appendToAgentProgress(progress: AgentProgress, msg: any): boolean {
-    const msgTime = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
-    const experimentId = typeof msg.experiment_id === "string" ? msg.experiment_id : null;
-
-    if (experimentId && progress.experimentIds.has(experimentId)) {
-      return false;
-    }
-
-    const time = Math.max(0, msgTime - progress.registeredAt);
-    const feasible = msg.feasible !== false;
-
-    progress.experiments.push({
-      time,
-      score: msg.score,
-      feasible,
-      experimentId: experimentId || undefined,
-    });
-    if (experimentId) progress.experimentIds.add(experimentId);
-    progress.lastEventTime = Math.max(progress.lastEventTime, msgTime);
-    return true;
-  }
-
-  private appendAgentExperiment(msg: any) {
-    if (!msg.agent_id) return;
-    const progress = this.agentProgress.get(msg.agent_id);
-    if (!progress || !progress.loaded) {
-      const pending = this.pendingAgentExperiments.get(msg.agent_id) || [];
-      pending.push(msg);
-      this.pendingAgentExperiments.set(msg.agent_id, pending);
-      return;
-    }
-    const added = this.appendToAgentProgress(progress, msg);
+  private appendAgentExperiment(msg: { agent_id?: string }): void {
+    const added = this.progressStore.appendLive(msg);
     if (!added) return;
-
     const tab = this.currentTab();
     if (tab.type === "agent" && tab.agentId === msg.agent_id) {
       this.redraw();
@@ -614,7 +477,7 @@ export class ChartPanel implements Panel {
   private redrawAgent(agentId: string, agentName: string) {
     this.g.selectAll("*").remove();
 
-    const progress = this.agentProgress.get(agentId);
+    const progress = this.progressStore.get(agentId);
     const { m, w, h, fs } = this.computeLayout();
 
     const chartG = this.g.append("g")

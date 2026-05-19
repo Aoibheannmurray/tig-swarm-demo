@@ -71,16 +71,7 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("energy-score")!;
-    this.scoreDeltaEl = document.getElementById("energy-score-delta")!;
     this.batteriesEl = document.getElementById("energy-batteries")!;
-    this.instanceLabelEl = document.getElementById("energy-instance-label")!;
-    this.navEl = document.getElementById("energy-nav")!;
-    this.agentNameEl = document.getElementById("energy-agent-name")!;
-    this.historyNavEl = document.getElementById("energy-history-nav")!;
-    this.historyLabelEl = document.getElementById("energy-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("energy-hist-live")!;
-    this.emptyStateEl = document.getElementById("energy-empty-state")!;
 
     this.svg = select("#energy-svg") as any;
     this.svg

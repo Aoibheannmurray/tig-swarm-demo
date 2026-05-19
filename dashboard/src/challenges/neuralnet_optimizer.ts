@@ -82,16 +82,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("nn-score")!;
-    this.scoreDeltaEl = document.getElementById("nn-score-delta")!;
-    this.instanceLabelEl = document.getElementById("nn-instance-label")!;
-    this.navEl = document.getElementById("nn-nav")!;
-    this.agentNameEl = document.getElementById("nn-agent-name")!;
-    this.historyNavEl = document.getElementById("nn-history-nav")!;
-    this.historyLabelEl = document.getElementById("nn-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("nn-hist-live")!;
-    this.emptyStateEl = document.getElementById("nn-empty-state")!;
-
     this.epochsBarEl = document.getElementById("nn-epochs-bar")!;
     this.epochsLabelEl = document.getElementById("nn-epochs-label")!;
     this.layersEl = document.getElementById("nn-layers")!;

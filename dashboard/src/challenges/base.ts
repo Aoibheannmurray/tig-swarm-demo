@@ -72,8 +72,40 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
 
   protected abstract idPrefix: string;
   protected abstract scaffoldHtml(): string;
+  // Wire subclass-specific DOM refs (SVG elements, sidebar labels, etc.).
+  // The shared refs covered by populateSharedRefs() — score, score-delta,
+  // instance-label, nav, agent-name, history-nav, history-label, hist-live,
+  // empty-state — are already populated before this runs, so subclasses
+  // only need to handle their own viz nodes.
   protected abstract attachRefs(root: HTMLElement): void;
   protected abstract showInstance(data: TInstances[keyof TInstances]): void;
+
+  // Wire the 9 DOM refs every subclass shares, using the `{idPrefix}-{field}`
+  // convention emitted by scaffoldHtml + navsScaffold. Throws on a missing id
+  // so a typo in a subclass's scaffold surfaces immediately instead of as a
+  // null-deref later. Called from init() before attachRefs().
+  private populateSharedRefs(): void {
+    const p = this.idPrefix;
+    const must = (id: string): HTMLElement => {
+      const el = document.getElementById(id);
+      if (!el) {
+        throw new Error(
+          `[${this.constructor.name}] missing required element #${id} ` +
+          `— scaffoldHtml must emit it (typically via navsScaffold())`,
+        );
+      }
+      return el;
+    };
+    this.scoreEl = must(`${p}-score`);
+    this.scoreDeltaEl = must(`${p}-score-delta`);
+    this.instanceLabelEl = must(`${p}-instance-label`);
+    this.navEl = must(`${p}-nav`);
+    this.agentNameEl = must(`${p}-agent-name`);
+    this.historyNavEl = must(`${p}-history-nav`);
+    this.historyLabelEl = must(`${p}-history-label`);
+    this.historyLiveBtnEl = must(`${p}-hist-live`);
+    this.emptyStateEl = must(`${p}-empty-state`);
+  }
 
   // Hooks — override as needed.
   protected onAfterApplyHistory(): void {}
@@ -122,6 +154,7 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
 
   init(container: HTMLElement) {
     container.innerHTML = this.scaffoldHtml();
+    this.populateSharedRefs();
     this.attachRefs(container);
 
     // Inject a transparent overlay over the panel-inner for the

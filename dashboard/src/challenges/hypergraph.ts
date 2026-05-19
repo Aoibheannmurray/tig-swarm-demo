@@ -103,16 +103,6 @@ export class HypergraphPanel extends DisplayPanelBase<AllHypergraphData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("hg-score")!;
-    this.scoreDeltaEl = document.getElementById("hg-score-delta")!;
-    this.instanceLabelEl = document.getElementById("hg-instance-label")!;
-    this.navEl = document.getElementById("hg-nav")!;
-    this.agentNameEl = document.getElementById("hg-agent-name")!;
-    this.historyNavEl = document.getElementById("hg-history-nav")!;
-    this.historyLabelEl = document.getElementById("hg-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("hg-hist-live")!;
-    this.emptyStateEl = document.getElementById("hg-empty-state")!;
-
     this.nodesEl = document.getElementById("hg-nodes")!;
     this.partsEl = document.getElementById("hg-parts")!;
     this.metricEl = document.getElementById("hg-metric")!;
