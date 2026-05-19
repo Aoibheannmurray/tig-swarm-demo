@@ -5,6 +5,7 @@ import { ChartPanel } from "../../panels/chart";
 import { ChallengeSelectorPanel } from "../../panels/challenge-selector";
 import { loadSwarmConfig, handleWsEvent as handleSwarmConfigEvent } from "../../lib/swarmConfig";
 import { getViewedChallenge, onViewedChallengeChange } from "../../lib/viewedChallenge";
+import { isMessageForChallenge } from "../../lib/messageScope";
 import type { WSMessage } from "../../types";
 
 const { wsUrl, apiUrl } = getDashboardUrls();
@@ -36,28 +37,15 @@ panelEl.innerHTML = `
 const chartPanel = new ChartPanel();
 chartPanel.init(document.getElementById("panel-chart-body")!);
 
-const CHALLENGE_SCOPED: Record<string, true> = {
-  experiment_published: true,
-  hypothesis_proposed: true,
-  new_global_best: true,
-  leaderboard_update: true,
-  chat_message: true,
-  trajectory_reset: true,
-  hypothesis_status_changed: true,
-};
-
 function handleMessage(msg: WSMessage) {
-  const m = msg as any;
-  if (CHALLENGE_SCOPED[m.type] && m.challenge && m.challenge !== getViewedChallenge()) {
-    return;
-  }
+  if (!isMessageForChallenge(msg, getViewedChallenge())) return;
   handleSwarmConfigEvent(apiUrl, msg);
   challengeSelector.handleMessage(msg);
   chartPanel.handleMessage(msg);
 }
 
 onViewedChallengeChange(() => {
-  chartPanel.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
+  chartPanel.handleMessage({ type: "reset", timestamp: new Date().toISOString() });
   void loadInitialState(apiUrl);
 });
 

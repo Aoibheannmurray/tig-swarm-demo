@@ -215,6 +215,15 @@ async def get_agent_name(conn, agent_id: str) -> str:
 
 # ── WebSocket manager ──
 
+# Max time we'll wait for a single ws.send_json before considering that
+# subscriber dead. Without this, asyncio.gather waits for every send to
+# resolve — a single hung subscriber (network stall, paused tab on a slow
+# connection) blocks broadcasts to every other dashboard. 2s is generous
+# for a healthy connection but short enough that a stuck one doesn't dam
+# the event stream during a busy publish burst.
+_WS_SEND_TIMEOUT_S = 2.0
+
+
 class ConnectionManager:
     def __init__(self):
         self.connections: list[WebSocket] = []
@@ -233,13 +242,20 @@ class ConnectionManager:
         if not self.connections:
             return
         payload = event.model_dump(mode="json")
+        # Per-send timeout: a TimeoutError from wait_for is captured by
+        # return_exceptions=True alongside any other send failure, so the
+        # below filter prunes hung subscribers exactly the same way it
+        # prunes ones that closed cleanly.
         results = await asyncio.gather(
-            *(ws.send_json(payload) for ws in self.connections),
+            *(
+                asyncio.wait_for(ws.send_json(payload), timeout=_WS_SEND_TIMEOUT_S)
+                for ws in self.connections
+            ),
             return_exceptions=True,
         )
         self.connections = [
             ws for ws, result in zip(self.connections, results)
-            if not isinstance(result, Exception)
+            if not isinstance(result, BaseException)
         ]
 
 
@@ -302,37 +318,46 @@ async def periodic_stats():
                 )
                 await conn.commit()
                 total_agents = await db.get_agent_count(conn, active_only=False)
-                # Per-challenge slices.
+
+                # Batched per-challenge counters. Previously this loop fired
+                # 5 separate COUNT queries per challenge (active, exp, hyp,
+                # traj, agents_in_challenge) — at 8 challenges that's 40
+                # roundtrips every 10s. At scale (~80 agents, 4-hour test)
+                # those queries also start touching more rows. Collapsing
+                # into 5 grouped queries (one per category, GROUP BY
+                # challenge) keeps total roundtrips constant regardless of
+                # how many challenges are configured.
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(*) as c FROM agent_challenge_state "
+                    "WHERE last_active_at >= ? GROUP BY challenge",
+                    (cutoff_ts,),
+                )
+                active_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(*) as c FROM experiments GROUP BY challenge",
+                )
+                exp_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(*) as c FROM hypotheses GROUP BY challenge",
+                )
+                hyp_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(*) as c FROM trajectories GROUP BY challenge",
+                )
+                traj_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                # Distinct-agents-who-published per challenge — same source
+                # of truth as get_challenge_total_agents (experiments table).
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(DISTINCT agent_id) as c FROM experiments GROUP BY challenge",
+                )
+                agents_in_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+
                 per_challenge: dict[str, dict] = {}
                 for ch in challenges.CHALLENGE_NAMES:
                     direction = await get_direction(ch)
                     cfg = await get_challenge_config_cached(ch)
                     best = await db.get_global_best(conn, ch, direction=direction)
                     baseline = await get_baseline_score(conn, ch)
-                    # Active agents on this challenge = agents whose
-                    # agent_challenge_state(*, ch).last_active_at is recent.
-                    cur = await conn.execute(
-                        "SELECT COUNT(*) as c FROM agent_challenge_state "
-                        "WHERE challenge = ? AND last_active_at >= ?",
-                        (ch, cutoff_ts),
-                    )
-                    active_ch = (await cur.fetchone())["c"]
-                    cur = await conn.execute(
-                        "SELECT COUNT(*) as c FROM experiments WHERE challenge = ?",
-                        (ch,),
-                    )
-                    total_exp = (await cur.fetchone())["c"]
-                    cur = await conn.execute(
-                        "SELECT COUNT(*) as c FROM hypotheses WHERE challenge = ?",
-                        (ch,),
-                    )
-                    total_hyp = (await cur.fetchone())["c"]
-                    cur = await conn.execute(
-                        "SELECT COUNT(*) as c FROM trajectories WHERE challenge = ?",
-                        (ch,),
-                    )
-                    total_traj = (await cur.fetchone())["c"]
-                    total_agents_ch = await db.get_challenge_total_agents(conn, ch)
                     best_solution_data = best["solution_data"] if best else None
                     num_instances = get_num_instances_for(cfg, best_solution_data)
                     best_score = best["score"] if best else None
@@ -342,15 +367,15 @@ async def periodic_stats():
                         else 0
                     )
                     per_challenge[ch] = {
-                        "active_agents": active_ch,
+                        "active_agents": active_by_ch.get(ch, 0),
                         "best_score": best_score,
                         "baseline_score": baseline,
                         "num_instances": num_instances,
                         "improvement_pct": imp,
-                        "total_experiments": total_exp,
-                        "hypotheses_count": total_hyp,
-                        "total_trajectories": total_traj,
-                        "total_agents_in_challenge": total_agents_ch,
+                        "total_experiments": exp_by_ch.get(ch, 0),
+                        "hypotheses_count": hyp_by_ch.get(ch, 0),
+                        "total_trajectories": traj_by_ch.get(ch, 0),
+                        "total_agents_in_challenge": agents_in_ch.get(ch, 0),
                     }
 
             # `per_challenge` is the source of truth; the dashboard slices
@@ -499,6 +524,26 @@ async def heartbeat(agent_id: str, req: HeartbeatRequest):
         await conn.execute(
             "UPDATE agents SET last_heartbeat = ?, status = ? WHERE id = ?",
             (timestamp, req.status, agent_id),
+        )
+        # Also bump `last_active_at` on the agent's current challenge state
+        # row. Without this, a long benchmark (multi-minute c3/GPU run) keeps
+        # `last_heartbeat` fresh but `last_active_at` (only updated by
+        # /api/state) goes stale — and periodic_stats's
+        # `deactivate_inactive_agent_trajectories` then reaps an actively-
+        # working agent's trajectory and clears their agent_bests row.
+        #
+        # "Current" challenge = the row with the most recent last_active_at
+        # for this agent (i.e. whichever challenge their last /api/state was
+        # for). If the agent has no acs rows yet (just registered, hasn't
+        # fetched state), this is a no-op — fine, there's no trajectory to
+        # keep alive at that stage.
+        await conn.execute(
+            "UPDATE agent_challenge_state SET last_active_at = ? "
+            "WHERE agent_id = ? AND challenge = ("
+            "  SELECT challenge FROM agent_challenge_state "
+            "  WHERE agent_id = ? ORDER BY last_active_at DESC LIMIT 1"
+            ")",
+            (timestamp, agent_id, agent_id),
         )
         await conn.commit()
     return {"ack": True, "server_time": timestamp}

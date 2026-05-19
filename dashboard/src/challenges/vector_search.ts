@@ -102,16 +102,6 @@ export class VectorSearchPanel extends DisplayPanelBase<AllVectorSearchData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("vs-score")!;
-    this.scoreDeltaEl = document.getElementById("vs-score-delta")!;
-    this.instanceLabelEl = document.getElementById("vs-instance-label")!;
-    this.navEl = document.getElementById("vs-nav")!;
-    this.agentNameEl = document.getElementById("vs-agent-name")!;
-    this.historyNavEl = document.getElementById("vs-history-nav")!;
-    this.historyLabelEl = document.getElementById("vs-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("vs-hist-live")!;
-    this.emptyStateEl = document.getElementById("vs-empty-state")!;
-
     this.queriesEl = document.getElementById("vs-queries")!;
     this.distanceEl = document.getElementById("vs-distance")!;
     this.dbEl = document.getElementById("vs-db")!;
