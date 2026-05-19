@@ -82,8 +82,7 @@ export class StrategyLeaderboardPanel implements Panel {
     if (!msg.feasible) return;
     // Drop events for any other challenge — main-ideas.ts also filters but
     // double-check here so the panel can never accumulate cross-challenge state.
-    const evCh = (msg as any).challenge;
-    if (evCh && evCh !== getViewedChallenge()) return;
+    if (msg.challenge && msg.challenge !== getViewedChallenge()) return;
     if (this.entries.has(msg.experiment_id)) return; // already recorded
 
     const worst = this.worstScore();
@@ -94,8 +93,8 @@ export class StrategyLeaderboardPanel implements Panel {
       score: msg.score,
       agent_id: msg.agent_id,
       agent_name: msg.agent_name,
-      strategy_tag: (msg as any).strategy_tag ?? null,
-      title: (msg as any).title ?? null,
+      strategy_tag: msg.strategy_tag ?? null,
+      title: msg.title ?? null,
     });
     this.trim();
     this.render();

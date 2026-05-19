@@ -268,8 +268,8 @@ export class StatsPanel implements Panel {
       // carries `per_challenge`); default to 0 here.
       counterTween(this.agentsEl, msg.active_agents ?? 0);
       counterTween(this.experimentsEl, msg.total_experiments ?? 0);
-      counterTween(this.agentsTotalEl, (msg as any).total_agents_in_challenge ?? 0);
-      counterTween(this.trajectoriesEl, (msg as any).total_trajectories ?? 0);
+      counterTween(this.agentsTotalEl, msg.total_agents_in_challenge ?? 0);
+      counterTween(this.trajectoriesEl, msg.total_trajectories ?? 0);
     }
 
     if (msg.type === "agent_joined") {
@@ -281,7 +281,7 @@ export class StatsPanel implements Panel {
     }
 
     if (msg.type === "new_global_best") {
-      this.trackScores = (msg as any).track_scores ?? null;
+      this.trackScores = msg.track_scores ?? null;
       this.renderTrackBreakdown();
       this.attachScoreClick();
     }

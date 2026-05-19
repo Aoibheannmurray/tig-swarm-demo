@@ -17,6 +17,7 @@ import {
   onViewedChallengeChange,
 } from "./lib/viewedChallenge";
 import { registerAgentColor } from "./lib/colors";
+import { isMessageForChallenge } from "./lib/messageScope";
 
 import { ChallengeSelectorPanel } from "./panels/challenge-selector";
 import { StatsPanel } from "./panels/stats";
@@ -93,31 +94,10 @@ function constructPanels() {
 // ── Message dispatch ──
 let soundEnabled = false;
 
-// Events that carry per-challenge data; drop them when their `challenge`
-// doesn't match the user's viewed challenge so panels render consistent state.
-const CHALLENGE_SCOPED: Record<string, true> = {
-  experiment_published: true,
-  hypothesis_proposed: true,
-  new_global_best: true,
-  leaderboard_update: true,
-  chat_message: true,
-  trajectory_reset: true,
-  hypothesis_status_changed: true,
-  // /api/admin/reset_challenge broadcasts `{type:"reset", challenge:"…"}`.
-  // Without this entry, a reset on knapsack would clear panels viewing
-  // job_scheduling. The filter below drops any scoped event whose
-  // `challenge` field doesn't match the viewed challenge.
-  reset: true,
-};
-
 function handleMessage(msg: WSMessage) {
   // Drop challenge-scoped events that don't belong to the viewed challenge.
-  // `agent_joined`, `swarm_config_updated`, `admin_broadcast`, and the
-  // global slice of `stats_update` don't get filtered.
-  const m = msg as any;
-  if (CHALLENGE_SCOPED[m.type] && m.challenge && m.challenge !== getViewedChallenge()) {
-    return;
-  }
+  // See lib/messageScope.ts for which event types are filtered.
+  if (!isMessageForChallenge(msg, getViewedChallenge())) return;
 
   // Keep agent_id → name map in sync. Leaderboard entries are server-JOINed
   // so they always carry the current name; agent_renamed is the explicit
@@ -157,8 +137,8 @@ function handleMessage(msg: WSMessage) {
   // For stats_update we slice `per_challenge` down to the viewed
   // challenge so panels see the right counters. `per_challenge` is the
   // sole source of truth on the wire.
-  if (msg.type === "stats_update" && (msg as any).per_challenge) {
-    const sliced = (msg as any).per_challenge[getViewedChallenge()] ?? {};
+  if (msg.type === "stats_update" && msg.per_challenge) {
+    const sliced = msg.per_challenge[getViewedChallenge()] ?? ({} as Partial<typeof msg.per_challenge[string]>);
     msg = {
       ...msg,
       active_agents: sliced.active_agents ?? 0,
@@ -170,7 +150,7 @@ function handleMessage(msg: WSMessage) {
       baseline_score: sliced.baseline_score ?? null,
       num_instances: sliced.num_instances ?? 0,
       improvement_pct: sliced.improvement_pct ?? 0,
-    } as any;
+    };
   }
 
   // Refetch swarm config when the host switches the active challenge.
@@ -410,7 +390,7 @@ onViewedChallengeChange((c) => {
   // Use the `reset` event the panels already handle to clear their
   // challenge-scoped state (chart history, leaderboard rows, feed items).
   panels.forEach((p) => {
-    p.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
+    p.handleMessage({ type: "reset", timestamp: new Date().toISOString() });
     p.setChallenge?.(c);
   });
   void loadInitialState(apiUrl, c);
