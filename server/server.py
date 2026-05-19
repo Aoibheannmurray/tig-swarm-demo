@@ -500,6 +500,26 @@ async def heartbeat(agent_id: str, req: HeartbeatRequest):
             "UPDATE agents SET last_heartbeat = ?, status = ? WHERE id = ?",
             (timestamp, req.status, agent_id),
         )
+        # Also bump `last_active_at` on the agent's current challenge state
+        # row. Without this, a long benchmark (multi-minute c3/GPU run) keeps
+        # `last_heartbeat` fresh but `last_active_at` (only updated by
+        # /api/state) goes stale — and periodic_stats's
+        # `deactivate_inactive_agent_trajectories` then reaps an actively-
+        # working agent's trajectory and clears their agent_bests row.
+        #
+        # "Current" challenge = the row with the most recent last_active_at
+        # for this agent (i.e. whichever challenge their last /api/state was
+        # for). If the agent has no acs rows yet (just registered, hasn't
+        # fetched state), this is a no-op — fine, there's no trajectory to
+        # keep alive at that stage.
+        await conn.execute(
+            "UPDATE agent_challenge_state SET last_active_at = ? "
+            "WHERE agent_id = ? AND challenge = ("
+            "  SELECT challenge FROM agent_challenge_state "
+            "  WHERE agent_id = ? ORDER BY last_active_at DESC LIMIT 1"
+            ")",
+            (timestamp, agent_id, agent_id),
+        )
         await conn.commit()
     return {"ack": True, "server_time": timestamp}
 
