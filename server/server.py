@@ -14,7 +14,7 @@ from pathlib import Path
 from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
-    AdminSeedInactive,
+    AdminRevoke, AdminSeedInactive,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
@@ -221,6 +221,19 @@ def _derive_user_password(username: str, base_password: str) -> str:
     return hashlib.sha256(f"{username}:{base_password}".encode()).hexdigest()
 
 
+def _revoked_usernames(config: dict) -> set[str]:
+    """Read the revoked-contributors set from config. Stored as a JSON
+    array under `revoked_contributors`; absent / unparseable values are
+    treated as an empty set so a bad write never locks everyone out."""
+    raw = config.get("revoked_contributors")
+    if not raw:
+        return set()
+    try:
+        return set(json.loads(raw))
+    except (ValueError, TypeError):
+        return set()
+
+
 async def verify_swarm_password(
     x_username: str | None = Header(default=None, alias="X-Username"),
     x_swarm_password: str | None = Header(default=None, alias="X-Swarm-Password"),
@@ -241,6 +254,8 @@ async def verify_swarm_password(
     expected = _derive_user_password(x_username, base)
     if not secrets.compare_digest(x_swarm_password, expected):
         raise HTTPException(status_code=403, detail="Invalid credentials")
+    if x_username in _revoked_usernames(config):
+        raise HTTPException(status_code=403, detail="Contributor has been revoked")
     return x_username
 
 
@@ -1916,6 +1931,56 @@ async def admin_seed_inactive(req: AdminSeedInactive):
         "challenge": req.challenge,
         "inactive_id": inactive_id,
         "source": req.source_label,
+    }
+
+
+@app.post("/api/admin/revoke")
+async def admin_revoke(req: AdminRevoke):
+    """Revoke a contributor by username.
+
+    Two effects, applied in the same transaction:
+      1. Adds the username to `config.revoked_contributors` so
+         `verify_swarm_password` rejects future /api/agents/register calls
+         under that name (even with a still-valid derived password hash).
+      2. Clears the per-agent `token` (and stamps `status='revoked'`) on
+         every agent row whose `contributor_username` matches, so existing
+         workers fail `verify_agent_token` on their next write call.
+         Agent rows themselves are preserved — dashboard history is
+         intact; only the auth handle is cut.
+
+    Idempotent: re-revoking the same username adds nothing and just
+    re-counts how many of their agents are currently still token-bearing.
+    """
+    global _config_cache
+    await verify_admin(req)
+    username = (req.username or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="username must be non-empty")
+    async with db.connect() as conn:
+        cur = await conn.execute(
+            "SELECT value FROM config WHERE key = 'revoked_contributors'"
+        )
+        row = await cur.fetchone()
+        try:
+            revoked = set(json.loads(row["value"])) if row and row["value"] else set()
+        except (ValueError, TypeError):
+            revoked = set()
+        revoked.add(username)
+        await conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+            ("revoked_contributors", json.dumps(sorted(revoked))),
+        )
+        cur = await conn.execute(
+            "UPDATE agents SET token = NULL, status = 'revoked' "
+            "WHERE contributor_username = ? AND token IS NOT NULL",
+            (username,),
+        )
+        agents_invalidated = cur.rowcount
+        await conn.commit()
+    _config_cache = None  # invalidate so the next register sees the new revoked set
+    return {
+        "revoked": username,
+        "agents_invalidated": agents_invalidated,
     }
 
 

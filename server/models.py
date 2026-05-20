@@ -90,6 +90,16 @@ class AdminResetChallenge(AdminAuth):
     challenge: "ChallengeName"
 
 
+class AdminRevoke(AdminAuth):
+    """Owner-only: revoke a contributor by username so they can no longer
+    register new agents. Existing agents owned by that contributor have
+    their per-agent token cleared in the same call, so in-flight workers
+    stop authenticating immediately. Agent rows (and their history) are
+    preserved — only the auth token + the entry in config.revoked_contributors
+    are touched."""
+    username: str
+
+
 class AdminSeedInactive(AdminAuth):
     """Owner-only: deposit an externally-sourced algorithm into the
     `inactive_algorithms` pool so the next stagnated agent that doesn't

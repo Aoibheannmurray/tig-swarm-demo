@@ -1190,10 +1190,15 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print(f"  Active challenge:  {active_challenge}")
     print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
     print("\n  Onboard each contributor with:\n")
-    print("    python setup.py invite <username>")
+    print("    python setup.py invite [<username>]")
     print("    # prints their username + per-contributor swarm_password.")
-    print("    # Share both with them; they paste into fleet.config.json with the")
-    print(f"    # URL ({server_url}) and run `python scripts/run_fleet.py`.")
+    print("    # Omit <username> to auto-generate a random slug — you don't")
+    print("    # have to collect names from contributors beforehand.")
+    print("    # Share the three values with them; they paste into fleet.config.json")
+    print(f"    # (URL: {server_url}) and run `python scripts/run_fleet.py`.")
+    print("\n  Boot a bad actor any time with:\n")
+    print("    python setup.py revoke <username>")
+    print("    # blocks future registers and kills their running agents.")
     print("\n  Base password (keep private — used by `setup.py invite` to derive")
     print("  per-contributor passwords; rotating it kicks every contributor):")
     print(f"    {swarm_password}")
@@ -1471,8 +1476,20 @@ def main() -> int:
         help="Host: issue a per-contributor swarm password (username + derived hash).",
     )
     invite.add_argument(
+        "username", nargs="?", default=None,
+        help=(
+            "Optional. Contributor's username (anything identifying them — "
+            "paste into fleet.config.json). If omitted, a random "
+            "adjective-noun slug is generated for you."
+        ),
+    )
+    revoke = sub.add_parser(
+        "revoke",
+        help="Host: revoke a contributor by username (blocks future registers, kills active agents).",
+    )
+    revoke.add_argument(
         "username",
-        help="Contributor's username (anything identifying them — paste into fleet.config.json).",
+        help="Username to revoke (as printed by `setup.py invite`).",
     )
     args = parser.parse_args()
 
@@ -1486,13 +1503,16 @@ def main() -> int:
         return run_tacit(args.agent_name)
     if args.mode == "invite":
         return run_invite(args.username)
+    if args.mode == "revoke":
+        return run_revoke(args.username)
 
     print(
         "setup.py is the host-admin tool.\n"
         "  contributors:  edit fleet.config.json, then run "
         "`python scripts/run_fleet.py`.\n"
         "  hosts:         `python setup.py create` to provision a new swarm.\n"
-        "  invite a contributor:  `python setup.py invite <username>`.\n"
+        "  invite a contributor:  `python setup.py invite [<username>]`.\n"
+        "  revoke a contributor:  `python setup.py revoke <username>`.\n"
         "  switch challenge:      `python setup.py switch <challenge>`.\n"
         "  edit tacit knowledge:  `python setup.py tacit [<agent-name>]`.",
         file=sys.stderr,
@@ -1500,15 +1520,41 @@ def main() -> int:
     return 1
 
 
-def run_invite(username: str) -> int:
+_INVITE_ADJECTIVES = [
+    "swift", "bold", "keen", "calm", "bright", "sharp", "vivid", "steady",
+    "fierce", "noble", "agile", "lucid", "rapid", "silent", "cosmic",
+    "astral", "polar", "solar", "lunar", "crystal", "quantum", "neural",
+    "primal", "sonic", "radiant", "golden", "silver", "iron", "amber",
+    "crimson", "azure", "obsidian", "phantom", "blazing", "frozen",
+]
+_INVITE_NOUNS = [
+    "falcon", "wolf", "hawk", "lynx", "otter", "raven", "viper", "fox",
+    "crane", "tiger", "cobra", "eagle", "shark", "puma", "elk", "owl",
+    "mantis", "phoenix", "hydra", "sphinx", "atlas", "nova", "pulse",
+    "spark", "orbit", "flux", "prism", "forge", "nexus", "cipher",
+    "vector", "vertex", "helix", "quasar", "photon", "beacon",
+]
+
+
+def _generate_invite_slug(taken: set[str]) -> str:
+    import random
+    for _ in range(200):
+        name = f"{random.choice(_INVITE_ADJECTIVES)}-{random.choice(_INVITE_NOUNS)}"
+        if name not in taken:
+            return name
+    # Fallback with a numeric suffix once the namespace is saturated.
+    return f"contrib-{random.randint(10000, 99999)}"
+
+
+def run_invite(username: str | None) -> int:
     """Issue a per-contributor swarm password by computing
     sha256(username + ':' + base_password). Prints the username + derived
-    hash for the host to share out-of-band with the contributor."""
+    hash for the host to share out-of-band with the contributor.
+
+    If `username` is None, an adjective-noun slug is generated for the
+    host; previously-issued names are tracked in swarm.admin.json
+    (`issued_contributors`) to avoid collisions across invite calls."""
     import hashlib
-    username = (username or "").strip()
-    if not username:
-        print("invite: username must be non-empty", file=sys.stderr)
-        return 1
     admin = read_swarm_admin()
     base = (admin.get("swarm_password") or "").strip()
     if not base:
@@ -1518,8 +1564,30 @@ def run_invite(username: str) -> int:
             file=sys.stderr,
         )
         return 1
+    issued: list[str] = list(admin.get("issued_contributors") or [])
+    revoked: list[str] = list(admin.get("revoked_contributors") or [])
+    if username:
+        username = username.strip()
+        if not username:
+            print("invite: username must be non-empty", file=sys.stderr)
+            return 1
+        if username in revoked:
+            # Re-issuing the same hash for a revoked name won't help — the
+            # server's revoked list rejects by username, not by hash.
+            print(
+                f"invite: {username!r} is on the revoked list; "
+                f"pick a different name or rotate the base password.",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        username = _generate_invite_slug(set(issued) | set(revoked))
     derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
     server_url = admin.get("server_url") or read_swarm_cache().get("server_url") or "<paste server URL>"
+    if username not in issued:
+        issued.append(username)
+        admin["issued_contributors"] = issued
+        write_swarm_admin(admin)
     print()
     print(f"  Contributor:    {username}")
     print(f"  Server URL:     {server_url}")
@@ -1528,6 +1596,63 @@ def run_invite(username: str) -> int:
     print("  Share the three values above with the contributor.")
     print("  They paste server_url, username, and swarm_password into")
     print("  their fleet.config.json, then run `python scripts/run_fleet.py`.")
+    print()
+    return 0
+
+
+def run_revoke(username: str) -> int:
+    """Revoke a contributor by username. POSTs to /api/admin/revoke which
+    adds the name to the server's revoked list (blocks future registers)
+    and clears the per-agent tokens on any of their existing agents so
+    in-flight workers stop authenticating immediately."""
+    username = (username or "").strip()
+    if not username:
+        print("revoke: username must be non-empty", file=sys.stderr)
+        return 1
+    admin = read_swarm_admin()
+    admin_key = (admin.get("admin_key") or "").strip()
+    if not admin_key:
+        print(
+            "revoke: no admin_key in swarm.admin.json — "
+            "run `setup.py create` first (host machine only).",
+            file=sys.stderr,
+        )
+        return 1
+    server_url = resolve_server_url()
+    if not server_url:
+        print(
+            "revoke: no server_url found — run `python setup.py create` first.",
+            file=sys.stderr,
+        )
+        return 1
+    payload = {"admin_key": admin_key, "username": username}
+    req = urllib.request.Request(
+        f"{server_url.rstrip('/')}/api/admin/revoke",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.load(resp)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        print(f"revoke: server returned {e.code}: {body}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        print(f"revoke: failed to reach {server_url} ({e})", file=sys.stderr)
+        return 1
+    # Mirror the server-side revoke into swarm.admin.json so `setup.py
+    # invite` can warn before re-issuing a revoked name.
+    revoked = list(admin.get("revoked_contributors") or [])
+    if username not in revoked:
+        revoked.append(username)
+        admin["revoked_contributors"] = revoked
+        write_swarm_admin(admin)
+    print()
+    print(f"  Revoked:        {username}")
+    print(f"  Agents stopped: {result.get('agents_invalidated', 0)}")
+    print(f"  Future register attempts under this username will be rejected.")
     print()
     return 0
 
