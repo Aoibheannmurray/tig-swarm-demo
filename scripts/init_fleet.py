@@ -19,6 +19,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -395,8 +396,6 @@ def run_wizard(force: bool = False) -> int:
     if api_key_env and not os.environ.get(api_key_env, "").strip():
         print(f"  {step}) export {api_key_env}=<your-key>")
         step += 1
-    print(f"  {step}) make sure Docker is running (`docker info`)")
-    step += 1
     print(f"  {step}) python scripts/run_fleet.py")
     print()
     return 0
@@ -409,12 +408,36 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+_DOCKER_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
+
+
+def _preflight_docker() -> None:
+    """Fail before the wizard if Docker isn't installed.
+
+    Benchmarks always run in a local Docker container (see
+    scripts/benchmark.py). benchmark.py's _ensure_docker_daemon() already
+    auto-launches Docker Desktop / OrbStack at fleet time if the daemon
+    is stopped, so we only catch the one case it can't recover from:
+    `docker` not on PATH at all. Without this, a contributor only finds
+    out Docker is missing after picking a provider, exporting an API
+    key, and hitting an opaque FileNotFoundError on iteration 1.
+    """
+    if shutil.which("docker") is None:
+        sys.exit(
+            "Docker is required to run benchmarks but `docker` was not found "
+            "on PATH.\n"
+            f"Install Docker Desktop from {_DOCKER_INSTALL_URL}, then re-run "
+            "`python scripts/init_fleet.py`."
+        )
+
+
 def main() -> int:
     if not EXAMPLE_PATH.exists():
         sys.exit(
             f"{EXAMPLE_PATH.name} not found at {EXAMPLE_PATH}. "
             "Are you running this from the repo root?"
         )
+    _preflight_docker()
     args = parse_args()
     try:
         return run_wizard(force=args.force)
