@@ -1607,6 +1607,23 @@ def run_invite(username: str | None) -> int:
     return 0
 
 
+def _resolve_host_server_url(admin: dict) -> str | None:
+    """Host-admin URL resolver. Distinct from `resolve_server_url()`, which
+    checks fleet.config.json — that file points at the swarm the *contributor*
+    is participating in, which may be a different swarm from the one the
+    host owns. For admin commands (invite/revoke/list) we want the URL of
+    the swarm whose admin_key we have, not whatever swarm this clone is
+    also contributing to. Precedence:
+      1. swarm.admin.json `server_url` (written by setup.py create)
+      2. .swarm-cache.json `server_url` (refreshed by setup.py sync)
+    """
+    url = (admin.get("server_url") or "").strip()
+    if url:
+        return url
+    cache_url = (read_swarm_cache().get("server_url") or "").strip()
+    return cache_url or None
+
+
 def run_revoke(username: str) -> int:
     """Revoke a contributor by username. POSTs to /api/admin/revoke which
     adds the name to the server's revoked list (blocks future registers)
@@ -1625,10 +1642,11 @@ def run_revoke(username: str) -> int:
             file=sys.stderr,
         )
         return 1
-    server_url = resolve_server_url()
+    server_url = _resolve_host_server_url(admin)
     if not server_url:
         print(
-            "revoke: no server_url found — run `python setup.py create` first.",
+            "revoke: no server_url found in swarm.admin.json or "
+            ".swarm-cache.json — run `python setup.py sync` first.",
             file=sys.stderr,
         )
         return 1
@@ -1678,10 +1696,11 @@ def run_list() -> int:
             file=sys.stderr,
         )
         return 1
-    server_url = resolve_server_url()
+    server_url = _resolve_host_server_url(admin)
     if not server_url:
         print(
-            "list: no server_url found — run `python setup.py create` first.",
+            "list: no server_url found in swarm.admin.json or "
+            ".swarm-cache.json — run `python setup.py sync` first.",
             file=sys.stderr,
         )
         return 1
