@@ -67,6 +67,24 @@ ROOT = Path(__file__).resolve().parent.parent
 AGENT_CONFIG_PATH = ROOT / "agent.config.json"
 sys.path.insert(0, str(ROOT / "scripts"))
 
+# Windows console crashes on box-drawing / ellipsis characters this script
+# prints when the active code page isn't UTF-8. Force UTF-8 with replacement
+# so contributors don't have to remember `python -X utf8`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
+
+def _read_json(path: Path) -> dict:
+    """Tolerant read of a JSON config file.
+
+    `utf-8-sig` strips a UTF-8 BOM if PowerShell `Set-Content` wrote one — a
+    common pitfall on Windows where strict `json.loads` then fails with
+    "Expecting value: line 1 column 1"."""
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
 from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
 from challenge_files import (
@@ -153,14 +171,14 @@ def load_config() -> dict:
             ".swarm-cache.json not found. Run `python setup.py sync` first "
             "(scripts/run_loop.py normally calls it at the top of every iteration)."
         )
-    return json.loads(cfg_path.read_text())
+    return _read_json(cfg_path)
 
 
 def load_agent_config() -> dict:
     if not AGENT_CONFIG_PATH.exists():
         return {}
     try:
-        data = json.loads(AGENT_CONFIG_PATH.read_text())
+        data = _read_json(AGENT_CONFIG_PATH)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -174,6 +192,7 @@ def sync_challenge() -> None:
     result = subprocess.run(
         [sys.executable, str(ROOT / "setup.py"), "sync"],
         cwd=ROOT, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()[-500:]
@@ -187,6 +206,7 @@ def _run_benchmark_local() -> tuple[dict | None, str]:
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "benchmark.py")],
         capture_output=True, text=True, cwd=ROOT,
+        encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         err = result.stderr or result.stdout or "Benchmark failed"
@@ -525,6 +545,16 @@ def _run_agentic_iteration(
 
     user_prompt = build_agentic_user_prompt(state, config)
     print(f"  [AGENTIC] Launching {backend.name} in {workdir} (timeout {args.agentic_timeout}s)…")
+    # Heads-up so the contributor's terminal doesn't look frozen. The
+    # subprocess is run with capture_output=True (we need the trace for
+    # fallback hypothesis synthesis), so stdout doesn't stream live — the
+    # backend can run for the full --agentic-timeout before printing anything
+    # else. Docker stays idle too: benchmark.py only runs *after* this returns.
+    print(
+        f"  [AGENTIC] Output is captured; expect no further log lines until "
+        f"the agent finishes (up to {args.agentic_timeout}s). "
+        f"Docker stays idle until then."
+    )
 
     stop = _start_heartbeat_thread(server, agent_id, agent_token)
     try:
@@ -873,11 +903,21 @@ def main() -> int:
         backend = agentic_backends.get_backend(args.provider)
         workdir = agentic_sandbox.resolve_workdir(agent_id, agent_name)
         print(f"Agentic worktree: {workdir}")
-        if shutil.which(backend.cli_name) is None:
+        # Use the backend's resolver instead of a bare shutil.which so the
+        # precheck honors the same env overrides (CODEX_CLI / CLAUDE_CLI) and
+        # Windows .cmd fallbacks the live call does. Without this, npm-installed
+        # Codex would pass at the backend layer but get rejected here.
+        if backend.resolve_cli() is None:
+            override_hint = ""
+            if sys.platform == "win32" and backend.cli_name == "codex":
+                override_hint = (
+                    "\nTip: if you installed via `npm install -g @openai/codex`, "
+                    "export CODEX_CLI=%APPDATA%\\npm\\codex.cmd before launching."
+                )
             sys.exit(
                 f"{backend.cli_name} CLI not found on PATH. Install it, or "
                 f"switch to a non-agentic provider (e.g. --provider claude-code "
-                f"for one-shot mode)."
+                f"for one-shot mode).{override_hint}"
             )
 
     print(f"Provider: {args.provider}  Model: {model}")

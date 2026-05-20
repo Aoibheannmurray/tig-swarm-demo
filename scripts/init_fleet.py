@@ -27,6 +27,17 @@ ROOT = Path(__file__).resolve().parent.parent
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
 EXAMPLE_PATH = ROOT / "fleet.config.example.json"
 
+# Windows console crashes on the box-drawing characters / checkmark glyphs this
+# wizard prints when the active code page isn't UTF-8 ("UnicodeEncodeError:
+# 'charmap' codec can't encode …"). Force the stream to UTF-8 with replacement
+# so contributors don't have to remember `python -X utf8`. No-op on Linux/macOS
+# where the default already is UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the
 # provider list in scripts/run_loop.py. Tuple: (label, default_model,

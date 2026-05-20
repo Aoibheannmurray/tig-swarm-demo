@@ -249,7 +249,7 @@ def read_swarm_cache() -> dict:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except json.JSONDecodeError:
         return {}
@@ -260,7 +260,7 @@ def read_swarm_admin() -> dict:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except json.JSONDecodeError:
         return {}
@@ -278,7 +278,7 @@ def resolve_server_url() -> str | None:
     """
     if AGENT_CONFIG_PATH.exists():
         try:
-            agent = json.loads(AGENT_CONFIG_PATH.read_text())
+            agent = json.loads(AGENT_CONFIG_PATH.read_text(encoding="utf-8-sig"))
             if isinstance(agent, dict) and agent.get("server_url"):
                 return agent["server_url"]
         except json.JSONDecodeError:
@@ -286,7 +286,7 @@ def resolve_server_url() -> str | None:
     fleet_path = ROOT / "fleet.config.json"
     if fleet_path.exists():
         try:
-            fleet = json.loads(fleet_path.read_text())
+            fleet = json.loads(fleet_path.read_text(encoding="utf-8-sig"))
             if isinstance(fleet, dict) and fleet.get("server_url"):
                 return fleet["server_url"]
         except json.JSONDecodeError:

@@ -17,12 +17,67 @@ run_loop.py knows the slot exists for a future contributor.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+
+# ── CLI resolution ─────────────────────────────────────────────────
+
+
+def _resolve_cli(name: str, env_override: str | None = None) -> str | None:
+    """Find a backend CLI binary, with Windows-specific fallbacks.
+
+    Resolution order:
+      1. `env_override` env var (e.g. `CODEX_CLI`) — explicit absolute path,
+         honored if it exists. Lets users on Windows point at the npm
+         install (`%APPDATA%\\npm\\codex.cmd`) when the Windows-Store/App
+         alias (`%LOCALAPPDATA%\\Microsoft\\WindowsApps\\<name>.exe`) shadows
+         the real CLI and returns "Access is denied".
+      2. `shutil.which(name)`, which on Windows already honors PATHEXT and
+         finds `.cmd` / `.bat` shims.
+      3. On Windows specifically, `shutil.which(name + ".cmd")` as a
+         belt-and-braces fallback for unusual PATH layouts.
+
+    Returns the resolved path or None if nothing was found."""
+    if env_override:
+        candidate = os.environ.get(env_override, "").strip()
+        if candidate and Path(candidate).exists():
+            return candidate
+
+    found = shutil.which(name)
+    if found:
+        return found
+
+    if sys.platform == "win32":
+        for suffix in (".cmd", ".exe", ".bat"):
+            found = shutil.which(name + suffix)
+            if found:
+                return found
+    return None
+
+
+def _wrap_for_windows(argv: list[str]) -> list[str]:
+    """Run `.cmd` / `.bat` scripts via cmd.exe so subprocess.run finds them.
+
+    Python's subprocess on Windows can usually execute `.cmd` directly, but
+    only when PATHEXT is set up *for the subprocess's environment* and the
+    binary is on PATH. When we pass an absolute path resolved from
+    `%APPDATA%\\npm\\codex.cmd` (the npm install for Codex CLI), subprocess
+    sometimes refuses to launch it without an explicit `cmd.exe /d /c`
+    prefix — surfaced as `[WinError 193] %1 is not a valid Win32
+    application`. Wrap proactively to avoid that gotcha."""
+    if sys.platform != "win32" or not argv:
+        return argv
+    first = argv[0]
+    if first.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/d", "/c"] + argv
+    return argv
 
 
 @dataclass
@@ -228,6 +283,10 @@ class ClaudeCodeAgent:
 
     name = "claude-code-agentic"
     cli_name = "claude"
+    cli_env_override = "CLAUDE_CLI"
+
+    def resolve_cli(self) -> str | None:
+        return _resolve_cli(self.cli_name, self.cli_env_override)
 
     def prepare(self, workdir: Path, challenge_md: str, config: dict) -> None:
         """Write CLAUDE.md + sandbox-settings.json into the worktree.
@@ -258,19 +317,22 @@ class ClaudeCodeAgent:
         file applies the permission sandbox. stdout/stderr captured and
         returned for logging + fallback hypothesis synthesis.
         """
-        if shutil.which("claude") is None:
+        claude_bin = self.resolve_cli()
+        if claude_bin is None:
             raise RuntimeError(
                 "claude CLI not found on PATH. Install Claude Code "
                 "(https://docs.claude.com/en/docs/claude-code) or switch to "
-                "--provider claude-code (one-shot mode) or an API provider."
+                "--provider claude-code (one-shot mode) or an API provider. "
+                "On Windows you can also export CLAUDE_CLI to point at the "
+                "absolute path of your `claude` install."
             )
 
-        cmd = [
-            "claude", "-p",
+        cmd = _wrap_for_windows([
+            claude_bin, "-p",
             "--settings", str(workdir / _SETTINGS_RELPATH),
             "--permission-mode", "acceptEdits",
             "--add-dir", str(workdir),
-        ]
+        ])
         if model:
             cmd += ["--model", model]
 
@@ -410,6 +472,10 @@ class CodexAgent:
 
     name = "codex-agentic"
     cli_name = "codex"
+    cli_env_override = "CODEX_CLI"
+
+    def resolve_cli(self) -> str | None:
+        return _resolve_cli(self.cli_name, self.cli_env_override)
 
     def prepare(self, workdir: Path, challenge_md: str, config: dict) -> None:
         """Write AGENTS.md into the worktree. Codex auto-discovers it."""
@@ -431,26 +497,31 @@ class CodexAgent:
         we're non-interactive; network access is forced off so the agent
         can't curl-exfiltrate or pull new crates mid-iteration.
         """
-        if shutil.which("codex") is None:
+        codex_bin = self.resolve_cli()
+        if codex_bin is None:
             raise RuntimeError(
                 "codex CLI not found on PATH. Install Codex CLI "
-                "(https://github.com/openai/codex) or switch to "
-                "--provider claude-code-agentic / an API provider."
+                "(`npm install -g @openai/codex` or "
+                "https://github.com/openai/codex) or switch to "
+                "--provider claude-code-agentic / an API provider. "
+                "On Windows, export CODEX_CLI to the npm install path "
+                "(e.g. `%APPDATA%\\npm\\codex.cmd`) if the Windows Store "
+                "alias is shadowing the real CLI with \"Access is denied\"."
             )
 
         last_msg_path = workdir / _LAST_MESSAGE_RELPATH
         if last_msg_path.exists():
             last_msg_path.unlink()
 
-        cmd = [
-            "codex", "exec",
+        cmd = _wrap_for_windows([
+            codex_bin, "exec",
             "--sandbox", "workspace-write",
             "-C", str(workdir),
             "--output-last-message", str(last_msg_path),
             "--skip-git-repo-check",
             "-c", 'approval_policy="never"',
             "-c", "sandbox_workspace_write.network_access=false",
-        ]
+        ])
         if model:
             cmd += ["--model", model]
 

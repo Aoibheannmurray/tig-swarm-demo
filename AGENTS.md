@@ -96,6 +96,45 @@ python scripts/run_fleet.py --list     # show agent names, ids, status
 python scripts/run_fleet.py --clean    # remove every worktree + branch
 ```
 
+## Windows-specific gotchas
+
+If the contributor is on Windows, walk through these *before* debugging anything
+else — they're the failure modes our docs have actually been bitten by:
+
+- **Docker Desktop requires WSL 2.** First-run Docker on Windows needs WSL 2 +
+  Virtual Machine Platform enabled (admin PowerShell: `wsl --install`, reboot,
+  `wsl --update`). Without this, the Docker daemon never starts and benchmarks
+  hang forever.
+- **`fleet.config.json` BOM.** PowerShell `Set-Content` writes UTF-8 *with* a
+  BOM by default. The loader now reads via `utf-8-sig` so this should no longer
+  break things, but the safe write idiom is
+  `$json | Out-File -Encoding utf8NoBOM fleet.config.json`. Better still: use
+  `python scripts/init_fleet.py`.
+- **Codex CLI: prefer the npm install.** The Windows Store alias for `codex`
+  (`%LOCALAPPDATA%\Microsoft\WindowsApps\codex.exe`) commonly returns
+  `Access is denied` when invoked from a subprocess. Have the user run
+  `npm install -g @openai/codex`, then either ensure the npm `codex.cmd` is
+  ahead of the Store alias on PATH or set
+  `$env:CODEX_CLI = "$env:APPDATA\npm\codex.cmd"`. `agentic_backends.py` and
+  `run_loop.py` both honor that env var. The Claude Code analog is
+  `CLAUDE_CLI`.
+- **Codex + ChatGPT login.** A ChatGPT-account-authenticated Codex CLI
+  *rejects* model IDs such as `gpt-5`. The wizard default for `codex-agentic`
+  is empty — accept it (Codex picks its own supported default). Do not guess
+  a model name.
+- **Agentic providers look frozen.** `claude-code-agentic` and `codex-agentic`
+  run with `capture_output=True`, so there is no live stdout while the agent
+  is thinking — up to `--agentic-timeout` seconds (default 900). The
+  background heartbeat keeps the dashboard happy; Docker stays idle until the
+  agent returns and `[BENCH]` starts. If the contributor reports "the terminal
+  is stuck," confirm an `[AGENTIC] Launching …` line is already on screen and
+  ask them to wait.
+- **PowerShell launch.** Tell them to `Set-Location` to the repo first; the
+  scripts assume cwd is the repo root. If `python` isn't on PATH, the bundled
+  Codex Python at
+  `%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe`
+  works as a fallback.
+
 ## Common failure modes & resolution
 
 - **`Docker is required to run benchmarks but \`docker\` was not found on PATH.`**

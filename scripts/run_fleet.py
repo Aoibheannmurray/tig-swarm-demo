@@ -34,6 +34,24 @@ ROOT = Path(__file__).resolve().parent.parent
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
 WORKTREES_DIR = ROOT / "worktrees"
 
+# Windows PowerShell `Set-Content` writes UTF-8 with a BOM by default. Strict
+# `json.loads(path.read_text())` then errors with "Expecting value: line 1
+# column 1" because the BOM is not whitespace. Reading via `utf-8-sig` strips
+# the BOM transparently and is a no-op for normal UTF-8.
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+# Windows console crashes on the box-drawing / ellipsis characters this script
+# prints when the active code page isn't UTF-8 ("UnicodeEncodeError: 'charmap'
+# codec can't encode …"). Force the parent's stdout/stderr to UTF-8 with
+# replacement so the contributor doesn't have to remember `python -X utf8`.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 # Fields on a fleet entry that are forwarded into the worktree's
 # agent.config.json. run_loop.py reads its provider/model/compute defaults
 # from there — no CLI flags needed on the subprocess.
@@ -71,7 +89,7 @@ def _load_fleet() -> tuple[str, str, str, list[dict]]:
             f"Or hand-edit:\n"
             f"    cp fleet.config.example.json fleet.config.json"
         )
-    data = json.loads(FLEET_CONFIG_PATH.read_text())
+    data = _read_json(FLEET_CONFIG_PATH)
     agents = data.get("agents") or []
     if not agents:
         sys.exit("fleet.config.json has no agents.")
@@ -116,6 +134,7 @@ def _load_fleet() -> tuple[str, str, str, list[dict]]:
 def _git(args: list[str]) -> str:
     result = subprocess.run(
         ["git"] + args, cwd=ROOT, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -124,12 +143,23 @@ def _git(args: list[str]) -> str:
     return result.stdout.strip()
 
 
+def _normalize_path(p: str | Path) -> str:
+    """Canonical form for cross-platform path comparison.
+
+    Git on Windows emits forward-slash paths (`C:/Users/.../worktrees/foo`)
+    while `str(WORKTREES_DIR / name)` uses backslashes, so a literal `in` check
+    fails on every valid worktree. Normalize via `os.path.normcase` (handles
+    case-insensitive NTFS + slash flipping) and `os.path.normpath` (collapses
+    `..`, double separators)."""
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
 def _existing_worktree_paths() -> set[str]:
     out = _git(["worktree", "list", "--porcelain"])
     paths: set[str] = set()
     for line in out.splitlines():
         if line.startswith("worktree "):
-            paths.add(line[len("worktree "):])
+            paths.add(_normalize_path(line[len("worktree "):]))
     return paths
 
 
@@ -142,7 +172,7 @@ def _ensure_worktree(name: str) -> Path:
     branch = f"fleet/{name}"
     known = _existing_worktree_paths()
 
-    if path.exists() and str(path) not in known:
+    if path.exists() and _normalize_path(path) not in known:
         # Stale directory not tracked as a worktree — prune and rebuild.
         _git(["worktree", "prune"])
         shutil.rmtree(path)
@@ -179,7 +209,7 @@ def _seed_worktree(
         # server_url straight into setup.py sync. A skipped seed just means
         # benchmark.py waits one extra iteration for the first sync to land.
         try:
-            cached = json.loads(root_cache.read_text())
+            cached = _read_json(root_cache)
             cached_url = (cached.get("server_url") or "").rstrip("/")
         except (json.JSONDecodeError, OSError):
             cached_url = ""
@@ -190,7 +220,7 @@ def _seed_worktree(
     existing: dict = {}
     if wt_agent.exists():
         try:
-            parsed = json.loads(wt_agent.read_text())
+            parsed = _read_json(wt_agent)
             if isinstance(parsed, dict):
                 existing = parsed
         except json.JSONDecodeError:
@@ -265,7 +295,7 @@ def _ensure_root_swarm_cache(server_url: str) -> None:
     cache = ROOT / ".swarm-cache.json"
     if cache.exists():
         try:
-            cached = json.loads(cache.read_text())
+            cached = _read_json(cache)
             cached_url = (cached.get("server_url") or "").rstrip("/")
         except (json.JSONDecodeError, OSError):
             cached_url = ""
@@ -277,6 +307,7 @@ def _ensure_root_swarm_cache(server_url: str) -> None:
     result = subprocess.run(
         [sys.executable, str(ROOT / "setup.py"), "sync"],
         cwd=ROOT, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
@@ -311,12 +342,12 @@ def cmd_list(agents: list[dict]) -> int:
     for agent in agents:
         name = agent["name"]
         path = WORKTREES_DIR / name
-        present = "ok" if str(path) in known else "missing"
+        present = "ok" if _normalize_path(path) in known else "missing"
         agent_id = "<unregistered>"
         wt_agent = path / "agent.config.json"
         if wt_agent.exists():
             try:
-                data = json.loads(wt_agent.read_text())
+                data = _read_json(wt_agent)
                 agent_id = data.get("agent_id") or "<unregistered>"
             except json.JSONDecodeError:
                 pass
@@ -390,10 +421,16 @@ def cmd_run(
 
         color = _COLORS[i % len(_COLORS)] if use_color else ""
         cmd = [sys.executable, "scripts/run_loop.py"]
+        # encoding/errors: child run_loop.py prints cargo + benchmark output
+        # that occasionally contains non-UTF-8 bytes (Windows console code page
+        # spillover, Rust panic backtraces with raw bytes). Without
+        # errors="replace" the parent crashes the moment it tries to decode a
+        # stray byte, killing the whole fleet.
         proc = subprocess.Popen(
             cmd, cwd=path, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
+            encoding="utf-8", errors="replace",
         )
         t = threading.Thread(
             target=_stream_output, args=(name, color, proc), daemon=True,

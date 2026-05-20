@@ -201,6 +201,8 @@ Per-provider default models live in `DEFAULT_MODELS` (scripts/run_loop.py). The 
 
 Each iteration shells out to `claude -p` from a temp directory so the CLI's `CLAUDE.md` auto-discovery doesn't inject anything from this repo into the system prompt — `run_loop.py` supplies its own. Trade-offs vs the API providers: per-call latency is higher (subprocess startup), and the dashboard's cost column reads $0 because the CLI doesn't surface token usage.
 
+> **Agentic providers run silently.** `claude-code-agentic` and `codex-agentic` each invoke their CLI inside a single subprocess with `capture_output=True` so we can read the trace afterwards — there is **no live stdout** for the duration of that call. Expect no terminal output for up to `--agentic-timeout` seconds (default **900s / 15 min**) per iteration. The fleet still heartbeats every 60s in the background, and `[BENCH]` / Docker activity only starts after the agent returns.
+
 ## Config Rule
 
 Swarm state lives on the server. Local files only tell this clone how to connect and run:
