@@ -65,8 +65,11 @@ _RESET = "\033[0m"
 def _load_fleet() -> tuple[str, str, str, list[dict]]:
     if not FLEET_CONFIG_PATH.exists():
         sys.exit(
-            f"fleet.config.json not found at {FLEET_CONFIG_PATH}.\n"
-            f"Copy fleet.config.example.json and edit it."
+            f"fleet.config.json not found at {FLEET_CONFIG_PATH}.\n\n"
+            f"Run the wizard to generate one (recommended):\n"
+            f"    python scripts/init_fleet.py\n\n"
+            f"Or hand-edit:\n"
+            f"    cp fleet.config.example.json fleet.config.json"
         )
     data = json.loads(FLEET_CONFIG_PATH.read_text())
     agents = data.get("agents") or []
@@ -248,6 +251,46 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
     return target, value
 
 
+# ── First-run bootstrap ────────────────────────────────────────────
+
+
+def _ensure_root_swarm_cache(server_url: str) -> None:
+    """Run `setup.py sync` once at the host root so .swarm-cache.json exists
+    before _seed_worktree tries to copy it into each worktree.
+
+    `setup.py sync` is idempotent: a no-op if the cache is already current and
+    its server_url matches `fleet.config.json`. We always run it because on a
+    fresh contributor clone there is no cache yet, and run_loop.py reads the
+    cache before its own per-iteration sync would run."""
+    cache = ROOT / ".swarm-cache.json"
+    if cache.exists():
+        try:
+            cached = json.loads(cache.read_text())
+            cached_url = (cached.get("server_url") or "").rstrip("/")
+        except (json.JSONDecodeError, OSError):
+            cached_url = ""
+        # Stale cache from a different swarm: drop it so sync writes a fresh one.
+        if cached_url and cached_url != server_url.rstrip("/"):
+            cache.unlink()
+
+    print(f"  [fleet] syncing swarm state from {server_url}…")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "setup.py"), "sync"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        sys.exit(f"  [fleet] setup.py sync failed:\n{err}")
+    if not cache.exists():
+        out = (result.stdout or "").strip()
+        sys.exit(
+            f"  [fleet] sync ran but produced no .swarm-cache.json — the swarm "
+            f"server may be unreachable.\n"
+            f"  Tried: {server_url}\n"
+            f"  setup.py output:\n{out}"
+        )
+
+
 # ── Streaming ──────────────────────────────────────────────────────
 
 
@@ -319,6 +362,13 @@ def cmd_run(
     # Resolve every API key up front so missing secrets fail fast before any
     # worktree work or subprocess starts.
     key_envs = [_resolve_api_key(a) for a in agents]
+
+    # Make sure .swarm-cache.json exists at root before any worktree is seeded.
+    # _seed_worktree copies the root cache into each worktree; without it,
+    # run_loop.py's first call to load_config() would bail with the legacy
+    # "Run `python setup.py sync` first" error that contributors aren't
+    # expected to know how to fix.
+    _ensure_root_swarm_cache(server_url)
 
     use_color = sys.stdout.isatty()
     procs: list[tuple[str, subprocess.Popen, threading.Thread]] = []
