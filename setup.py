@@ -1589,13 +1589,13 @@ def run_invite(username: str | None) -> int:
         admin["issued_contributors"] = issued
         write_swarm_admin(admin)
     print()
-    print(f"  Contributor:    {username}")
-    print(f"  Server URL:     {server_url}")
-    print(f"  swarm_password: {derived}")
+    print(f'  "server_url": {json.dumps(server_url)},')
+    print(f'  "username": {json.dumps(username)},')
+    print(f'  "swarm_password": {json.dumps(derived)},')
     print()
-    print("  Share the three values above with the contributor.")
-    print("  They paste server_url, username, and swarm_password into")
-    print("  their fleet.config.json, then run `python scripts/run_fleet.py`.")
+    print("  Share the three lines above with the contributor.")
+    print("  They paste them into their fleet.config.json (replacing the")
+    print("  matching keys), then run `python scripts/run_fleet.py`.")
     print()
     return 0
 
