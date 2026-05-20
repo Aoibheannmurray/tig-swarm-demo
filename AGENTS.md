@@ -73,6 +73,14 @@ printf '%s\n' "$SERVER_URL" "$USERNAME" "$SWARM_PASSWORD" "1" "" "1" | python sc
 sequence if the user wants a different provider — see the prompts in
 `scripts/init_fleet.py`.)
 
+**Fleet size.** The trailing `"1"` in that pipe is the *number of agents to
+spawn in parallel* — not a Yes/No. Default to 1 unless the user explicitly
+asks for more (e.g. "set me up with 3 agents"); then change the last `"1"`
+to that number. The wizard auto-generates unique `<adjective>-<noun>` names
+for the extra agents. If the user already has a `fleet.config.json` and
+wants to grow it, just duplicate one agent entry under `agents: [...]` with
+a new unique `name` — no need to re-run the wizard.
+
 The wizard writes `fleet.config.json` and prints the env var the user must
 export (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) — unless they picked a
 CLI-auth provider (`claude-code`, `claude-code-agentic`, `codex-agentic`),
