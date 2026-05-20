@@ -237,7 +237,14 @@ def publish_results(
         payload["kernel_code"] = kernel_code
     if bench.get("challenge_metrics") is not None:
         payload["challenge_metrics"] = bench["challenge_metrics"]
+    # Publish carries the full algorithm source + bench artifacts and is the
+    # only call that loses work on timeout (score + hypothesis never reach
+    # the dashboard, while the local code is overwritten next iteration). A
+    # generous ceiling absorbs the slow-but-eventually-responds case we
+    # actually observed in the wild without slowing the happy path — the
+    # call still returns the moment the server responds.
     return server_post(
         f"{server}/api/iterations", payload,
         agent_token=agent_token,
+        timeout=30,
     )
