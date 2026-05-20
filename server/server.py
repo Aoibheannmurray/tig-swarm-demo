@@ -1984,6 +1984,74 @@ async def admin_revoke(req: AdminRevoke):
     }
 
 
+@app.post("/api/admin/contributors")
+async def admin_contributors(req: AdminAuth):
+    """Return one row per contributor known to this swarm.
+
+    Sources merged:
+      - `agents` table grouped by `contributor_username` (registered names).
+      - `config.revoked_contributors` (names that were revoked but may have
+        had no surviving agents).
+
+    Fields per row:
+      - username
+      - agent_count: total agents the contributor ever registered
+      - agents_active: agents with last_heartbeat within the inactive window
+      - agents_invalidated: agents whose token was cleared (revoke side-effect)
+      - last_heartbeat: most recent heartbeat across all their agents (or null)
+      - revoked: true if the username is in config.revoked_contributors
+    """
+    await verify_admin(req)
+    cutoff = inactive_cutoff()
+    config = await get_config_cached()
+    revoked = _revoked_usernames(config)
+    rows: dict[str, dict] = {}
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT contributor_username AS username, "
+            "       COUNT(*) AS agent_count, "
+            "       SUM(CASE WHEN last_heartbeat >= ? THEN 1 ELSE 0 END) AS agents_active, "
+            "       SUM(CASE WHEN token IS NULL THEN 1 ELSE 0 END) AS agents_invalidated, "
+            "       MAX(last_heartbeat) AS last_heartbeat "
+            "FROM agents WHERE contributor_username IS NOT NULL "
+            "GROUP BY contributor_username",
+            (cutoff,),
+        )
+        for r in await cursor.fetchall():
+            username = r["username"]
+            rows[username] = {
+                "username": username,
+                "agent_count": r["agent_count"] or 0,
+                "agents_active": r["agents_active"] or 0,
+                "agents_invalidated": r["agents_invalidated"] or 0,
+                "last_heartbeat": r["last_heartbeat"],
+                "revoked": username in revoked,
+            }
+    # Surface revoked names with no surviving agent rows so they're still
+    # auditable (and so a host can't be surprised by a "missing" name).
+    for username in revoked:
+        if username not in rows:
+            rows[username] = {
+                "username": username,
+                "agent_count": 0,
+                "agents_active": 0,
+                "agents_invalidated": 0,
+                "last_heartbeat": None,
+                "revoked": True,
+            }
+    # Sort: active contributors first (by most recent heartbeat), then
+    # never-heartbeated, then revoked-with-no-agents at the bottom.
+    def _sort_key(row: dict) -> tuple:
+        return (
+            row["revoked"] and row["agent_count"] == 0,
+            row["last_heartbeat"] is None,
+            -(row["agents_active"] or 0),
+            row["last_heartbeat"] or "",
+        )
+    contributors = sorted(rows.values(), key=_sort_key)
+    return {"contributors": contributors, "inactive_cutoff": cutoff}
+
+
 @app.post("/api/admin/config")
 async def admin_config(req: AdminAuth, key: str = "", value: str = ""):
     global _config_cache

@@ -1491,6 +1491,10 @@ def main() -> int:
         "username",
         help="Username to revoke (as printed by `setup.py invite`).",
     )
+    sub.add_parser(
+        "list",
+        help="Host: list contributors (joined agents, active count, revoked state).",
+    )
     args = parser.parse_args()
 
     if args.mode == "create":
@@ -1505,6 +1509,8 @@ def main() -> int:
         return run_invite(args.username)
     if args.mode == "revoke":
         return run_revoke(args.username)
+    if args.mode == "list":
+        return run_list()
 
     print(
         "setup.py is the host-admin tool.\n"
@@ -1513,6 +1519,7 @@ def main() -> int:
         "  hosts:         `python setup.py create` to provision a new swarm.\n"
         "  invite a contributor:  `python setup.py invite [<username>]`.\n"
         "  revoke a contributor:  `python setup.py revoke <username>`.\n"
+        "  list contributors:     `python setup.py list`.\n"
         "  switch challenge:      `python setup.py switch <challenge>`.\n"
         "  edit tacit knowledge:  `python setup.py tacit [<agent-name>]`.",
         file=sys.stderr,
@@ -1653,6 +1660,95 @@ def run_revoke(username: str) -> int:
     print(f"  Revoked:        {username}")
     print(f"  Agents stopped: {result.get('agents_invalidated', 0)}")
     print(f"  Future register attempts under this username will be rejected.")
+    print()
+    return 0
+
+
+def run_list() -> int:
+    """List contributors. POSTs to /api/admin/contributors and pretty-prints
+    one row per contributor (joined name, agent counts, last heartbeat,
+    revoked flag). Also flags any name in swarm.admin.json that the server
+    doesn't know about — a quick way to spot invites that haven't been used yet."""
+    admin = read_swarm_admin()
+    admin_key = (admin.get("admin_key") or "").strip()
+    if not admin_key:
+        print(
+            "list: no admin_key in swarm.admin.json — "
+            "run `setup.py create` first (host machine only).",
+            file=sys.stderr,
+        )
+        return 1
+    server_url = resolve_server_url()
+    if not server_url:
+        print(
+            "list: no server_url found — run `python setup.py create` first.",
+            file=sys.stderr,
+        )
+        return 1
+    payload = {"admin_key": admin_key}
+    req = urllib.request.Request(
+        f"{server_url.rstrip('/')}/api/admin/contributors",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        print(f"list: server returned {e.code}: {body}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        print(f"list: failed to reach {server_url} ({e})", file=sys.stderr)
+        return 1
+
+    rows = data.get("contributors") or []
+    if not rows:
+        print()
+        print("  No contributors registered yet.")
+        print(f"  Issue an invite with:  python setup.py invite [<username>]")
+        print()
+        return 0
+
+    header = ("USERNAME", "AGENTS", "ACTIVE", "LAST HEARTBEAT", "STATE")
+    table = [header]
+    for r in rows:
+        if r["revoked"]:
+            state = "revoked"
+        elif r["agents_invalidated"] and r["agents_invalidated"] == r["agent_count"]:
+            # Edge case: not in the revoked set but every agent has had its
+            # token cleared. Shouldn't normally happen, but flag it rather
+            # than silently labelling them "ok".
+            state = "tokens cleared"
+        else:
+            state = "ok"
+        table.append((
+            r["username"] or "",
+            str(r["agent_count"]),
+            str(r["agents_active"]),
+            r["last_heartbeat"] or "—",
+            state,
+        ))
+    widths = [max(len(row[i]) for row in table) for i in range(len(header))]
+    print()
+    for i, row in enumerate(table):
+        print("  " + "  ".join(cell.ljust(widths[j]) for j, cell in enumerate(row)))
+        if i == 0:
+            print("  " + "  ".join("-" * w for w in widths))
+
+    # Cross-check against the local invite log so the host can spot names
+    # they've issued credentials for but who haven't joined yet.
+    issued = set(admin.get("issued_contributors") or [])
+    joined = {r["username"] for r in rows}
+    pending = sorted(issued - joined)
+    if pending:
+        print()
+        print(f"  Issued but not yet joined ({len(pending)}):")
+        for u in pending:
+            print(f"    - {u}")
+    print()
+    print(f"  Active window: heartbeats since {data.get('inactive_cutoff', '?')}.")
     print()
     return 0
 
