@@ -19,13 +19,26 @@ Usage:
 
 from __future__ import annotations
 
+# Python-version preflight — fires before any other import. `%` formatting and
+# a bare `sys` import keep the message readable on Python 2.x / very old 3.x.
+# Without this, contributors on older Python hit a confusing
+# `TypeError: 'type' object is not subscriptable` from some downstream module
+# instead of a clear "upgrade Python" pointer.
+import sys
+if sys.version_info < (3, 9):
+    sys.stderr.write(
+        "TIG swarm scripts require Python 3.9 or newer. You're running %d.%d.%d.\n"
+        "Install a current Python from https://www.python.org/downloads/ and re-run.\n"
+        % sys.version_info[:3]
+    )
+    sys.exit(1)
+
 import argparse
 import json
 import os
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
