@@ -116,8 +116,16 @@ else — they're the failure modes our docs have actually been bitten by:
   `npm install -g @openai/codex`, then either ensure the npm `codex.cmd` is
   ahead of the Store alias on PATH or set
   `$env:CODEX_CLI = "$env:APPDATA\npm\codex.cmd"`. `agentic_backends.py` and
-  `run_loop.py` both honor that env var. The Claude Code analog is
-  `CLAUDE_CLI`.
+  `run_loop.py` both honor that env var.
+- **Claude CLI: same shape.** The npm install
+  (`npm install -g @anthropic-ai/claude-code`) puts `claude.cmd` at
+  `%APPDATA%\npm\claude.cmd`. Usually fine on PATH out of the box, but if the
+  precheck still can't find it (or another `claude.exe` further up PATH is
+  winning), pin it explicitly:
+  `$env:CLAUDE_CLI = "$env:APPDATA\npm\claude.cmd"`. Same resolver, same
+  fallback behavior. Unlike Codex, `claude-code-agentic` does *not* care
+  whether the model name is `gpt-5`-style: the Claude CLI accepts any model
+  ID it knows.
 - **Codex + ChatGPT login.** A ChatGPT-account-authenticated Codex CLI
   *rejects* model IDs such as `gpt-5`. The wizard default for `codex-agentic`
   is empty — accept it (Codex picks its own supported default). Do not guess
