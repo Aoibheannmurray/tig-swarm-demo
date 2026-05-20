@@ -29,10 +29,10 @@ python setup.py switch knapsack
 
 Requirements:
 - Python 3
-- [Docker](https://www.docker.com/products/docker-desktop/) — benchmarks run inside a local Docker container. Install Docker Desktop and make sure it's running (`docker info` should succeed) before launching the fleet.
+- [Docker](https://www.docker.com/products/docker-desktop/) — benchmarks run inside a local Docker container. Install Docker Desktop and make sure it's running (`docker info` should succeed) before launching the fleet. On Windows, Docker Desktop also requires WSL 2; its installer will prompt you.
 - Credentials for whichever LLM provider you choose (Anthropic, OpenAI, Google, etc.).
 
-Other compute backends (e.g. remote `c3` GPUs) are supported by `fleet.config.json` directly — see [Compute](#compute) — but the wizard sticks to local Docker. Switch by hand-editing the config once your fleet is running.
+Don't have a terminal handy? Open this repo in [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://docs.claude.com/en/docs/claude-code) — both auto-discover `AGENTS.md` / `CLAUDE.md` and will walk you through setup.
 
 **Step 1. Generate `fleet.config.json`.** Pick one of the two options below.
 
@@ -77,8 +77,7 @@ Each agent gets its own git worktree under `worktrees/<name>/`, its own `agent_i
       "name": "phil",
       "provider": "openai",
       "model": "gpt-5.5",
-      "api_key_env": "OPENAI_API_KEY",
-      "compute": "local"
+      "api_key_env": "OPENAI_API_KEY"
     }
   ]
 }
@@ -92,8 +91,6 @@ Per-entry fields:
 | `provider`       | LLM provider — see [Providers](#providers).                             |
 | `model`          | Model ID; per-provider defaults live in `DEFAULT_MODELS` in `run_loop.py`. |
 | `api_key_env`    | Env var to read the API key from. Omit for CLI-auth providers.          |
-| `compute`        | `local` (Docker on this machine) or `c3` (remote).                      |
-| `hardware`       | C3 GPU instance (e.g. `l40`); used when `compute: c3`.                  |
 | `tacit_knowledge`| Optional path to a private hint file; auto-copied into the worktree.    |
 
 Fleet management:
@@ -110,17 +107,9 @@ To paste/upload tacit-knowledge hints for an agent (the one interactive bit that
 python setup.py tacit claude-1
 ```
 
-## Compute
+## Benchmark image
 
-TIG supports two benchmark backends per agent: local Docker and remote compute.
-
-### Local Docker
-
-Use local Docker when you want benchmarks to run on this machine.
-
-Requirements: Docker.
-
-Set `"compute": "local"` on the agent entry. Build the benchmark image once:
+Benchmarks run inside a local Docker container. Build the image once before the first launch:
 
 ```bash
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
@@ -129,59 +118,7 @@ docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 docker build -f Dockerfile.gpu -t tig-swarm-gpu .
 ```
 
-### Remote Compute
-
-Use remote compute when you want benchmarks to run on external infrastructure instead of this machine.
-
-C3 is currently the only built-in remote compute provider. A future provider with similar capabilities could be added if it can run a Docker image, upload the staged TIG workspace, execute the benchmark command, and return benchmark artifacts.
-
-Requirements for the built-in C3 provider:
-- `c3` CLI
-- either `c3 login` or `C3_API_KEY`
-
-```bash
-c3 whoami
-
-# or:
-export C3_API_KEY=...
-```
-
-Set `"compute": "c3"` and `"hardware": "l40"` (or another supported instance) on the agent entry.
-
-Remote C3 jobs default to public upstream Docker Hub images, so a fresh clone can run without access to any TIG-owned image:
-
-| Swarm/challenge type | Default image |
-|----------------------|---------------|
-| CPU                  | `rust:1-bookworm` |
-| GPU                  | `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` |
-
-Those public defaults are the most portable path, but they install missing packages and Python/Rust dependencies during job startup. For faster remote deploys, build a TIG-specific image with the benchmark dependencies already installed, push it to Docker Hub, and reference it via `"env"` on the agent entry:
-
-```bash
-docker login
-
-docker build -f Dockerfile.cpu -t <dockerhub-user>/tig-swarm-cpu:latest .
-docker push <dockerhub-user>/tig-swarm-cpu:latest
-
-docker build -f Dockerfile.gpu -t <dockerhub-user>/tig-swarm-gpu:latest .
-docker push <dockerhub-user>/tig-swarm-gpu:latest
-```
-
-C3 must be able to pull the image from Docker Hub, so local tags such as `tig-swarm-cpu:latest` are not enough unless they have been pushed to a public Docker Hub repository. Add `"env"` to the agent entry to match the swarm/challenge type:
-
-```json
-{
-  "name": "gpu-1",
-  "provider": "anthropic",
-  "compute": "c3",
-  "hardware": "l40",
-  "env": "<dockerhub-user>/tig-swarm-gpu:latest"
-}
-```
-
-With `"compute": "c3"` per agent, benchmarking is offloaded — running N agents only multiplies LLM calls, not local CPU or Docker pressure.
-
-### Providers
+## Providers
 
 | `provider`            | Auth                                                                            |
 |-----------------------|---------------------------------------------------------------------------------|
@@ -212,8 +149,8 @@ Swarm state lives on the server. Local files only tell this clone how to connect
 | `fleet.config.json`      | User-edited — list of agents to spawn (contributors).         |
 | `swarm.admin.json`       | Host-only — admin key + swarm tuning. Created by `setup.py create`. |
 | `.swarm-cache.json`      | Machine-managed — mirror of `/api/swarm_config`. Auto-refreshed by `setup.py sync` on every iteration. |
-| `worktrees/<name>/agent.config.json` | Per-worktree state — provider/model/compute + persisted `agent_id`. |
+| `worktrees/<name>/agent.config.json` | Per-worktree state — provider/model + persisted `agent_id`. |
 
-Secrets stay in environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `C3_API_KEY`).
+Secrets stay in environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`).
 
 See `ARCHITECTURE.md` for internals and the swarm protocol contributors call into.
