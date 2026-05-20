@@ -51,6 +51,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
+        default_timeout=300,
     ),
     "vehicle_routing": ChallengeDef(
         name="vehicle_routing",
@@ -67,6 +68,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "constraint_relaxation", "decomposition", "hybrid",
             "data_structure", "other",
         ),
+        default_timeout=260,
     ),
     "knapsack": ChallengeDef(
         name="knapsack",
@@ -82,6 +84,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "dp", "branch_and_bound", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
+        default_timeout=60,
     ),
     "job_scheduling": ChallengeDef(
         name="job_scheduling",
@@ -98,6 +101,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "constraint_relaxation", "decomposition", "hybrid",
             "data_structure", "other",
         ),
+        default_timeout=260,
     ),
     "energy_arbitrage": ChallengeDef(
         name="energy_arbitrage",

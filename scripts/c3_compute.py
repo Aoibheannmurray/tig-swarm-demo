@@ -1,38 +1,42 @@
 """C3 cloud compute integration for remote benchmarking.
 
-Handles project bundling, .c3 config generation, job submission,
-polling, and result extraction.
+The current C3 architecture runs a project described by a root `.c3` file.
+For Docker jobs C3 pulls a public Docker Hub image, uploads the project
+workspace, runs the configured bash script inside the container, then returns
+files written to `$C3_ARTIFACTS_DIR` or configured `output:` directories.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
-from contextlib import contextmanager
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
+from pathlib import Path
+from typing import Iterable
 
 from challenge_files import ROOT, read_optional
 
 _POLL_INTERVAL_SECS = 15
+_DEFAULT_CPU_IMAGE = "rust:1-bookworm"
+_DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 
 
 # ── Helpers ────────────────────────────────────────────────────────
 
 
 def _yaml_quote(value: str) -> str:
-    # JSON strings are a subset of YAML strings — json.dumps gives us correct
-    # escaping for quotes/backslashes/newlines without pulling in a YAML lib.
+    # JSON strings are valid YAML scalars and handle quotes/backslashes safely.
     return json.dumps(value)
 
 
 def _parse_walltime(c3_time: str) -> int:
-    """Parse 'HH:MM:SS' (or 'MM:SS' or 'SS') to seconds. Returns 7200 on parse failure."""
+    """Parse 'HH:MM:SS' (or 'MM:SS' or 'SS') to seconds. Returns 7200 on failure."""
     try:
         parts = [int(p) for p in c3_time.split(":")]
     except ValueError:
@@ -48,44 +52,117 @@ def _parse_walltime(c3_time: str) -> int:
     return h * 3600 + m * 60 + s
 
 
-def _script_write_file_b64(path: str, content: str) -> str:
-    encoded = base64.b64encode(content.encode()).decode()
-    return f"""\
-python3 - <<'PY'
-import base64
-from pathlib import Path
-
-path = Path({path!r})
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_bytes(base64.b64decode({encoded!r}))
-PY
-"""
+def _arg_value(args: argparse.Namespace, name: str, default=None):
+    return getattr(args, name, default)
 
 
-# ── Transient C3 project files ────────────────────────────────────
+def _select_docker_image(args: argparse.Namespace, config: dict) -> str:
+    explicit = (
+        _arg_value(args, "env")
+        or _arg_value(args, "env_image")
+        or config.get("env")
+        or config.get("env_image")
+        or config.get("c3_image")
+    )
+    if explicit:
+        return explicit
+    if bool(config.get("is_gpu")):
+        return (
+            _arg_value(args, "env_gpu")
+            or _arg_value(args, "c3_gpu_image")
+            or config.get("env_gpu")
+            or config.get("c3_gpu_image")
+            or _DEFAULT_GPU_IMAGE
+        )
+    return (
+        _arg_value(args, "env_cpu")
+        or _arg_value(args, "c3_cpu_image")
+        or config.get("env_cpu")
+        or config.get("c3_cpu_image")
+        or _DEFAULT_CPU_IMAGE
+    )
 
 
-@contextmanager
-def _temporary_c3_files(config: dict, server: str, c3_time: str):
-    """Create the transient .c3 project + runner script C3 needs.
+def _copy_required(src: Path, dst: Path) -> None:
+    if not src.exists():
+        raise FileNotFoundError(f"required C3 workspace path missing: {src}")
+    if src.is_dir():
+        shutil.copytree(
+            src,
+            dst,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "target"),
+        )
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
 
-    C3 expects `.c3` to live at the project root, so we write it only for
-    the duration of `c3 deploy` and restore any pre-existing file exactly.
-    """
+
+def _copy_optional(src: Path, dst: Path) -> None:
+    if src.exists():
+        _copy_required(src, dst)
+
+
+def _write_current_source_files(stage: Path, config: dict) -> None:
+    challenge = config.get("challenge", "unknown")
+    algorithm_rel = config.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
+    algorithm_code = read_optional(ROOT / algorithm_rel)
+    if algorithm_code:
+        algorithm_path = stage / algorithm_rel
+        algorithm_path.parent.mkdir(parents=True, exist_ok=True)
+        algorithm_path.write_text(algorithm_code)
+
+    kernel_rel = config.get("kernel_path")
+    if kernel_rel:
+        kernel_code = read_optional(ROOT / kernel_rel)
+        if kernel_code:
+            kernel_path = stage / kernel_rel
+            kernel_path.parent.mkdir(parents=True, exist_ok=True)
+            kernel_path.write_text(kernel_code)
+
+
+def _create_workspace(stage: Path, config: dict, server: str) -> dict:
+    """Create the minimal TIG workspace C3 should upload."""
+    challenge = config.get("challenge", "unknown")
+    staged_config = dict(config)
+    staged_config["server_url"] = server
+
+    for name in ("Cargo.toml", "Cargo.lock", "requirements.txt"):
+        _copy_required(ROOT / name, stage / name)
+
+    src_stage = stage / "src"
+    src_stage.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "lib.rs",
+        "main_generator.rs",
+        "main_solver.rs",
+        "main_evaluator.rs",
+        "main_gpu_benchmark.rs",
+    ):
+        _copy_optional(ROOT / "src" / name, src_stage / name)
+    _copy_required(ROOT / "src" / challenge, src_stage / challenge)
+    _write_current_source_files(stage, staged_config)
+
+    scripts_stage = stage / "scripts"
+    scripts_stage.mkdir(parents=True, exist_ok=True)
+    for script in (ROOT / "scripts").glob("*.py"):
+        _copy_required(script, scripts_stage / script.name)
+
+    (stage / ".swarm-cache.json").write_text(
+        json.dumps(staged_config, indent=2, sort_keys=True) + "\n"
+    )
+    return staged_config
+
+
+def _write_c3_project(
+    stage: Path,
+    config: dict,
+    server: str,
+    c3_time: str,
+    image: str,
+) -> str:
     run_id = uuid.uuid4().hex[:10]
     challenge = config.get("challenge", "unknown")
-    is_gpu = bool(config.get("is_gpu"))
-    dockerfile = "./scripts/c3/docker/Dockerfile.gpu" if is_gpu else "./scripts/c3/docker/Dockerfile.cpu"
-    c3_path = ROOT / ".c3"
-    script_name = f".c3-run-benchmark-{run_id}.sh"
-    script_path = ROOT / script_name
-    artifacts_dir = ROOT / "c3-artifacts"
-
-    algo_p = ROOT / config.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
-    kernel_cfg = config.get("kernel_path")
-    kernel_p = ROOT / kernel_cfg if kernel_cfg else None
-
-    old_c3 = c3_path.read_text() if c3_path.exists() else None
+    script_name = f"run-benchmark-{run_id}.sh"
 
     c3_config = f"""\
 project: tig-swarm-benchmark
@@ -95,73 +172,80 @@ time: {_yaml_quote(c3_time)}
 job_name: {_yaml_quote(f"tig-{challenge}-{run_id}")}
 
 docker:
-  dockerfile: {dockerfile}
-  context: ./scripts/c3/docker
+  image: {_yaml_quote(image)}
 
 output:
   - ./c3-artifacts
 """
+    (stage / ".c3").write_text(c3_config)
 
-    algorithm_code = read_optional(algo_p)
-    kernel_code = read_optional(kernel_p)
+    gpu_check = ""
+    if bool(config.get("is_gpu")):
+        gpu_check = """
+if ! command -v nvcc >/dev/null 2>&1; then
+  echo "nvcc is required for GPU challenges; use a CUDA devel Docker image" >&2
+  exit 127
+fi
+"""
 
     runner = f"""\
 #!/bin/bash
-set -u
+set -euo pipefail
 
 cd "${{C3_JOB_WORKDIR:-/workspace}}"
 mkdir -p "${{C3_ARTIFACTS_DIR}}" c3-artifacts
 
 export TIG_IN_DOCKER=1
 export TIG_SWARM_SERVER={_yaml_quote(server)}
+export PATH="${{HOME:-/root}}/.cargo/bin:/root/.cargo/bin:${{PATH}}"
 
-{_script_write_file_b64(config.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs"), algorithm_code)}
-"""
-    if kernel_cfg:
-        runner += _script_write_file_b64(kernel_cfg, kernel_code)
-    runner += f"""\
+needs_apt=0
+command -v python3 >/dev/null 2>&1 || needs_apt=1
+python3 -m pip --version >/dev/null 2>&1 || needs_apt=1
+command -v curl >/dev/null 2>&1 || needs_apt=1
+command -v cc >/dev/null 2>&1 || needs_apt=1
+test -e /usr/include/openssl/ssl.h || needs_apt=1
 
-cat > swarm.config.json <<'JSON'
-{json.dumps(config, indent=2, sort_keys=True)}
-JSON
+if [ "$needs_apt" -eq 1 ]; then
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "missing required system tools and apt-get is unavailable in this image" >&2
+    exit 127
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq curl ca-certificates build-essential python3 python3-pip pkg-config libssl-dev
+fi
 
+if ! command -v cargo >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  export PATH="${{HOME:-/root}}/.cargo/bin:/root/.cargo/bin:${{PATH}}"
+fi
+
+PIP_ROOT_USER_ACTION=ignore python3 -m pip install --break-system-packages -q -r requirements.txt
+{gpu_check}
 status=0
-python3 scripts/benchmark.py \
-  > "${{C3_ARTIFACTS_DIR}}/benchmark.json" \
+python3 scripts/benchmark.py \\
+  > "${{C3_ARTIFACTS_DIR}}/benchmark.json" \\
   2> "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" || status=$?
+
+cp "${{C3_ARTIFACTS_DIR}}/benchmark.json" c3-artifacts/benchmark.json 2>/dev/null || true
+cp "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" c3-artifacts/benchmark.stderr 2>/dev/null || true
 
 exit "$status"
 """
-
-    try:
-        artifacts_dir.mkdir(exist_ok=True)
-        c3_path.write_text(c3_config)
-        script_path.write_text(runner)
-        script_path.chmod(0o755)
-        yield
-    finally:
-        if old_c3 is None:
-            try:
-                c3_path.unlink()
-            except FileNotFoundError:
-                pass
-        else:
-            c3_path.write_text(old_c3)
-        try:
-            script_path.unlink()
-        except FileNotFoundError:
-            pass
+    script_path = stage / script_name
+    script_path.write_text(runner)
+    script_path.chmod(0o755)
+    return script_name
 
 
-# ── Job ID parsing ─────────────────────────────────────────────────
+# ── C3 command parsing / polling ───────────────────────────────────
 
 
 def _parse_c3_id(text: str) -> str | None:
     for pat in [
-        r'"id"\s*:\s*"([^"]+)"',
-        r"(inst_[a-zA-Z0-9_-]+)",
-        r"(job_[a-zA-Z0-9_-]+)",
-        r"([a-f0-9]{8,})",
+        r'"(?:id|job_id|jobId)"\s*:\s*"(job_[^"]+)"',
+        r"\b(job_[a-zA-Z0-9_-]+)\b",
     ]:
         m = re.search(pat, text)
         if m:
@@ -169,56 +253,72 @@ def _parse_c3_id(text: str) -> str | None:
     return None
 
 
-# ── Job polling ────────────────────────────────────────────────────
+def _normalise_status(value: str | None) -> str | None:
+    if not value:
+        return None
+    return str(value).strip().replace("-", "_").replace(" ", "_").upper()
+
+
+def _iter_job_dicts(data) -> Iterable[dict]:
+    if isinstance(data, list):
+        for item in data:
+            yield from _iter_job_dicts(item)
+    elif isinstance(data, dict):
+        if any(k in data for k in ("id", "job_id", "jobId")):
+            yield data
+        for key in ("jobs", "items", "data", "results", "queue"):
+            yield from _iter_job_dicts(data.get(key))
 
 
 _TERMINAL_OK = ("COMPLETED", "SYNCED", "SUCCEEDED", "SUCCESS")
-_TERMINAL_BAD = ("FAILED", "CANCELLED", "CANCELED", "ERROR")
+_TERMINAL_BAD = ("FAILED", "CANCELLED", "CANCELED", "ERROR", "TIMED_OUT", "TIMEOUT")
+_NON_TERMINAL = ("PENDING", "SCHEDULING", "RUNNING", "QUEUED", "SUBMITTED")
 
 
-def _read_job_status(job_id: str, env: dict) -> str | None:
-    """Return uppercased status from `c3 jobs get`, or None if unknown.
-
-    Prefers `-o json` for a clean parse; falls back to scraping the table.
-    """
+def _read_job_status(job_id: str, env: dict, cwd: Path) -> str | None:
     result = subprocess.run(
-        ["c3", "jobs", "get", job_id, "-o", "json"],
-        capture_output=True, text=True, cwd=ROOT, env=env,
+        ["c3", "squeue", "--json"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=env,
     )
     raw = (result.stdout or "").strip()
-    if raw.startswith("{"):
+    if raw:
         try:
             data = json.loads(raw)
-            status = data.get("status") or data.get("state") or ""
-            if status:
-                return str(status).upper()
+            for job in _iter_job_dicts(data):
+                ids = {str(job.get(k, "")) for k in ("id", "job_id", "jobId")}
+                if job_id in ids:
+                    return _normalise_status(
+                        job.get("status") or job.get("state") or job.get("phase")
+                    )
         except json.JSONDecodeError:
             pass
-    # Fallback: plain table
-    result = subprocess.run(
-        ["c3", "jobs", "get", job_id],
-        capture_output=True, text=True, cwd=ROOT, env=env,
+
+    table = subprocess.run(
+        ["c3", "squeue", "-n", "50"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=env,
     )
-    out = (result.stdout or "").upper()
-    if not out.strip():
-        return None
-    for marker in _TERMINAL_OK + _TERMINAL_BAD + ("RUNNING", "PENDING", "QUEUED"):
-        if marker in out:
-            return marker
+    for line in (table.stdout or "").splitlines():
+        if job_id not in line:
+            continue
+        upper = line.upper()
+        for marker in _TERMINAL_OK + _TERMINAL_BAD + _NON_TERMINAL:
+            if marker in upper:
+                return marker
     return None
 
 
-def _poll_c3_job(job_id: str, env: dict, walltime_secs: int) -> str:
-    """Poll a c3 job until terminal state.
-
-    Deadline is derived from the job's own walltime plus a 50% buffer for
-    queueing/teardown (min 30 min). Polls `c3 jobs get` — never trusts a
-    transient empty squeue as "completed".
-    """
-    deadline = time.monotonic() + max(1800, int(walltime_secs * 1.5))
+def _poll_c3_job(job_id: str, env: dict, cwd: Path, walltime_secs: int) -> str:
+    """Poll a C3 job until it reaches a terminal state."""
+    deadline = time.monotonic() + max(1800, walltime_secs + 2700)
     poll = 0
     while time.monotonic() < deadline:
-        status = _read_job_status(job_id, env)
+        status = _read_job_status(job_id, env, cwd)
         if status:
             if any(s in status for s in _TERMINAL_OK):
                 return "completed"
@@ -226,12 +326,101 @@ def _poll_c3_job(job_id: str, env: dict, walltime_secs: int) -> str:
                 return "failed"
             if poll % 4 == 0:
                 print(f"    [C3] {job_id}: {status}")
-        else:
-            if poll % 4 == 0:
-                print(f"    [C3] Still waiting on {job_id} (poll {poll + 1})…")
+        elif poll % 4 == 0:
+            print(f"    [C3] Still waiting on {job_id} (poll {poll + 1})...")
         poll += 1
         time.sleep(_POLL_INTERVAL_SECS)
     return "timeout"
+
+
+def _read_logs(job_id: str, env: dict, cwd: Path) -> str:
+    result = subprocess.run(
+        ["c3", "logs", job_id],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=env,
+    )
+    return (result.stdout or "") + (result.stderr or "")
+
+
+def _check_c3_auth(env: dict) -> str:
+    result = subprocess.run(
+        ["c3", "whoami"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env=env,
+    )
+    if result.returncode == 0:
+        return ""
+    detail = ((result.stdout or "") + (result.stderr or "")).strip()
+    return (
+        "[C3] Authentication failed. Run `c3 login`, or create an API key with "
+        "`c3 apikey create tig-swarm` and export it as `C3_API_KEY` before "
+        "running TIG. "
+        f"`c3 whoami` said: {detail[-1000:]}"
+    )
+
+
+def _pull_artifacts(job_id: str, env: dict, cwd: Path) -> str:
+    result = subprocess.run(
+        ["c3", "pull", job_id],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=env,
+    )
+    if result.returncode == 0:
+        return (result.stdout or "") + (result.stderr or "")
+
+    fallback = subprocess.run(
+        ["c3", "squeue", "pull", job_id],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=env,
+    )
+    return (
+        (result.stdout or "")
+        + (result.stderr or "")
+        + (fallback.stdout or "")
+        + (fallback.stderr or "")
+    )
+
+
+def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
+    candidates = sorted(
+        stage.rglob("benchmark.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    decode_errors = []
+    for path in candidates:
+        if path.stat().st_size == 0:
+            continue
+        try:
+            bench = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            decode_errors.append(f"{path}: {exc}")
+            continue
+        if "score" in bench or "challenge" in bench:
+            print(f"    [C3] Results extracted from {path}")
+            return bench, ""
+
+    benchmark_stderr = ""
+    stderr_candidates = sorted(
+        stage.rglob("benchmark.stderr"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if stderr_candidates:
+        benchmark_stderr = stderr_candidates[0].read_text(errors="replace")
+
+    detail = "\n".join(decode_errors[-3:])
+    if benchmark_stderr:
+        detail = f"{detail}\nbenchmark.stderr:\n{benchmark_stderr}".strip()
+    return None, detail
 
 
 # ── Run benchmark on C3 ───────────────────────────────────────────
@@ -248,101 +437,88 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
     cfg["server_url"] = server
     cfg["c3_hardware"] = args.hardware.lower()
 
+    image = _select_docker_image(args, cfg)
+    cfg["env"] = image
+
     env = os.environ.copy()
     if c3_key and not c3_key.startswith("your_"):
         env["C3_API_KEY"] = c3_key
+    elif c3_key:
+        env.pop("C3_API_KEY", None)
 
-    print(f"    [C3] Bundling project for {challenge}…")
+    auth_err = _check_c3_auth(env)
+    if auth_err:
+        return None, auth_err
 
-    with _temporary_c3_files(cfg, server, args.c3_time):
+    print(f"    [C3] Staging project for {challenge} with image {image}...")
+
+    with tempfile.TemporaryDirectory(prefix="tig-c3-") as tmp:
+        stage = Path(tmp)
+        try:
+            _create_workspace(stage, cfg, server)
+            _write_c3_project(stage, cfg, server, args.c3_time, image)
+        except Exception as exc:
+            return None, f"[C3] Failed to create staged project: {exc}"
+
         cmd = ["c3", "deploy"]
-        if args.c3_cloud_provider:
-            cmd.extend(["-p", args.c3_cloud_provider])
-        if args.c3_no_build:
-            cmd.append("--no-build")
+        provider = _arg_value(args, "c3_provider")
+        if provider:
+            cmd.extend(["-p", provider])
 
         print(f"    [C3] Running: {' '.join(cmd)}")
-        print(f"    [C3] (streaming deploy output — first run uploads ~10GB Docker image)")
+        print("    [C3] C3 will upload the staged workspace and pull the Docker Hub image")
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, cwd=ROOT, env=env,
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=stage,
+            env=env,
         )
         deploy_output_lines = []
+        assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip()
             deploy_output_lines.append(line)
             print(f"    [C3]   {line}")
         proc.wait()
-        result = subprocess.CompletedProcess(
-            cmd, proc.returncode,
-            stdout="\n".join(deploy_output_lines), stderr="",
-        )
+        combined = "\n".join(deploy_output_lines)
 
-    combined = (result.stdout or "") + "\n" + (result.stderr or "")
-    print(f"    [C3] Deploy output: {combined[:300]}")
+        if proc.returncode != 0:
+            err = f"[C3] c3 deploy failed ({proc.returncode}):\n{combined[-4000:]}"
+            print(f"    {err}")
+            return None, err
 
-    job_id = _parse_c3_id(combined)
-    if not job_id:
-        err = f"[C3] Could not parse job ID from c3 deploy output:\n{combined[-2000:]}"
-        print(f"    {err}")
-        return None, err
+        job_id = _parse_c3_id(combined)
+        if not job_id:
+            err = f"[C3] Could not parse job ID from c3 deploy output:\n{combined[-2000:]}"
+            print(f"    {err}")
+            return None, err
 
-    walltime_secs = _parse_walltime(args.c3_time)
-    print(f"    [C3] Job submitted: {job_id} — polling for completion (walltime {walltime_secs}s)…")
-    status = _poll_c3_job(job_id, env, walltime_secs)
+        walltime_secs = _parse_walltime(args.c3_time)
+        print(f"    [C3] Job submitted: {job_id} — polling for completion...")
+        status = _poll_c3_job(job_id, env, stage, walltime_secs)
+        logs_out = _read_logs(job_id, env, stage)
 
-    logs_result = subprocess.run(
-        ["c3", "logs", job_id],
-        capture_output=True, text=True, cwd=ROOT, env=env,
-    )
-    logs_out = logs_result.stdout or ""
+        if status != "completed":
+            err = f"[C3] Job {job_id} {status}"
+            print(f"    {err}")
+            if logs_out:
+                print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
+            pull_output = _pull_artifacts(job_id, env, stage)
+            _, parse_err = _load_benchmark_json(stage)
+            details = "\n".join(
+                part for part in (parse_err, pull_output[-2000:], logs_out[-2000:]) if part
+            )
+            return None, f"{err}\n{details}"
 
-    if status != "completed":
-        err = f"[C3] Job {job_id} {status}"
-        print(f"    {err}")
-        if logs_out:
-            print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
-        return None, f"{err}:\n{logs_out[-4000:]}"
-
-    print(f"    [C3] Job {job_id} completed — pulling results…")
-
-    subprocess.run(
-        ["c3", "pull", job_id], capture_output=True, text=True, cwd=ROOT, env=env,
-    )
-
-    for artifact_dir in [ROOT / job_id / "artifacts", ROOT / job_id / "c3-artifacts",
-                         ROOT / "c3-artifacts"]:
-        artifact_json = artifact_dir / "benchmark.json"
-        if artifact_json.exists() and artifact_json.stat().st_size > 0:
-            try:
-                bench = json.loads(artifact_json.read_text())
-                print(f"    [C3] Results extracted from {artifact_json}")
-                return bench, ""
-            except json.JSONDecodeError:
-                continue
-
-    for line in reversed(logs_out.strip().splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                bench = json.loads(line)
-                if "score" in bench or "challenge" in bench:
-                    print(f"    [C3] Results extracted from logs")
-                    return bench, ""
-            except json.JSONDecodeError:
-                continue
-
-    json_blocks = re.findall(r'\{[^{}]*"score"[^{}]*\}', logs_out)
-    if json_blocks:
-        try:
-            bench = json.loads(json_blocks[-1])
-            print(f"    [C3] Results extracted via regex fallback")
+        print(f"    [C3] Job {job_id} completed — pulling artifacts...")
+        pull_output = _pull_artifacts(job_id, env, stage)
+        bench, parse_err = _load_benchmark_json(stage)
+        if bench is not None:
             return bench, ""
-        except json.JSONDecodeError:
-            pass
 
-    err = f"[C3] Job {job_id} completed but could not parse benchmark JSON"
-    print(f"    {err}")
-    if logs_out:
-        print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
-    return None, err
+        err = f"[C3] Job {job_id} completed but benchmark.json was not found or parseable"
+        details = "\n".join(part for part in (parse_err, pull_output[-2000:], logs_out[-2000:]) if part)
+        print(f"    {err}")
+        return None, f"{err}\n{details}"

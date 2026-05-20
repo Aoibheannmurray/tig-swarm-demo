@@ -16,8 +16,10 @@ runtime.txt
 server/static/
 
 # Per-deploy / per-contributor state — never committed
-swarm.config.json
-agent.config.json
+.swarm-cache.json
+swarm.admin.json
+fleet.config.json
+worktrees/
 AGENTS.md
 CHALLENGE.md
 data/
@@ -28,5 +30,6 @@ tacit_knowledge_*.md
 tacit_knowledge_personal.md
 
 src/*/algorithm/mod.rs
+src/*/algorithm/kernels.cu
 tig-monorepo/
 prompts_log/

@@ -1,0 +1,5 @@
+# Python deps for the benchmark Docker images (Dockerfile.cpu / Dockerfile.gpu).
+# The server has its own deps in server/requirements.txt.
+# Local contributor/host scripts (setup.py, scripts/*.py) use only stdlib.
+blake3
+requests

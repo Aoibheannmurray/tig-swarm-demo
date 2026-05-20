@@ -15,6 +15,7 @@ Usage:
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
     python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+    python scripts/run_loop.py --provider anthropic --compute c3 --env rust:1-bookworm
     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
     # Resume a specific previous agent
@@ -36,7 +37,8 @@ Picking a model (--model):
 Provider/model/compute defaults come from agent.config.json when present.
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
 GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
---c3-api-key, or existing `c3 login` credentials.
+--c3-api-key, or existing `c3 login` credentials. C3 Docker jobs use public
+Docker Hub images, configured with --env.
 
 claude-code provider:
     Shells out to your local `claude -p` binary instead of hitting an HTTP
@@ -57,6 +59,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -73,14 +76,18 @@ from challenge_files import (
     validate_code,
 )
 from server import (
+    AgentTokenRevoked,
+    agent_exists,
     get_state,
     post_message,
     publish_results,
     register_agent,
     send_heartbeat,
     server_get,
+    validate_agent_token,
 )
 from prompts import (
+    build_agentic_user_prompt,
     build_code_system_prompt,
     build_code_user_prompt,
     build_compile_fix_prompt,
@@ -91,6 +98,8 @@ from prompts import (
     build_runtime_fix_prompt,
     parse_hypothesis,
 )
+import agentic_backends
+import agentic_sandbox
 from c3_compute import run_benchmark_c3
 
 # Backoff after a recoverable iteration-level failure (state fetch, LLM error).
@@ -138,9 +147,12 @@ def _call_llm_logged(
 
 
 def load_config() -> dict:
-    cfg_path = ROOT / "swarm.config.json"
+    cfg_path = ROOT / ".swarm-cache.json"
     if not cfg_path.exists():
-        sys.exit("swarm.config.json not found. Run `python setup.py` first.")
+        sys.exit(
+            ".swarm-cache.json not found. Run `python setup.py sync` first "
+            "(scripts/run_loop.py normally calls it at the top of every iteration)."
+        )
     return json.loads(cfg_path.read_text())
 
 
@@ -177,8 +189,8 @@ def _run_benchmark_local() -> tuple[dict | None, str]:
         capture_output=True, text=True, cwd=ROOT,
     )
     if result.returncode != 0:
-        err = result.stderr[-2000:]
-        print(f"  Benchmark failed:\n{err}", file=sys.stderr)
+        err = result.stderr or result.stdout or "Benchmark failed"
+        print(f"  Benchmark failed:\n{err[-2000:]}", file=sys.stderr)
         return None, err
     try:
         return json.loads(result.stdout), ""
@@ -265,7 +277,7 @@ def _try_compile_fix(
     Returns (success, input_tokens, output_tokens).
     """
     code, kernel = files.read()
-    fix_prompt = build_compile_fix_prompt(code, kernel, build_err[-1500:], files.is_gpu)
+    fix_prompt = build_compile_fix_prompt(code, kernel, build_err, files.is_gpu)
     try:
         fix_response, usage = _call_llm_logged(
             "compile_fix", config,
@@ -340,7 +352,7 @@ def _benchmark_with_compile_fix(
 
 def _fix_runtime_errors(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, server: str, agent_id: str, challenge_md: str,
+    config: dict, server: str, agent_token: str, agent_id: str, challenge_md: str,
     files: ChallengeFiles, bench: dict,
     best_code: str, best_kernel: str,
 ) -> tuple[dict | None, bool, int, int]:
@@ -399,7 +411,7 @@ def _fix_runtime_errors(
         code_changed = True
 
         print("  Re-running benchmark ...")
-        send_heartbeat(server, agent_id)
+        send_heartbeat(server, agent_id, agent_token=agent_token)
         bench_result, build_err = run_benchmark(args, config, server)
 
         if bench_result is None:
@@ -424,6 +436,123 @@ def _fix_runtime_errors(
     return bench, code_changed, input_tokens, output_tokens
 
 
+# ── Agentic (mode 2) iteration ─────────────────────────────────────
+
+
+_AGENTIC_HEARTBEAT_INTERVAL_S = 60
+
+
+def _start_heartbeat_thread(server: str, agent_id: str, agent_token: str) -> threading.Event:
+    """Send a heartbeat every minute while the agentic call is running.
+
+    Mode-2 iterations can run 10+ minutes inside a single `claude -p`
+    subprocess. Without a background heartbeat the agent would drop from
+    the server's inspiration pool mid-iteration. Returns a stop event the
+    caller must set when the agentic call exits.
+    """
+    stop = threading.Event()
+
+    def _beat() -> None:
+        while not stop.wait(_AGENTIC_HEARTBEAT_INTERVAL_S):
+            try:
+                send_heartbeat(server, agent_id, agent_token=agent_token)
+            except Exception as e:
+                print(f"  [HEARTBEAT] background beat failed: {e}", file=sys.stderr)
+
+    t = threading.Thread(target=_beat, daemon=True)
+    t.start()
+    return stop
+
+
+def _seed_worktree_files(
+    workdir: Path, state: dict, files: ChallengeFiles, config: dict,
+) -> None:
+    """Drop the agent's current best into the worktree as its starting point.
+
+    The worktree is gitignored at `src/<challenge>/algorithm/mod.rs` so on a
+    fresh worktree there's no mod.rs at all — the loop has to put one
+    there before the agent runs. Same for kernels.cu on GPU challenges.
+    Also copies .swarm-cache.json across (benchmark.py reads it).
+    """
+    best_code = state.get("best_algorithm_code") or ""
+    best_kernel = state.get("best_kernel_code") or ""
+    algo_rel = config["algorithm_path"]
+    algo_path = workdir / algo_rel
+    algo_path.parent.mkdir(parents=True, exist_ok=True)
+    if best_code:
+        algo_path.write_text(best_code)
+
+    kernel_rel = config.get("kernel_path")
+    if files.is_gpu and kernel_rel and best_kernel:
+        kp = workdir / kernel_rel
+        kp.parent.mkdir(parents=True, exist_ok=True)
+        kp.write_text(best_kernel)
+
+    agentic_sandbox.seed_worktree_config(workdir)
+
+
+def _read_worktree_files(
+    workdir: Path, files: ChallengeFiles, config: dict,
+) -> tuple[str, str]:
+    """Read whatever the agent left on disk in the worktree."""
+    algo_path = workdir / config["algorithm_path"]
+    code = algo_path.read_text() if algo_path.exists() else ""
+    kernel = ""
+    if files.is_gpu and config.get("kernel_path"):
+        kp = workdir / config["kernel_path"]
+        if kp.exists():
+            kernel = kp.read_text()
+    return code, kernel
+
+
+def _run_agentic_iteration(
+    args: argparse.Namespace,
+    state: dict, config: dict, server: str, agent_token: str,
+    agent_id: str, agent_name: str,
+    workdir: Path, backend: agentic_backends.AgenticBackend,
+    challenge_md: str, files: ChallengeFiles,
+) -> tuple[dict, str, str, agentic_backends.AgenticResult]:
+    """One tooled-agent iteration. Returns (hypothesis, code, kernel, result).
+
+    Hypothesis is always non-None: when the agent forgot to write
+    `.swarm/hypothesis.json` the caller gets a synthesized fallback so the
+    iteration can still publish. Code/kernel are whatever's on disk in the
+    worktree when the agent exits; the caller validates and benchmarks.
+    """
+    backend.prepare(workdir, challenge_md, config)
+    _seed_worktree_files(workdir, state, files, config)
+    agentic_sandbox.reset_iteration_state(workdir)
+
+    user_prompt = build_agentic_user_prompt(state, config)
+    print(f"  [AGENTIC] Launching {backend.name} in {workdir} (timeout {args.agentic_timeout}s)…")
+
+    stop = _start_heartbeat_thread(server, agent_id, agent_token)
+    try:
+        result = backend.iterate(
+            workdir, user_prompt,
+            model=args.model, timeout_s=args.agentic_timeout,
+        )
+    finally:
+        stop.set()
+
+    if result.timed_out:
+        print(f"  [AGENTIC] TIMED OUT after {result.duration_s:.0f}s")
+    else:
+        print(f"  [AGENTIC] Exit {result.exit_code}  duration {result.duration_s:.0f}s")
+    if result.exit_code != 0 and not result.timed_out:
+        tail = (result.stderr or result.stdout or "").strip()[-500:]
+        if tail:
+            print(f"  [AGENTIC] tail: {tail}")
+
+    hypothesis = agentic_sandbox.read_agent_hypothesis(workdir)
+    if hypothesis is None:
+        print("  [AGENTIC] No .swarm/hypothesis.json — synthesizing from stdout")
+        hypothesis = agentic_sandbox.synthesize_hypothesis_from_stdout(result.stdout)
+
+    code, kernel = _read_worktree_files(workdir, files, config)
+    return hypothesis, code, kernel, result
+
+
 # ── CLI ────────────────────────────────────────────────────────────
 
 
@@ -435,8 +564,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--provider",
-        choices=["anthropic", "openai", "google", "claude-code"],
-        help="LLM provider (default: agent.config.json, then anthropic)",
+        choices=[
+            "anthropic", "openai", "google",
+            "claude-code", "claude-code-agentic", "codex-agentic",
+        ],
+        help=(
+            "LLM provider (default: agent.config.json, then anthropic). "
+            "`claude-code` = headless one-shot completion via the local CLI; "
+            "`claude-code-agentic` = headless Claude Code agent mode in a "
+            "sandboxed worktree with file-edit tools; `codex-agentic` = same "
+            "shape via the local `codex exec` CLI. Agentic modes are "
+            "subscription-only (auth via the respective CLI's login) and "
+            "burn ~5–20× tokens per iteration vs single-shot."
+        ),
     )
     default_hint = ", ".join(f"{prov}={mid}" for prov, mid in DEFAULT_MODELS.items())
     p.add_argument(
@@ -468,14 +608,28 @@ def parse_args() -> argparse.Namespace:
         help="C3 job walltime for each benchmark job (default: 02:00:00)",
     )
     p.add_argument(
-        "--c3-cloud-provider",
-        help="Optional C3 CLI cloud provider passed as `c3 deploy -p ...`",
+        "--c3-provider",
+        help="Optional C3 CLI provider passed as `c3 deploy -p ...`",
     )
     p.add_argument(
-        "--c3-no-build", action="store_true",
-        help="Pass --no-build to c3 deploy, requiring a cached Docker image",
+        "--env",
+        help="Docker Hub environment image for C3 jobs; overrides built-in defaults",
     )
+    p.add_argument("--env-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--env-cpu", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-cpu-image", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--env-gpu", dest="env", help=argparse.SUPPRESS)
+    p.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
+    p.add_argument(
+        "--agentic-timeout", type=int, default=900,
+        help=(
+            "Wall-clock timeout in seconds for one agentic iteration "
+            "(claude-code-agentic only). Default 900 (15 min). The claude "
+            "CLI has no --max-turns flag, so this is the only ceiling."
+        ),
+    )
     p.add_argument("--agent-id", help="Resume with an existing agent ID")
     p.add_argument("--agent-name", help="Agent name (used with --agent-id)")
     p.add_argument("--new-agent", action="store_true", help="Register a new agent even if agent.config.json has one.")
@@ -483,7 +637,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_api_key(provider: str, api_key: str | None) -> str:
-    if provider == "claude-code":
+    if provider in ("claude-code", "claude-code-agentic", "codex-agentic"):
         return ""
     if api_key:
         return api_key
@@ -491,11 +645,48 @@ def resolve_api_key(provider: str, api_key: str | None) -> str:
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",
+        "venice": "VENICE_API_KEY",
     }
     key = os.environ.get(env_map[provider], "")
     if not key:
         sys.exit(f"No API key. Set ${env_map[provider]} or pass --api-key.")
     return key
+
+
+def preflight_llm_check(
+    provider: str, model: str, api_key: str, api_base: str | None,
+) -> None:
+    """Verify the LLM endpoint is reachable with the provided key/model BEFORE
+    we register the agent on the swarm.
+
+    Without this, an agent with a bad API key (revoked, misspelt env var,
+    wrong provider for the key, model not enabled on the account, hard rate
+    limit) registers fine, broadcasts agent_joined to every dashboard, then
+    fails every iteration in a tight retry loop. The dashboard ends up
+    showing ghost agents that have never published anything — confusing for
+    swarm hosts trying to read the AGENTS counter against the leaderboard.
+
+    Skipped for providers that don't go through call_llm (claude-code uses
+    a CLI + subscription auth; the agentic providers run their backend's
+    CLI directly and surface auth errors at first invocation)."""
+    if provider in ("claude-code", "claude-code-agentic", "codex-agentic"):
+        return
+    print(f"  [LLM] Pre-flight check via {provider}/{model}…")
+    try:
+        call_llm(
+            provider, model, api_key,
+            "You are a smoke test responder.",
+            "Reply with the single word OK.",
+            api_base,
+        )
+    except Exception as e:
+        sys.exit(
+            f"LLM pre-flight failed for {provider}/{model}: {e}\n"
+            f"Fix the API key / model / provider settings and try again. "
+            f"The agent has NOT been registered, so nothing was posted to "
+            f"the swarm dashboard."
+        )
+    print("  [LLM] Pre-flight OK")
 
 
 # ── Main loop ──────────────────────────────────────────────────────
@@ -505,48 +696,141 @@ def main() -> int:
     args = parse_args()
     config = load_config()
     agent_config = load_agent_config()
+    # `setup.py sync` (called at the top of every iteration) rebuilds
+    # .swarm-cache.json from a server-field whitelist, so log_prompts can't
+    # live there. Read it from agent.config.json once and re-apply it after
+    # each load_config() inside the loop.
+    log_prompts = bool(agent_config.get("log_prompts"))
+    config["log_prompts"] = log_prompts
 
     args.provider = args.provider or agent_config.get("provider") or "anthropic"
-    valid_providers = set(DEFAULT_MODELS) | {"claude-code"}
+    valid_providers = set(DEFAULT_MODELS) | {
+        "claude-code", "claude-code-agentic", "codex-agentic",
+    }
     if args.provider not in valid_providers:
         sys.exit(f"Unknown provider: {args.provider}")
+    is_agentic = args.provider in ("claude-code-agentic", "codex-agentic")
     args.model = args.model or agent_config.get("model")
     args.api_base = args.api_base or agent_config.get("api_base")
     args.compute = args.compute or agent_config.get("compute") or "local"
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
-    args.c3_cloud_provider = args.c3_cloud_provider or agent_config.get("c3_cloud_provider")
-    args.c3_no_build = args.c3_no_build or bool(agent_config.get("c3_no_build", False))
+    args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
+    args.env = args.env or agent_config.get("env")
+    if args.env is None:
+        args.env = agent_config.get("env_image") or agent_config.get("c3_image")
+    if args.env is None:
+        args.env = (
+            agent_config.get("env_gpu") or agent_config.get("c3_gpu_image")
+            if bool(config.get("is_gpu"))
+            else agent_config.get("env_cpu") or agent_config.get("c3_cpu_image")
+        )
     if args.compute not in ("local", "c3"):
         sys.exit(f"Unknown compute provider: {args.compute}")
 
     api_key = resolve_api_key(args.provider, args.api_key)
     model = args.model or DEFAULT_MODELS.get(args.provider, "")
 
-    server = config.get("server_url", "").rstrip("/")
+    # server_url is materialized into agent.config.json by run_fleet from the
+    # top-level fleet.config.json entry.
+    server = (agent_config.get("server_url") or "").rstrip("/")
     if not server:
-        sys.exit("No server_url in swarm.config.json. Run setup.py first.")
+        sys.exit(
+            "No server_url in agent.config.json. Did run_fleet.py spawn this "
+            "worktree, or was agent.config.json hand-edited?"
+        )
+    swarm_password = (agent_config.get("swarm_password") or "").strip()
+    username = (agent_config.get("username") or "").strip()
+    if not swarm_password or not username:
+        sys.exit(
+            "Missing username or swarm_password in agent.config.json. "
+            "Both are required to register — ask the host to run "
+            "`python setup.py invite <your-name>` and paste both into "
+            "fleet.config.json, then respawn the fleet."
+        )
     if args.compute == "c3":
         if shutil.which("c3") is None:
             sys.exit("c3 CLI not found. Install it from https://docs.cthree.cloud/.")
 
+    # Pre-flight the LLM BEFORE touching the swarm. If this fails, the script
+    # exits without calling register_agent — no agent_joined broadcast, no
+    # phantom row in the dashboard's AGENTS counter.
+    preflight_llm_check(args.provider, model, api_key, args.api_base)
+
     # Register or resume. agent.config.json is local-only, so it is safe to
-    # persist the swarm agent id there for automatic restarts.
+    # persist the swarm agent id + token there for automatic restarts.
+    # The token is the per-agent secret returned by /api/agents/register;
+    # it gates every non-register write call via the X-Agent-Token header.
     configured_agent_id = agent_config.get("agent_id")
     configured_agent_name = agent_config.get("agent_name")
+    configured_agent_token = agent_config.get("agent_token")
     if args.new_agent:
         configured_agent_id = None
         configured_agent_name = None
+        configured_agent_token = None
 
-    if args.agent_id or configured_agent_id:
+    if (args.agent_id or configured_agent_id) and configured_agent_token:
         agent_id = args.agent_id or configured_agent_id
         agent_name = args.agent_name or configured_agent_name or f"script-{agent_id[:8]}"
-        print(f"Resuming agent: {agent_name} ({agent_id})")
+        agent_token = configured_agent_token
+        # Validate before resuming. If the server doesn't have a row for
+        # this id (DB reset/redeploy, switched swarms, or a first-run
+        # interruption left a stale id locally), re-register with the
+        # same display name so the contributor keeps their identity.
+        # Multi-agent coordination keys off agent_id only — renaming or
+        # re-registering one contributor is invisible to everyone else.
+        if agent_exists(server, agent_id):
+            # Authenticated probe before the loop spends an LLM call: a
+            # revoked worker still satisfies agent_exists (the row is
+            # preserved for dashboard history; only token + status change),
+            # so without this check the first 403 wouldn't surface until
+            # post_message/heartbeat in iteration 1.
+            try:
+                validate_agent_token(server, agent_id, agent_token)
+            except AgentTokenRevoked as e:
+                sys.exit(
+                    f"This agent's access has been revoked by the swarm host "
+                    f"(server: {server}).\n"
+                    f"  agent_id: {agent_id}\n"
+                    f"  agent_name: {agent_name}\n"
+                    f"  server detail: {e}\n"
+                    f"Ask the host to re-invite you, then re-run setup with "
+                    f"the new swarm_password."
+                )
+            print(f"Resuming agent: {agent_name} ({agent_id})")
+        else:
+            print(
+                f"  [REGISTER] Stored agent_id {agent_id} not on server; "
+                f"re-registering as {agent_name!r}…"
+            )
+            agent_id, agent_name, agent_token = register_agent(
+                server, provider=args.provider, model=model,
+                requested_name=agent_name,
+                name=agent_config.get("name"),
+                username=username,
+                swarm_password=swarm_password,
+            )
+            print(f"Re-registered as: {agent_name} ({agent_id})")
     else:
-        agent_id, agent_name = register_agent(server, config)
+        # No persisted token (fresh install, upgrade from pre-token version,
+        # or --new-agent) — register fresh.
+        agent_id, agent_name, agent_token = register_agent(
+            server, provider=args.provider, model=model,
+            name=agent_config.get("name"),
+            username=username,
+            swarm_password=swarm_password,
+        )
         print(f"Registered as: {agent_name} ({agent_id})")
 
     updated_agent_config = dict(agent_config)
+    updated_agent_config.pop("c3_cloud_provider", None)
+    updated_agent_config.pop("c3_no_build", None)
+    updated_agent_config.pop("c3_image", None)
+    updated_agent_config.pop("c3_cpu_image", None)
+    updated_agent_config.pop("c3_gpu_image", None)
+    updated_agent_config.pop("env_image", None)
+    updated_agent_config.pop("env_cpu", None)
+    updated_agent_config.pop("env_gpu", None)
     runtime_defaults = {
         "provider": args.provider,
         "model": args.model,
@@ -554,21 +838,52 @@ def main() -> int:
         "compute": args.compute,
         "c3_hardware": args.hardware,
         "c3_time": args.c3_time,
-        "c3_cloud_provider": args.c3_cloud_provider,
-        "c3_no_build": args.c3_no_build,
+        "c3_provider": args.c3_provider,
+        "env": args.env,
     }
     for key, value in runtime_defaults.items():
         updated_agent_config.setdefault(key, value)
     updated_agent_config.update({
         "agent_id": agent_id,
         "agent_name": agent_name,
+        "agent_token": agent_token,
     })
     write_agent_config(updated_agent_config)
 
+    # Refresh .swarm-cache.json + CHALLENGE.md against the live server before
+    # the start-up banner prints `Challenge: ...`. Without this, a worktree
+    # whose cache predates a host-side `setup.py switch` would announce the
+    # old challenge until the first iteration's sync runs — confusing to read
+    # and easy to mis-trust. The per-iteration sync below still handles
+    # mid-run challenge switches.
+    print("  [SYNC] Syncing challenge with server…")
+    sync_challenge()
+    config = load_config()
+    config["log_prompts"] = log_prompts
     challenge_md = read_challenge_md()
+
+    # Agentic mode (claude-code-agentic): tooled headless Claude Code inside a
+    # gitignored worktree, edits restricted by sandbox-settings.json. The
+    # worktree persists across iterations (and across run_loop restarts) so
+    # the cargo build cache survives. Set up once; the per-iteration
+    # `backend.prepare(...)` refreshes CLAUDE.md / settings.json.
+    backend: agentic_backends.AgenticBackend | None = None
+    workdir: Path | None = None
+    if is_agentic:
+        backend = agentic_backends.get_backend(args.provider)
+        workdir = agentic_sandbox.resolve_workdir(agent_id, agent_name)
+        print(f"Agentic worktree: {workdir}")
+        if shutil.which(backend.cli_name) is None:
+            sys.exit(
+                f"{backend.cli_name} CLI not found on PATH. Install it, or "
+                f"switch to a non-agentic provider (e.g. --provider claude-code "
+                f"for one-shot mode)."
+            )
 
     print(f"Provider: {args.provider}  Model: {model}")
     compute_desc = f"c3/{args.hardware.lower()}" if args.compute == "c3" else args.compute
+    if args.compute == "c3" and args.env:
+        compute_desc += f" image={args.env}"
     print(f"Compute: {compute_desc}")
     print(f"Challenge: {config.get('challenge', '?')}")
     print(f"Server: {server}")
@@ -588,6 +903,7 @@ def main() -> int:
         print("  [SYNC] Syncing challenge with server…")
         sync_challenge()
         config = load_config()
+        config["log_prompts"] = log_prompts
         challenge_md = read_challenge_md()
         print(f"  [SYNC] Challenge: {config.get('challenge', '?')}  GPU: {config.get('is_gpu', False)}")
 
@@ -606,6 +922,18 @@ def main() -> int:
             time.sleep(_ITERATION_BACKOFF_SECS)
             continue
 
+        # If the agent's local `name` (from agent.config.json, materialized
+        # from fleet.config.json) differs from the server's agents.name, POST
+        # a rename. Cheap: piggybacks on the state we already fetched.
+        try:
+            from sync_identity import sync_identity_with_state
+            renamed = sync_identity_with_state(server, agent_id, state, agent_token=agent_token)
+            if renamed:
+                agent_name = renamed
+                print(f"  [IDENT] renamed to {agent_name!r}")
+        except Exception as e:
+            print(f"  [IDENT] sync skipped: {e}")
+
         my_score = state.get("my_best_score")
         global_best = state.get("best_score")
         stagnation = state.get("my_runs_since_improvement", 0)
@@ -618,7 +946,8 @@ def main() -> int:
         if reset:
             print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')} **")
             post_message(server, agent_name, agent_id,
-                         f"Trajectory reset: {reset.get('type')}")
+                         f"Trajectory reset: {reset.get('type')}",
+                         agent_token=agent_token)
 
         # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
@@ -634,155 +963,222 @@ def main() -> int:
         if bootstrap:
             print("  [FILES] Starting from stub — will ask LLM to write initial implementation")
 
-        # ── LLM hypothesis ─────────────────────────────────────
-        hint = state.get("stagnation_hint")
-        if hint:
-            print(f"  [LLM] Stagnation hint: {hint}")
-        if state.get("inspiration_code"):
-            print(f"  [LLM] Inspiration available from {state.get('inspiration_agent_name', '?')}")
-
-        prior = state.get("prior_hypotheses") or []
-        if prior:
-            print(f"  [LLM] {len(prior)} prior failed hypotheses on this program")
-
-        print(f"  [LLM] Generating hypothesis via {args.provider}/{model}…")
-        try:
-            hyp_response, hyp_usage = _call_llm_logged(
-                "hypothesis", config,
-                args.provider, model, api_key,
-                build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
-                build_hypothesis_user_prompt(state, config),
-                args.api_base,
+        if is_agentic:
+            # ── Mode 2: tooled agent in sandboxed worktree ─────
+            # Single tooled `claude -p` invocation replaces the entire
+            # mode-1 sequence (hypothesis → code → compile-fix → runtime-fix
+            # → redescribe). The agent decides its own hypothesis, edits the
+            # algorithm file directly in the worktree, runs `cargo check`
+            # itself, and writes .swarm/hypothesis.json before stopping.
+            # Tokens aren't surfaced by the CLI so usage stays 0.
+            assert backend is not None and workdir is not None
+            hypothesis, code, new_kernel, _agentic_result = _run_agentic_iteration(
+                args, state, config, server, agent_token, agent_id, agent_name,
+                workdir, backend, challenge_md, files,
             )
-            iter_input_tokens += hyp_usage["input_tokens"]
-            iter_output_tokens += hyp_usage["output_tokens"]
-        except Exception as e:
-            print(f"  [LLM] HYPOTHESIS FAILED: {e}")
-            post_message(server, agent_name, agent_id,
-                         f"LLM call failed: {type(e).__name__}")
-            time.sleep(_ITERATION_BACKOFF_SECS)
-            continue
+            tag = hypothesis.get("strategy_tag", "other")
+            title = hypothesis.get("title", "untitled")
+            print(f"  [AGENTIC] Hypothesis: [{tag}] {title}")
 
-        hypothesis = parse_hypothesis(hyp_response)
-        tag = hypothesis.get("strategy_tag", "?")
-        title = hypothesis.get("title", "?")
-        desc = hypothesis.get("description", "")
-        print(f"  [LLM] Hypothesis: [{tag}] {title}")
-        if desc:
-            print(f"         {desc[:120]}")
+            if not code:
+                print("  [AGENTIC] Agent left no algorithm file — restoring best")
+                if best_code:
+                    files.write(best_code, best_kernel)
+                # Local-only failure: don't broadcast to the swarm feed.
+                # A backend that consistently produces no code would otherwise
+                # spam every dashboard viewer once per iteration.
+                continue
 
-        # ── LLM code generation ────────────────────────────────
-        code, new_kernel, gen_in, gen_out = _generate_code(
-            args, model, api_key, state, hypothesis, config,
-            challenge_md, files,
-        )
-        iter_input_tokens += gen_in
-        iter_output_tokens += gen_out
+            violation = validate_code(code)
+            if violation:
+                print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
+                if best_code:
+                    files.write(best_code, best_kernel)
+                continue
 
-        if not code:
-            print(f"  [SKIP] No valid code produced — skipping to next iteration")
-            continue
+            # Copy the worktree's edited code into the main checkout so the
+            # official benchmark sees it. No compile-fix retry: the agent
+            # ran `cargo check` itself before stopping. If the official
+            # build still fails (e.g. feature-flag mismatch the agent
+            # missed), we restore and continue without escalating.
+            files.write(code, new_kernel)
+            print(f"  [FILES] {files.describe_write(code, new_kernel)}")
 
-        # ── Code similarity check ──────────────────────────────
-        if best_code:
-            sim = difflib.SequenceMatcher(None, best_code, code).ratio()
-            pct = sim * 100
-            if pct < 30:
-                label = "likely full rewrite"
-            elif pct < 60:
-                label = "major rewrite"
-            elif pct < 85:
-                label = "moderate edit"
-            else:
-                label = "incremental edit"
-            print(f"  [FILES] Code similarity: {pct:.0f}% ({label})")
+            compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
+            print(f"  [BENCH] Running benchmark on {compute_label}…")
+            send_heartbeat(server, agent_id, agent_token=agent_token)
+            bench, build_err = run_benchmark(args, config, server)
+
+            if bench is None:
+                print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
+                print(f"  [BENCH] Restoring previous code and continuing")
+                if best_code:
+                    files.write(best_code, best_kernel)
+                continue
+
+            track_scores = bench.get("track_scores", {})
+            errors = bench.get("errors") or []
+            print(f"  [BENCH] Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
+            if track_scores:
+                for tk, ts in track_scores.items():
+                    print(f"          Track {tk}: {ts:.0f}")
+            if errors:
+                print(f"  [BENCH] Errors ({len(errors)}):")
+                for e in errors[:5]:
+                    print(f"          {e}")
         else:
-            print("  [FILES] First algorithm (no prior code)")
+            # ── Mode 1: single-shot LLM completion ─────────────
+            # ── LLM hypothesis ─────────────────────────────────
+            hint = state.get("stagnation_hint")
+            if hint:
+                print(f"  [LLM] Stagnation hint: {hint}")
+            if state.get("inspiration_code"):
+                print(f"  [LLM] Inspiration available from {state.get('inspiration_agent_name', '?')}")
 
-        files.write(code, new_kernel)
-        print(f"  [FILES] {files.describe_write(code, new_kernel)}")
+            prior = state.get("prior_hypotheses") or []
+            if prior:
+                print(f"  [LLM] {len(prior)} prior failed hypotheses on this program")
 
-        # ── Benchmark with compile-error retry ─────────────────
-        compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
-        print(f"  [BENCH] Running benchmark on {compute_label}…")
-        post_message(server, agent_name, agent_id, f"Trying [{tag}] {title}")
-        send_heartbeat(server, agent_id)
-
-        bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
-            args, model, api_key, config, server, challenge_md,
-            files,
-        )
-        iter_input_tokens += fix_in
-        iter_output_tokens += fix_out
-
-        if bench is None:
-            print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
-            print(f"  [BENCH] Restoring previous code and continuing")
-            if best_code:
-                files.write(best_code, best_kernel)
-            post_message(server, agent_name, agent_id,
-                         f"[{tag}] {title} — benchmark failed (build error?)")
-            continue
-
-        track_scores = bench.get("track_scores", {})
-        errors = bench.get("errors") or []
-        print(f"  [BENCH] Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
-        if track_scores:
-            for tk, ts in track_scores.items():
-                print(f"          Track {tk}: {ts:.0f}")
-        if errors:
-            print(f"  [BENCH] Errors ({len(errors)}):")
-            for e in errors[:5]:
-                print(f"          {e}")
-
-        # ── Runtime error retry ────────────────────────────────
-        runtime_errors = bench.get("errors") or []
-        if runtime_errors and not bench.get("feasible"):
-            bench, rt_changed, rt_in, rt_out = _fix_runtime_errors(
-                args, model, api_key, config, server, agent_id, challenge_md,
-                files, bench, best_code, best_kernel,
-            )
-            iter_input_tokens += rt_in
-            iter_output_tokens += rt_out
-            code_changed = code_changed or rt_changed
-
-        if bench is None:
-            post_message(server, agent_name, agent_id,
-                         f"[{tag}] {title} — benchmark failed after runtime fix")
-            continue
-
-        # ── Re-describe hypothesis if code changed ─────────────
-        # Skip when the post-recovery code is nearly identical to what we
-        # originally proposed — the recovery was almost certainly cosmetic
-        # and not worth a round-trip to confirm "no change".
-        final_code, final_kernel = files.read()
-        post_fix_similarity = difflib.SequenceMatcher(None, code, final_code).ratio()
-        if code_changed and post_fix_similarity < _REDESCRIBE_SIMILARITY_THRESHOLD:
-            print(
-                f"  Code changed during error recovery "
-                f"(post-fix similarity {post_fix_similarity * 100:.0f}%) — re-describing hypothesis ..."
-            )
+            print(f"  [LLM] Generating hypothesis via {args.provider}/{model}…")
             try:
-                redesc_response, redesc_usage = _call_llm_logged(
-                    "redescribe", config,
+                hyp_response, hyp_usage = _call_llm_logged(
+                    "hypothesis", config,
                     args.provider, model, api_key,
-                    build_redescribe_system_prompt(config),
-                    build_redescribe_hypothesis_prompt(
-                        best_code or "", final_code, hypothesis,
-                        original_kernel=best_kernel or "",
-                        final_kernel=final_kernel,
-                    ),
+                    build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
+                    build_hypothesis_user_prompt(state, config),
                     args.api_base,
                 )
-                iter_input_tokens += redesc_usage["input_tokens"]
-                iter_output_tokens += redesc_usage["output_tokens"]
-                updated = parse_hypothesis(redesc_response)
-                print(f"  Updated hypothesis: [{updated.get('strategy_tag', '?')}] {updated.get('title', '?')}")
-                hypothesis = updated
-                tag = hypothesis.get("strategy_tag", "?")
-                title = hypothesis.get("title", "?")
+                iter_input_tokens += hyp_usage["input_tokens"]
+                iter_output_tokens += hyp_usage["output_tokens"]
             except Exception as e:
-                print(f"  Re-describe failed: {e} — using original hypothesis", file=sys.stderr)
+                # Local-only: LLM transport errors (rate limit, out of tokens,
+                # provider 5xx) used to broadcast a chat message to the swarm
+                # feed every time. That spammed every dashboard viewer when
+                # an agent exhausted quota and entered a fast retry loop.
+                # The local print + heartbeat absence is enough signal for
+                # the contributor; the swarm doesn't need to hear about it.
+                print(f"  [LLM] HYPOTHESIS FAILED: {e}")
+                time.sleep(_ITERATION_BACKOFF_SECS)
+                continue
+
+            hypothesis = parse_hypothesis(hyp_response)
+            tag = hypothesis.get("strategy_tag", "?")
+            title = hypothesis.get("title", "?")
+            desc = hypothesis.get("description", "")
+            print(f"  [LLM] Hypothesis: [{tag}] {title}")
+            if desc:
+                print(f"         {desc[:120]}")
+
+            # ── LLM code generation ────────────────────────────
+            code, new_kernel, gen_in, gen_out = _generate_code(
+                args, model, api_key, state, hypothesis, config,
+                challenge_md, files,
+            )
+            iter_input_tokens += gen_in
+            iter_output_tokens += gen_out
+
+            if not code:
+                print(f"  [SKIP] No valid code produced — skipping to next iteration")
+                continue
+
+            # ── Code similarity check ──────────────────────────
+            if best_code:
+                sim = difflib.SequenceMatcher(None, best_code, code).ratio()
+                pct = sim * 100
+                if pct < 30:
+                    label = "likely full rewrite"
+                elif pct < 60:
+                    label = "major rewrite"
+                elif pct < 85:
+                    label = "moderate edit"
+                else:
+                    label = "incremental edit"
+                print(f"  [FILES] Code similarity: {pct:.0f}% ({label})")
+            else:
+                print("  [FILES] First algorithm (no prior code)")
+
+            files.write(code, new_kernel)
+            print(f"  [FILES] {files.describe_write(code, new_kernel)}")
+
+            # ── Benchmark with compile-error retry ─────────────
+            compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
+            print(f"  [BENCH] Running benchmark on {compute_label}…")
+            post_message(server, agent_name, agent_id, f"Trying [{tag}] {title}",
+                         agent_token=agent_token)
+            send_heartbeat(server, agent_id, agent_token=agent_token)
+
+            bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
+                args, model, api_key, config, server, challenge_md,
+                files,
+            )
+            iter_input_tokens += fix_in
+            iter_output_tokens += fix_out
+
+            if bench is None:
+                print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
+                print(f"  [BENCH] Restoring previous code and continuing")
+                if best_code:
+                    files.write(best_code, best_kernel)
+                continue
+
+            track_scores = bench.get("track_scores", {})
+            errors = bench.get("errors") or []
+            print(f"  [BENCH] Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
+            if track_scores:
+                for tk, ts in track_scores.items():
+                    print(f"          Track {tk}: {ts:.0f}")
+            if errors:
+                print(f"  [BENCH] Errors ({len(errors)}):")
+                for e in errors[:5]:
+                    print(f"          {e}")
+
+            # ── Runtime error retry ────────────────────────────
+            runtime_errors = bench.get("errors") or []
+            if runtime_errors and not bench.get("feasible"):
+                bench, rt_changed, rt_in, rt_out = _fix_runtime_errors(
+                    args, model, api_key, config, server, agent_token, agent_id, challenge_md,
+                    files, bench, best_code, best_kernel,
+                )
+                iter_input_tokens += rt_in
+                iter_output_tokens += rt_out
+                code_changed = code_changed or rt_changed
+
+            if bench is None:
+                print(f"  [BENCH] Benchmark failed after runtime fix — skipping iteration")
+                continue
+
+            # ── Re-describe hypothesis if code changed ─────────
+            # Skip when the post-recovery code is nearly identical to what
+            # we originally proposed — the recovery was almost certainly
+            # cosmetic and not worth a round-trip to confirm "no change".
+            final_code, final_kernel = files.read()
+            post_fix_similarity = difflib.SequenceMatcher(None, code, final_code).ratio()
+            if code_changed and post_fix_similarity < _REDESCRIBE_SIMILARITY_THRESHOLD:
+                print(
+                    f"  Code changed during error recovery "
+                    f"(post-fix similarity {post_fix_similarity * 100:.0f}%) — re-describing hypothesis ..."
+                )
+                try:
+                    redesc_response, redesc_usage = _call_llm_logged(
+                        "redescribe", config,
+                        args.provider, model, api_key,
+                        build_redescribe_system_prompt(config),
+                        build_redescribe_hypothesis_prompt(
+                            best_code or "", final_code, hypothesis,
+                            original_kernel=best_kernel or "",
+                            final_kernel=final_kernel,
+                        ),
+                        args.api_base,
+                    )
+                    iter_input_tokens += redesc_usage["input_tokens"]
+                    iter_output_tokens += redesc_usage["output_tokens"]
+                    updated = parse_hypothesis(redesc_response)
+                    print(f"  Updated hypothesis: [{updated.get('strategy_tag', '?')}] {updated.get('title', '?')}")
+                    hypothesis = updated
+                    tag = hypothesis.get("strategy_tag", "?")
+                    title = hypothesis.get("title", "?")
+                except Exception as e:
+                    print(f"  Re-describe failed: {e} — using original hypothesis", file=sys.stderr)
 
         # ── Publish ────────────────────────────────────────────
         iter_cost = estimate_cost(model, {
@@ -798,6 +1194,7 @@ def main() -> int:
                 input_tokens=iter_input_tokens,
                 output_tokens=iter_output_tokens,
                 estimated_cost=iter_cost,
+                agent_token=agent_token,
             )
             is_new_best = result.get("is_new_best", False)
             if is_new_best:
@@ -810,8 +1207,9 @@ def main() -> int:
         status = "NEW BEST!" if is_new_best else f"score {bench.get('score', 0):.0f}"
         feasible_str = "" if bench.get("feasible") else " (INFEASIBLE)"
         post_message(server, agent_name, agent_id,
-                     f"[{tag}] {title} → {status}{feasible_str}")
-        send_heartbeat(server, agent_id)
+                     f"[{tag}] {title} → {status}{feasible_str}",
+                     agent_token=agent_token)
+        send_heartbeat(server, agent_id, agent_token=agent_token)
 
         elapsed = time.time() - t_start
         print(f"  [DONE] Iteration {iteration} finished in {elapsed:.0f}s")

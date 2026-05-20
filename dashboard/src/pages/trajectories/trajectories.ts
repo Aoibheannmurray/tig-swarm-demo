@@ -1,4 +1,9 @@
-import * as d3 from "d3";
+import { axisBottom, axisLeft, type AxisScale } from "d3-axis";
+import { extent, max, min } from "d3-array";
+import { format } from "d3-format";
+import { scaleLinear } from "d3-scale";
+import { select } from "d3-selection";
+import { curveStepAfter, line } from "d3-shape";
 
 interface ScorePoint {
   score: number;
@@ -32,7 +37,8 @@ interface TrajectoriesResponse {
   trajectories: Trajectory[];
 }
 
-import { PALETTE, token } from "../lib/colors";
+import { PALETTE, token } from "../../lib/colors";
+import { getViewedChallenge } from "../../lib/viewedChallenge";
 
 function trajColor(index: number): string {
   return PALETTE[index % PALETTE.length];
@@ -73,6 +79,13 @@ export class TrajectoriesPanel {
   private view: ChartView = { kind: "all" };
 
   init(container: HTMLElement, apiUrl: string) {
+    // init() is called again on every challenge switch from
+    // pages/trajectories/main.ts; clear the prior 15s poll so it doesn't
+    // stack.
+    if (this.refreshTimer !== null) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+    }
     this.container = container;
     this.apiUrl = apiUrl;
 
@@ -154,7 +167,13 @@ export class TrajectoriesPanel {
 
   private async fetchData() {
     try {
-      const res = await fetch(`${this.apiUrl}/api/trajectories`);
+      // Pin to the viewed challenge — otherwise the server defaults to its
+      // active challenge and the page always shows that one's trajectories,
+      // regardless of what the user picked in the selector.
+      const challenge = getViewedChallenge();
+      const res = await fetch(
+        `${this.apiUrl}/api/trajectories?challenge=${encodeURIComponent(challenge)}`,
+      );
       if (!res.ok) return;
       this.data = await res.json();
       this.render();
@@ -228,7 +247,7 @@ export class TrajectoriesPanel {
 
   private renderChart(trajectories: Trajectory[]) {
     const wrap = document.getElementById("traj-chart-wrap")!;
-    const svg = d3.select("#traj-chart-svg");
+    const svg = select("#traj-chart-svg");
     svg.selectAll("*").remove();
 
     const w = wrap.clientWidth;
@@ -278,20 +297,28 @@ export class TrajectoriesPanel {
       for (const t of withHistory) {
         for (const p of t.score_history) allTimes.push(new Date(p.created_at));
       }
-      const ext = d3.extent(allTimes) as [Date, Date];
-      xDomain = [ext[0].getTime(), ext[1].getTime()];
+      const ext = extent(allTimes) as [Date, Date];
+      const startMs = ext[0].getTime();
+      const endMs = ext[1].getTime();
+      // Pad the right edge so the active-trajectory extension below is
+      // visible. Without this, xDomain[1] equals the last data point's
+      // timestamp, so the step-after hold has zero width and the latest
+      // score renders as only an endpoint dot — making the ALL view look
+      // stale vs the per-trajectory view (which already pads by 5%).
+      const span = Math.max(endMs - startMs, 1);
+      xDomain = [startMs, endMs + span * 0.05];
     }
 
     const allScores: number[] = [];
     for (const t of withHistory) {
       for (const p of t.score_history) allScores.push(p.score);
     }
-    const yMin = d3.min(allScores)!;
-    const yMax = d3.max(allScores)!;
+    const yMin = min(allScores)!;
+    const yMax = max(allScores)!;
     const yPad = Math.max(Math.abs(yMax - yMin) * 0.08, 1);
 
-    const x = d3.scaleLinear().domain(xDomain).range([0, cw]);
-    const y = d3.scaleLinear().domain([yMin - yPad, yMax + yPad]).range([ch, 0]);
+    const x = scaleLinear().domain(xDomain).range([0, cw]);
+    const y = scaleLinear().domain([yMin - yPad, yMax + yPad]).range([ch, 0]);
 
     const g = svg.append("g")
       .attr("transform", `translate(${margin.left},${margin.top})`);
@@ -332,7 +359,7 @@ export class TrajectoriesPanel {
         .attr("stroke", AXIS_LINE());
     } else {
       xAxis.call(
-        d3.axisBottom(x as unknown as d3.AxisScale<number>)
+        axisBottom(x as unknown as AxisScale<number>)
           .ticks(6)
           .tickFormat((d) => {
             const dt = new Date(d as number);
@@ -346,16 +373,16 @@ export class TrajectoriesPanel {
 
     // Y axis
     const yAxis = g.append("g");
-    yAxis.call(d3.axisLeft(y).ticks(6).tickFormat(d3.format(",.0f")) as any);
+    yAxis.call(axisLeft(y).ticks(6).tickFormat(format(",.0f")) as any);
     yAxis.selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
     yAxis.selectAll("line").attr("stroke", AXIS_LINE());
     yAxis.select(".domain").attr("stroke", AXIS_LINE());
 
     // Step function lines per trajectory
-    const stepLine = d3.line<{ t: number; s: number }>()
+    const stepLine = line<{ t: number; s: number }>()
       .x((d) => x(d.t))
       .y((d) => y(d.s))
-      .curve(d3.curveStepAfter);
+      .curve(curveStepAfter);
 
     for (let i = 0; i < withHistory.length; i++) {
       const traj = withHistory[i];

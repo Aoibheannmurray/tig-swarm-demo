@@ -49,6 +49,10 @@ class HeartbeatRequest(BaseModel):
     current_hypothesis_id: Optional[str] = None
 
 
+class RenameRequest(BaseModel):
+    agent_name: str
+
+
 class IterationCreate(BaseModel):
     agent_id: str
     title: str
@@ -84,6 +88,36 @@ class AdminResetChallenge(AdminAuth):
     `hypotheses`, and `agent_challenge_state` so prior research and per-agent
     counters (run counts, trajectories, stagnation) remain intact."""
     challenge: "ChallengeName"
+
+
+class AdminRevoke(AdminAuth):
+    """Owner-only: revoke a contributor by username so they can no longer
+    register new agents. Existing agents owned by that contributor have
+    their per-agent token cleared in the same call, so in-flight workers
+    stop authenticating immediately. Agent rows (and their history) are
+    preserved — only the auth token + the entry in config.revoked_contributors
+    are touched."""
+    username: str
+
+
+class AdminSeedInactive(AdminAuth):
+    """Owner-only: deposit an externally-sourced algorithm into the
+    `inactive_algorithms` pool so the next stagnated agent that doesn't
+    qualify for a fresh start adopts it (server.py's `adopted_inactive`
+    path). Used at swarm-create time to seed the pool with the current
+    top-earning TIG mainnet algorithm.
+
+    Restricted server-side to {knapsack, satisfiability} — the only
+    challenges whose mainnet algorithms ship as a single mod.rs (+ optional
+    kernels.cu), which is what the `agent_bests` / `inactive_algorithms`
+    wire format expects today.
+    """
+    challenge: "ChallengeName"
+    algorithm_code: str
+    kernel_code: Optional[str] = None
+    # Free-form label for the synthetic agent the pool entry is attributed
+    # to (e.g. "tig-foundation"). The server creates the agent on first use.
+    source_label: str = "tig-foundation"
 
 
 # Swarm-wide configuration set by the owner via the setup wizard.
@@ -146,6 +180,7 @@ class MessageCreate(BaseModel):
 class AgentResponse(BaseModel):
     agent_id: str
     agent_name: str
+    agent_token: str
     registered_at: str
     config: dict
 

@@ -2,17 +2,19 @@ import json
 import asyncio
 import logging
 import random
+import secrets
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from models import (
-    RegisterRequest, HeartbeatRequest,
+    RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
+    AdminRevoke, AdminSeedInactive,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
@@ -104,14 +106,22 @@ async def get_challenge_config_cached(challenge: str) -> dict:
         return _challenge_config_cache[challenge]
     async with db.connect() as conn:
         row = await db.get_challenge_config(conn, challenge)
-    cfg = row or {
-        "challenge": challenge,
-        "tracks": "{}",
-        "timeout": 5,
-        "scoring_direction": "max",
-        "initial_algorithm_code": "",
-        "initial_kernel_code": "",
-    }
+    if row is None:
+        # No row in challenge_configs yet — the wizard hasn't run for this
+        # challenge. Mirror the schema/registry defaults so callers always
+        # see a fully-populated dict.
+        ch_def = challenges.CHALLENGES.get(challenge)
+        cfg = {
+            "challenge": challenge,
+            "tracks": "{}",
+            "timeout": ch_def.default_timeout if ch_def else 30,
+            "scoring_direction": ch_def.scoring_direction if ch_def else "max",
+            "initial_algorithm_code": "",
+            "initial_kernel_code": "",
+            "strategy_tags": "[]",
+        }
+    else:
+        cfg = row
     _challenge_config_cache[challenge] = cfg
     return cfg
 
@@ -198,6 +208,79 @@ async def verify_admin(req: AdminAuth) -> None:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
 
+def _derive_user_password(username: str, base_password: str) -> str:
+    """Per-contributor password = sha256(username + ':' + base_password).
+
+    The server stores only the base password (config.swarm_password); the
+    host computes each contributor's derived password via
+    `python setup.py invite <username>` and shares it with them out-of-band.
+    Same shape `hashlib` digest used by the invite command, so the two
+    must match exactly.
+    """
+    import hashlib
+    return hashlib.sha256(f"{username}:{base_password}".encode()).hexdigest()
+
+
+def _revoked_usernames(config: dict) -> set[str]:
+    """Read the revoked-contributors set from config. Stored as a JSON
+    array under `revoked_contributors`; absent / unparseable values are
+    treated as an empty set so a bad write never locks everyone out."""
+    raw = config.get("revoked_contributors")
+    if not raw:
+        return set()
+    try:
+        return set(json.loads(raw))
+    except (ValueError, TypeError):
+        return set()
+
+
+async def verify_swarm_password(
+    x_username: str | None = Header(default=None, alias="X-Username"),
+    x_swarm_password: str | None = Header(default=None, alias="X-Swarm-Password"),
+) -> str:
+    """Gates /api/agents/register (the join endpoint). Returns the
+    contributor's username so the handler can stamp it on the new agent.
+    Subsequent writes use the per-agent token (see verify_agent_token).
+    """
+    if not x_username or not x_swarm_password:
+        raise HTTPException(
+            status_code=403,
+            detail="Missing X-Username or X-Swarm-Password header",
+        )
+    config = await get_config_cached()
+    base = config.get("swarm_password")
+    if not base:
+        raise HTTPException(status_code=403, detail="Swarm not configured")
+    expected = _derive_user_password(x_username, base)
+    if not secrets.compare_digest(x_swarm_password, expected):
+        raise HTTPException(status_code=403, detail="Invalid credentials")
+    if x_username in _revoked_usernames(config):
+        raise HTTPException(status_code=403, detail="Contributor has been revoked")
+    return x_username
+
+
+async def verify_agent_token(
+    x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
+) -> str:
+    """Look up the agent by token. Returns the agent_id so downstream
+    handlers can use it; raises 403 if the token is missing or unknown.
+
+    Issued at /api/agents/register and stored on the agents row. Tokens
+    are not revocable today — deleting the agents row is the only way to
+    invalidate one.
+    """
+    if not x_agent_token:
+        raise HTTPException(status_code=403, detail="Missing agent token")
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT id FROM agents WHERE token = ?", (x_agent_token,),
+        )
+        row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=403, detail="Invalid agent token")
+    return row["id"]
+
+
 async def get_agent_name(conn, agent_id: str) -> str:
     cursor = await conn.execute("SELECT name FROM agents WHERE id = ?", (agent_id,))
     row = await cursor.fetchone()
@@ -205,6 +288,15 @@ async def get_agent_name(conn, agent_id: str) -> str:
 
 
 # ── WebSocket manager ──
+
+# Max time we'll wait for a single ws.send_json before considering that
+# subscriber dead. Without this, asyncio.gather waits for every send to
+# resolve — a single hung subscriber (network stall, paused tab on a slow
+# connection) blocks broadcasts to every other dashboard. 2s is generous
+# for a healthy connection but short enough that a stuck one doesn't dam
+# the event stream during a busy publish burst.
+_WS_SEND_TIMEOUT_S = 2.0
+
 
 class ConnectionManager:
     def __init__(self):
@@ -224,13 +316,20 @@ class ConnectionManager:
         if not self.connections:
             return
         payload = event.model_dump(mode="json")
+        # Per-send timeout: a TimeoutError from wait_for is captured by
+        # return_exceptions=True alongside any other send failure, so the
+        # below filter prunes hung subscribers exactly the same way it
+        # prunes ones that closed cleanly.
         results = await asyncio.gather(
-            *(ws.send_json(payload) for ws in self.connections),
+            *(
+                asyncio.wait_for(ws.send_json(payload), timeout=_WS_SEND_TIMEOUT_S)
+                for ws in self.connections
+            ),
             return_exceptions=True,
         )
         self.connections = [
             ws for ws, result in zip(self.connections, results)
-            if not isinstance(result, Exception)
+            if not isinstance(result, BaseException)
         ]
 
 
@@ -281,38 +380,58 @@ async def periodic_stats():
             cutoff_ts = inactive_cutoff()
             active_challenge = await get_active_challenge()
             async with db.connect() as conn:
+                # Free up trajectories held by agents that have gone silent
+                # past the inactive cutoff. Without this sweep, the
+                # stagnation-reset path in /api/iterations is the only way
+                # a trajectory ever leaves `active` — so a crashed or
+                # disconnected agent's trajectory would stay flagged active
+                # forever, and their best algorithm would never reach the
+                # inactive pool that other agents adopt from.
+                await db.deactivate_inactive_agent_trajectories(
+                    conn, cutoff_ts, now(),
+                )
+                await conn.commit()
                 total_agents = await db.get_agent_count(conn, active_only=False)
-                # Per-challenge slices.
+
+                # Batched per-challenge counters. Previously this loop fired
+                # 5 separate COUNT queries per challenge (active, exp, hyp,
+                # traj, agents_in_challenge) — at 8 challenges that's 40
+                # roundtrips every 10s. At scale (~80 agents, 4-hour test)
+                # those queries also start touching more rows. Collapsing
+                # into 5 grouped queries (one per category, GROUP BY
+                # challenge) keeps total roundtrips constant regardless of
+                # how many challenges are configured.
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(*) as c FROM agent_challenge_state "
+                    "WHERE last_active_at >= ? GROUP BY challenge",
+                    (cutoff_ts,),
+                )
+                active_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(*) as c FROM experiments GROUP BY challenge",
+                )
+                exp_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(*) as c FROM hypotheses GROUP BY challenge",
+                )
+                hyp_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(*) as c FROM trajectories GROUP BY challenge",
+                )
+                traj_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                # Distinct-agents-who-published per challenge — same source
+                # of truth as get_challenge_total_agents (experiments table).
+                cur = await conn.execute(
+                    "SELECT challenge, COUNT(DISTINCT agent_id) as c FROM experiments GROUP BY challenge",
+                )
+                agents_in_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+
                 per_challenge: dict[str, dict] = {}
                 for ch in challenges.CHALLENGE_NAMES:
                     direction = await get_direction(ch)
                     cfg = await get_challenge_config_cached(ch)
                     best = await db.get_global_best(conn, ch, direction=direction)
                     baseline = await get_baseline_score(conn, ch)
-                    # Active agents on this challenge = agents whose
-                    # agent_challenge_state(*, ch).last_active_at is recent.
-                    cur = await conn.execute(
-                        "SELECT COUNT(*) as c FROM agent_challenge_state "
-                        "WHERE challenge = ? AND last_active_at >= ?",
-                        (ch, cutoff_ts),
-                    )
-                    active_ch = (await cur.fetchone())["c"]
-                    cur = await conn.execute(
-                        "SELECT COUNT(*) as c FROM experiments WHERE challenge = ?",
-                        (ch,),
-                    )
-                    total_exp = (await cur.fetchone())["c"]
-                    cur = await conn.execute(
-                        "SELECT COUNT(*) as c FROM hypotheses WHERE challenge = ?",
-                        (ch,),
-                    )
-                    total_hyp = (await cur.fetchone())["c"]
-                    cur = await conn.execute(
-                        "SELECT COUNT(*) as c FROM trajectories WHERE challenge = ?",
-                        (ch,),
-                    )
-                    total_traj = (await cur.fetchone())["c"]
-                    total_agents_ch = await db.get_challenge_total_agents(conn, ch)
                     best_solution_data = best["solution_data"] if best else None
                     num_instances = get_num_instances_for(cfg, best_solution_data)
                     best_score = best["score"] if best else None
@@ -322,15 +441,15 @@ async def periodic_stats():
                         else 0
                     )
                     per_challenge[ch] = {
-                        "active_agents": active_ch,
+                        "active_agents": active_by_ch.get(ch, 0),
                         "best_score": best_score,
                         "baseline_score": baseline,
                         "num_instances": num_instances,
                         "improvement_pct": imp,
-                        "total_experiments": total_exp,
-                        "hypotheses_count": total_hyp,
-                        "total_trajectories": total_traj,
-                        "total_agents_in_challenge": total_agents_ch,
+                        "total_experiments": exp_by_ch.get(ch, 0),
+                        "hypotheses_count": hyp_by_ch.get(ch, 0),
+                        "total_trajectories": traj_by_ch.get(ch, 0),
+                        "total_agents_in_challenge": agents_in_ch.get(ch, 0),
                     }
 
             # `per_challenge` is the source of truth; the dashboard slices
@@ -348,8 +467,12 @@ async def periodic_stats():
 # ── Agent endpoints ──
 
 @app.post("/api/agents/register", response_model=AgentResponse)
-async def register_agent(req: RegisterRequest):
+async def register_agent(
+    req: RegisterRequest,
+    contributor_username: str = Depends(verify_swarm_password),
+):
     agent_id = new_id()
+    agent_token = secrets.token_urlsafe(24)
     timestamp = now()
     # Honour the contributor's chosen name when supplied AND not already
     # taken; fall back to the server's auto-generator otherwise. We can't
@@ -371,12 +494,24 @@ async def register_agent(req: RegisterRequest):
 
     async with db.connect() as conn:
         await conn.execute(
-            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type),
+            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type, token, contributor_username) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type, agent_token, contributor_username),
+        )
+        config = await db.get_config(conn)
+        # Persist a join event so the dashboard's live feed can replay it
+        # on reload via /api/messages. The `challenge` column is NOT NULL,
+        # so we record the active challenge at join time; clients querying
+        # /api/messages get agent_joined rows back regardless of which
+        # challenge they ask about (see list_messages).
+        active_challenge = config.get("active_challenge") or DEFAULT_CHALLENGE
+        await conn.execute(
+            "INSERT INTO messages (id, agent_id, challenge, agent_name, content, msg_type, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new_id(), agent_id, active_challenge, agent_name,
+             "joined the swarm", "agent_joined", timestamp),
         )
         await conn.commit()
-        config = await db.get_config(conn)
 
     await manager.broadcast(ws_events.AgentJoined(
         agent_id=agent_id,
@@ -399,6 +534,7 @@ async def register_agent(req: RegisterRequest):
     return AgentResponse(
         agent_id=agent_id,
         agent_name=agent_name,
+        agent_token=agent_token,
         registered_at=timestamp,
         config={
             "heartbeat_interval_seconds": 30,
@@ -409,13 +545,84 @@ async def register_agent(req: RegisterRequest):
     )
 
 
-@app.post("/api/agents/{agent_id}/heartbeat")
+@app.post("/api/agents/{agent_id}/rename", dependencies=[Depends(verify_agent_token)])
+async def rename_agent(agent_id: str, req: RenameRequest):
+    """Update an existing agent's display name. `agents.name` is the
+    single source of truth for an agent's name — leaderboard, messages
+    GET, and every event broadcast resolve through it — so this is the
+    only operation that affects what the dashboard shows for `agent_id`.
+
+    Returns 404 if the agent doesn't exist, 409 if `agent_name` collides
+    with another agent, 400 if blank. Idempotent when the new name
+    equals the current one (no broadcast in that case)."""
+    requested = (req.agent_name or "").strip()
+    if not requested:
+        raise HTTPException(status_code=400, detail="agent_name must be non-empty")
+
+    timestamp = now()
+    async with db.connect() as conn:
+        cur = await conn.execute(
+            "SELECT name FROM agents WHERE id = ?", (agent_id,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+        old_name = row["name"]
+        if old_name == requested:
+            return {"agent_id": agent_id, "agent_name": requested}
+
+        cur = await conn.execute(
+            "SELECT id FROM agents WHERE name = ? AND id != ?",
+            (requested, agent_id),
+        )
+        if await cur.fetchone() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"agent_name {requested!r} is already taken",
+            )
+
+        await conn.execute(
+            "UPDATE agents SET name = ? WHERE id = ?",
+            (requested, agent_id),
+        )
+        await conn.commit()
+
+    await manager.broadcast(ws_events.AgentRenamed(
+        agent_id=agent_id,
+        old_name=old_name,
+        new_name=requested,
+        timestamp=timestamp,
+    ))
+    return {"agent_id": agent_id, "agent_name": requested}
+
+
+@app.post("/api/agents/{agent_id}/heartbeat", dependencies=[Depends(verify_agent_token)])
 async def heartbeat(agent_id: str, req: HeartbeatRequest):
     timestamp = now()
     async with db.connect() as conn:
         await conn.execute(
             "UPDATE agents SET last_heartbeat = ?, status = ? WHERE id = ?",
             (timestamp, req.status, agent_id),
+        )
+        # Also bump `last_active_at` on the agent's current challenge state
+        # row. Without this, a long benchmark (multi-minute c3/GPU run) keeps
+        # `last_heartbeat` fresh but `last_active_at` (only updated by
+        # /api/state) goes stale — and periodic_stats's
+        # `deactivate_inactive_agent_trajectories` then reaps an actively-
+        # working agent's trajectory and clears their agent_bests row.
+        #
+        # "Current" challenge = the row with the most recent last_active_at
+        # for this agent (i.e. whichever challenge their last /api/state was
+        # for). If the agent has no acs rows yet (just registered, hasn't
+        # fetched state), this is a no-op — fine, there's no trajectory to
+        # keep alive at that stage.
+        await conn.execute(
+            "UPDATE agent_challenge_state SET last_active_at = ? "
+            "WHERE agent_id = ? AND challenge = ("
+            "  SELECT challenge FROM agent_challenge_state "
+            "  WHERE agent_id = ? ORDER BY last_active_at DESC LIMIT 1"
+            ")",
+            (timestamp, agent_id, agent_id),
         )
         await conn.commit()
     return {"ack": True, "server_time": timestamp}
@@ -682,9 +889,14 @@ async def get_state(
             ch_def = challenges.CHALLENGES.get(challenge)
             is_gpu = ch_def.is_gpu if ch_def else False
 
+            # Server's view of this agent's name — used by the loop client
+            # to detect a local rename (swarm.config.json contributor_name
+            # diverging from server's agents.name) and POST /rename.
+            self_agent_name = await get_agent_name(conn, agent_id)
             resp = {
                 "challenge": challenge,
                 "is_gpu": is_gpu,
+                "agent_name": self_agent_name,
                 "best_score": global_best_score,
                 "best_algorithm_code": my_best_code,
                 "best_experiment_id": my_best_experiment_id,
@@ -772,6 +984,12 @@ async def get_state(
         "recent_experiments": [
             {
                 "id": e["id"],
+                # Include agent_id so the dashboard can resolve each backfilled
+                # experiment to the agent's palette color (getAgentColor is
+                # keyed on agent_id). Without this, backfilled experiments
+                # render with the event-type fallback color while live ones
+                # use the agent's color — same agent, two colors.
+                "agent_id": e["agent_id"],
                 "agent_name": e["agent_name"],
                 "score": e["score"],
                 "feasible": bool(e["feasible"]),
@@ -803,7 +1021,7 @@ async def get_state(
 
 # ── Iteration endpoint (unified hypothesis + experiment) ──
 
-@app.post("/api/iterations", response_model=IterationResponse)
+@app.post("/api/iterations", response_model=IterationResponse, dependencies=[Depends(verify_agent_token)])
 async def create_iteration(req: IterationCreate):
     challenge = await resolve_challenge(req.challenge)
     direction = await get_direction(challenge)
@@ -1088,7 +1306,7 @@ async def get_leaderboard(challenge: str | None = None):
 
 # ── Messages (chat feed) ──
 
-@app.post("/api/messages")
+@app.post("/api/messages", dependencies=[Depends(verify_agent_token)])
 async def create_message(req: MessageCreate):
     challenge = await resolve_challenge(req.challenge)
     msg_id = new_id()
@@ -1098,9 +1316,10 @@ async def create_message(req: MessageCreate):
         # feed can attribute messages to an agent_id that the leaderboard
         # has no row for, making the dashboard look inconsistent.
         cursor = await conn.execute(
-            "SELECT 1 FROM agents WHERE id = ?", (req.agent_id,)
+            "SELECT name FROM agents WHERE id = ?", (req.agent_id,)
         )
-        if await cursor.fetchone() is None:
+        row = await cursor.fetchone()
+        if row is None:
             raise HTTPException(
                 status_code=404,
                 detail=(
@@ -1108,16 +1327,20 @@ async def create_message(req: MessageCreate):
                     "Call POST /api/agents/register first."
                 ),
             )
+        # `req.agent_name` is intentionally ignored — `agents.name` is the
+        # single source of truth. Clients that want to change the display
+        # name must POST /api/agents/{id}/rename first.
+        agent_name = row["name"]
         await conn.execute(
             "INSERT INTO messages (id, agent_id, challenge, agent_name, content, msg_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (msg_id, req.agent_id, challenge, req.agent_name, req.content, req.msg_type, timestamp),
+            (msg_id, req.agent_id, challenge, agent_name, req.content, req.msg_type, timestamp),
         )
         await conn.commit()
 
     await manager.broadcast(ws_events.ChatMessage(
         challenge=challenge,
         message_id=msg_id,
-        agent_name=req.agent_name,
+        agent_name=agent_name,
         agent_id=req.agent_id,
         content=req.content,
         msg_type=req.msg_type,
@@ -1129,11 +1352,20 @@ async def create_message(req: MessageCreate):
 
 @app.get("/api/messages")
 async def list_messages(limit: int = 50, challenge: str | None = None):
+    """Chat messages for the requested challenge, plus agent_joined events
+    regardless of challenge (joins are swarm-wide). `agent_name` is JOINed
+    from `agents` so retired snapshot data in `messages.agent_name` is
+    never returned — current name only."""
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         cursor = await conn.execute(
-            "SELECT * FROM messages WHERE challenge = ? "
-            "ORDER BY created_at DESC LIMIT ?",
+            "SELECT m.id, m.agent_id, m.challenge, "
+            "       COALESCE(a.name, m.agent_name) AS agent_name, "
+            "       m.content, m.msg_type, m.created_at "
+            "FROM messages m "
+            "LEFT JOIN agents a ON a.id = m.agent_id "
+            "WHERE m.challenge = ? OR m.msg_type = 'agent_joined' "
+            "ORDER BY m.created_at DESC LIMIT ?",
             (challenge, limit),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
@@ -1356,8 +1588,16 @@ async def get_replay(challenge: str | None = None, compact: int = 0):
     """
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
+        # JOIN agents so the response always carries the agent's current
+        # name; the bh.agent_name snapshot is only used as a fallback when
+        # the agent row has been deleted (shouldn't happen in practice).
         cursor = await conn.execute(
-            "SELECT * FROM best_history WHERE challenge = ? ORDER BY created_at ASC",
+            "SELECT bh.experiment_id, bh.agent_id, "
+            "       COALESCE(a.name, bh.agent_name) AS agent_name, "
+            "       bh.score, bh.solution_data, bh.created_at "
+            "FROM best_history bh "
+            "LEFT JOIN agents a ON a.id = bh.agent_id "
+            "WHERE bh.challenge = ? ORDER BY bh.created_at ASC",
             (challenge,),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
@@ -1648,6 +1888,170 @@ async def admin_reset_challenge(req: AdminResetChallenge):
     }
 
 
+SEED_INACTIVE_SUPPORTED = ("knapsack", "satisfiability")
+
+
+@app.post("/api/admin/seed_inactive")
+async def admin_seed_inactive(req: AdminSeedInactive):
+    """Insert an externally-sourced algorithm into the inactive_algorithms
+    pool. The next stagnated agent on this challenge that does NOT qualify
+    for a fresh start (i.e. inactive pool is non-empty AND n_trajectories²
+    >= total_deactivations) picks it up via the existing `adopted_inactive`
+    branch in server.py — at which point it is removed from the pool
+    (consume-once semantics).
+
+    Restricted to challenges whose mainnet algorithm format matches the
+    swarm's single-file expectation. The host-side wizard enforces the
+    same set; this is defense-in-depth so a stray curl can't seed an
+    unsupported challenge with a payload that would break adoption."""
+    await verify_admin(req)
+    if req.challenge not in SEED_INACTIVE_SUPPORTED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"seed_inactive is supported for {list(SEED_INACTIVE_SUPPORTED)} "
+                f"only (got {req.challenge!r})"
+            ),
+        )
+    if not req.algorithm_code.strip():
+        raise HTTPException(status_code=400, detail="algorithm_code is empty")
+    timestamp = now()
+    async with db.connect() as conn:
+        agent_id = await db.ensure_synthetic_agent(
+            conn, req.source_label, timestamp,
+        )
+        inactive_id = await db.deposit_inactive(
+            conn, agent_id, req.challenge,
+            req.algorithm_code, None, timestamp,
+            kernel_code=req.kernel_code,
+        )
+        await conn.commit()
+    return {
+        "seeded": True,
+        "challenge": req.challenge,
+        "inactive_id": inactive_id,
+        "source": req.source_label,
+    }
+
+
+@app.post("/api/admin/revoke")
+async def admin_revoke(req: AdminRevoke):
+    """Revoke a contributor by username.
+
+    Two effects, applied in the same transaction:
+      1. Adds the username to `config.revoked_contributors` so
+         `verify_swarm_password` rejects future /api/agents/register calls
+         under that name (even with a still-valid derived password hash).
+      2. Clears the per-agent `token` (and stamps `status='revoked'`) on
+         every agent row whose `contributor_username` matches, so existing
+         workers fail `verify_agent_token` on their next write call.
+         Agent rows themselves are preserved — dashboard history is
+         intact; only the auth handle is cut.
+
+    Idempotent: re-revoking the same username adds nothing and just
+    re-counts how many of their agents are currently still token-bearing.
+    """
+    global _config_cache
+    await verify_admin(req)
+    username = (req.username or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="username must be non-empty")
+    async with db.connect() as conn:
+        cur = await conn.execute(
+            "SELECT value FROM config WHERE key = 'revoked_contributors'"
+        )
+        row = await cur.fetchone()
+        try:
+            revoked = set(json.loads(row["value"])) if row and row["value"] else set()
+        except (ValueError, TypeError):
+            revoked = set()
+        revoked.add(username)
+        await conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+            ("revoked_contributors", json.dumps(sorted(revoked))),
+        )
+        cur = await conn.execute(
+            "UPDATE agents SET token = NULL, status = 'revoked' "
+            "WHERE contributor_username = ? AND token IS NOT NULL",
+            (username,),
+        )
+        agents_invalidated = cur.rowcount
+        await conn.commit()
+    _config_cache = None  # invalidate so the next register sees the new revoked set
+    return {
+        "revoked": username,
+        "agents_invalidated": agents_invalidated,
+    }
+
+
+@app.post("/api/admin/contributors")
+async def admin_contributors(req: AdminAuth):
+    """Return one row per contributor known to this swarm.
+
+    Sources merged:
+      - `agents` table grouped by `contributor_username` (registered names).
+      - `config.revoked_contributors` (names that were revoked but may have
+        had no surviving agents).
+
+    Fields per row:
+      - username
+      - agent_count: total agents the contributor ever registered
+      - agents_active: agents with last_heartbeat within the inactive window
+      - agents_invalidated: agents whose token was cleared (revoke side-effect)
+      - last_heartbeat: most recent heartbeat across all their agents (or null)
+      - revoked: true if the username is in config.revoked_contributors
+    """
+    await verify_admin(req)
+    cutoff = inactive_cutoff()
+    config = await get_config_cached()
+    revoked = _revoked_usernames(config)
+    rows: dict[str, dict] = {}
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT contributor_username AS username, "
+            "       COUNT(*) AS agent_count, "
+            "       SUM(CASE WHEN last_heartbeat >= ? THEN 1 ELSE 0 END) AS agents_active, "
+            "       SUM(CASE WHEN token IS NULL THEN 1 ELSE 0 END) AS agents_invalidated, "
+            "       MAX(last_heartbeat) AS last_heartbeat "
+            "FROM agents WHERE contributor_username IS NOT NULL "
+            "GROUP BY contributor_username",
+            (cutoff,),
+        )
+        for r in await cursor.fetchall():
+            username = r["username"]
+            rows[username] = {
+                "username": username,
+                "agent_count": r["agent_count"] or 0,
+                "agents_active": r["agents_active"] or 0,
+                "agents_invalidated": r["agents_invalidated"] or 0,
+                "last_heartbeat": r["last_heartbeat"],
+                "revoked": username in revoked,
+            }
+    # Surface revoked names with no surviving agent rows so they're still
+    # auditable (and so a host can't be surprised by a "missing" name).
+    for username in revoked:
+        if username not in rows:
+            rows[username] = {
+                "username": username,
+                "agent_count": 0,
+                "agents_active": 0,
+                "agents_invalidated": 0,
+                "last_heartbeat": None,
+                "revoked": True,
+            }
+    # Sort: active contributors first (by most recent heartbeat), then
+    # never-heartbeated, then revoked-with-no-agents at the bottom.
+    def _sort_key(row: dict) -> tuple:
+        return (
+            row["revoked"] and row["agent_count"] == 0,
+            row["last_heartbeat"] is None,
+            -(row["agents_active"] or 0),
+            row["last_heartbeat"] or "",
+        )
+    contributors = sorted(rows.values(), key=_sort_key)
+    return {"contributors": contributors, "inactive_cutoff": cutoff}
+
+
 @app.post("/api/admin/config")
 async def admin_config(req: AdminAuth, key: str = "", value: str = ""):
     global _config_cache
@@ -1695,8 +2099,10 @@ async def get_swarm_config():
         ch_def = challenges.CHALLENGES.get(ch_name)
         available[ch_name] = {
             "tracks": tracks,
-            "timeout": row.get("timeout") or 5,
-            "scoring_direction": row.get("scoring_direction") or "max",
+            "timeout": row.get("timeout") or (ch_def.default_timeout if ch_def else 30),
+            "scoring_direction": row.get("scoring_direction") or (
+                ch_def.scoring_direction if ch_def else "max"
+            ),
             # Flag-only: don't ship the algorithm body in this response (it
             # can be large and is fetched separately from /api/initial_algorithm).
             "has_initial_algorithm": bool(row.get("initial_algorithm_code")),

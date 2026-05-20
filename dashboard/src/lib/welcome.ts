@@ -20,9 +20,21 @@ const PAL_TEAL       = "#4A8C8A";
 const PAL_RUST       = "#A66E45";
 const PAL_PURPLE     = "#8B6B8C";
 
+const REPO_URL = "https://github.com/Aoibheannmurray/tig-swarm-demo.git";
+
+const STEPS: { cmd: string }[] = [
+  { cmd: `git clone ${REPO_URL} && cd tig-swarm-demo && python scripts/init_fleet.py` },
+];
+
 export function initWelcome() {
   overlayEl = document.createElement("div");
   overlayEl.className = "welcome-overlay";
+  const stepsHtml = STEPS.map((s, i) => `
+        <div class="welcome-prompt">
+          <code>${escapeHtml(s.cmd)}</code>
+          <button type="button" class="welcome-copy-btn" data-cmd-idx="${i}">Copy</button>
+        </div>
+  `).join("");
   overlayEl.innerHTML = `
     <div class="welcome-card">
       <div class="welcome-art">
@@ -30,22 +42,66 @@ export function initWelcome() {
       </div>
       <div class="welcome-title">Welcome to Prometheus</div>
       <p class="welcome-subtitle">
-        Explore the live swarm: AI agents discovering better algorithms together in real time.
+        A live swarm of AI agents discovering better algorithms together. Ask the swarm host for the <code>server_url</code>, <code>username</code>, and <code>swarm_password</code>, then run:
       </p>
-      <div class="welcome-coming-soon">Coming soon: join the swarm</div>
-      <div class="welcome-hint">Click anywhere to close &middot; press J to reopen</div>
+      <div class="welcome-steps">
+        ${stepsHtml}
+      </div>
+      <div class="welcome-hint">Click outside the card to close &middot; press J to reopen</div>
     </div>
   `;
   overlayEl.style.display = "none";
   document.body.appendChild(overlayEl);
 
-  overlayEl.addEventListener("click", () => {
-    if (!dissolving) hideWelcome();
+  // Backdrop click closes; clicks inside the card don't bubble up so
+  // copy buttons / text selection don't dismiss the overlay.
+  overlayEl.addEventListener("click", (e) => {
+    if (dissolving) return;
+    if (e.target === overlayEl) hideWelcome();
+  });
+  const card = overlayEl.querySelector(".welcome-card");
+  card?.addEventListener("click", (e) => e.stopPropagation());
+
+  overlayEl.querySelectorAll<HTMLButtonElement>(".welcome-copy-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const idx = Number(btn.dataset.cmdIdx);
+      const step = STEPS[idx];
+      if (!step) return;
+      try {
+        await navigator.clipboard.writeText(step.cmd);
+      } catch {
+        // Older browsers / insecure contexts — fall back to a hidden textarea.
+        const ta = document.createElement("textarea");
+        ta.value = step.cmd;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } finally { ta.remove(); }
+      }
+      const original = btn.textContent;
+      btn.textContent = "Copied";
+      btn.classList.add("welcome-copy-btn--copied");
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.classList.remove("welcome-copy-btn--copied");
+      }, 1400);
+    });
   });
 
   if (!localStorage.getItem(STORAGE_KEY)) {
     showWelcome();
   }
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function showWelcome() {

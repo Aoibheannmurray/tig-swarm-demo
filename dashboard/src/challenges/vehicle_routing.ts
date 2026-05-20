@@ -1,21 +1,36 @@
-import * as d3 from "d3";
-import type { RouteData, AllRouteData, RoutePoint } from "../types";
+import { select } from "d3-selection";
+import { curveCatmullRom, line } from "d3-shape";
 import { getRouteColor } from "../lib/colors";
-import { DisplayPanelBase } from "./displayPanelBase";
+import { DisplayPanelBase } from "./base";
+
+interface RoutePoint {
+  x: number;
+  y: number;
+  customer_id: number;
+}
+
+interface RouteData {
+  depot: { x: number; y: number };
+  routes: { vehicle_id: number; path: RoutePoint[] }[];
+}
+
+// solution_data from server: dict keyed by instance name.
+type AllRouteData = Record<string, RouteData>;
 
 const STYLE = {
   customerRadius: 0.006,
+  customerStroke: 0.0015,
   depotSize:      0.020,
-  routeStroke:    0.004,
+  routeStroke:    0.0055,
   glowStroke:     0.012,
   routeDashOn:    0.018,
   routeDashOff:   0.007,
 } as const;
 
-const routeLine = d3.line<RoutePoint>()
+const routeLine = line<RoutePoint>()
   .x((d) => d.x)
   .y((d) => d.y)
-  .curve(d3.curveCatmullRom.alpha(0.5));
+  .curve(curveCatmullRom.alpha(0.5));
 
 function fullPath(data: RouteData, route: { path: RoutePoint[] }): RoutePoint[] {
   const depot = { x: data.depot.x, y: data.depot.y, customer_id: -1 };
@@ -54,17 +69,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       <div class="panel-inner solution-panel">
         <div class="panel-label">ROUTES</div>
         <div class="solution-agent-name" id="solution-agent-name"></div>
-        <div class="solution-history-nav" id="solution-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="solution-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="solution-history-label"></span>
-          <button class="solution-nav-btn" id="solution-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="solution-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="solution-nav" style="display:none">
-          <button class="solution-nav-btn" id="solution-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="solution-instance-label"></span>
-          <button class="solution-nav-btn" id="solution-next">&rsaquo;</button>
-        </div>
+        ${this.navsScaffold()}
         <div class="solution-svg-wrap" id="solution-svg-wrap">
           <svg id="solution-svg"></svg>
           <div class="solution-empty-state" id="solution-empty-state">
@@ -86,18 +91,9 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("solution-score")!;
-    this.scoreDeltaEl = document.getElementById("solution-score-delta")!;
     this.routeDistanceEl = document.getElementById("solution-route-distance")!;
-    this.instanceLabelEl = document.getElementById("solution-instance-label")!;
-    this.navEl = document.getElementById("solution-nav")!;
-    this.agentNameEl = document.getElementById("solution-agent-name")!;
-    this.historyNavEl = document.getElementById("solution-history-nav")!;
-    this.historyLabelEl = document.getElementById("solution-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("solution-hist-live")!;
-    this.emptyStateEl = document.getElementById("solution-empty-state")!;
 
-    this.svg = d3.select("#solution-svg");
+    this.svg = select("#solution-svg");
     this.svg
       .attr("viewBox", "0 0 1000 1000")
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -118,7 +114,7 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       const size = Math.max(0, Math.min(wrap.clientWidth, wrap.clientHeight));
       this.svg.attr("width", size).attr("height", size);
     };
-    new ResizeObserver(resize).observe(wrap);
+    this.observeResize(wrap, resize);
     resize();
   }
 
@@ -133,17 +129,6 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
 
   protected onAfterApplyHistory(): void {
     this.updateViewBox();
-  }
-
-  // VRP scores are distances — lower is better. Override the default
-  // formatter so a drop in distance shows as a positive % improvement,
-  // matching the live feed's `+X.XXXXX% vs prev best` convention.
-  protected formatScoreDelta(currentScore: number, prevScore: number): void {
-    const pct = prevScore > 0 ? ((prevScore - currentScore) / prevScore) * 100 : 0;
-    const scoreChange = -pct;
-    const sign = scoreChange >= 0 ? "+" : "";
-    this.scoreDeltaEl.textContent = `${sign}${scoreChange.toFixed(5)}% vs prev best`;
-    this.scoreDeltaEl.style.color = "var(--green)";
   }
 
   // Compute a square viewBox that tightly bounds *all* instances' data.
@@ -192,14 +177,11 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
 
     const s = this.viewSide;
     const customerR = (STYLE.customerRadius * s).toFixed(3);
+    const customerStroke = (STYLE.customerStroke * s).toFixed(3);
     const routeW = (STYLE.routeStroke * s).toFixed(3);
     const glowW = (STYLE.glowStroke * s).toFixed(3);
     const dashOn = (STYLE.routeDashOn * s).toFixed(3);
     const dashOff = (STYLE.routeDashOff * s).toFixed(3);
-
-    // Cap the dashFlow CSS animation when there are many routes — it's
-    // a per-frame GPU cost that scales with route count.
-    const animateRoutes = data.routes.length <= 30;
 
     const routeParts: string[] = [];
     const customerParts: string[] = [];
@@ -209,12 +191,11 @@ export class SolutionPanel extends DisplayPanelBase<AllRouteData> {
       const d = routeLine(path);
       if (!d) return;
 
-      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${glowW}" stroke-opacity="0.1" filter="url(#route-glow)"/>`);
-      const cls = animateRoutes ? ' class="route-flowing"' : "";
-      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-opacity="0.9" stroke-dasharray="${dashOn} ${dashOff}"${cls}/>`);
+      routeParts.push(`<path d="${d}" fill="none" stroke="#fff" stroke-width="${glowW}" stroke-opacity="0.45" filter="url(#route-glow)"/>`);
+      routeParts.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${routeW}" stroke-dasharray="${dashOn} ${dashOff}" class="route-flowing"/>`);
 
       for (const pt of route.path) {
-        customerParts.push(`<circle cx="${pt.x}" cy="${pt.y}" r="${customerR}" fill="${color}" opacity="0.75"/>`);
+        customerParts.push(`<circle cx="${pt.x}" cy="${pt.y}" r="${customerR}" fill="${color}" stroke="#1A1A1A" stroke-width="${customerStroke}"/>`);
       }
     });
     routeNode.innerHTML = routeParts.join("");

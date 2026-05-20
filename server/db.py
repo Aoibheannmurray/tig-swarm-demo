@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS agents (
     registered_at TEXT NOT NULL,
     last_heartbeat TEXT NOT NULL,
     status TEXT DEFAULT 'idle',
-    llm_type TEXT
+    llm_type TEXT,
+    -- Per-agent session token, generated at register. Required as
+    -- X-Agent-Token on every non-register participant-write call.
+    token TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hypotheses (
@@ -207,6 +210,9 @@ CREATE INDEX IF NOT EXISTS idx_best_history_challenge ON best_history(challenge,
 CREATE INDEX IF NOT EXISTS idx_msg_challenge_created ON messages(challenge, created_at);
 CREATE INDEX IF NOT EXISTS idx_acs_challenge ON agent_challenge_state(challenge);
 CREATE INDEX IF NOT EXISTS idx_acs_active ON agent_challenge_state(challenge, last_active_at);
+-- Covers get_baseline_score: WHERE feasible=1 AND challenge=? ORDER BY created_at ASC LIMIT 1.
+-- Called from periodic_stats per-challenge, /api/state per fetch, /api/iterations per publish.
+CREATE INDEX IF NOT EXISTS idx_exp_baseline ON experiments(challenge, feasible, created_at);
 """
 
 DEFAULT_CONFIG = {
@@ -226,18 +232,37 @@ DEFAULT_CONFIG = {
 
 
 async def _add_column(db, table: str, column: str, typedef: str) -> None:
+    # Idempotent ALTER for legacy DBs that predate columns now in SCHEMA.
+    # Only swallow the duplicate-column error — anything else (locked DB,
+    # type mismatch, etc.) must surface so init_db doesn't silently leave
+    # the schema half-migrated.
     try:
         await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
-    except Exception:
-        pass  # column already exists
+    except aiosqlite.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
 
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
+        # WAL mode is durable across connections — set once at startup, the
+        # journal_mode persists in the DB file. Lets readers (dashboard WS,
+        # /api/state) proceed concurrently with the single writer instead of
+        # blocking on every commit, which matters as soon as the swarm has
+        # >1 contributor.
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.executescript(SCHEMA)
         await db.executescript(SCHEMA_INDEXES)
         await db.commit()
 
+        # Per-agent session token, generated at register. Used by every
+        # non-register participant-write endpoint instead of the swarm
+        # password (which is only consumed at register).
+        await _add_column(db, "agents", "token", "TEXT")
+        # Contributor username stamped at register. Lets the dashboard
+        # group agents by owner. Derived from the X-Username header at
+        # register time; not modifiable after the fact.
+        await _add_column(db, "agents", "contributor_username", "TEXT")
         # Migrations for token tracking columns on existing databases.
         await _add_column(db, "experiments", "input_tokens", "INTEGER DEFAULT 0")
         await _add_column(db, "experiments", "output_tokens", "INTEGER DEFAULT 0")
@@ -270,14 +295,42 @@ async def init_db() -> None:
                 "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
                 ("admin_key", secrets.token_urlsafe(16)),
             )
+        # Swarm password: same priority as admin_key (env var wins, then
+        # existing DB value, then a generated default on fresh DBs). Guards
+        # the participant-write endpoints so a contributor needs URL + password
+        # to register an agent or publish iterations.
+        env_pw = os.environ.get("SWARM_PASSWORD")
+        if env_pw:
+            await db.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                ("swarm_password", env_pw),
+            )
+        else:
+            await db.execute(
+                "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
+                ("swarm_password", secrets.token_urlsafe(16)),
+            )
         await db.commit()
 
 
 @asynccontextmanager
 async def connect():
-    """Context manager for DB connections — ensures cleanup on error."""
+    """Context manager for DB connections — ensures cleanup on error.
+
+    Per-connection PRAGMAs:
+      - busy_timeout=5000: wait up to 5s for a contended write lock instead
+        of failing immediately with SQLITE_BUSY. Under concurrent publish +
+        periodic_stats load this avoids spurious 500s.
+      - foreign_keys=ON: SQLite ships with FK enforcement OFF by default; the
+        schema declares FKs (agent_bests.agent_id → agents.id, etc.) so we
+        actually enforce them.
+      - journal_mode=WAL is set once globally in init_db() — it's a database-
+        level setting that persists in the file, not per-connection.
+    """
     conn = await aiosqlite.connect(DB_PATH)
     conn.row_factory = aiosqlite.Row
+    await conn.execute("PRAGMA busy_timeout=5000")
+    await conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
     finally:
@@ -310,16 +363,22 @@ _AGENT_BESTS_COLS = (
 
 
 async def get_global_best(
-    conn: aiosqlite.Connection, challenge: str, direction: str = "min"
+    conn: aiosqlite.Connection, challenge: str, *, direction: str
 ) -> dict | None:
-    # Global best is the best-scoring `agent_bests` row — i.e. whichever
-    # agent's branch currently holds the leading feasible score for the
-    # given challenge. `id` is aliased to experiment_id so callers that
-    # expect the old experiments shape keep working.
+    # Best-scoring feasible experiment for the challenge, across ALL
+    # trajectories — active and inactive. Querying `experiments` (not
+    # `agent_bests`) means the peak score from a now-deactivated trajectory
+    # still counts: agent_bests is wiped per-agent on stagnation reset,
+    # which would otherwise hide historical peaks once their trajectory
+    # ended. Returned shape mirrors the prior agent_bests-based result so
+    # callers don't need to change.
     order = _direction_order(direction)
     cursor = await conn.execute(
-        f"SELECT {_AGENT_BESTS_COLS} FROM agent_bests "
-        f"WHERE feasible = 1 AND challenge = ? "
+        "SELECT id as experiment_id, id, agent_id, challenge, "
+        "algorithm_code, kernel_code, score, feasible, challenge_metrics, "
+        "solution_data, track_scores, created_at as updated_at, "
+        "trajectory_id "
+        "FROM experiments WHERE feasible = 1 AND challenge = ? "
         f"ORDER BY score {order} LIMIT 1",
         (challenge,),
     )
@@ -379,8 +438,9 @@ async def upsert_agent_best(
 async def list_agent_bests(
     conn: aiosqlite.Connection,
     challenge: str,
+    *,
+    direction: str,
     exclude_agent_ids: list[str] | None = None,
-    direction: str = "min",
     active_only: bool = False,
     inactive_cutoff: str | None = None,
 ) -> list[dict]:
@@ -442,7 +502,8 @@ async def compute_leaderboard(
     conn: aiosqlite.Connection,
     challenge: str,
     inactive_cutoff: str | None = None,
-    direction: str = "min",
+    *,
+    direction: str,
 ) -> list[dict]:
     # Per-challenge leaderboard. Only includes agents that have actually
     # PUBLISHED at least one iteration on this challenge. An agent that
@@ -478,7 +539,14 @@ async def compute_leaderboard(
             ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
         WHERE acs.challenge = ?
           AND acs.experiments_completed > 0
-        ORDER BY current_score IS NULL, current_score {order}, a.name ASC
+        -- Sort by best-ever score (not current_score from agent_bests):
+        -- agent_bests is cleared when a trajectory stagnates or the
+        -- inactivity sweep fires, so current_score goes NULL for agents
+        -- whose trajectory has ended even though their historical peak
+        -- is still meaningful. best_ever_score on acs is monotonic — it
+        -- captures the agent's highest score across every trajectory
+        -- they've ever held on this challenge.
+        ORDER BY best_ever_score IS NULL, best_ever_score {order}, a.name ASC
         """,
         (challenge, challenge),
     )
@@ -508,29 +576,22 @@ async def compute_leaderboard(
 async def get_challenge_total_agents(
     conn: aiosqlite.Connection, challenge: str
 ) -> int:
-    """Count of distinct agents that have ever fetched state for or published
-    on this challenge. Sourced from agent_challenge_state (one row per
-    agent×challenge), which is created lazily on first /api/state hit."""
+    """Count of distinct agents that have actually PUBLISHED at least one
+    experiment on this challenge.
+
+    Was previously sourced from agent_challenge_state, which is created
+    lazily on the first /api/state hit — so any agent that registered,
+    fetched state once, then died (LLM API error before its first publish,
+    bad config, crashed worker) showed up in this count forever. That
+    diverged from compute_leaderboard, which already filters to "agents
+    that have published at least once" — meaning the dashboard's AGENTS
+    counter could read higher than the rows in its own leaderboard.
+
+    Sourcing from experiments fixes that divergence: an agent only counts
+    once it has done useful work."""
     cur = await conn.execute(
-        "SELECT COUNT(*) as c FROM agent_challenge_state WHERE challenge = ?",
+        "SELECT COUNT(DISTINCT agent_id) as c FROM experiments WHERE challenge = ?",
         (challenge,),
-    )
-    row = await cur.fetchone()
-    return row["c"] if row else 0
-
-
-async def get_trajectory_unique_agents(
-    conn: aiosqlite.Connection, trajectory_id: str
-) -> int:
-    """Number of distinct agents that have published an experiment on the
-    given trajectory. Authoritative replacement for trajectories.num_agents,
-    which is only ever incremented on creation / adoption — not for the case
-    where the same trajectory has been worked on by multiple agents in
-    sequence after each adoption."""
-    cur = await conn.execute(
-        "SELECT COUNT(DISTINCT agent_id) as c FROM experiments "
-        "WHERE trajectory_id = ?",
-        (trajectory_id,),
     )
     row = await cur.fetchone()
     return row["c"] if row else 0
@@ -645,11 +706,17 @@ async def increment_agent_challenge_counters(
 # ── challenge_configs helpers ──
 
 
+_CHALLENGE_CONFIG_COLS = (
+    "challenge, tracks, timeout, scoring_direction, "
+    "initial_algorithm_code, initial_kernel_code, strategy_tags"
+)
+
+
 async def get_challenge_config(
     conn: aiosqlite.Connection, challenge: str
 ) -> dict | None:
     cursor = await conn.execute(
-        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code, initial_kernel_code "
+        f"SELECT {_CHALLENGE_CONFIG_COLS} "
         "FROM challenge_configs WHERE challenge = ?",
         (challenge,),
     )
@@ -659,7 +726,7 @@ async def get_challenge_config(
 
 async def list_challenge_configs(conn: aiosqlite.Connection) -> list[dict]:
     cursor = await conn.execute(
-        "SELECT challenge, tracks, timeout, scoring_direction, initial_algorithm_code, initial_kernel_code "
+        f"SELECT {_CHALLENGE_CONFIG_COLS} "
         "FROM challenge_configs ORDER BY challenge"
     )
     return [dict(row) for row in await cursor.fetchall()]
@@ -715,20 +782,42 @@ async def upsert_challenge_config(
 # ── active_challenge helpers ──
 
 
-async def get_active_challenge(conn: aiosqlite.Connection) -> str:
-    """The swarm-wide challenge contributors auto-follow. Owner-set."""
-    cursor = await conn.execute(
-        "SELECT value FROM config WHERE key = 'active_challenge'"
-    )
-    row = await cursor.fetchone()
-    return row["value"] if row else DEFAULT_CHALLENGE
-
-
 async def set_active_challenge(conn: aiosqlite.Connection, challenge: str) -> None:
+    """Swarm-wide active challenge. Owner-set via POST /api/swarm_config.
+    Reads go through `get_config_cached` in server.py, not a dedicated
+    helper, so contributors hit the cache on every /api/state call."""
     await conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
         ("active_challenge", challenge),
     )
+
+
+async def ensure_synthetic_agent(
+    conn: aiosqlite.Connection, name: str, timestamp: str,
+) -> str:
+    """Look up (or create) a synthetic agent row keyed by `name`. Used for
+    pool entries that need an `agent_id` FK but don't originate from a real
+    swarm contributor (e.g. seeds from the TIG mainnet).
+
+    The synthetic row sets `last_heartbeat` to the creation time and never
+    updates it, so it naturally falls outside `active_only=True` queries
+    (leaderboards, inspiration) and won't compete with real agents.
+    """
+    cursor = await conn.execute(
+        "SELECT id FROM agents WHERE name = ?", (name,),
+    )
+    row = await cursor.fetchone()
+    if row:
+        return row["id"]
+    import uuid
+    agent_id = uuid.uuid4().hex[:12]
+    await conn.execute(
+        "INSERT INTO agents "
+        "  (id, name, registered_at, last_heartbeat, status, llm_type) "
+        "VALUES (?, ?, ?, ?, 'idle', ?)",
+        (agent_id, name, timestamp, timestamp, "tig-mainnet-seed"),
+    )
+    return agent_id
 
 
 async def deposit_inactive(
@@ -749,29 +838,6 @@ async def deposit_inactive(
         (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id),
     )
     return cursor.lastrowid
-
-
-async def count_inactive(conn: aiosqlite.Connection, challenge: str) -> int:
-    row = await (await conn.execute(
-        "SELECT COUNT(*) as c FROM inactive_algorithms WHERE challenge = ?",
-        (challenge,),
-    )).fetchone()
-    return row["c"]
-
-
-async def pick_random_inactive(
-    conn: aiosqlite.Connection, challenge: str
-) -> dict | None:
-    # CORRECTNESS INVARIANT: must filter by challenge so a stagnating agent's
-    # "fresh start" cannot be handed code from a different challenge that
-    # won't compile against its types.
-    cursor = await conn.execute(
-        "SELECT id, agent_id, challenge, algorithm_code, kernel_code, score, trajectory_id, program_id "
-        "FROM inactive_algorithms WHERE challenge = ? ORDER BY RANDOM() LIMIT 1",
-        (challenge,),
-    )
-    row = await cursor.fetchone()
-    return dict(row) if row else None
 
 
 async def remove_inactive(conn: aiosqlite.Connection, inactive_id: int) -> None:
@@ -838,11 +904,93 @@ async def create_trajectory(
 async def deactivate_trajectory(
     conn: aiosqlite.Connection, trajectory_id: str, deactivated_at: str
 ) -> None:
+    # `AND status = 'active'` makes this idempotent — callers that aren't
+    # certain whether the trajectory has already been deactivated (e.g.
+    # the inactivity sweep below) can re-fire without double-bumping
+    # num_deactivations.
     await conn.execute(
         "UPDATE trajectories SET status = 'inactive', deactivated_at = ?, "
-        "num_deactivations = num_deactivations + 1 WHERE id = ?",
+        "num_deactivations = num_deactivations + 1 "
+        "WHERE id = ? AND status = 'active'",
         (deactivated_at, trajectory_id),
     )
+
+
+async def deactivate_inactive_agent_trajectories(
+    conn: aiosqlite.Connection, cutoff_ts: str, timestamp: str
+) -> int:
+    """Free up trajectories owned by agents who've gone silent.
+
+    An agent that crashes or disconnects never hits the stagnation-reset
+    path in `publish_iteration`, so their trajectory stays flagged
+    `active` and their best algorithm is locked inside `agent_bests` —
+    invisible to the per-challenge inactive pool that other agents draw
+    inspiration from. This sweep handles that: for each (agent,
+    challenge) whose `last_active_at` is older than `cutoff_ts` but
+    still holds a `current_trajectory_id`, we:
+
+      1. Mark the trajectory inactive (unless another agent that IS still
+         live claims it as their current — shared trajectories shouldn't
+         deactivate while anyone's still working on them).
+      2. Deposit the agent's best into `inactive_algorithms` so it can be
+         adopted from the pool.
+      3. Clear their `agent_bests` row and null the trajectory pointer on
+         their `agent_challenge_state` row, so a returning agent starts
+         fresh on next /api/state.
+
+    Returns the number of (agent, challenge) pairs processed.
+    """
+    cursor = await conn.execute(
+        "SELECT agent_id, challenge, current_trajectory_id, current_program_id "
+        "FROM agent_challenge_state "
+        "WHERE last_active_at < ? AND current_trajectory_id IS NOT NULL",
+        (cutoff_ts,),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    processed = 0
+    for row in rows:
+        agent_id = row["agent_id"]
+        challenge = row["challenge"]
+        traj_id = row["current_trajectory_id"]
+        program_id = row["current_program_id"]
+
+        # Compare-and-swap: atomically clear the trajectory pointer ONLY if
+        # the agent is still inactive AND still owns the same trajectory we
+        # saw in the snapshot. Without this guard, a heartbeat or /api/state
+        # call landing between the snapshot SELECT and this UPDATE would
+        # have its trajectory clipped despite the agent being live again.
+        # rowcount == 0 means the agent slipped out from under us; skip
+        # all side-effects for this row.
+        guard = await conn.execute(
+            "UPDATE agent_challenge_state "
+            "SET current_trajectory_id = NULL, current_program_id = NULL "
+            "WHERE agent_id = ? AND challenge = ? "
+            "  AND last_active_at < ? AND current_trajectory_id = ?",
+            (agent_id, challenge, cutoff_ts, traj_id),
+        )
+        if (guard.rowcount or 0) == 0:
+            continue
+        processed += 1
+
+        other_live = await (await conn.execute(
+            "SELECT 1 FROM agent_challenge_state "
+            "WHERE current_trajectory_id = ? AND last_active_at >= ? "
+            "  AND NOT (agent_id = ? AND challenge = ?) LIMIT 1",
+            (traj_id, cutoff_ts, agent_id, challenge),
+        )).fetchone()
+        if other_live is None:
+            await deactivate_trajectory(conn, traj_id, timestamp)
+
+        best = await get_agent_best(conn, agent_id, challenge)
+        if best is not None:
+            await deposit_inactive(
+                conn, agent_id, challenge,
+                best["algorithm_code"], best["score"], timestamp,
+                trajectory_id=traj_id, program_id=program_id,
+                kernel_code=best.get("kernel_code"),
+            )
+            await clear_agent_best(conn, agent_id, challenge)
+    return processed
 
 
 async def reactivate_trajectory(
@@ -924,8 +1072,9 @@ async def list_trajectories(
 async def get_trajectory_score_history(
     conn: aiosqlite.Connection,
     trajectory_id: str,
+    *,
+    direction: str,
     challenge: str | None = None,
-    direction: str = "max",
 ) -> list[dict]:
     if challenge is None:
         cursor = await conn.execute(

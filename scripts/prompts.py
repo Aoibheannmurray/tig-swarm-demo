@@ -76,8 +76,10 @@ def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
     bootstrap = is_stub_code(code)
     if bootstrap:
         parts.append(
-            "No working algorithm yet — the current code is a stub. "
-            "Propose an initial implementation strategy from scratch."
+            "Current algorithm (mod.rs) is a stub — propose an initial "
+            "implementation strategy from scratch. The stub below shows the "
+            "exact `solve_challenge` signature any implementation must keep.\n"
+            f"```rust\n{code}\n```"
         )
     else:
         parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
@@ -179,9 +181,11 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
     bootstrap = is_stub_code(code)
     if bootstrap:
         parts.append(
-            "No working algorithm yet — write a complete solve_challenge "
-            "implementation from scratch. Call save_solution() whenever you "
-            "find an improved solution."
+            "Current algorithm (mod.rs) is a stub — replace it with a complete "
+            "implementation. Keep the exact `solve_challenge` signature shown "
+            "below (parameter names and types), and call the `save_solution` "
+            "closure parameter whenever you find an improved solution.\n"
+            f"```rust\n{code}\n```"
         )
     else:
         parts.append(f"Current algorithm (mod.rs):\n```rust\n{code}\n```")
@@ -342,3 +346,118 @@ def parse_hypothesis(text: str) -> dict:
             if key in meta and value:
                 meta[key] = value
     return meta
+
+
+# ── Agentic mode user prompt ───────────────────────────────────────
+
+
+def build_agentic_user_prompt(state: dict, config: dict) -> str:
+    """Per-iteration prompt for tooled (agentic) Claude Code.
+
+    Stable rules — file scope, hypothesis.json schema, cargo allowlist,
+    solver constraints — live in CLAUDE.md. This prompt is just the
+    variable state the agent needs to decide what to try this iteration.
+    """
+    parts: list[str] = []
+    is_gpu = bool(config.get("is_gpu"))
+    challenge = config.get("challenge", "unknown")
+
+    my_score = state.get("my_best_score")
+    global_best = state.get("best_score")
+    stagnation = state.get("my_runs_since_improvement", 0)
+    runs = state.get("my_runs", 0)
+    improvements = state.get("my_improvements", 0)
+
+    parts.append(
+        f"## Iteration context\n"
+        f"- Challenge: {challenge}{' (GPU)' if is_gpu else ''}\n"
+        f"- Your best score: {my_score}\n"
+        f"- Global best score: {global_best}\n"
+        f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}"
+    )
+
+    reset = state.get("trajectory_reset")
+    if reset:
+        rtype = reset.get("type", "")
+        if rtype == "adopted_inactive":
+            parts.append(
+                "\n## Trajectory reset\n"
+                "You stagnated and the server handed you another agent's "
+                "previously-active algorithm as your new starting point. "
+                "Study it (already on disk) and propose an improvement that "
+                "builds on its approach."
+            )
+        else:
+            parts.append(
+                "\n## Trajectory reset (fresh start)\n"
+                "You stagnated and have been reset to the template algorithm. "
+                "Propose an initial strategy from scratch."
+            )
+
+    bootstrap = is_stub_code(state.get("best_algorithm_code") or "")
+    if bootstrap:
+        parts.append(
+            "\n## Bootstrap iteration\n"
+            "The algorithm on disk is a stub (`unimplemented!()`). Write a "
+            "complete `solve_challenge` implementation from scratch — don't "
+            "tweak, replace. Read the stub first to lock in the exact "
+            "`solve_challenge` signature (parameter names and types) before "
+            "writing anything."
+        )
+
+    prior = state.get("prior_hypotheses") or []
+    if prior:
+        lines = [
+            "\n## Already tried against this exact code (avoid repeating)",
+        ]
+        for h in prior:
+            tag = h.get("strategy_tag", "?")
+            title = h.get("title", "?")
+            lines.append(f"  - [{tag}] {title}")
+        parts.append("\n".join(lines))
+
+    hint = state.get("stagnation_hint")
+    if hint == "inspiration":
+        insp = state.get("inspiration_code", "")
+        insp_agent = state.get("inspiration_agent_name", "another agent")
+        if insp:
+            block = [
+                f"\n## Stagnation hint — inspiration from {insp_agent}",
+                "Study this peer's current best for *structural* ideas to "
+                "adapt. Do NOT copy it wholesale — your job is to evolve "
+                "your own lineage, not replace it.",
+                "",
+                "```rust",
+                insp,
+                "```",
+            ]
+            if is_gpu:
+                insp_kernel = state.get("inspiration_kernel_code", "")
+                if insp_kernel:
+                    block += [
+                        "",
+                        f"Peer CUDA kernels:",
+                        "```cuda",
+                        insp_kernel,
+                        "```",
+                    ]
+            parts.append("\n".join(block))
+    elif hint == "tacit_knowledge":
+        parts.append(
+            "\n## Stagnation hint — tacit knowledge\n"
+            "Check `tacit_knowledge_personal.md` in this worktree (if "
+            "present) for strategy hints the contributor wrote down. If "
+            "absent, fall back to the inspiration_code block above if any."
+        )
+
+    parts.append(
+        "\n## Your task\n"
+        "1. Decide on ONE specific improvement.\n"
+        "2. Edit the algorithm file in place to implement it.\n"
+        "3. Run `cargo check --features solver," + challenge + "` to confirm it compiles.\n"
+        "4. Write `.swarm/hypothesis.json` describing what you did.\n"
+        "5. Stop.\n\n"
+        "Do not run `scripts/benchmark.py` — the driver will run the "
+        "official benchmark after you stop."
+    )
+    return "\n".join(parts)

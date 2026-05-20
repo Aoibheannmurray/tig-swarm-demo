@@ -1,7 +1,11 @@
-import * as d3 from "d3";
+import { max, min } from "d3-array";
+import { scaleLinear } from "d3-scale";
+import { select } from "d3-selection";
+import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
 import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
+import { AgentProgressStore, type AgentExperiment } from "./agentProgressStore";
 import type { Panel, WSMessage } from "../types";
 
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
@@ -26,30 +30,6 @@ type Tab =
   | { type: "global" }
   | { type: "agent"; agentId: string; agentName: string };
 
-interface AgentExperiment {
-  time: number;
-  score: number;
-  feasible: boolean;
-  experimentId?: string;
-  // Per-iteration metadata fed back from /api/agent_experiments — used to
-  // mark events on the per-agent progress plot:
-  //  - trajectoryId   → group of consecutive experiments sharing a trajectory
-  //  - trajectoryDeactivated → last experiment on a trajectory that became
-  //                            inactive (cross marker)
-  //  - receivedHint   → "tacit_knowledge" (star) / "inspiration" (square)
-  trajectoryId?: string | null;
-  trajectoryDeactivated?: boolean;
-  receivedHint?: "tacit_knowledge" | "inspiration" | null;
-}
-
-interface AgentProgress {
-  registeredAt: number; // epoch ms
-  experiments: AgentExperiment[]; // time = ms since registeredAt
-  experimentIds: Set<string>;
-  loaded: boolean;
-  lastEventTime: number; // epoch ms of most recent appended experiment
-}
-
 export class ChartPanel implements Panel {
   private svg!: any;
   private g!: any;
@@ -63,10 +43,7 @@ export class ChartPanel implements Panel {
   private tabs: Tab[] = [{ type: "global" }];
   private currentTabIndex = 0;
 
-  private agentProgress = new Map<string, AgentProgress>();
-  // Live experiment events that arrive before /api/agent_experiments has
-  // finished loading for a given agent.
-  private pendingAgentExperiments = new Map<string, any[]>();
+  private progressStore = new AgentProgressStore();
 
   private tabLabelEl!: HTMLElement;
   private tabPrevEl!: HTMLElement;
@@ -93,12 +70,18 @@ export class ChartPanel implements Panel {
     this.tabPrevEl.addEventListener("click", () => this.cycleTab(-1));
     this.tabNextEl.addEventListener("click", () => this.cycleTab(1));
 
+    // Measure the SVG itself, not the parent panel — the SVG is `flex: 1`
+    // so the browser has already sized it to fit the remaining space after
+    // the panel label, tabs row, and panel padding. The previous
+    // `parent.height - 48` underestimated the chrome (closer to ~78px on
+    // the mainpage), so the SVG coordinate space extended below the
+    // visible flex box and the bottom-most y-tick label got clipped.
     const svgEl = document.getElementById("chart-svg")!;
-    const rect = svgEl.parentElement!.getBoundingClientRect();
+    const rect = svgEl.getBoundingClientRect();
     this.width = rect.width;
-    this.height = rect.height - 48; // label + tab row
+    this.height = rect.height;
 
-    this.svg = d3.select("#chart-svg")
+    this.svg = select("#chart-svg")
       .attr("width", this.width)
       .attr("height", this.height);
 
@@ -121,13 +104,13 @@ export class ChartPanel implements Panel {
     }
 
     const observer = new ResizeObserver(() => {
-      const newRect = svgEl.parentElement!.getBoundingClientRect();
+      const newRect = svgEl.getBoundingClientRect();
       this.width = newRect.width;
-      this.height = newRect.height - 48;
+      this.height = newRect.height;
       this.svg.attr("width", this.width).attr("height", this.height);
       this.redraw();
     });
-    observer.observe(svgEl.parentElement!);
+    observer.observe(svgEl);
 
     this.renderTabLabel();
   }
@@ -173,8 +156,7 @@ export class ChartPanel implements Panel {
     if (msg.type === "reset") {
       this.globalData = [];
       this.globalStartTime = 0;
-      this.agentProgress.clear();
-      this.pendingAgentExperiments.clear();
+      this.progressStore.clear();
       this.tabs = [{ type: "global" }];
       this.currentTabIndex = 0;
       this.renderTabLabel();
@@ -204,7 +186,7 @@ export class ChartPanel implements Panel {
     this.renderTabLabel();
     const tab = this.currentTab();
     if (tab.type === "agent") {
-      this.ensureAgentLoaded(tab.agentId).then(() => {
+      this.progressStore.load(this.apiUrl, tab.agentId).then(() => {
         if (this.currentTab().type === "agent"
             && (this.currentTab() as any).agentId === tab.agentId) {
           this.redraw();
@@ -282,108 +264,14 @@ export class ChartPanel implements Panel {
   }
 
   // ── Per-agent chart data ──
+  // Cache + fetch + pending-merge lives in AgentProgressStore. The chart
+  // only needs to (a) trigger a load when an agent tab is opened, and
+  // (b) feed live events in. Redraw decisions stay here because they depend
+  // on which tab is currently visible.
 
-  private async ensureAgentLoaded(agentId: string): Promise<void> {
-    const existing = this.agentProgress.get(agentId);
-    if (existing?.loaded) return;
-
-    try {
-      const res = await fetch(`${this.apiUrl}/api/agent_experiments?agent_id=${encodeURIComponent(agentId)}`);
-      if (!res.ok) return;
-      const data: {
-        agent_id: string;
-        agent_name: string | null;
-        registered_at: string | null;
-        experiments: {
-          id?: string;
-          score: number;
-          feasible: boolean;
-          created_at: string;
-          trajectory_id?: string | null;
-          received_hint?: "tacit_knowledge" | "inspiration" | null;
-          trajectory_deactivated?: boolean;
-        }[];
-      } = await res.json();
-
-      const registeredAt = data.registered_at
-        ? new Date(data.registered_at).getTime()
-        : Date.now();
-
-      const experiments: AgentExperiment[] = data.experiments.map((e) => ({
-        time: Math.max(0, new Date(e.created_at).getTime() - registeredAt),
-        score: e.score,
-        feasible: e.feasible,
-        experimentId: e.id,
-        trajectoryId: e.trajectory_id ?? null,
-        trajectoryDeactivated: !!e.trajectory_deactivated,
-        receivedHint: e.received_hint ?? null,
-      }));
-
-      const experimentIds = new Set(
-        experiments
-          .map((e) => e.experimentId)
-          .filter((id): id is string => Boolean(id))
-      );
-
-      const lastEventTime = data.experiments.length
-        ? new Date(data.experiments[data.experiments.length - 1].created_at).getTime()
-        : 0;
-
-      const progress: AgentProgress = {
-        registeredAt,
-        experiments,
-        experimentIds,
-        loaded: true,
-        lastEventTime,
-      };
-
-      // Merge any live events that landed while the history request was in-flight.
-      const pending = this.pendingAgentExperiments.get(agentId) || [];
-      for (const msg of pending) {
-        this.appendToAgentProgress(progress, msg);
-      }
-      this.pendingAgentExperiments.delete(agentId);
-
-      this.agentProgress.set(agentId, progress);
-    } catch {
-      // leave unloaded; next tab visit will retry
-    }
-  }
-
-  private appendToAgentProgress(progress: AgentProgress, msg: any): boolean {
-    const msgTime = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
-    const experimentId = typeof msg.experiment_id === "string" ? msg.experiment_id : null;
-
-    if (experimentId && progress.experimentIds.has(experimentId)) {
-      return false;
-    }
-
-    const time = Math.max(0, msgTime - progress.registeredAt);
-    const feasible = msg.feasible !== false;
-
-    progress.experiments.push({
-      time,
-      score: msg.score,
-      feasible,
-      experimentId: experimentId || undefined,
-    });
-    if (experimentId) progress.experimentIds.add(experimentId);
-    progress.lastEventTime = Math.max(progress.lastEventTime, msgTime);
-    return true;
-  }
-
-  private appendAgentExperiment(msg: any) {
-    if (!msg.agent_id) return;
-    const progress = this.agentProgress.get(msg.agent_id);
-    if (!progress || !progress.loaded) {
-      const pending = this.pendingAgentExperiments.get(msg.agent_id) || [];
-      pending.push(msg);
-      this.pendingAgentExperiments.set(msg.agent_id, pending);
-      return;
-    }
-    const added = this.appendToAgentProgress(progress, msg);
+  private appendAgentExperiment(msg: { agent_id?: string }): void {
+    const added = this.progressStore.appendLive(msg);
     if (!added) return;
-
     const tab = this.currentTab();
     if (tab.type === "agent" && tab.agentId === msg.agent_id) {
       this.redraw();
@@ -423,15 +311,17 @@ export class ChartPanel implements Panel {
     //           clearance above the chart for a label sitting at y = 0.
     //   bottom: tick labels baseline at h + fs + 6, descender ~fs/4 below,
     //           plus a few px breathing room.
-    //   left:   y-axis labels (text-anchor=end at x = -8) can be ~8 chars
-    //           wide on log-scaled scores ("100.00M"); at ~0.55em/char
-    //           that's ~4.4·fs.
+    //   left:   y-axis labels (text-anchor=end at x = -8) can run up to
+    //           ~9 chars on negative log-magnitude scores ("-100.00M");
+    //           at ~0.6em/char that's ~5.4·fs. The previous 5.0·fs / 52px
+    //           floor sized for the positive-only case and clipped the
+    //           leading minus sign on the small mainpage chart.
     //   right:  half-strokes from end-of-data lines plus a small buffer.
     const m = {
       top: Math.max(28, fs + 12),
       right: Math.max(16, Math.round(fs * 2)),
       bottom: Math.max(28, fs + 18),
-      left: Math.max(52, Math.round(fs * 5)),
+      left: Math.max(60, Math.round(fs * 6)),
     };
     const w = Math.max(0, this.width - m.left - m.right);
     const h = Math.max(0, this.height - m.top - m.bottom);
@@ -460,16 +350,16 @@ export class ChartPanel implements Panel {
       return;
     }
 
-    const latestData = d3.max(this.globalData, (d) => d.time)!;
+    const latestData = max(this.globalData, (d) => d.time)!;
     const xPad = Math.max(latestData * 0.15, 5000);
-    const xScale = d3.scaleLinear()
+    const xScale = scaleLinear()
       .domain([0, latestData + xPad])
       .range([0, w]);
 
     const yDomain = this.getGlobalYDomain();
     if (!yDomain) return;
 
-    const yScale = d3.scaleLinear()
+    const yScale = scaleLinear()
       .domain(yDomain)
       .range([h, 0]);
 
@@ -539,7 +429,7 @@ export class ChartPanel implements Panel {
         .attr("stroke-opacity", 0.5);
 
       chartG.append("path")
-        .attr("d", d3.symbol(d3.symbolDiamond, 24)())
+        .attr("d", symbol(symbolDiamond, 24)())
         .attr("transform", `translate(${x},${y})`)
         .attr("fill", color)
         .attr("opacity", 0.9);
@@ -572,6 +462,7 @@ export class ChartPanel implements Panel {
     });
 
     const xTicks = xScale.ticks(6);
+    const fmtElapsed = makeElapsedFormatter(latestData + xPad);
     xTicks.forEach((tick) => {
       chartG.append("text")
         .attr("x", xScale(tick))
@@ -580,14 +471,14 @@ export class ChartPanel implements Panel {
         .attr("font-size", `${fs}px`)
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "middle")
-        .text(formatElapsed(tick));
+        .text(fmtElapsed(tick));
     });
   }
 
   private redrawAgent(agentId: string, agentName: string) {
     this.g.selectAll("*").remove();
 
-    const progress = this.agentProgress.get(agentId);
+    const progress = this.progressStore.get(agentId);
     const { m, w, h, fs } = this.computeLayout();
 
     const chartG = this.g.append("g")
@@ -613,7 +504,7 @@ export class ChartPanel implements Panel {
     // very few horizontal pixels; iteration index lets every agent's line
     // span the full chart width regardless of when they registered.
     const xDomainEnd = Math.max(exps.length - 1, 1);
-    const xScale = d3.scaleLinear()
+    const xScale = scaleLinear()
       .domain([0, xDomainEnd])
       .range([0, w]);
 
@@ -624,8 +515,8 @@ export class ChartPanel implements Panel {
     // whose scores never became the global best) gets clipped off-chart
     // and looks like a flat line.
     const globalYDomain = this.getGlobalYDomain();
-    const minScore = d3.min(exps, (d) => d.score)!;
-    const maxScore = d3.max(exps, (d) => d.score)!;
+    const minScore = min(exps, (d) => d.score)!;
+    const maxScore = max(exps, (d) => d.score)!;
     const fallbackPad = Math.max(Math.abs(maxScore - minScore) * 0.15, 1);
     const yDomain: [number, number] = globalYDomain
       ? [
@@ -633,12 +524,7 @@ export class ChartPanel implements Panel {
           Math.max(globalYDomain[1], maxScore + fallbackPad),
         ]
       : [minScore - fallbackPad, maxScore + fallbackPad];
-    // scaleLog requires strictly positive values. Fall back to linear
-    // when the domain crosses zero — early infeasible attempts can produce
-    // negative quality scores under baseline-relative scoring.
-    const yScale = (yDomain[0] > 0 && yDomain[1] > 0
-      ? d3.scaleLog()
-      : d3.scaleLinear())
+    const yScale = scaleLinear()
       .domain(yDomain)
       .range([h, 0]);
 
@@ -699,14 +585,14 @@ export class ChartPanel implements Panel {
         // Star — agent was nudged with a tacit-knowledge hint on the prior
         // /api/state call.
         chartG.append("path")
-          .attr("d", d3.symbol(d3.symbolStar, 60)())
+          .attr("d", symbol(symbolStar, 60)())
           .attr("transform", `translate(${x0},${y0})`)
           .attr("fill", color).attr("opacity", 0.95)
           .attr("stroke", color).attr("stroke-width", 0.5);
       } else if (event === "inspiration") {
         // Square — agent was given another agent's code as inspiration.
         chartG.append("path")
-          .attr("d", d3.symbol(d3.symbolSquare, 50)())
+          .attr("d", symbol(symbolSquare, 50)())
           .attr("transform", `translate(${x0},${y0})`)
           .attr("fill", color).attr("opacity", 0.95)
           .attr("stroke", color).attr("stroke-width", 0.5);
@@ -779,12 +665,12 @@ export class ChartPanel implements Panel {
           .attr("stroke", color).attr("stroke-width", 1.4);
       } else if (item.kind === "tacit_knowledge") {
         legend.append("path")
-          .attr("d", d3.symbol(d3.symbolStar, 36)())
+          .attr("d", symbol(symbolStar, 36)())
           .attr("transform", `translate(${x0},${cy})`)
           .attr("fill", color).attr("opacity", 0.9);
       } else {
         legend.append("path")
-          .attr("d", d3.symbol(d3.symbolSquare, 30)())
+          .attr("d", symbol(symbolSquare, 30)())
           .attr("transform", `translate(${x0},${cy})`)
           .attr("fill", color).attr("opacity", 0.9);
       }
@@ -801,14 +687,17 @@ export class ChartPanel implements Panel {
 
   private getGlobalYDomain(): [number, number] | null {
     if (this.globalData.length < 1) return null;
-    const scoreMin = d3.min(this.globalData, (d) => d.score);
-    const scoreMax = d3.max(this.globalData, (d) => d.score);
+    const scoreMin = min(this.globalData, (d) => d.score);
+    const scoreMax = max(this.globalData, (d) => d.score);
     if (scoreMin == null || scoreMax == null) return null;
 
+    // Pad both sides symmetrically. Previously yMin was clamped to >= 1
+    // because the y-axis used scaleLog, but now that we always use
+    // scaleLinear that floor inverts the domain whenever all scores are
+    // negative (e.g. job_scheduling at -4k..-2k) — every point ends up
+    // rendered below the visible chart.
     const pad = Math.max(Math.abs(scoreMax - scoreMin) * 0.15, 1);
-    const yMin = Math.max(1, scoreMin - pad);
-    const yMax = scoreMax + pad;
-    return [yMin, yMax];
+    return [scoreMin - pad, scoreMax + pad];
   }
 }
 
@@ -825,9 +714,48 @@ function pickEventKind(
   return null;
 }
 
-function formatElapsed(ms: number): string {
-  const totalSec = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
+// Pick a tick-formatter for elapsed-time x-axes based on the total span
+// the axis covers. Returns a closure so every tick is formatted in the
+// same unit family — picking per-tick would mix units (e.g. "59:00" and
+// "1h00m") on one axis and look bad.
+//
+//   span < 1 min   → "Xs"           (e.g. "30s")
+//   span < 1 hour  → "M:SS"         (e.g. "12:30")
+//   span < 1 day   → "Hh Mm" / "Hh" (e.g. "2h30m", "6h")
+//   span ≥ 1 day   → "Dd Hh" / "Dd" (e.g. "1d6h", "3d")
+//
+// Without this, a swarm running for days renders ticks as "4320:00",
+// "4500:00", etc. — minutes-only, requiring the viewer to divide by 1440
+// in their head to recover "3 days, 3 days 2 hours, ...".
+function makeElapsedFormatter(domainMs: number): (ms: number) => string {
+  const SEC = 1000;
+  const MIN = 60 * SEC;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+
+  if (domainMs < MIN) {
+    return (ms) => `${Math.max(0, Math.round(ms / SEC))}s`;
+  }
+  if (domainMs < HOUR) {
+    return (ms) => {
+      const totalSec = Math.max(0, Math.floor(ms / SEC));
+      const m = Math.floor(totalSec / 60);
+      const s = totalSec % 60;
+      return `${m}:${s.toString().padStart(2, "0")}`;
+    };
+  }
+  if (domainMs < DAY) {
+    return (ms) => {
+      const totalMin = Math.max(0, Math.floor(ms / MIN));
+      const h = Math.floor(totalMin / 60);
+      const m = totalMin % 60;
+      return m === 0 ? `${h}h` : `${h}h${m}m`;
+    };
+  }
+  return (ms) => {
+    const totalHr = Math.max(0, Math.floor(ms / HOUR));
+    const d = Math.floor(totalHr / 24);
+    const h = totalHr % 24;
+    return h === 0 ? `${d}d` : `${d}d${h}h`;
+  };
 }

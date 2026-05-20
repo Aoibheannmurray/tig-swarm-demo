@@ -1,7 +1,6 @@
-import "@phosphor-icons/web/regular/style.css";
 import "./style.css";
 import { SwarmWebSocket } from "./lib/websocket";
-import { MockDataGenerator } from "./mock";
+import { getDashboardUrls, installKeyboardNav } from "./lib/bootstrap";
 import { viewportFlash } from "./lib/animate";
 import {
   soundAgentJoined, soundHypothesisProposed, soundExperimentPublished,
@@ -17,6 +16,8 @@ import {
   getViewedChallenge,
   onViewedChallengeChange,
 } from "./lib/viewedChallenge";
+import { registerAgentColor } from "./lib/colors";
+import { isMessageForChallenge } from "./lib/messageScope";
 
 import { ChallengeSelectorPanel } from "./panels/challenge-selector";
 import { StatsPanel } from "./panels/stats";
@@ -24,25 +25,11 @@ import { ChartPanel } from "./panels/chart";
 import { DiversityPanel } from "./panels/diversity";
 import { FeedPanel } from "./panels/feed";
 import { LeaderboardPanel } from "./panels/leaderboard";
-import { buildPanelFor, isKnownChallenge } from "./lib/challengeRegistry";
+import { buildPanelFor, isKnownChallenge } from "./challenges/registry";
 
 import type { WSMessage, Panel } from "./types";
 
-// ── Config ──
-const params = new URLSearchParams(window.location.search);
-const isMock = params.has("mock");
-const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-const wsUrl = params.get("ws") || `${wsProtocol}//${window.location.host}/ws/dashboard`;
-
-// Derive REST API URL from WS URL
-function getApiUrl(): string {
-  const explicit = params.get("api");
-  if (explicit) return explicit;
-  return wsUrl
-    .replace("ws://", "http://")
-    .replace("wss://", "https://")
-    .replace("/ws/dashboard", "");
-}
+const { wsUrl, apiUrl } = getDashboardUrls();
 
 // ── Initialize panels ──
 // Panels are constructed inside `bootstrap()` after loadSwarmConfig() so
@@ -52,7 +39,17 @@ function getApiUrl(): string {
 // re-fetches its data via setChallenge().
 const panels: Panel[] = [];
 let chartPanel: ChartPanel;
+let feedPanel: FeedPanel;
 let displayPanel: Panel | undefined;
+
+// agent_id → current agent_name. Authoritative source on the dashboard
+// side; populated from every LeaderboardUpdate (which on the server JOINs
+// agents.name live) and updated in-place on agent_renamed. Read by the
+// feed panel so it can render names from the agent_id rather than relying
+// on whatever snapshot was attached to a given event.
+const agentNameMap = new Map<string, string>();
+const lookupAgentName = (agent_id: string): string | undefined =>
+  agentNameMap.get(agent_id);
 
 function initPanel<T extends Panel>(PanelClass: new () => T, containerId: string): T {
   const panel = new PanelClass();
@@ -71,8 +68,8 @@ function constructDisplayPanel() {
     displayPanel = undefined;
     container.innerHTML = "";
   }
-  // The registry maps challenge id → panel factory. Adding a 6th challenge
-  // is one entry in lib/challengeRegistry.ts — no edit here.
+  // The registry maps challenge id → panel factory. Adding a new challenge
+  // is one entry in challenges/registry.ts — no edit here.
   const challenge = getViewedChallenge();
   if (!isKnownChallenge(challenge)) {
     console.warn(`[Dashboard] No panel registered for challenge "${challenge}"`);
@@ -89,37 +86,40 @@ function constructPanels() {
   constructDisplayPanel();
   chartPanel = initPanel(ChartPanel, "panel-chart");
   initPanel(DiversityPanel, "panel-diversity");
-  initPanel(FeedPanel, "panel-feed");
+  feedPanel = initPanel(FeedPanel, "panel-feed");
+  feedPanel.setNameLookup(lookupAgentName);
   initPanel(LeaderboardPanel, "panel-leaderboard");
 }
 
 // ── Message dispatch ──
 let soundEnabled = false;
 
-// Events that carry per-challenge data; drop them when their `challenge`
-// doesn't match the user's viewed challenge so panels render consistent state.
-const CHALLENGE_SCOPED: Record<string, true> = {
-  experiment_published: true,
-  hypothesis_proposed: true,
-  new_global_best: true,
-  leaderboard_update: true,
-  chat_message: true,
-  trajectory_reset: true,
-  hypothesis_status_changed: true,
-  // /api/admin/reset_challenge broadcasts `{type:"reset", challenge:"…"}`.
-  // Without this entry, a reset on knapsack would clear panels viewing
-  // job_scheduling. The filter below drops any scoped event whose
-  // `challenge` field doesn't match the viewed challenge.
-  reset: true,
-};
-
 function handleMessage(msg: WSMessage) {
   // Drop challenge-scoped events that don't belong to the viewed challenge.
-  // `agent_joined`, `swarm_config_updated`, `admin_broadcast`, and the
-  // global slice of `stats_update` don't get filtered.
-  const m = msg as any;
-  if (CHALLENGE_SCOPED[m.type] && m.challenge && m.challenge !== getViewedChallenge()) {
-    return;
+  // See lib/messageScope.ts for which event types are filtered.
+  if (!isMessageForChallenge(msg, getViewedChallenge())) return;
+
+  // Keep agent_id → name map in sync. Leaderboard entries are server-JOINed
+  // so they always carry the current name; agent_renamed is the explicit
+  // signal when no leaderboard update follows. agent_joined seeds first-name
+  // entries before any leaderboard fires.
+  //
+  // Pin each agent's palette color at the same point. Registering up-front
+  // means every later panel — feed dot, chart line, leaderboard, diversity —
+  // resolves the *same* slot regardless of which one renders the agent
+  // first, and there is no per-event-type color override anywhere.
+  if (msg.type === "leaderboard_update") {
+    for (const entry of msg.entries) {
+      if (entry.agent_id && entry.agent_name) {
+        agentNameMap.set(entry.agent_id, entry.agent_name);
+        registerAgentColor(entry.agent_id);
+      }
+    }
+  } else if (msg.type === "agent_renamed") {
+    agentNameMap.set(msg.agent_id, msg.new_name);
+  } else if (msg.type === "agent_joined") {
+    agentNameMap.set(msg.agent_id, msg.agent_name);
+    if (msg.agent_id) registerAgentColor(msg.agent_id);
   }
 
   if (soundEnabled) {
@@ -137,8 +137,8 @@ function handleMessage(msg: WSMessage) {
   // For stats_update we slice `per_challenge` down to the viewed
   // challenge so panels see the right counters. `per_challenge` is the
   // sole source of truth on the wire.
-  if (msg.type === "stats_update" && (msg as any).per_challenge) {
-    const sliced = (msg as any).per_challenge[getViewedChallenge()] ?? {};
+  if (msg.type === "stats_update" && msg.per_challenge) {
+    const sliced = msg.per_challenge[getViewedChallenge()] ?? ({} as Partial<typeof msg.per_challenge[string]>);
     msg = {
       ...msg,
       active_agents: sliced.active_agents ?? 0,
@@ -150,11 +150,11 @@ function handleMessage(msg: WSMessage) {
       baseline_score: sliced.baseline_score ?? null,
       num_instances: sliced.num_instances ?? 0,
       improvement_pct: sliced.improvement_pct ?? 0,
-    } as any;
+    };
   }
 
   // Refetch swarm config when the host switches the active challenge.
-  handleSwarmConfigEvent(getApiUrl(), msg);
+  handleSwarmConfigEvent(apiUrl, msg);
 
   panels.forEach((panel) => panel.handleMessage(msg));
 
@@ -163,7 +163,7 @@ function handleMessage(msg: WSMessage) {
   // baselines are correct without requiring a full page reload. Without
   // this, panels sit blank until the next live event arrives.
   if (msg.type === "reset" && msg.challenge === getViewedChallenge()) {
-    void loadInitialState(getApiUrl(), getViewedChallenge());
+    void loadInitialState(apiUrl, getViewedChallenge());
   }
 }
 
@@ -183,6 +183,11 @@ async function loadInitialState(apiUrl: string, challenge: string) {
     const stateRes = await fetch(`${apiUrl}/api/state${q}`);
     if (!stateRes.ok) return;
     const state = await stateRes.json();
+    // Drop the response if the user switched challenges while /api/state was
+    // in flight — otherwise we'd dispatch a batch of synthesised messages
+    // (stats_update, new_global_best, experiments, hypotheses) belonging to
+    // the previous challenge into the freshly-reset panels.
+    if (challenge !== getViewedChallenge()) return;
     const hypothesisCount =
       state.hypotheses_count ?? (state.recent_hypotheses?.length || 0);
 
@@ -278,7 +283,11 @@ async function loadInitialState(apiUrl: string, challenge: string) {
           type: "experiment_published",
           experiment_id: exp.id || "",
           agent_name: exp.agent_name,
-          agent_id: "",
+          // Server now includes agent_id in /api/state's recent_experiments
+          // (was missing before). getAgentColor is keyed on agent_id, so
+          // threading the real id through makes backfilled experiments
+          // render with the same palette color as live WS events.
+          agent_id: exp.agent_id || "",
           score: exp.score,
           feasible: exp.feasible !== false,
           improvement_pct: exp.improvement_pct || 0,
@@ -297,7 +306,9 @@ async function loadInitialState(apiUrl: string, challenge: string) {
           type: "hypothesis_proposed",
           hypothesis_id: hyp.id || "",
           agent_name: hyp.agent_name,
-          agent_id: "",
+          // Server's recent_hypotheses already includes agent_id; thread it
+          // through so the feed dot uses the agent's palette color.
+          agent_id: hyp.agent_id || "",
           title: hyp.title,
           description: hyp.description || "",
           strategy_tag: hyp.strategy_tag,
@@ -309,12 +320,60 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       }
     }
 
+    // Backfill the live feed from /api/messages so chat history AND
+    // agent_joined events survive a page reload. Server returns rows for
+    // the viewed challenge plus all msg_type='agent_joined' rows regardless
+    // of challenge (joins are swarm-wide). Dispatched oldest-first so the
+    // newest entries land at the top of the feed alongside synthesised
+    // experiment/hypothesis events above.
+    void fetch(`${apiUrl}/api/messages?limit=200&challenge=${encodeURIComponent(challenge)}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows: Array<{
+        id: string;
+        agent_id: string | null;
+        agent_name: string;
+        content: string;
+        msg_type: string;
+        created_at: string;
+      }>) => {
+        if (challenge !== getViewedChallenge()) return;
+        rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+        for (const row of rows) {
+          // Re-check per row: the user can switch challenges mid-dispatch
+          // (200 rows × a handleMessage each is not instant). Without this,
+          // the tail of an old batch leaks into the new view.
+          if (challenge !== getViewedChallenge()) return;
+          if (row.msg_type === "agent_joined") {
+            handleMessage({
+              type: "agent_joined",
+              agent_id: row.agent_id || "",
+              agent_name: row.agent_name,
+              timestamp: row.created_at,
+            } as any);
+          } else {
+            handleMessage({
+              type: "chat_message",
+              message_id: row.id,
+              agent_id: row.agent_id,
+              agent_name: row.agent_name,
+              content: row.content,
+              msg_type: row.msg_type === "milestone" ? "milestone" : "agent",
+              timestamp: row.created_at,
+            } as any);
+          }
+        }
+      })
+      .catch((e) => console.warn("[Dashboard] /api/messages backfill failed:", e));
+
     soundEnabled = true;
     console.log("[Dashboard] Loaded initial state for challenge:", challenge);
 
     // Seed the chart's score-history line when the (compact) replay
     // lands. Doesn't block visualization or stats panels above.
+    // Drop the result if the user has switched challenges while the
+    // replay was in flight — otherwise stale data overwrites the chart.
     replayPromise.then((replay) => {
+      if (challenge !== getViewedChallenge()) return;
       if (replay && replay.length) chartPanel.seedHistory(replay);
     });
   } catch (e) {
@@ -331,49 +390,30 @@ onViewedChallengeChange((c) => {
   // Use the `reset` event the panels already handle to clear their
   // challenge-scoped state (chart history, leaderboard rows, feed items).
   panels.forEach((p) => {
-    p.handleMessage({ type: "reset", timestamp: new Date().toISOString() } as any);
+    p.handleMessage({ type: "reset", timestamp: new Date().toISOString() });
     p.setChallenge?.(c);
   });
-  void loadInitialState(getApiUrl(), c);
+  void loadInitialState(apiUrl, c);
 });
 
 // ── Welcome overlay ──
 initWelcome();
 
 // ── Keyboard navigation ──
+installKeyboardNav("main");
 document.addEventListener("keydown", (e) => {
-  if (e.key === "2") window.location.href = "/ideas.html";
-  if (e.key === "3") window.location.href = "/diversity.html";
-  if (e.key === "4") window.location.href = "/benchmark.html";
-  if (e.key === "5") window.location.href = "/trajectories.html";
   if (e.key === "j" || e.key === "J") toggleWelcome();
-  if (e.key === "r" || e.key === "R") startReplay(getApiUrl(), handleMessage);
+  if (e.key === "r" || e.key === "R") startReplay(apiUrl, handleMessage);
 });
 
 // ── Connect ──
-if (isMock) {
-  console.log("[Dashboard] Running in MOCK mode");
-  soundEnabled = true;
+console.log(`[Dashboard] Connecting to ${wsUrl}, API: ${apiUrl}`);
+
+void loadSwarmConfig(apiUrl).then(() => {
   constructPanels();
-  const mock = new MockDataGenerator();
-  mock.onMessage(handleMessage);
-  mock.start();
+  void loadInitialState(apiUrl, getViewedChallenge());
+});
 
-  const wsEl = document.getElementById("ws-status");
-  if (wsEl) {
-    wsEl.textContent = "MOCK";
-    wsEl.className = "ws-status connected";
-  }
-} else {
-  const apiUrl = getApiUrl();
-  console.log(`[Dashboard] Connecting to ${wsUrl}, API: ${apiUrl}`);
-
-  void loadSwarmConfig(apiUrl).then(() => {
-    constructPanels();
-    void loadInitialState(apiUrl, getViewedChallenge());
-  });
-
-  const ws = new SwarmWebSocket(wsUrl);
-  ws.onMessage(handleMessage);
-  ws.connect();
-}
+const ws = new SwarmWebSocket(wsUrl);
+ws.onMessage(handleMessage);
+ws.connect();

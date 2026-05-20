@@ -14,7 +14,7 @@
 // the selector so viewers see which challenge agents are actively working on.
 //
 // Per-challenge UI metadata (pretty name, score label, panel factory, fallback
-// sub-config) lives in `challengeRegistry.ts` — this file owns only the
+// sub-config) lives in `challenges/registry.ts` — this file owns only the
 // server-driven slice.
 
 import {
@@ -25,10 +25,10 @@ import {
   type Challenge,
   type ChallengeSubConfig,
   type ScoringDirection,
-} from "./challengeRegistry";
+} from "../challenges/registry";
 
 // Re-export the challenge type aliases so callers can grab them from one
-// place — but `Challenge` itself is owned by challengeRegistry.ts; this
+// place — but `Challenge` itself is owned by challenges/registry.ts; this
 // file just consumes it.
 export type { Challenge, ChallengeSubConfig, ScoringDirection };
 

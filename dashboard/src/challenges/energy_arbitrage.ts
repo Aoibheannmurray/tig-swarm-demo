@@ -1,13 +1,17 @@
-import * as d3 from "d3";
-import { DisplayPanelBase } from "./displayPanelBase";
+import { axisBottom, axisLeft, axisRight } from "d3-axis";
+import { extent, max, min } from "d3-array";
+import { scaleLinear } from "d3-scale";
+import { select, type Selection } from "d3-selection";
+import { line } from "d3-shape";
+import { DisplayPanelBase } from "./base";
 import { token } from "../lib/colors";
 
 // Categorical assignments from the earthen viz palette:
-//   discharge (energy out) → terracotta (--viz-1)
-//   charge    (energy in)  → slate blue (--viz-4)
-//   da-price line          → mustard    (--viz-2)
-const DISCHARGE = () => token("--viz-1", "#B8541F");
-const CHARGE    = () => token("--viz-4", "#4E6B85");
+//   discharge (energy out) → plum   (--viz-5)
+//   charge    (energy in)  → olive  (--viz-3)
+//   da-price line          → mustard (--viz-2)
+const DISCHARGE = () => token("--viz-5", "#7A4F6E");
+const CHARGE    = () => token("--viz-3", "#6B7F4E");
 const PRICE     = () => token("--viz-2", "#C68F3E");
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
 const AXIS_LBL  = () => token("--ink-mid", "rgba(26,26,26,0.70)");
@@ -32,11 +36,11 @@ const CHART_H = VB_H - MARGIN.top - MARGIN.bottom;
 export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
   protected idPrefix = "energy";
 
-  private svg!: d3.Selection<SVGSVGElement, unknown, HTMLElement, any>;
-  private chartG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
-  private xAxisG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
-  private yLeftAxisG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
-  private yRightAxisG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
+  private svg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
+  private chartG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private xAxisG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private yLeftAxisG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private yRightAxisG!: Selection<SVGGElement, unknown, HTMLElement, any>;
 
   private batteriesEl!: HTMLElement;
 
@@ -45,17 +49,7 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       <div class="panel-inner energy-panel">
         <div class="panel-label">ENERGY SCHEDULE</div>
         <div class="energy-agent-name" id="energy-agent-name"></div>
-        <div class="solution-history-nav" id="energy-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="energy-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="energy-history-label"></span>
-          <button class="solution-nav-btn" id="energy-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="energy-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="energy-nav" style="display:none">
-          <button class="solution-nav-btn" id="energy-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="energy-instance-label"></span>
-          <button class="solution-nav-btn" id="energy-next">&rsaquo;</button>
-        </div>
+        ${this.navsScaffold()}
         <div class="energy-svg-wrap" id="energy-svg-wrap">
           <svg id="energy-svg"></svg>
           <div class="solution-empty-state" id="energy-empty-state">
@@ -77,18 +71,9 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("energy-score")!;
-    this.scoreDeltaEl = document.getElementById("energy-score-delta")!;
     this.batteriesEl = document.getElementById("energy-batteries")!;
-    this.instanceLabelEl = document.getElementById("energy-instance-label")!;
-    this.navEl = document.getElementById("energy-nav")!;
-    this.agentNameEl = document.getElementById("energy-agent-name")!;
-    this.historyNavEl = document.getElementById("energy-history-nav")!;
-    this.historyLabelEl = document.getElementById("energy-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("energy-hist-live")!;
-    this.emptyStateEl = document.getElementById("energy-empty-state")!;
 
-    this.svg = d3.select("#energy-svg") as any;
+    this.svg = select("#energy-svg") as any;
     this.svg
       .attr("viewBox", `0 0 ${VB_W} ${VB_H}`)
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -106,7 +91,7 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
     const resize = () => {
       this.svg.attr("width", wrap.clientWidth).attr("height", wrap.clientHeight);
     };
-    new ResizeObserver(resize).observe(wrap);
+    this.observeResize(wrap, resize);
     resize();
   }
 
@@ -133,21 +118,21 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
     const n = data.num_steps;
     const dt = 0.25;
 
-    const x = d3.scaleLinear().domain([0, n * dt]).range([0, CHART_W]);
+    const x = scaleLinear().domain([0, n * dt]).range([0, CHART_W]);
 
     const powerMax = Math.max(
-      d3.max(data.agg_discharge) || 0,
-      Math.abs(d3.min(data.agg_charge) || 0),
+      max(data.agg_discharge) || 0,
+      Math.abs(min(data.agg_charge) || 0),
       1,
     );
-    const yPower = d3.scaleLinear()
+    const yPower = scaleLinear()
       .domain([-powerMax * 1.1, powerMax * 1.1])
       .range([CHART_H, 0]);
 
-    const priceExtent = d3.extent(data.avg_da_price) as [number, number];
+    const priceExtent = extent(data.avg_da_price) as [number, number];
     const priceMin = (priceExtent[0] ?? 0) * 0.9;
     const priceMax = (priceExtent[1] ?? 100) * 1.1;
-    const yPrice = d3.scaleLinear()
+    const yPrice = scaleLinear()
       .domain([priceMin, priceMax])
       .range([CHART_H, 0]);
 
@@ -164,35 +149,40 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       const discharge = data.agg_discharge[t];
       if (discharge > 0) {
         const yTop = yPower(discharge);
-        parts.push(`<rect x="${xPos}" y="${yTop.toFixed(2)}" width="${barW}" height="${(yPower(0) - yTop).toFixed(2)}" fill="${DISCHARGE()}" opacity="0.85"/>`);
+        parts.push(`<rect class="energy-bar-up" style="--t:${t}" x="${xPos}" y="${yTop.toFixed(2)}" width="${barW}" height="${(yPower(0) - yTop).toFixed(2)}" fill="${DISCHARGE()}" opacity="0.85"/>`);
       }
       if (charge < 0) {
         const yBot = yPower(charge);
-        parts.push(`<rect x="${xPos}" y="${yZero}" width="${barW}" height="${(yBot - yPower(0)).toFixed(2)}" fill="${CHARGE()}" opacity="0.85"/>`);
+        parts.push(`<rect class="energy-bar-down" style="--t:${t}" x="${xPos}" y="${yZero}" width="${barW}" height="${(yBot - yPower(0)).toFixed(2)}" fill="${CHARGE()}" opacity="0.85"/>`);
       }
     }
 
     if (data.avg_da_price.length > 0) {
-      const priceLine = d3.line<number>()
+      const priceLine = line<number>()
         .x((_, i) => x(i * dt))
         .y((d) => yPrice(d));
       const path = priceLine(data.avg_da_price);
       if (path) {
-        parts.push(`<path d="${path}" fill="none" stroke="${PRICE()}" stroke-width="1.5" opacity="0.95"/>`);
+        // Bars start at i*20ms and grow for 650ms (.energy-bar-* in
+        // style.css). Spanning the full bar window with linear easing on
+        // .energy-price-line places the line at index i around bar i's
+        // midpoint — so the line tracks the bar growth front end-to-end.
+        const priceAnimMs = (n - 1) * 20 + 650;
+        parts.push(`<path class="energy-price-line" style="animation-duration:${priceAnimMs}ms" pathLength="100" d="${path}" fill="none" stroke="${PRICE()}" stroke-width="1.5" opacity="0.95"/>`);
       }
     }
     chartNode.innerHTML = parts.join("");
 
     // axes
-    const xTicks = d3.axisBottom(x).ticks(8).tickFormat((d) => `${d}h`);
+    const xTicks = axisBottom(x).ticks(8).tickFormat((d) => `${d}h`);
     this.xAxisG.call(xTicks as any)
-      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 11);
     this.xAxisG.selectAll("line").attr("stroke", AXIS_TEXT());
     this.xAxisG.select(".domain").attr("stroke", AXIS_TEXT());
 
-    const yLeftTicks = d3.axisLeft(yPower).ticks(6).tickFormat((d) => `${d}`);
+    const yLeftTicks = axisLeft(yPower).ticks(6).tickFormat((d) => `${d}`);
     this.yLeftAxisG.call(yLeftTicks as any)
-      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 9);
+      .selectAll("text").attr("fill", AXIS_TEXT()).attr("font-size", 11);
     this.yLeftAxisG.selectAll("line").attr("stroke", AXIS_TEXT());
     this.yLeftAxisG.select(".domain").attr("stroke", AXIS_TEXT());
 
@@ -201,12 +191,12 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       .attr("x", -CHART_H / 2).attr("y", -38)
       .attr("text-anchor", "middle")
       .attr("fill", AXIS_LBL())
-      .attr("font-size", 9)
+      .attr("font-size", 11)
       .text("MW");
 
-    const yRightTicks = d3.axisRight(yPrice).ticks(6).tickFormat((d) => `$${d}`);
+    const yRightTicks = axisRight(yPrice).ticks(6).tickFormat((d) => `$${d}`);
     this.yRightAxisG.call(yRightTicks as any)
-      .selectAll("text").attr("fill", PRICE()).attr("font-size", 9);
+      .selectAll("text").attr("fill", PRICE()).attr("font-size", 11);
     this.yRightAxisG.selectAll("line").attr("stroke", PRICE()).attr("opacity", 0.4);
     this.yRightAxisG.select(".domain").attr("stroke", PRICE()).attr("opacity", 0.4);
 
@@ -215,7 +205,7 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       .attr("x", CHART_H / 2).attr("y", -40)
       .attr("text-anchor", "middle")
       .attr("fill", PRICE())
-      .attr("font-size", 9)
+      .attr("font-size", 11)
       .text("$/MWh");
 
     // legend
@@ -225,21 +215,21 @@ export class EnergyPanel extends DisplayPanelBase<AllEnergyData> {
       .attr("fill", DISCHARGE()).attr("opacity", 0.85);
     this.chartG.append("text")
       .attr("x", 18).attr("y", legendY + 9)
-      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("Discharge");
+      .attr("fill", AXIS_LBL()).attr("font-size", 11).text("Discharge");
 
     this.chartG.append("rect")
       .attr("x", 84).attr("y", legendY).attr("width", 10).attr("height", 10)
       .attr("fill", CHARGE()).attr("opacity", 0.85);
     this.chartG.append("text")
       .attr("x", 98).attr("y", legendY + 9)
-      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("Charge");
+      .attr("fill", AXIS_LBL()).attr("font-size", 11).text("Charge");
 
     this.chartG.append("line")
       .attr("x1", 152).attr("x2", 162).attr("y1", legendY + 5).attr("y2", legendY + 5)
       .attr("stroke", PRICE()).attr("stroke-width", 1.5);
     this.chartG.append("text")
       .attr("x", 166).attr("y", legendY + 9)
-      .attr("fill", AXIS_LBL()).attr("font-size", 9).text("DA Price");
+      .attr("fill", AXIS_LBL()).attr("font-size", 11).text("DA Price");
 
     this.batteriesEl.textContent = String(data.num_batteries);
   }

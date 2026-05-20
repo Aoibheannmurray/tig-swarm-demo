@@ -1,5 +1,6 @@
-import * as d3 from "d3";
-import { DisplayPanelBase } from "./displayPanelBase";
+import { scaleLinear } from "d3-scale";
+import { select, type Selection } from "d3-selection";
+import { DisplayPanelBase } from "./base";
 import { token } from "../lib/colors";
 
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
@@ -30,20 +31,42 @@ const VB_H = 600;
 const CHART_W = VB_W - MARGIN.left - MARGIN.right;
 const CHART_H = VB_H - MARGIN.top - MARGIN.bottom;
 
+// Fixed palette for job bars. Jobs 0–7 use these literal swatches. Jobs
+// beyond the palette fall through to a procedural generator below, which
+// holds saturation/lightness in the same muted-earth-tone range so
+// generated colors blend with the base palette.
+const JOB_PALETTE_BASE = [
+  "#B8541F",
+  "#A66E45",
+  "#C68F3E",
+  "#6B7F4E",
+  "#4A8C8A",
+  "#4E6B85",
+  "#8B6B8C",
+  "#7A4F6E",
+];
+
 function jobColor(job: number): string {
-  const hue = (job * 137.508) % 360;
-  const sat = 60 + (job % 3) * 10;
-  const lit = 52 + (job % 2) * 8;
-  return `hsl(${hue}, ${sat}%, ${lit}%)`;
+  const i = ((job % 1e6) + 1e6) % 1e6;
+  if (i < JOB_PALETTE_BASE.length) return JOB_PALETTE_BASE[i];
+  // Golden-angle hue walk starting at +100° so the first generated color
+  // lands in the green/cyan band (gap in the base palette). Lightness
+  // alternates between two bands (38% / 56%) so adjacent generated jobs
+  // get clear value contrast — at S=28% the eye can't separate close
+  // hues alone. (Temporary — revisit if the band feels too stripey.)
+  const k = i - JOB_PALETTE_BASE.length;
+  const hue = (k * 137.508 + 100) % 360;
+  const lightness = k % 2 === 0 ? 38 : 56;
+  return `hsl(${hue.toFixed(1)}, 28%, ${lightness}%)`;
 }
 
 export class GanttPanel extends DisplayPanelBase<AllGanttData> {
   protected idPrefix = "gantt";
 
-  private svg!: d3.Selection<SVGSVGElement, unknown, HTMLElement, any>;
-  private chartG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
-  private axisG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
-  private labelG!: d3.Selection<SVGGElement, unknown, HTMLElement, any>;
+  private svg!: Selection<SVGSVGElement, unknown, HTMLElement, any>;
+  private chartG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private axisG!: Selection<SVGGElement, unknown, HTMLElement, any>;
+  private labelG!: Selection<SVGGElement, unknown, HTMLElement, any>;
 
   private makespanEl!: HTMLElement;
 
@@ -52,17 +75,7 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
       <div class="panel-inner gantt-panel">
         <div class="panel-label">SCHEDULE</div>
         <div class="gantt-agent-name" id="gantt-agent-name"></div>
-        <div class="solution-history-nav" id="gantt-history-nav" style="display:none">
-          <button class="solution-nav-btn" id="gantt-hist-prev" title="Previous global best">&lsaquo;</button>
-          <span class="solution-history-label" id="gantt-history-label"></span>
-          <button class="solution-nav-btn" id="gantt-hist-next" title="Next global best">&rsaquo;</button>
-          <button class="solution-history-live" id="gantt-hist-live" title="Jump to latest" style="display:none">LIVE &rarr;</button>
-        </div>
-        <div class="solution-nav" id="gantt-nav" style="display:none">
-          <button class="solution-nav-btn" id="gantt-prev">&lsaquo;</button>
-          <span class="solution-instance-label" id="gantt-instance-label"></span>
-          <button class="solution-nav-btn" id="gantt-next">&rsaquo;</button>
-        </div>
+        ${this.navsScaffold()}
         <div class="gantt-svg-wrap" id="gantt-svg-wrap">
           <svg id="gantt-svg"></svg>
           <div class="solution-empty-state" id="gantt-empty-state">
@@ -84,18 +97,9 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.scoreEl = document.getElementById("gantt-score")!;
-    this.scoreDeltaEl = document.getElementById("gantt-score-delta")!;
     this.makespanEl = document.getElementById("gantt-makespan")!;
-    this.instanceLabelEl = document.getElementById("gantt-instance-label")!;
-    this.navEl = document.getElementById("gantt-nav")!;
-    this.agentNameEl = document.getElementById("gantt-agent-name")!;
-    this.historyNavEl = document.getElementById("gantt-history-nav")!;
-    this.historyLabelEl = document.getElementById("gantt-history-label")!;
-    this.historyLiveBtnEl = document.getElementById("gantt-hist-live")!;
-    this.emptyStateEl = document.getElementById("gantt-empty-state")!;
 
-    this.svg = d3.select("#gantt-svg") as any;
+    this.svg = select("#gantt-svg") as any;
     this.svg
       .attr("viewBox", `0 0 ${VB_W} ${VB_H}`)
       .attr("preserveAspectRatio", "xMidYMid meet");
@@ -111,7 +115,7 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
     const resize = () => {
       this.svg.attr("width", wrap.clientWidth).attr("height", wrap.clientHeight);
     };
-    new ResizeObserver(resize).observe(wrap);
+    this.observeResize(wrap, resize);
     resize();
   }
 
@@ -138,7 +142,7 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
     const nMachines = data.num_machines;
     const makespan = data.makespan;
 
-    const x = d3.scaleLinear().domain([0, makespan]).range([0, CHART_W]);
+    const x = scaleLinear().domain([0, makespan]).range([0, CHART_W]);
     const rowH = CHART_H / nMachines;
     const barH = rowH * 0.78;
     const barPad = (rowH - barH) / 2;
@@ -162,7 +166,8 @@ export class GanttPanel extends DisplayPanelBase<AllGanttData> {
       const bx = x(bar.start);
       const bw = Math.max(x(bar.end) - x(bar.start), 0.8);
       const by = bar.machine * rowH + barPad;
-      parts.push(`<rect x="${bx.toFixed(2)}" y="${by.toFixed(2)}" width="${bw.toFixed(2)}" height="${barHStr}" fill="${jobColor(bar.job)}" stroke="rgba(26,26,26,0.20)" stroke-width="0.4" rx="1"/>`);
+      const frac = makespan > 0 ? (bar.start / makespan).toFixed(4) : "0";
+      parts.push(`<rect class="gantt-bar" style="--t:${frac}" x="${bx.toFixed(2)}" y="${by.toFixed(2)}" width="${bw.toFixed(2)}" height="${barHStr}" fill="${jobColor(bar.job)}" stroke="rgba(26,26,26,0.20)" stroke-width="0.4" rx="1"/>`);
     }
 
     const xMakespan = x(makespan).toFixed(2);

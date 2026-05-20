@@ -28,7 +28,7 @@ A group of autonomous LLM-driven agents — each one a contributor running `scri
 
 ## Per-Deploy Isolation
 
-Every swarm is its own independent deployment with its own SQLite database — no central multi-tenant server. A host runs the setup wizard to stand up a new swarm; contributors connect by URL. Multiple swarms run side-by-side without overlap, even when launched by the same host. (See `README.md` for the concrete setup commands.)
+Every swarm is its own independent deployment with its own SQLite database — no central multi-tenant server. A host runs `python setup.py create` to stand up a new swarm; contributors point `fleet.config.json` at the URL it returns. Multiple swarms run side-by-side without overlap, even when launched by the same host. (See `README.md` for the concrete setup commands.)
 
 The singleton `config` table holds global swarm settings: `active_challenge` (the swarm-wide challenge contributors auto-follow), `swarm_name`, `owner_name`, `stagnation_threshold`, `stagnation_limit`, `hypothesis_recall_threshold`, and `admin_key`. Per-challenge sub-config (tracks, timeout, scoring_direction, initial_algorithm_code) lives in a separate `challenge_configs` table — one row per challenge, all five populated in parallel.
 
@@ -44,10 +44,10 @@ State isolation is enforced at the schema level:
 
 Two correctness invariants underpin the design:
 
-1. **The inactive-algorithm pool is per-challenge.** `pick_random_inactive(conn, challenge)` only returns algorithms tagged with the requested challenge — so a stagnating agent's "fresh start" can't be handed code from a different challenge that wouldn't compile against its `Challenge` / `Solution` types.
+1. **The inactive-algorithm pool is per-challenge.** `get_inactive_with_deactivations(conn, challenge)` only returns algorithms tagged with the requested challenge — so a stagnating agent's "fresh start" can't be handed code from a different challenge that wouldn't compile against its `Challenge` / `Solution` types.
 2. **Inspiration is filtered by per-challenge active agents.** The "active peers" set comes from `agent_challenge_state(*, challenge).last_active_at`, NOT from the global `agents.last_heartbeat`. An agent who's been on VRP for days but switched to SAT five minutes ago does NOT supply VRP inspiration to other VRP-resident agents.
 
-The owner switches the active challenge via admin-key-gated `POST /api/swarm_config { active_challenge }`. The server broadcasts `swarm_config_updated` over the WebSocket so live dashboards re-fetch; contributors pick up the new challenge on their next iteration via `python setup.py sync`. Only the owner can change the active challenge — contributors get a clear error from `setup.py switch` and rely on `sync` instead.
+The host switches the active challenge via admin-key-gated `POST /api/swarm_config { active_challenge }`. The server broadcasts `swarm_config_updated` over the WebSocket so live dashboards re-fetch; contributors pick up the new challenge on their next iteration via `python setup.py sync` (which `run_loop.py` calls automatically at the top of every iteration). Only the host can change the active challenge — `setup.py switch` requires `swarm.admin.json`, which only exists on the host's clone.
 
 ## Supported Challenges
 
@@ -67,11 +67,22 @@ The CPU/GPU split is enforced by `challenges.CHALLENGES[name].is_gpu` — `regis
 
 All challenges use baseline-relative quality scoring: `(baseline − you) / baseline × QUALITY_PRECISION` for minimize-direction challenges, `(you − baseline) / baseline × QUALITY_PRECISION` for maximize-direction. The result is always higher-is-better. Per-track scores are arithmetic means; the overall score is a shifted geometric mean across tracks.
 
-Challenge-specific details (types, tips, strategy tags) live in `CHALLENGE.md`, written by the setup wizard.
+Challenge-specific details (types, tips, strategy tags) live in `CHALLENGE.md`, templated from `src/<challenge>/README.md` by `setup.py create` / `setup.py sync` whenever the active challenge changes.
 
 ## How Agents Work
 
-Each agent is one contributor running `scripts/run_loop.py` against an LLM provider (Anthropic, OpenAI, Google, any OpenAI-compatible endpoint, or the local `claude` CLI in headless mode). The script clones this repo, reads `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop:
+Each agent is one contributor running `scripts/run_loop.py` against an LLM provider (Anthropic, OpenAI, Google, any OpenAI-compatible endpoint, or the local `claude` CLI in either one-shot or agent mode). The script clones this repo, reads `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop.
+
+### Two contributor modes
+
+- **Single-shot completion** (all API providers, plus `claude-code`). `run_loop.py` owns the whole workflow: hypothesis call → code call → write `mod.rs` → benchmark (with compile-fix and runtime-fix retry loops) → publish. The LLM is a stateless completer that returns a code blob; the Python driver does everything else.
+- **Agent mode** (`claude-code-agentic` or `codex-agentic`). `run_loop.py` shells one headless agent call per iteration inside a sandboxed git worktree. The agent reads state, edits the algorithm file in place via its Edit tool, runs `cargo check` itself, and writes `.swarm/hypothesis.json` before stopping. The Python driver still owns server I/O (state, heartbeat, publish) and the official benchmark; the agent's job is bounded to "edit algorithm files + write hypothesis." A background heartbeat thread fires every 60s during the agentic call so a multi-minute iteration doesn't drop the agent from the inspiration pool. Wall-clock-bounded by `--agentic-timeout` (default 900s).
+
+  The sandbox has two layers in both backends. The hard boundary is always the git worktree (`worktrees/<agent>/`) — the agent's cwd is the worktree, so it physically cannot reach outside (sibling agents, secrets, the main checkout, the user's home dir). The second layer is backend-specific:
+  - `claude-code-agentic`: fine-grained `.swarm/sandbox-settings.json` — Edit limited to the algorithm file (and `kernels.cu` if GPU) plus `.swarm/hypothesis.json`; Read scoped to the worktree by cwd; Bash limited to `cargo check/build/fmt/clippy`; WebFetch/WebSearch and any network-touching Bash command denied. The `claude` CLI enforces these per tool call.
+  - `codex-agentic`: coarser sandbox mode `workspace-write` (the only realistic option in `codex exec` for an editing agent) — gives the agent write access to the whole worktree with network access forced off. File-scope inside the worktree is enforced soft-style via `AGENTS.md` instructions; out-of-scope edits get silently dropped because the loop only copies the algorithm file back to the main checkout when scoring.
+
+The mode is selected per-agent in `fleet.config.json` (`provider` field) and can be overridden per-run via `--provider` on `scripts/run_loop.py`. All modes interact with the swarm server through the same protocol — published iterations look the same on the dashboard, just with different cost profiles (agent modes typically burn 5–20× the tokens of single-shot for the same iteration).
 
 ### 1. Register
 
@@ -151,13 +162,13 @@ The agent reads the updated state and starts the cycle again. Over many iteratio
 
 The starting code every agent sees on a fresh trajectory — both the very first iteration and the "fresh start" slot of trajectory resets — is the swarm's **initial algorithm**, set by the host once at swarm creation.
 
-The repo ships with a single editable file at the root: `initial_algorithm.rs`. Its default content is a challenge-agnostic stub (`solve_challenge` signature with `unimplemented!()` body); the host can replace the body with any starter algorithm before running `python setup.py create`. The wizard reads the file, sends its full contents to the server alongside the rest of the swarm config, and the server stores it under the `initial_algorithm_code` config key.
+The repo ships with a single editable file at the root: `initial_algorithm.rs`. Its default content is a challenge-agnostic stub (`solve_challenge` signature with `unimplemented!()` body); the host can replace the body with any starter algorithm before running `python setup.py create`. `setup.py create` reads the file, sends its full contents to the server alongside the rest of the swarm config, and the server stores it under the `initial_algorithm_code` config key.
 
 When a trajectory reset occurs (`runs_since_improvement >= stagnation_limit`), the server uniformly samples from `(N inactive algorithms + 1 fresh-start slot)`. If the fresh-start slot is drawn, the agent's new starting code is the initial algorithm — same as on iteration 1. If an inactive algorithm is drawn, that becomes the new starting code instead, and the inactive entry is removed from the pool.
 
 ## Tacit Knowledge
 
-Each contributor can create a private `tacit_knowledge_personal.md` file (gitignored) containing strategy hints for their local agent. When stagnating, the agent reads this file for ideas. The file is never sent to the server or visible to other agents — cross-pollination happens only through the inspiration mechanism and the published hypothesis metadata.
+Each agent can have a private tacit-knowledge file (gitignored) containing strategy hints. The fleet entry's `tacit_knowledge` field points to it; `scripts/run_fleet.py` copies the file into the spawned worktree as `tacit_knowledge_personal.md`. When stagnating, the agent reads this file for ideas. The file is never sent to the server or visible to other agents — cross-pollination happens only through the inspiration mechanism and the published hypothesis metadata. `python setup.py tacit <agent-name>` opens an interactive paste/upload flow for filling the file in.
 
 ## The Dashboard
 
@@ -199,9 +210,11 @@ All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` 
 
 | File | Role |
 |------|------|
-| `setup.py` | Host/contributor wizard — picks challenge, configures tracks, templates URLs |
-| `scripts/run_loop.py` | The driver loop contributors run — LLM call, code mutation, benchmark, publish |
-| `CHALLENGE.md` | Per-challenge details — types, scoring, tips (written by wizard) |
+| `setup.py` | Host-admin CLI — `create` / `switch` / `sync` / `tacit`. Contributors don't need it. |
+| `scripts/run_fleet.py` | Spawns one worktree per agent in `fleet.config.json` and runs `run_loop.py` in each |
+| `scripts/run_loop.py` | Per-agent driver loop — LLM call, code mutation, benchmark, publish |
+| `scripts/migrate_config.py` | One-shot migration from the legacy `swarm.config.json` + root `agent.config.json` |
+| `CHALLENGE.md` | Per-challenge details — types, scoring, tips (templated from `src/<challenge>/README.md`) |
 | `server/server.py` | Coordination server — FastAPI, WebSocket, all agent APIs |
 | `server/db.py` | SQLite schema, migrations, direction-aware queries |
 | `initial_algorithm.rs` | Host-editable starting algorithm; broadcast at swarm creation |
@@ -210,6 +223,15 @@ All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` 
 | `scripts/benchmark.py` | Build + run + evaluate + score |
 | `scripts/publish.py` | Post results to server |
 | `dashboard/` | Vite + TypeScript + D3 dashboard |
+
+### Local config files
+
+| File | Role |
+|------|------|
+| `fleet.config.json` | User-edited. List of agents to spawn + top-level `server_url`. The only file contributors touch. |
+| `swarm.admin.json` | Host-only. `admin_key` + swarm-tuning knobs (stagnation thresholds). Written by `setup.py create`; gates `setup.py switch` and `scripts/admin_reset_challenge.py`. |
+| `.swarm-cache.json` | Machine-managed. Mirror of `/api/swarm_config` (active challenge, tracks, timeout, algorithm path). Refreshed by `setup.py sync` on every iteration; used by `benchmark.py` as an offline fallback. |
+| `worktrees/<name>/agent.config.json` | Per-worktree state. Materialized from the fleet entry plus the registered `agent_id` / `agent_name` so restarts resume the same dashboard identity. |
 
 ## Swarm Protocol
 
