@@ -137,6 +137,48 @@ def agent_exists(server: str, agent_id: str) -> bool:
     return (state.get("agent_name") or "").strip() != "unknown"
 
 
+class AgentTokenRevoked(Exception):
+    """Server rejected the stored agent_token with 403.
+
+    Raised by validate_agent_token so the loop can bail out with a clear
+    message before spending an LLM call on a worker whose access has been
+    cut (admin revoke, manual DB edit, etc.).
+    """
+
+
+def validate_agent_token(
+    server: str, agent_id: str, agent_token: str,
+) -> None:
+    """Confirm the stored agent_token still authenticates against the server.
+
+    POSTs a heartbeat — the cheapest authenticated endpoint we have, with
+    side effects limited to bumping last_heartbeat. Without this, a revoked
+    worker (token cleared by /api/admin/revoke) clears agent_exists, runs
+    a full LLM iteration, and only learns it's been cut when the trailing
+    post_message/heartbeat returns 403.
+
+    Raises AgentTokenRevoked on a 403 response. Returns normally on
+    success or on transport failure — same fail-open policy as
+    agent_exists so a flaky network doesn't lock anyone out.
+    """
+    try:
+        server_post(
+            f"{server}/api/agents/{urllib.parse.quote(agent_id)}/heartbeat",
+            {"status": "working"}, timeout=5,
+            agent_token=agent_token,
+        )
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            try:
+                detail = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = ""
+            raise AgentTokenRevoked(detail.strip() or "agent token rejected") from e
+        # Non-403 HTTP errors (5xx, transient 4xx) — treat as transport.
+    except _NET_ERRORS:
+        pass
+
+
 def send_heartbeat(
     server: str, agent_id: str,
     *, agent_token: str | None = None,

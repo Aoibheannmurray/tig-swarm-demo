@@ -76,6 +76,7 @@ from challenge_files import (
     validate_code,
 )
 from server import (
+    AgentTokenRevoked,
     agent_exists,
     get_state,
     post_message,
@@ -83,6 +84,7 @@ from server import (
     register_agent,
     send_heartbeat,
     server_get,
+    validate_agent_token,
 )
 from prompts import (
     build_agentic_user_prompt,
@@ -778,6 +780,23 @@ def main() -> int:
         # Multi-agent coordination keys off agent_id only — renaming or
         # re-registering one contributor is invisible to everyone else.
         if agent_exists(server, agent_id):
+            # Authenticated probe before the loop spends an LLM call: a
+            # revoked worker still satisfies agent_exists (the row is
+            # preserved for dashboard history; only token + status change),
+            # so without this check the first 403 wouldn't surface until
+            # post_message/heartbeat in iteration 1.
+            try:
+                validate_agent_token(server, agent_id, agent_token)
+            except AgentTokenRevoked as e:
+                sys.exit(
+                    f"This agent's access has been revoked by the swarm host "
+                    f"(server: {server}).\n"
+                    f"  agent_id: {agent_id}\n"
+                    f"  agent_name: {agent_name}\n"
+                    f"  server detail: {e}\n"
+                    f"Ask the host to re-invite you, then re-run setup with "
+                    f"the new swarm_password."
+                )
             print(f"Resuming agent: {agent_name} ({agent_id})")
         else:
             print(
