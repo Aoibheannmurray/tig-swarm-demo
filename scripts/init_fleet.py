@@ -14,18 +14,44 @@ Usage:
 
 from __future__ import annotations
 
+# Python-version preflight — fires before any other import in case those
+# imports use PEP 585 / PEP 604 runtime forms that don't exist on older Python.
+# `%` formatting and a bare `sys` import keep the message readable even on
+# Python 2.x or very old 3.x (Ubuntu 20.04 still ships 3.8 as system python,
+# RHEL 8 ships 3.6). Without this, contributors on those versions hit a
+# confusing `TypeError: 'type' object is not subscriptable` from some
+# downstream module instead of a clear "upgrade Python" pointer.
+import sys
+if sys.version_info < (3, 9):
+    sys.stderr.write(
+        "TIG swarm scripts require Python 3.9 or newer. You're running %d.%d.%d.\n"
+        "Install a current Python from https://www.python.org/downloads/ and re-run.\n"
+        % sys.version_info[:3]
+    )
+    sys.exit(1)
+
 import argparse
 import json
 import os
 import random
 import re
 import shutil
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
 EXAMPLE_PATH = ROOT / "fleet.config.example.json"
+
+# Windows console crashes on the box-drawing characters / checkmark glyphs this
+# wizard prints when the active code page isn't UTF-8 ("UnicodeEncodeError:
+# 'charmap' codec can't encode …"). Force the stream to UTF-8 with replacement
+# so contributors don't have to remember `python -X utf8`. No-op on Linux/macOS
+# where the default already is UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
 
 
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the

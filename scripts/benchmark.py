@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -397,6 +398,43 @@ def _ensure_docker_image(image: str, dockerfile: str) -> None:
         sys.exit(build.returncode)
 
 
+def _safe_volume_suffix(name: str) -> str:
+    """Coerce an arbitrary string into a valid Docker volume-name fragment.
+
+    Docker volume names must match `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. Agent names
+    from the wizard are already safe (lowercase letters + hyphens), but a
+    hand-edited fleet entry or an unusual repo-dir basename could include
+    spaces / quotes / non-ASCII characters. Replace anything outside the
+    allowed set with `_` and prepend `x` if the first character isn't
+    alphanumeric. Empty input becomes `x`."""
+    s = re.sub(r"[^a-zA-Z0-9_.-]", "_", name)
+    if not s:
+        return "x"
+    if not s[0].isalnum():
+        s = "x" + s
+    return s
+
+
+def _cargo_target_volume(cfg: dict) -> str:
+    """Per-worktree cargo `target/` volume name.
+
+    Each fleet agent runs `benchmark.py` from its own worktree
+    (`worktrees/<agent_name>/`), so `ROOT_DIR.name` is unique per agent and
+    we can key the volume off it. Single-agent dev (running from the repo
+    root) just gets a volume tied to the repo dir name.
+
+    Why per-agent: cargo's `target/` directory is not safe to share between
+    concurrent builds of *different* source. Two agents would race on
+    `target/release/tig_solver` — cargo's file locks fight each other, and
+    an agent can end up benchmarking a binary that was just rewritten with
+    the other agent's code. The `~/.cargo/registry` cache is kept shared
+    because it's read-mostly and cargo handles concurrent reads on it
+    correctly, so we don't waste GB re-downloading crates per agent."""
+    suffix = "gpu" if is_gpu_challenge(cfg) else "cpu"
+    agent_suffix = _safe_volume_suffix(ROOT_DIR.name)
+    return f"tig-cargo-cache-{suffix}-{agent_suffix}"
+
+
 def _reexec_in_docker(cfg: dict) -> int:
     """Re-launch benchmark.py inside the appropriate Docker container."""
     image, dockerfile = _docker_image_for(cfg)
@@ -414,7 +452,7 @@ def _reexec_in_docker(cfg: dict) -> int:
         "docker", "run", "--rm",
         *gpu_flags,
         "-v", f"{ROOT_DIR}:/app",
-        "-v", f"tig-cargo-cache-{suffix}:/app/target",
+        "-v", f"{_cargo_target_volume(cfg)}:/app/target",
         "-v", f"tig-cargo-registry-{suffix}:/root/.cargo/registry",
         *env_flags,
         image,
