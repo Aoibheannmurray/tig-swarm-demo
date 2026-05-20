@@ -368,7 +368,45 @@ def cmd_list(agents: list[dict]) -> int:
     return 0
 
 
+def _safe_volume_suffix(name: str) -> str:
+    """Mirror of `_safe_volume_suffix` in benchmark.py — kept duplicated here
+    instead of imported so `run_fleet.py --clean` doesn't pull benchmark.py's
+    heavier import graph (urllib, math, ThreadPoolExecutor, …) just to delete
+    a few Docker volumes. Keep these two helpers in sync."""
+    import re
+    s = re.sub(r"[^a-zA-Z0-9_.-]", "_", name)
+    if not s:
+        return "x"
+    if not s[0].isalnum():
+        s = "x" + s
+    return s
+
+
+def _remove_cargo_volumes(agent_name: str) -> None:
+    """Best-effort cleanup of the per-agent cargo target volumes.
+
+    `benchmark.py` creates `tig-cargo-cache-{cpu,gpu}-<safe_name>` lazily on
+    first run. We don't know which (or whether either) was actually
+    materialized, so we try both and silently swallow "no such volume"
+    errors. A docker daemon that isn't running is also fine — the volumes
+    will just stay there until the user starts Docker and removes them
+    manually."""
+    safe = _safe_volume_suffix(agent_name)
+    for suffix in ("cpu", "gpu"):
+        vol = f"tig-cargo-cache-{suffix}-{safe}"
+        result = subprocess.run(
+            ["docker", "volume", "rm", vol],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        if result.returncode == 0:
+            print(f"  removed docker volume {vol}")
+        # Silent on failure: most calls hit the "no such volume" path
+        # because most agents only used one of cpu/gpu (or none yet).
+
+
 def cmd_clean(agents: list[dict]) -> int:
+    docker_available = shutil.which("docker") is not None
     for agent in agents:
         name = agent["name"]
         path = WORKTREES_DIR / name
@@ -385,6 +423,8 @@ def cmd_clean(agents: list[dict]) -> int:
                 print(f"  deleted branch {branch}")
             except RuntimeError as e:
                 print(f"  could not delete branch {branch}: {e}", file=sys.stderr)
+        if docker_available:
+            _remove_cargo_volumes(name)
     _git(["worktree", "prune"])
     return 0
 
