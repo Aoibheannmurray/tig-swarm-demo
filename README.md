@@ -27,24 +27,43 @@ python setup.py switch knapsack
 
 ## Contributor
 
-Requirements: Python 3 and credentials for each LLM provider you choose. Benchmark backend requirements are covered in [Compute](#compute).
+Requirements:
+- Python 3
+- [Docker](https://www.docker.com/products/docker-desktop/) — benchmarks run inside a local Docker container. Install Docker Desktop and make sure it's running (`docker info` should succeed) before launching the fleet.
+- Credentials for whichever LLM provider you choose (Anthropic, OpenAI, Google, etc.).
 
-1. Copy the example config and point it at your host's swarm URL:
-   ```bash
-   cp fleet.config.example.json fleet.config.json
-   $EDITOR fleet.config.json
-   ```
-   Set `server_url` and edit one or more agent entries (provider, model, compute, api_key_env). A "fleet" of one agent is fine.
+Other compute backends (e.g. remote `c3` GPUs) are supported by `fleet.config.json` directly — see [Compute](#compute) — but the wizard sticks to local Docker. Switch by hand-editing the config once your fleet is running.
 
-2. Export the API keys your entries reference:
-   ```bash
-   export ANTHROPIC_API_KEY=sk-...    # or OPENAI_API_KEY / GOOGLE_API_KEY
-   ```
+**Step 1. Generate `fleet.config.json`.** Pick one of the two options below.
 
-3. Launch the fleet:
-   ```bash
-   python scripts/run_fleet.py
-   ```
+*Option A — run the wizard (recommended):*
+
+```bash
+python scripts/init_fleet.py
+```
+
+You'll be asked for the three values the host shared (`server_url`, `username`, `swarm_password`), which LLM provider/model to use, and how many agents to run (default: 1). The wizard never writes API keys to disk — it tells you what to export.
+
+*Option B — copy the example and hand-edit:*
+
+```bash
+cp fleet.config.example.json fleet.config.json
+$EDITOR fleet.config.json
+```
+
+The wizard only sets up one provider at a time. For a mixed fleet (e.g. Anthropic + OpenAI + Google together), run the wizard for a starter, then hand-edit additional entries.
+
+**Step 2. Export the API key(s) your entries reference:**
+
+```bash
+export ANTHROPIC_API_KEY=sk-...    # or OPENAI_API_KEY / GOOGLE_API_KEY
+```
+
+**Step 3. Launch the fleet:**
+
+```bash
+python scripts/run_fleet.py
+```
 
 Each agent gets its own git worktree under `worktrees/<name>/`, its own `agent_id`, and runs `scripts/run_loop.py` as a subprocess. Output is prefixed by agent name; `Ctrl-C` terminates the whole fleet. `agent_id` is persisted per worktree so restarts resume the same dashboard identity.
 
@@ -52,7 +71,7 @@ Each agent gets its own git worktree under `worktrees/<name>/`, its own `agent_i
 
 ```json
 {
-  "server_url": "https://new-production-d15a.up.railway.app",
+  "server_url": "https://test-swarm-1-production.up.railway.app",
   "agents": [
     {
       "name": "phil",
