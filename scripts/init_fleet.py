@@ -19,6 +19,8 @@ import json
 import os
 import random
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -409,12 +411,52 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+_DOCKER_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
+
+
+def _preflight_docker() -> None:
+    """Fail before the wizard if Docker can't be used.
+
+    Benchmarks always run in a local Docker container today (see
+    scripts/benchmark.py). Catching a missing/stopped Docker here saves
+    contributors from picking a provider, exporting an API key, and only
+    then hitting an opaque benchmark crash on iteration 1.
+    """
+    if shutil.which("docker") is None:
+        sys.exit(
+            "Docker is required to run benchmarks but `docker` was not found "
+            "on PATH.\n"
+            f"Install Docker Desktop from {_DOCKER_INSTALL_URL}, then re-run "
+            "`python scripts/init_fleet.py`."
+        )
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        sys.exit(
+            f"`docker info` failed to run ({e}). Make sure the Docker "
+            f"daemon is started (open Docker Desktop), then re-run."
+        )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        hint = detail[-1] if detail else "daemon not reachable"
+        sys.exit(
+            f"`docker info` returned non-zero. The Docker CLI is installed "
+            f"but the daemon isn't responding ({hint}).\n"
+            f"Start Docker Desktop and wait for it to finish booting, then "
+            f"re-run."
+        )
+
+
 def main() -> int:
     if not EXAMPLE_PATH.exists():
         sys.exit(
             f"{EXAMPLE_PATH.name} not found at {EXAMPLE_PATH}. "
             "Are you running this from the repo root?"
         )
+    _preflight_docker()
     args = parse_args()
     try:
         return run_wizard(force=args.force)
