@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS agents (
     registered_at TEXT NOT NULL,
     last_heartbeat TEXT NOT NULL,
     status TEXT DEFAULT 'idle',
-    llm_type TEXT
+    llm_type TEXT,
+    -- Per-agent session token, generated at register. Required as
+    -- X-Agent-Token on every non-register participant-write call.
+    token TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hypotheses (
@@ -252,6 +255,14 @@ async def init_db() -> None:
         await db.executescript(SCHEMA_INDEXES)
         await db.commit()
 
+        # Per-agent session token, generated at register. Used by every
+        # non-register participant-write endpoint instead of the swarm
+        # password (which is only consumed at register).
+        await _add_column(db, "agents", "token", "TEXT")
+        # Contributor username stamped at register. Lets the dashboard
+        # group agents by owner. Derived from the X-Username header at
+        # register time; not modifiable after the fact.
+        await _add_column(db, "agents", "contributor_username", "TEXT")
         # Migrations for token tracking columns on existing databases.
         await _add_column(db, "experiments", "input_tokens", "INTEGER DEFAULT 0")
         await _add_column(db, "experiments", "output_tokens", "INTEGER DEFAULT 0")
@@ -283,6 +294,21 @@ async def init_db() -> None:
             await db.execute(
                 "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
                 ("admin_key", secrets.token_urlsafe(16)),
+            )
+        # Swarm password: same priority as admin_key (env var wins, then
+        # existing DB value, then a generated default on fresh DBs). Guards
+        # the participant-write endpoints so a contributor needs URL + password
+        # to register an agent or publish iterations.
+        env_pw = os.environ.get("SWARM_PASSWORD")
+        if env_pw:
+            await db.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                ("swarm_password", env_pw),
+            )
+        else:
+            await db.execute(
+                "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
+                ("swarm_password", secrets.token_urlsafe(16)),
             )
         await db.commit()
 

@@ -2,10 +2,11 @@ import json
 import asyncio
 import logging
 import random
+import secrets
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -207,6 +208,64 @@ async def verify_admin(req: AdminAuth) -> None:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
 
+def _derive_user_password(username: str, base_password: str) -> str:
+    """Per-contributor password = sha256(username + ':' + base_password).
+
+    The server stores only the base password (config.swarm_password); the
+    host computes each contributor's derived password via
+    `python setup.py invite <username>` and shares it with them out-of-band.
+    Same shape `hashlib` digest used by the invite command, so the two
+    must match exactly.
+    """
+    import hashlib
+    return hashlib.sha256(f"{username}:{base_password}".encode()).hexdigest()
+
+
+async def verify_swarm_password(
+    x_username: str | None = Header(default=None, alias="X-Username"),
+    x_swarm_password: str | None = Header(default=None, alias="X-Swarm-Password"),
+) -> str:
+    """Gates /api/agents/register (the join endpoint). Returns the
+    contributor's username so the handler can stamp it on the new agent.
+    Subsequent writes use the per-agent token (see verify_agent_token).
+    """
+    if not x_username or not x_swarm_password:
+        raise HTTPException(
+            status_code=403,
+            detail="Missing X-Username or X-Swarm-Password header",
+        )
+    config = await get_config_cached()
+    base = config.get("swarm_password")
+    if not base:
+        raise HTTPException(status_code=403, detail="Swarm not configured")
+    expected = _derive_user_password(x_username, base)
+    if not secrets.compare_digest(x_swarm_password, expected):
+        raise HTTPException(status_code=403, detail="Invalid credentials")
+    return x_username
+
+
+async def verify_agent_token(
+    x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
+) -> str:
+    """Look up the agent by token. Returns the agent_id so downstream
+    handlers can use it; raises 403 if the token is missing or unknown.
+
+    Issued at /api/agents/register and stored on the agents row. Tokens
+    are not revocable today — deleting the agents row is the only way to
+    invalidate one.
+    """
+    if not x_agent_token:
+        raise HTTPException(status_code=403, detail="Missing agent token")
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT id FROM agents WHERE token = ?", (x_agent_token,),
+        )
+        row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=403, detail="Invalid agent token")
+    return row["id"]
+
+
 async def get_agent_name(conn, agent_id: str) -> str:
     cursor = await conn.execute("SELECT name FROM agents WHERE id = ?", (agent_id,))
     row = await cursor.fetchone()
@@ -393,8 +452,12 @@ async def periodic_stats():
 # ── Agent endpoints ──
 
 @app.post("/api/agents/register", response_model=AgentResponse)
-async def register_agent(req: RegisterRequest):
+async def register_agent(
+    req: RegisterRequest,
+    contributor_username: str = Depends(verify_swarm_password),
+):
     agent_id = new_id()
+    agent_token = secrets.token_urlsafe(24)
     timestamp = now()
     # Honour the contributor's chosen name when supplied AND not already
     # taken; fall back to the server's auto-generator otherwise. We can't
@@ -416,9 +479,9 @@ async def register_agent(req: RegisterRequest):
 
     async with db.connect() as conn:
         await conn.execute(
-            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type),
+            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type, token, contributor_username) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type, agent_token, contributor_username),
         )
         config = await db.get_config(conn)
         # Persist a join event so the dashboard's live feed can replay it
@@ -456,6 +519,7 @@ async def register_agent(req: RegisterRequest):
     return AgentResponse(
         agent_id=agent_id,
         agent_name=agent_name,
+        agent_token=agent_token,
         registered_at=timestamp,
         config={
             "heartbeat_interval_seconds": 30,
@@ -466,7 +530,7 @@ async def register_agent(req: RegisterRequest):
     )
 
 
-@app.post("/api/agents/{agent_id}/rename")
+@app.post("/api/agents/{agent_id}/rename", dependencies=[Depends(verify_agent_token)])
 async def rename_agent(agent_id: str, req: RenameRequest):
     """Update an existing agent's display name. `agents.name` is the
     single source of truth for an agent's name — leaderboard, messages
@@ -517,7 +581,7 @@ async def rename_agent(agent_id: str, req: RenameRequest):
     return {"agent_id": agent_id, "agent_name": requested}
 
 
-@app.post("/api/agents/{agent_id}/heartbeat")
+@app.post("/api/agents/{agent_id}/heartbeat", dependencies=[Depends(verify_agent_token)])
 async def heartbeat(agent_id: str, req: HeartbeatRequest):
     timestamp = now()
     async with db.connect() as conn:
@@ -942,7 +1006,7 @@ async def get_state(
 
 # ── Iteration endpoint (unified hypothesis + experiment) ──
 
-@app.post("/api/iterations", response_model=IterationResponse)
+@app.post("/api/iterations", response_model=IterationResponse, dependencies=[Depends(verify_agent_token)])
 async def create_iteration(req: IterationCreate):
     challenge = await resolve_challenge(req.challenge)
     direction = await get_direction(challenge)
@@ -1227,7 +1291,7 @@ async def get_leaderboard(challenge: str | None = None):
 
 # ── Messages (chat feed) ──
 
-@app.post("/api/messages")
+@app.post("/api/messages", dependencies=[Depends(verify_agent_token)])
 async def create_message(req: MessageCreate):
     challenge = await resolve_challenge(req.challenge)
     msg_id = new_id()

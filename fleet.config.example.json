@@ -1,5 +1,7 @@
 {
   "server_url": "https://my-swarm.up.railway.app",
+  "username": "your-username-from-the-host",
+  "swarm_password": "paste-the-derived-password-the-host-shared",
   "agents": [
     {
       "name": "claude-1",

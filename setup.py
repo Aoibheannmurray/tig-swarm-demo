@@ -211,7 +211,7 @@ def template_files(
 #   .swarm-cache.json — machine-managed mirror of /api/swarm_config
 #   fleet.config.json — user-edited list of agents to spawn
 _ADMIN_FIELDS = (
-    "admin_key", "owner_name", "swarm_name", "challenges",
+    "admin_key", "swarm_password", "owner_name", "swarm_name", "challenges",
     "stagnation_threshold", "stagnation_limit",
     "hypothesis_recall_threshold",
 )
@@ -1074,6 +1074,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         )
 
     admin_key = secrets.token_urlsafe(16)
+    swarm_password = secrets.token_urlsafe(16)
 
     railway_dir = ROOT / ".railway"
     if railway_dir.exists():
@@ -1088,7 +1089,11 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print(f"  service: {service.get('name', swarm_name)}")
 
     print("  setting environment variables…")
-    _railway_set_variables(swarm_name, {"DATA_DIR": "/data", "ADMIN_KEY": admin_key})
+    _railway_set_variables(swarm_name, {
+        "DATA_DIR": "/data",
+        "ADMIN_KEY": admin_key,
+        "SWARM_PASSWORD": swarm_password,
+    })
 
     print("  attaching /data volume…")
     _railway_add_volume(swarm_name, "/data")
@@ -1123,6 +1128,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         "owner_name": os.environ.get("USER", "owner"),
         "server_url": server_url,
         "admin_key": admin_key,
+        "swarm_password": swarm_password,
         "role": "owner",
         "swarm_type": swarm_type,
         "active_challenge": active_challenge,
@@ -1159,7 +1165,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     write_challenge_md(active_challenge)
     write_swarm_admin(cfg)
     write_swarm_cache(cfg)
-    _scaffold_fleet_config(server_url)
+    _scaffold_fleet_config(server_url, swarm_password)
     repo_url = "<this-repo-url>"
     try:
         result = sp.run(
@@ -1183,12 +1189,14 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print(f"  Swarm type:  {type_label}")
     print(f"  Active challenge:  {active_challenge}")
     print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
-    print("\n  Share this with anyone who wants to contribute:\n")
-    print(f"    git clone {repo_url}")
-    print(f"    cd {repo_dir_hint}")
-    print("    # edit fleet.config.json — point server_url at:")
-    print(f"    #   {server_url}")
-    print("    python scripts/run_fleet.py")
+    print("\n  Onboard each contributor with:\n")
+    print("    python setup.py invite <username>")
+    print("    # prints their username + per-contributor swarm_password.")
+    print("    # Share both with them; they paste into fleet.config.json with the")
+    print(f"    # URL ({server_url}) and run `python scripts/run_fleet.py`.")
+    print("\n  Base password (keep private — used by `setup.py invite` to derive")
+    print("  per-contributor passwords; rotating it kicks every contributor):")
+    print(f"    {swarm_password}")
     print("\n  Admin key (keep private — gates /api/admin/*):")
     print(f"    {admin_key}")
     print("\n  Your own clone has been scaffolded with fleet.config.json —")
@@ -1198,7 +1206,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     return 0
 
 
-def _scaffold_fleet_config(server_url: str) -> None:
+def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:
     """After `setup.py create`, leave the host with a working fleet.config.json
     so they can immediately participate via `python scripts/run_fleet.py`.
     Skipped if a fleet.config.json already exists — never clobbers user edits."""
@@ -1208,6 +1216,7 @@ def _scaffold_fleet_config(server_url: str) -> None:
         return
     starter = {
         "server_url": server_url,
+        "swarm_password": swarm_password,
         "agents": [
             {
                 "name": os.environ.get("USER", "agent-1"),
@@ -1457,6 +1466,14 @@ def main() -> int:
         "agent_name", nargs="?",
         help="Name of the fleet agent to edit (default: only agent in fleet.config.json).",
     )
+    invite = sub.add_parser(
+        "invite",
+        help="Host: issue a per-contributor swarm password (username + derived hash).",
+    )
+    invite.add_argument(
+        "username",
+        help="Contributor's username (anything identifying them — paste into fleet.config.json).",
+    )
     args = parser.parse_args()
 
     if args.mode == "create":
@@ -1467,17 +1484,52 @@ def main() -> int:
         return run_sync()
     if args.mode == "tacit":
         return run_tacit(args.agent_name)
+    if args.mode == "invite":
+        return run_invite(args.username)
 
     print(
         "setup.py is the host-admin tool.\n"
         "  contributors:  edit fleet.config.json, then run "
         "`python scripts/run_fleet.py`.\n"
         "  hosts:         `python setup.py create` to provision a new swarm.\n"
-        "  switch challenge:  `python setup.py switch <challenge>`.\n"
+        "  invite a contributor:  `python setup.py invite <username>`.\n"
+        "  switch challenge:      `python setup.py switch <challenge>`.\n"
         "  edit tacit knowledge:  `python setup.py tacit [<agent-name>]`.",
         file=sys.stderr,
     )
     return 1
+
+
+def run_invite(username: str) -> int:
+    """Issue a per-contributor swarm password by computing
+    sha256(username + ':' + base_password). Prints the username + derived
+    hash for the host to share out-of-band with the contributor."""
+    import hashlib
+    username = (username or "").strip()
+    if not username:
+        print("invite: username must be non-empty", file=sys.stderr)
+        return 1
+    admin = read_swarm_admin()
+    base = (admin.get("swarm_password") or "").strip()
+    if not base:
+        print(
+            "invite: no swarm_password in swarm.admin.json — "
+            "run `setup.py create` first (host machine only).",
+            file=sys.stderr,
+        )
+        return 1
+    derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
+    server_url = admin.get("server_url") or read_swarm_cache().get("server_url") or "<paste server URL>"
+    print()
+    print(f"  Contributor:    {username}")
+    print(f"  Server URL:     {server_url}")
+    print(f"  swarm_password: {derived}")
+    print()
+    print("  Share the three values above with the contributor.")
+    print("  They paste server_url, username, and swarm_password into")
+    print("  their fleet.config.json, then run `python scripts/run_fleet.py`.")
+    print()
+    return 0
 
 
 if __name__ == "__main__":

@@ -350,7 +350,7 @@ def _benchmark_with_compile_fix(
 
 def _fix_runtime_errors(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, server: str, agent_id: str, challenge_md: str,
+    config: dict, server: str, agent_token: str, agent_id: str, challenge_md: str,
     files: ChallengeFiles, bench: dict,
     best_code: str, best_kernel: str,
 ) -> tuple[dict | None, bool, int, int]:
@@ -409,7 +409,7 @@ def _fix_runtime_errors(
         code_changed = True
 
         print("  Re-running benchmark ...")
-        send_heartbeat(server, agent_id)
+        send_heartbeat(server, agent_id, agent_token=agent_token)
         bench_result, build_err = run_benchmark(args, config, server)
 
         if bench_result is None:
@@ -440,7 +440,7 @@ def _fix_runtime_errors(
 _AGENTIC_HEARTBEAT_INTERVAL_S = 60
 
 
-def _start_heartbeat_thread(server: str, agent_id: str) -> threading.Event:
+def _start_heartbeat_thread(server: str, agent_id: str, agent_token: str) -> threading.Event:
     """Send a heartbeat every minute while the agentic call is running.
 
     Mode-2 iterations can run 10+ minutes inside a single `claude -p`
@@ -453,7 +453,7 @@ def _start_heartbeat_thread(server: str, agent_id: str) -> threading.Event:
     def _beat() -> None:
         while not stop.wait(_AGENTIC_HEARTBEAT_INTERVAL_S):
             try:
-                send_heartbeat(server, agent_id)
+                send_heartbeat(server, agent_id, agent_token=agent_token)
             except Exception as e:
                 print(f"  [HEARTBEAT] background beat failed: {e}", file=sys.stderr)
 
@@ -505,7 +505,7 @@ def _read_worktree_files(
 
 def _run_agentic_iteration(
     args: argparse.Namespace,
-    state: dict, config: dict, server: str,
+    state: dict, config: dict, server: str, agent_token: str,
     agent_id: str, agent_name: str,
     workdir: Path, backend: agentic_backends.AgenticBackend,
     challenge_md: str, files: ChallengeFiles,
@@ -524,7 +524,7 @@ def _run_agentic_iteration(
     user_prompt = build_agentic_user_prompt(state, config)
     print(f"  [AGENTIC] Launching {backend.name} in {workdir} (timeout {args.agentic_timeout}s)…")
 
-    stop = _start_heartbeat_thread(server, agent_id)
+    stop = _start_heartbeat_thread(server, agent_id, agent_token)
     try:
         result = backend.iterate(
             workdir, user_prompt,
@@ -737,6 +737,15 @@ def main() -> int:
             "No server_url in agent.config.json. Did run_fleet.py spawn this "
             "worktree, or was agent.config.json hand-edited?"
         )
+    swarm_password = (agent_config.get("swarm_password") or "").strip()
+    username = (agent_config.get("username") or "").strip()
+    if not swarm_password or not username:
+        sys.exit(
+            "Missing username or swarm_password in agent.config.json. "
+            "Both are required to register — ask the host to run "
+            "`python setup.py invite <your-name>` and paste both into "
+            "fleet.config.json, then respawn the fleet."
+        )
     if args.compute == "c3":
         if shutil.which("c3") is None:
             sys.exit("c3 CLI not found. Install it from https://docs.cthree.cloud/.")
@@ -747,16 +756,21 @@ def main() -> int:
     preflight_llm_check(args.provider, model, api_key, args.api_base)
 
     # Register or resume. agent.config.json is local-only, so it is safe to
-    # persist the swarm agent id there for automatic restarts.
+    # persist the swarm agent id + token there for automatic restarts.
+    # The token is the per-agent secret returned by /api/agents/register;
+    # it gates every non-register write call via the X-Agent-Token header.
     configured_agent_id = agent_config.get("agent_id")
     configured_agent_name = agent_config.get("agent_name")
+    configured_agent_token = agent_config.get("agent_token")
     if args.new_agent:
         configured_agent_id = None
         configured_agent_name = None
+        configured_agent_token = None
 
-    if args.agent_id or configured_agent_id:
+    if (args.agent_id or configured_agent_id) and configured_agent_token:
         agent_id = args.agent_id or configured_agent_id
         agent_name = args.agent_name or configured_agent_name or f"script-{agent_id[:8]}"
+        agent_token = configured_agent_token
         # Validate before resuming. If the server doesn't have a row for
         # this id (DB reset/redeploy, switched swarms, or a first-run
         # interruption left a stale id locally), re-register with the
@@ -770,16 +784,22 @@ def main() -> int:
                 f"  [REGISTER] Stored agent_id {agent_id} not on server; "
                 f"re-registering as {agent_name!r}…"
             )
-            agent_id, agent_name = register_agent(
+            agent_id, agent_name, agent_token = register_agent(
                 server, provider=args.provider, model=model,
                 requested_name=agent_name,
                 name=agent_config.get("name"),
+                username=username,
+                swarm_password=swarm_password,
             )
             print(f"Re-registered as: {agent_name} ({agent_id})")
     else:
-        agent_id, agent_name = register_agent(
+        # No persisted token (fresh install, upgrade from pre-token version,
+        # or --new-agent) — register fresh.
+        agent_id, agent_name, agent_token = register_agent(
             server, provider=args.provider, model=model,
             name=agent_config.get("name"),
+            username=username,
+            swarm_password=swarm_password,
         )
         print(f"Registered as: {agent_name} ({agent_id})")
 
@@ -807,6 +827,7 @@ def main() -> int:
     updated_agent_config.update({
         "agent_id": agent_id,
         "agent_name": agent_name,
+        "agent_token": agent_token,
     })
     write_agent_config(updated_agent_config)
 
@@ -887,7 +908,7 @@ def main() -> int:
         # a rename. Cheap: piggybacks on the state we already fetched.
         try:
             from sync_identity import sync_identity_with_state
-            renamed = sync_identity_with_state(server, agent_id, state)
+            renamed = sync_identity_with_state(server, agent_id, state, agent_token=agent_token)
             if renamed:
                 agent_name = renamed
                 print(f"  [IDENT] renamed to {agent_name!r}")
@@ -906,7 +927,8 @@ def main() -> int:
         if reset:
             print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')} **")
             post_message(server, agent_name, agent_id,
-                         f"Trajectory reset: {reset.get('type')}")
+                         f"Trajectory reset: {reset.get('type')}",
+                         agent_token=agent_token)
 
         # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
@@ -932,7 +954,7 @@ def main() -> int:
             # Tokens aren't surfaced by the CLI so usage stays 0.
             assert backend is not None and workdir is not None
             hypothesis, code, new_kernel, _agentic_result = _run_agentic_iteration(
-                args, state, config, server, agent_id, agent_name,
+                args, state, config, server, agent_token, agent_id, agent_name,
                 workdir, backend, challenge_md, files,
             )
             tag = hypothesis.get("strategy_tag", "other")
@@ -965,7 +987,7 @@ def main() -> int:
 
             compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
             print(f"  [BENCH] Running benchmark on {compute_label}…")
-            send_heartbeat(server, agent_id)
+            send_heartbeat(server, agent_id, agent_token=agent_token)
             bench, build_err = run_benchmark(args, config, server)
 
             if bench is None:
@@ -1062,8 +1084,9 @@ def main() -> int:
             # ── Benchmark with compile-error retry ─────────────
             compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
             print(f"  [BENCH] Running benchmark on {compute_label}…")
-            post_message(server, agent_name, agent_id, f"Trying [{tag}] {title}")
-            send_heartbeat(server, agent_id)
+            post_message(server, agent_name, agent_id, f"Trying [{tag}] {title}",
+                         agent_token=agent_token)
+            send_heartbeat(server, agent_id, agent_token=agent_token)
 
             bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
                 args, model, api_key, config, server, challenge_md,
@@ -1094,7 +1117,7 @@ def main() -> int:
             runtime_errors = bench.get("errors") or []
             if runtime_errors and not bench.get("feasible"):
                 bench, rt_changed, rt_in, rt_out = _fix_runtime_errors(
-                    args, model, api_key, config, server, agent_id, challenge_md,
+                    args, model, api_key, config, server, agent_token, agent_id, challenge_md,
                     files, bench, best_code, best_kernel,
                 )
                 iter_input_tokens += rt_in
@@ -1152,6 +1175,7 @@ def main() -> int:
                 input_tokens=iter_input_tokens,
                 output_tokens=iter_output_tokens,
                 estimated_cost=iter_cost,
+                agent_token=agent_token,
             )
             is_new_best = result.get("is_new_best", False)
             if is_new_best:
@@ -1164,8 +1188,9 @@ def main() -> int:
         status = "NEW BEST!" if is_new_best else f"score {bench.get('score', 0):.0f}"
         feasible_str = "" if bench.get("feasible") else " (INFEASIBLE)"
         post_message(server, agent_name, agent_id,
-                     f"[{tag}] {title} → {status}{feasible_str}")
-        send_heartbeat(server, agent_id)
+                     f"[{tag}] {title} → {status}{feasible_str}",
+                     agent_token=agent_token)
+        send_heartbeat(server, agent_id, agent_token=agent_token)
 
         elapsed = time.time() - t_start
         print(f"  [DONE] Iteration {iteration} finished in {elapsed:.0f}s")
