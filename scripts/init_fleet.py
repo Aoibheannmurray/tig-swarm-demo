@@ -20,7 +20,6 @@ import os
 import random
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -415,12 +414,15 @@ _DOCKER_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
 
 
 def _preflight_docker() -> None:
-    """Fail before the wizard if Docker can't be used.
+    """Fail before the wizard if Docker isn't installed.
 
-    Benchmarks always run in a local Docker container today (see
-    scripts/benchmark.py). Catching a missing/stopped Docker here saves
-    contributors from picking a provider, exporting an API key, and only
-    then hitting an opaque benchmark crash on iteration 1.
+    Benchmarks always run in a local Docker container (see
+    scripts/benchmark.py). benchmark.py's _ensure_docker_daemon() already
+    auto-launches Docker Desktop / OrbStack at fleet time if the daemon
+    is stopped, so we only catch the one case it can't recover from:
+    `docker` not on PATH at all. Without this, a contributor only finds
+    out Docker is missing after picking a provider, exporting an API
+    key, and hitting an opaque FileNotFoundError on iteration 1.
     """
     if shutil.which("docker") is None:
         sys.exit(
@@ -428,25 +430,6 @@ def _preflight_docker() -> None:
             "on PATH.\n"
             f"Install Docker Desktop from {_DOCKER_INSTALL_URL}, then re-run "
             "`python scripts/init_fleet.py`."
-        )
-    try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        sys.exit(
-            f"`docker info` failed to run ({e}). Make sure the Docker "
-            f"daemon is started (open Docker Desktop), then re-run."
-        )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        hint = detail[-1] if detail else "daemon not reachable"
-        sys.exit(
-            f"`docker info` returned non-zero. The Docker CLI is installed "
-            f"but the daemon isn't responding ({hint}).\n"
-            f"Start Docker Desktop and wait for it to finish booting, then "
-            f"re-run."
         )
 
 
