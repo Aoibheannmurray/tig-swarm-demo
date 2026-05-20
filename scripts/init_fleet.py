@@ -396,8 +396,6 @@ def run_wizard(force: bool = False) -> int:
     if api_key_env and not os.environ.get(api_key_env, "").strip():
         print(f"  {step}) export {api_key_env}=<your-key>")
         step += 1
-    print(f"  {step}) make sure Docker is running (`docker info`)")
-    step += 1
     print(f"  {step}) python scripts/run_fleet.py")
     print()
     return 0

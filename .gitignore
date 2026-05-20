@@ -20,7 +20,6 @@ server/static/
 swarm.admin.json
 fleet.config.json
 worktrees/
-AGENTS.md
 CHALLENGE.md
 data/
 datasets/*/generated/
