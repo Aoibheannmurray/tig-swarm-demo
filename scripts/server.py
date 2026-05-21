@@ -195,13 +195,26 @@ def send_heartbeat(
 
 def post_message(
     server: str, agent_name: str, agent_id: str, content: str,
-    *, agent_token: str | None = None,
+    *, challenge: str | None = None,
+    agent_token: str | None = None,
 ) -> None:
+    """Post a chat-feed message. When `challenge` is provided it pins the
+    message to that challenge's feed; otherwise the server falls back to
+    its current `active_challenge`. Callers inside an iteration loop
+    should always pass the iteration's challenge so a host-side
+    `setup.py switch` mid-benchmark can't reroute the message to the
+    wrong feed."""
+    payload = {
+        "agent_name": agent_name, "agent_id": agent_id,
+        "content": content, "msg_type": "agent",
+    }
+    if challenge:
+        payload["challenge"] = challenge
     try:
-        server_post(f"{server}/api/messages", {
-            "agent_name": agent_name, "agent_id": agent_id,
-            "content": content, "msg_type": "agent",
-        }, timeout=5, agent_token=agent_token)
+        server_post(
+            f"{server}/api/messages", payload,
+            timeout=5, agent_token=agent_token,
+        )
     except _NET_ERRORS as e:
         print(f"  [WARN] post_message failed: {e}", file=sys.stderr)
 

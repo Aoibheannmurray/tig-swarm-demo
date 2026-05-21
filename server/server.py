@@ -726,12 +726,14 @@ async def get_state(
                 new_traj_id = None
                 new_program_id = None
 
-                # Fresh start if N² < D (number of trajectories² < total
-                # deactivations). This lets the trajectory count grow as
-                # √(total_work), while average trajectory length also grows
-                # as √(total_work) — both increase without bound.
+                # Fresh start if N^1.5 < D (number of trajectories^1.5 <
+                # total deactivations). At equilibrium N^1.5 ≈ D, so the
+                # trajectory count grows as total_work^(2/3) and mean
+                # trajectory length (D/N) grows as total_work^(1/3) —
+                # favors more diverse trajectories with shorter lives than
+                # the prior N² rule.
                 n_traj, total_deact = await db.trajectory_counts(conn, challenge)
-                go_fresh = not inactive_pool or n_traj * n_traj < total_deact
+                go_fresh = not inactive_pool or n_traj ** 1.5 < total_deact
 
                 if go_fresh:
                     new_code, new_kernel_code = await load_initial_algorithm(challenge)
@@ -1895,7 +1897,7 @@ SEED_INACTIVE_SUPPORTED = ("knapsack", "satisfiability")
 async def admin_seed_inactive(req: AdminSeedInactive):
     """Insert an externally-sourced algorithm into the inactive_algorithms
     pool. The next stagnated agent on this challenge that does NOT qualify
-    for a fresh start (i.e. inactive pool is non-empty AND n_trajectories²
+    for a fresh start (i.e. inactive pool is non-empty AND n_trajectories^1.5
     >= total_deactivations) picks it up via the existing `adopted_inactive`
     branch in server.py — at which point it is removed from the pool
     (consume-once semantics).

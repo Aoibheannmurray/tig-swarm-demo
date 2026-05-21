@@ -93,7 +93,29 @@ _RESET = "\033[0m"
 # ── Config ─────────────────────────────────────────────────────────
 
 
-def _load_fleet() -> tuple[str, str, str, list[dict]]:
+SHARED_TACIT_DEFAULT = "tacit_knowledge.md"
+
+
+def _resolve_tacit_source(
+    agent: dict, fleet_tacit: str | None,
+) -> tuple[Path, bool]:
+    """Resolve where an agent's tacit-knowledge file lives. Precedence:
+    per-agent override > top-level fleet default > repo-root shared file.
+
+    Returns (path, explicit) — `explicit=True` means the path was set by
+    the user (per-agent or top-level), so a missing file is a config
+    error; `explicit=False` means we fell through to the implicit
+    `tacit_knowledge.md` default, so a missing file just means no notes
+    yet."""
+    explicit_rel = agent.get("tacit_knowledge") or fleet_tacit
+    rel = explicit_rel or SHARED_TACIT_DEFAULT
+    path = Path(rel)
+    if not path.is_absolute():
+        path = ROOT / path
+    return path, bool(explicit_rel)
+
+
+def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
     if not FLEET_CONFIG_PATH.exists():
         sys.exit(
             f"fleet.config.json not found at {FLEET_CONFIG_PATH}.\n\n"
@@ -138,7 +160,9 @@ def _load_fleet() -> tuple[str, str, str, list[dict]]:
         names.append(name)
     if len(set(names)) != len(names):
         sys.exit("fleet.config.json has duplicate agent names.")
-    return server_url, username, swarm_password, agents
+
+    fleet_tacit = data.get("tacit_knowledge") or None
+    return server_url, username, swarm_password, agents, fleet_tacit
 
 
 # ── Git worktree helpers ───────────────────────────────────────────
@@ -201,7 +225,7 @@ def _ensure_worktree(name: str) -> Path:
 
 
 def _seed_worktree(
-    path: Path, agent: dict,
+    path: Path, agent: dict, fleet_tacit: str | None,
     fleet_server_url: str, fleet_username: str, fleet_swarm_password: str,
 ) -> None:
     """Materialize one fleet entry into a worktree's agent.config.json and
@@ -257,14 +281,13 @@ def _seed_worktree(
         merged["tacit_knowledge"] = agent["tacit_knowledge"]
     wt_agent.write_text(json.dumps(merged, indent=2) + "\n")
 
-    tacit = agent.get("tacit_knowledge")
-    if tacit:
-        src = Path(tacit)
-        if not src.is_absolute():
-            src = ROOT / src
-        if not src.exists():
-            sys.exit(f"Agent {agent['name']}: tacit_knowledge file not found: {src}")
+    src, explicit = _resolve_tacit_source(agent, fleet_tacit)
+    if src.exists():
         shutil.copy2(src, path / "tacit_knowledge_personal.md")
+    elif explicit:
+        # User explicitly named this file; missing = configuration error.
+        sys.exit(f"Agent {agent['name']}: tacit_knowledge file not found: {src}")
+    # else: implicit shared default doesn't exist yet — no notes this run.
 
 
 # ── API keys ───────────────────────────────────────────────────────
@@ -435,6 +458,7 @@ def cmd_run(
     server_url: str,
     username: str,
     swarm_password: str,
+    fleet_tacit: str | None = None,
 ) -> int:
     if only:
         names = {a["name"] for a in agents}
@@ -461,7 +485,7 @@ def cmd_run(
         name = agent["name"]
         print(f"  [fleet] preparing {name}…")
         path = _ensure_worktree(name)
-        _seed_worktree(path, agent, server_url, username, swarm_password)
+        _seed_worktree(path, agent, fleet_tacit, server_url, username, swarm_password)
 
         env = os.environ.copy()
         target, value = key_envs[i]
@@ -523,7 +547,69 @@ def cmd_run(
     for name, p, t in procs:
         t.join(timeout=2)
         print(f"  [fleet] {name} exited with code {p.returncode}")
+
+    _sync_tacit_back(agents, fleet_tacit)
     return 0
+
+
+def _sync_tacit_back(agents: list[dict], fleet_tacit: str | None) -> None:
+    """After the fleet stops, copy `- LLM:` bullets each agent appended to
+    its worktree's tacit_knowledge_personal.md back to the source file the
+    agent resolves to. Multiple agents that share one source (the default
+    when no per-agent override is set) all funnel into the same file —
+    their LLM lessons get collated and deduped against existing content.
+    Lines already present (matched verbatim) are skipped, so the sync is
+    idempotent across restarts."""
+    # group worktree LLM lines by destination path
+    by_source: dict[Path, list[str]] = {}
+    for agent in agents:
+        name = agent.get("name")
+        if not name:
+            continue
+        wt_path = WORKTREES_DIR / name / "tacit_knowledge_personal.md"
+        if not wt_path.exists():
+            continue
+        src_path, _ = _resolve_tacit_source(agent, fleet_tacit)
+        try:
+            worktree_text = wt_path.read_text()
+        except OSError as e:
+            print(f"  [fleet] tacit sync-back skipped for {name}: {e}")
+            continue
+        llm_lines = [
+            ln for ln in worktree_text.splitlines()
+            if ln.startswith("- LLM:")
+        ]
+        if not llm_lines:
+            continue
+        by_source.setdefault(src_path, []).extend(llm_lines)
+
+    for src_path, candidate_lines in by_source.items():
+        if not src_path.exists():
+            continue
+        try:
+            src_text = src_path.read_text()
+        except OSError as e:
+            print(f"  [fleet] tacit sync-back skipped for {src_path}: {e}")
+            continue
+        existing = {
+            ln for ln in src_text.splitlines() if ln.startswith("- LLM:")
+        }
+        seen: set[str] = set()
+        new_lines: list[str] = []
+        for ln in candidate_lines:
+            if ln in existing or ln in seen:
+                continue
+            seen.add(ln)
+            new_lines.append(ln)
+        if not new_lines:
+            continue
+        suffix = "" if src_text.endswith("\n") else "\n"
+        src_path.write_text(src_text + suffix + "\n".join(new_lines) + "\n")
+        try:
+            shown = src_path.relative_to(ROOT)
+        except ValueError:
+            shown = src_path
+        print(f"  [fleet] synced {len(new_lines)} LLM lesson(s) → {shown}")
 
 
 # ── Entry point ────────────────────────────────────────────────────
@@ -548,12 +634,14 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    server_url, username, swarm_password, agents = _load_fleet()
+    server_url, username, swarm_password, agents, fleet_tacit = _load_fleet()
     if args.list:
         return cmd_list(agents)
     if args.clean:
         return cmd_clean(agents)
-    return cmd_run(agents, args.only, server_url, username, swarm_password)
+    return cmd_run(
+        agents, args.only, server_url, username, swarm_password, fleet_tacit,
+    )
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 Multiple agents optimize TIG challenge solvers in Rust, coordinated by a FastAPI server and live dashboard.
 
-Each contributor runs `scripts/run_fleet.py`, which spawns one or more agents — each calling any LLM (Anthropic, OpenAI, Google, OpenAI-compatible endpoints, or your local `claude` / `codex` CLI in headless agent mode) in a loop and contributing to the swarm.
+Each contributor runs `python run.py`, which spawns one or more agents — each calling any LLM (Anthropic, OpenAI, Google, OpenAI-compatible endpoints, or your local `claude` / `codex` CLI in headless agent mode) in a loop and contributing to the swarm.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally, including the server protocol contributors call into.
 
@@ -23,7 +23,7 @@ Switch the active challenge later:
 python setup.py switch knapsack
 ```
 
-`setup.py` is host-only. Contributors do not need it — they edit `fleet.config.json` and run `scripts/run_fleet.py` directly.
+`setup.py` is host-only. Contributors do not need it — they run `python run.py`.
 
 ## Contributor
 
@@ -34,38 +34,35 @@ Requirements:
 
 Don't have a terminal handy? Open this repo in [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://docs.claude.com/en/docs/claude-code) — both auto-discover `AGENTS.md` / `CLAUDE.md` and will walk you through setup.
 
-**Step 1. Generate `fleet.config.json`.** Pick one of the two options below.
-
-*Option A — run the wizard (recommended):*
+**One command for the whole flow:**
 
 ```bash
-python scripts/init_fleet.py
+python run.py
 ```
 
-You'll be asked for the three values the host shared (`server_url`, `username`, `swarm_password`), which LLM provider/model to use, and how many agents to run (default: 1). The wizard never writes API keys to disk — it tells you what to export.
+What it does, in order:
 
-*Option B — copy the example and hand-edit:*
+1. Checks `docker` is on PATH.
+2. **First time only** — runs the setup wizard to create `fleet.config.json`. You'll be asked for the three values the host shared (`server_url`, `username`, `swarm_password`), which LLM provider/model to use, and how many agents to run (default: 1). The wizard never writes API keys to disk — it tells you what to export. On subsequent runs this step is skipped automatically.
+3. Asks whether you'd like to add or edit tacit knowledge for your agent(s) (default **No**). If yes, walks you through a short guided capture; answers are **appended** to your existing notes rather than overwriting them. See [Tacit knowledge](#tacit-knowledge) below.
+4. Launches the fleet: each agent gets its own git worktree under `worktrees/<name>/`, its own `agent_id`, and runs `scripts/run_loop.py` as a subprocess. Output is prefixed by agent name; `Ctrl-C` terminates the whole fleet. `agent_id` is persisted per worktree so restarts resume the same dashboard identity.
+5. On shutdown, syncs any `- LLM:` lessons the agent appended in its worktree back to the source tacit file so they survive across runs.
 
-```bash
-cp fleet.config.example.json fleet.config.json
-$EDITOR fleet.config.json
-```
-
-The wizard only sets up one provider at a time. For a mixed fleet (e.g. Anthropic + OpenAI + Google together), run the wizard for a starter, then hand-edit additional entries.
-
-**Step 2. Export the API key(s) your entries reference:**
+**Export the API key(s) your entries reference** (any time before launch):
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...    # or OPENAI_API_KEY / GOOGLE_API_KEY
 ```
 
-**Step 3. Launch the fleet:**
+**Hand-editing instead of the wizard.** If you'd rather skip the wizard:
 
 ```bash
-python scripts/run_fleet.py
+cp fleet.config.example.json fleet.config.json
+$EDITOR fleet.config.json
+python run.py
 ```
 
-Each agent gets its own git worktree under `worktrees/<name>/`, its own `agent_id`, and runs `scripts/run_loop.py` as a subprocess. Output is prefixed by agent name; `Ctrl-C` terminates the whole fleet. `agent_id` is persisted per worktree so restarts resume the same dashboard identity.
+The wizard only sets up one provider at a time. For a mixed fleet (e.g. Anthropic + OpenAI + Google together), run the wizard for a starter, then hand-edit additional entries.
 
 `fleet.config.json` schema (see `fleet.config.example.json` for a fuller sample):
 
@@ -91,20 +88,34 @@ Per-entry fields:
 | `provider`       | LLM provider — see [Providers](#providers).                             |
 | `model`          | Model ID; per-provider defaults live in `DEFAULT_MODELS` in `run_loop.py`. |
 | `api_key_env`    | Env var to read the API key from. Omit for CLI-auth providers.          |
-| `tacit_knowledge`| Optional path to a private hint file; auto-copied into the worktree.    |
+| `tacit_knowledge`| Optional per-agent override of the shared `tacit_knowledge.md` file. See [Tacit knowledge](#tacit-knowledge). |
 
-Fleet management:
+### Tacit knowledge
+
+A private hint file at the repo root (`tacit_knowledge.md`, gitignored, never sent to the server). By default **all your agents share this one file**, so lessons distilled by any agent are available to every agent on the next run. Each agent consults the file when stagnating, and **appends its own `- LLM:` bullets** — "what didn't work, abstracted away from the specific challenge" — when it has stagnated 10 iterations in a row or hit a 50-run milestone. On fleet shutdown those LLM entries are collated back into `tacit_knowledge.md`, deduped against existing content.
+
+Tacit knowledge is the practical, hard-won expertise you've built through years of practice — strategies, heuristics, judgment calls you reach for instinctively but rarely write down. `python run.py` offers a guided capture every run (default skip). To edit it directly outside of `run.py`:
 
 ```bash
+python setup.py tacit             # edits the shared file by default
+python setup.py tacit claude-1    # edits whichever file claude-1 resolves to
+```
+
+Both flows are append-mode — re-running the wizard adds to existing notes rather than wiping them.
+
+**Per-agent override.** If you want one agent to use its own private file (no sharing), add `"tacit_knowledge": "tacit_knowledge_<name>.md"` to that agent's entry in `fleet.config.json`. To rename the shared file, add a top-level `"tacit_knowledge"` field at the same level as `agents`. Resolution precedence: per-agent override > top-level fleet default > implicit `tacit_knowledge.md`.
+
+### Manual / power-user flow
+
+The underlying commands `run.py` orchestrates are still callable directly when you want finer control:
+
+```bash
+python scripts/init_fleet.py                   # just the setup wizard
+python setup.py tacit [<name>]                 # just the tacit wizard
+python scripts/run_fleet.py                    # just launch (no preflight prompts)
 python scripts/run_fleet.py --list             # show agent names, agent_ids, worktree status
 python scripts/run_fleet.py --only claude-1    # run a subset (repeatable)
 python scripts/run_fleet.py --clean            # remove every fleet worktree and its branch
-```
-
-To paste/upload tacit-knowledge hints for an agent (the one interactive bit that survives JSON):
-
-```bash
-python setup.py tacit claude-1
 ```
 
 ## Benchmark image

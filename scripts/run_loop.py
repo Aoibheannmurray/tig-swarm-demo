@@ -114,8 +114,11 @@ from prompts import (
     build_redescribe_hypothesis_prompt,
     build_redescribe_system_prompt,
     build_runtime_fix_prompt,
+    build_tacit_distillation_prompts,
     parse_hypothesis,
+    parse_tacit_distillation,
 )
+import prompts as _prompts
 import agentic_backends
 import agentic_sandbox
 from c3_compute import run_benchmark_c3
@@ -126,6 +129,17 @@ _ITERATION_BACKOFF_SECS = 5
 # the pre-fix code — the fix was almost certainly cosmetic (bounds checks,
 # error wrappers) and not worth a round-trip to confirm "no change".
 _REDESCRIBE_SIMILARITY_THRESHOLD = 0.95
+
+# Tacit-knowledge distillation
+# ────────────────────────────
+# The driver fires a distillation LLM call after the iteration that's
+# about to trigger a trajectory reset (stagnation == stagnation_limit - 1,
+# attempt didn't improve). The single switch for whether this runs for
+# agentic providers lives in `prompts.DRIVER_DISTILL_FOR_AGENTIC`; flip
+# it there and both the in-band prompt block (built in
+# `build_agentic_user_prompt`) and the driver-side gate below stay in
+# sync automatically.
+_AGENTIC_PROVIDERS = ("claude-code-agentic", "codex-agentic")
 
 _PROMPT_LOG_DIR = ROOT / "prompts_log"
 
@@ -509,6 +523,93 @@ def _seed_worktree_files(
         kp.write_text(best_kernel)
 
     agentic_sandbox.seed_worktree_config(workdir)
+
+
+def _should_distill_tacit(
+    state: dict, config: dict, is_new_best: bool, provider: str,
+) -> bool:
+    """Predicate for firing the tacit-knowledge distillation step.
+    Triggers on the last iteration before a trajectory reset would
+    happen, gated on the attempt not having saved the trajectory:
+
+      - my_runs_since_improvement == stagnation_limit - 1
+      - this attempt did not improve (else stagnation resets to 0 anyway)
+      - stagnation_limit >= 3 so there are >= 2 failures to distill from
+
+    For agentic providers we currently rely on the in-band prompt in
+    `build_agentic_user_prompt` instead, unless
+    prompts.DRIVER_DISTILL_FOR_AGENTIC is flipped on."""
+    if is_new_best:
+        return False
+    limit = int(config.get("stagnation_limit") or 0)
+    if limit < 3:
+        return False
+    if state.get("my_runs_since_improvement", 0) != limit - 1:
+        return False
+    if provider in _AGENTIC_PROVIDERS and not _prompts.DRIVER_DISTILL_FOR_AGENTIC:
+        return False
+    return True
+
+
+def _append_tacit_line(line: str) -> None:
+    """Append a single `- LLM:` bullet to the worktree's tacit file. The
+    file is created on first use (matching the convention used by
+    `setup.py` and `run.py`). The fleet's sync-back hook will carry the
+    new line back to the source `tacit_knowledge.md` on shutdown."""
+    path = ROOT / "tacit_knowledge_personal.md"
+    if path.exists():
+        existing = path.read_text()
+        if line in existing:
+            return  # already present — keep things idempotent within a run
+        if not existing.endswith("\n"):
+            existing += "\n"
+        path.write_text(existing + line + "\n")
+    else:
+        path.write_text(
+            "# Personal tacit knowledge (worktree copy)\n\n"
+            "## Strategies\n\n"
+            + line + "\n"
+        )
+
+
+def _distill_tacit_if_due(
+    state: dict, config: dict, is_new_best: bool, provider: str,
+    model: str, api_key: str | None, api_base: str | None,
+    files: ChallengeFiles,
+) -> tuple[int, int]:
+    """If the trigger fires, run one LLM call to distill a transferable
+    failure-lesson from this trajectory and append it to the worktree's
+    tacit file. Returns the (input_tokens, output_tokens) used (zero
+    when the trigger doesn't fire or the model returned SKIP)."""
+    if not _should_distill_tacit(state, config, is_new_best, provider):
+        return 0, 0
+
+    current_code, _ = files.read()
+    tacit_path = ROOT / "tacit_knowledge_personal.md"
+    existing_tacit = tacit_path.read_text() if tacit_path.exists() else ""
+
+    system_prompt, user_prompt = build_tacit_distillation_prompts(
+        state, config, current_code, existing_tacit,
+    )
+
+    print("  [TACIT] Trajectory about to reset — distilling failure lesson…")
+    try:
+        response, usage = _call_llm_logged(
+            "tacit_distill", config,
+            provider, model, api_key,
+            system_prompt, user_prompt, api_base,
+        )
+    except Exception as e:
+        print(f"  [TACIT] distillation call failed: {e}")
+        return 0, 0
+
+    line = parse_tacit_distillation(response)
+    if line is None:
+        print("  [TACIT] model returned SKIP (or unparseable) — no entry added")
+    else:
+        _append_tacit_line(line)
+        print(f"  [TACIT] appended: {line[:120]}")
+    return usage.get("input_tokens", 0), usage.get("output_tokens", 0)
 
 
 def _read_worktree_files(
@@ -945,7 +1046,11 @@ def main() -> int:
         config = load_config()
         config["log_prompts"] = log_prompts
         challenge_md = read_challenge_md()
-        print(f"  [SYNC] Challenge: {config.get('challenge', '?')}  GPU: {config.get('is_gpu', False)}")
+        # Pin the iteration's challenge here so chat messages and any other
+        # follow-up writes stay attributed to it even if the host runs
+        # `setup.py switch` while this iteration is running.
+        iter_challenge = config.get("challenge")
+        print(f"  [SYNC] Challenge: {iter_challenge or '?'}  GPU: {config.get('is_gpu', False)}")
 
         try:
             swarm_cfg = server_get(f"{server}/api/swarm_config")
@@ -987,6 +1092,7 @@ def main() -> int:
             print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')} **")
             post_message(server, agent_name, agent_id,
                          f"Trajectory reset: {reset.get('type')}",
+                         challenge=iter_challenge,
                          agent_token=agent_token)
 
         # ── Write current best to disk ─────────────────────────
@@ -1144,6 +1250,7 @@ def main() -> int:
             compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
             print(f"  [BENCH] Running benchmark on {compute_label}…")
             post_message(server, agent_name, agent_id, f"Trying [{tag}] {title}",
+                         challenge=iter_challenge,
                          agent_token=agent_token)
             send_heartbeat(server, agent_id, agent_token=agent_token)
 
@@ -1248,8 +1355,17 @@ def main() -> int:
         feasible_str = "" if bench.get("feasible") else " (INFEASIBLE)"
         post_message(server, agent_name, agent_id,
                      f"[{tag}] {title} → {status}{feasible_str}",
+                     challenge=bench.get("challenge") or iter_challenge,
                      agent_token=agent_token)
         send_heartbeat(server, agent_id, agent_token=agent_token)
+
+        tk_in, tk_out = _distill_tacit_if_due(
+            state, config, is_new_best,
+            args.provider, model, api_key, args.api_base,
+            files,
+        )
+        iter_input_tokens += tk_in
+        iter_output_tokens += tk_out
 
         elapsed = time.time() - t_start
         print(f"  [DONE] Iteration {iteration} finished in {elapsed:.0f}s")

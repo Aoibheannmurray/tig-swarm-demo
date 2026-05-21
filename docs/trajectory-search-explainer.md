@@ -65,18 +65,28 @@ A population of AI agents each maintain an independent solution trajectory, impr
                                     ▼
 ┌─── INACTIVE TRAJECTORY POOL ─────────────────────────────────────────────────────────────┐
 │                                                                                          │
-│   Deposited trajectories from past resets, plus one "fresh start" slot:                  │
+│   Deposited trajectories from past resets:                                               │
 │                                                                                          │
-│   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       ┌─────────────┐         │
-│   │ Former   │  │ Former   │  │ Former   │  │ Former   │       │   FRESH     │         │
-│   │ Agent X  │  │ Agent Y  │  │ Agent B  │  │ Agent Z  │  ...  │   START     │         │
-│   │ code     │  │ code     │  │ code     │  │ code     │       │   (seed)    │         │
-│   │ + hyps   │  │ + hyps   │  │ + hyps   │  │ + hyps   │       │             │         │
-│   └──────────┘  └──────────┘  └──────────┘  └──────────┘       └─────────────┘         │
-│        ▲              ▲             ▲              ▲                   ▲                  │
-│        └──────────────┴─────────────┴──────────────┴───────────────────┘                  │
-│                         uniform random selection                                          │
-│                      (chosen item removed from pool)                                      │
+│   ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐                                │
+│   │ Former   │  │ Former   │  │ Former   │  │ Former   │   ...                          │
+│   │ Agent X  │  │ Agent Y  │  │ Agent B  │  │ Agent Z  │                                │
+│   │ code     │  │ code     │  │ code     │  │ code     │                                │
+│   │ + hyps   │  │ + hyps   │  │ + hyps   │  │ + hyps   │                                │
+│   └──────────┘  └──────────┘  └──────────┘  └──────────┘                                │
+│                                                                                          │
+│   Selection rule (per reset event):                                                      │
+│                                                                                          │
+│        if pool empty  OR  T^1.5 < P:                                                     │
+│             FRESH START   → load swarm's initial algorithm                               │
+│        else:                                                                             │
+│             ADOPT          → uniform random from pool, entry removed                     │
+│                                                                                          │
+│        T = # trajectories ever created for this challenge                                │
+│        P = total deactivations summed across all of them                                 │
+│                                                                                          │
+│   Scaling: at equilibrium T^1.5 ≈ P, so T ~ work^(2/3) and mean trajectory               │
+│   lifetime P/T ~ work^(1/3). Early on (T small) fresh starts dominate; as the            │
+│   population grows, recycling from the pool dominates.                                   │
 │                                                                                          │
 │   Recycling: no promising direction is permanently lost — another agent                   │
 │   may succeed on code where the original agent stalled.                                   │

@@ -5,13 +5,34 @@ contributor set up their machine to join an existing TIG swarm. The user has
 probably pasted a short snippet like:
 
 ```
-git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python scripts/init_fleet.py
+git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python run.py
 server_url:     https://…railway.app
 username:       <their-handle>
 swarm_password: <hex string from the swarm host>
 ```
 
-Your job is to get `python scripts/run_fleet.py` running cleanly. Nothing more.
+Your job is to get `python run.py` running cleanly. Nothing more.
+
+`run.py` is the single contributor entry point. It orchestrates three phases
+in one command:
+
+1. Preflight (`docker` on PATH).
+2. **Init wizard** if `fleet.config.json` is missing — same prompts as
+   `scripts/init_fleet.py` (it actually calls into that script).
+3. **Tacit-knowledge prompt**: asks "Add or edit tacit knowledge for your
+   agent(s)? (y/N)" — default No. On yes, walks a guided capture in append
+   mode (does not wipe existing notes). By default every agent in the
+   fleet shares one file (`tacit_knowledge.md` at repo root), so the
+   wizard runs once and all agents benefit.
+4. **Launches the fleet** — same logic as `scripts/run_fleet.py`. On
+   shutdown, any `- LLM:` lessons agents appended in their worktrees are
+   collated back into the shared `tacit_knowledge.md` (deduped against
+   existing entries), so distillations accumulate across runs and across
+   agents.
+
+The underlying scripts (`scripts/init_fleet.py`, `setup.py tacit`,
+`scripts/run_fleet.py`) all still work standalone for power-user / scripted
+flows. `run.py` just calls into them, so behavior is identical.
 
 ## What this repo is (so you don't get pulled off-mission)
 
@@ -38,9 +59,9 @@ and often fails on managed machines.
 
 ## If Docker is missing
 
-`python scripts/init_fleet.py` preflight-checks for `docker` on PATH and
-exits with a link to Docker Desktop. **Send the user to that link.** Do
-*not* try to install Docker yourself via Homebrew / apt / dnf:
+`python run.py` preflight-checks for `docker` on PATH and exits with a link
+to Docker Desktop. **Send the user to that link.** Do *not* try to install
+Docker yourself via Homebrew / apt / dnf:
 
 - macOS without Homebrew → fragile.
 - Linux server installs of dockerd → need sudo and typically conflict with
@@ -49,9 +70,9 @@ exits with a link to Docker Desktop. **Send the user to that link.** Do
   grant from a coding-assistant shell.
 
 After the user installs Docker Desktop and finishes its first-run setup,
-resume from `python scripts/init_fleet.py`.
+resume from `python run.py`.
 
-## The wizard (`scripts/init_fleet.py`)
+## The wizard (invoked by `run.py`, also runnable as `scripts/init_fleet.py`)
 
 It prompts for, in order:
 
@@ -90,14 +111,17 @@ which use the CLI's own login. **Never write API keys into
 ## Launching
 
 ```bash
-python scripts/run_fleet.py
+python run.py
 ```
 
-Each agent spawns its own git worktree under `worktrees/<name>/`. Output is
+`run.py` reuses the existing `fleet.config.json` (skipping the wizard) and
+asks once whether to add tacit knowledge (default No), then launches. Each
+agent spawns its own git worktree under `worktrees/<name>/`. Output is
 prefixed by agent name. `Ctrl-C` terminates the whole fleet. If the user
 restarts later, agent identities persist via `worktrees/<name>/agent.config.json`.
 
-Useful fleet management:
+Useful fleet management (still on `scripts/run_fleet.py`, since `run.py`
+doesn't forward management flags):
 
 ```bash
 python scripts/run_fleet.py --list     # show agent names, ids, status
@@ -117,7 +141,7 @@ else — they're the failure modes our docs have actually been bitten by:
   BOM by default. The loader now reads via `utf-8-sig` so this should no longer
   break things, but the safe write idiom is
   `$json | Out-File -Encoding utf8NoBOM fleet.config.json`. Better still: use
-  `python scripts/init_fleet.py`.
+  `python run.py` (which calls the wizard).
 - **Codex CLI: prefer the npm install.** The Windows Store alias for `codex`
   (`%LOCALAPPDATA%\Microsoft\WindowsApps\codex.exe`) commonly returns
   `Access is denied` when invoked from a subprocess. Have the user run

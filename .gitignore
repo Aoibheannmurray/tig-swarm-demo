@@ -25,6 +25,7 @@ data/
 datasets/*/generated/
 # Personal tacit-knowledge files Claude reads locally; the source of truth
 # is the contributor's filesystem. The shared repo doesn't need them.
+tacit_knowledge.md
 tacit_knowledge_*.md
 tacit_knowledge_personal.md
 
