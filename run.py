@@ -38,29 +38,43 @@ import setup as setup_mod
 
 
 def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
-    """Prompt 'Add/edit tacit knowledge? (y/N)'. On yes, run the wizard
-    once per unique source file (most fleets share one default file, so
-    this is usually a single pass). Append mode — existing notes are
-    preserved."""
-    try:
-        answer = input(
-            "\nAdd or edit tacit knowledge for your agent(s)? (y/N): "
-        ).strip().lower()
-    except EOFError:
-        return
-    if answer not in ("y", "yes"):
-        return
+    """Tacit-knowledge phase.
 
-    stagnation_threshold = setup_mod.read_swarm_admin().get(
-        "stagnation_threshold", 2,
-    )
+    First-run experience (no source file has real content yet): skip the
+    y/N preamble and go straight to the create wizard — there's nothing
+    to be "adding to" yet, so the question is just noise.
 
+    Returning-contributor experience (at least one source file has real
+    content): ask "Add or edit tacit knowledge? (y/N)" first. On yes, run
+    the per-path wizard, which auto-picks the edit menu (with Open in
+    $EDITOR, etc.) for files that already have content and the create
+    menu for any that don't yet.
+    """
     # Dedup by destination path: agents that share a source file (the
     # default) edit it once together.
     by_source: dict[Path, list[str]] = {}
     for agent in agents:
         src, _ = run_fleet._resolve_tacit_source(agent, fleet_tacit)
         by_source.setdefault(src, []).append(agent.get("name", "?"))
+
+    stagnation_threshold = setup_mod.read_swarm_admin().get(
+        "stagnation_threshold", 2,
+    )
+
+    any_existing = any(
+        setup_mod._has_user_content(p) for p in by_source.keys()
+    )
+
+    if any_existing:
+        try:
+            answer = input(
+                "\nAdd or edit tacit knowledge for your agent(s)? (y/N): "
+            ).strip().lower()
+        except EOFError:
+            return
+        if answer not in ("y", "yes"):
+            return
+    # else: skip the y/N — go straight to the create menu below.
 
     for tk_path, names in by_source.items():
         if len(names) > 1:
@@ -96,6 +110,17 @@ def main() -> int:
         rc = init_fleet.run_wizard(force=False)
         if rc != 0:
             return rc
+    else:
+        try:
+            ans = input(
+                "\nUpdate your fleet config (provider / model / agent count)? (y/N): "
+            ).strip().lower()
+        except EOFError:
+            ans = ""
+        if ans in ("y", "yes"):
+            rc = init_fleet.run_wizard(force=True)
+            if rc != 0:
+                return rc
 
     server_url, username, swarm_password, agents, fleet_tacit = (
         run_fleet._load_fleet()

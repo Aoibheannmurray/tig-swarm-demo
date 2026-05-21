@@ -13,17 +13,23 @@ swarm_password: <hex string from the swarm host>
 
 Your job is to get `python run.py` running cleanly. Nothing more.
 
-`run.py` is the single contributor entry point. It orchestrates three phases
+`run.py` is the single contributor entry point. It orchestrates four phases
 in one command:
 
 1. Preflight (`docker` on PATH).
-2. **Init wizard** if `fleet.config.json` is missing — same prompts as
-   `scripts/init_fleet.py` (it actually calls into that script).
-3. **Tacit-knowledge prompt**: asks "Add or edit tacit knowledge for your
-   agent(s)? (y/N)" — default No. On yes, walks a guided capture in append
-   mode (does not wipe existing notes). By default every agent in the
-   fleet shares one file (`tacit_knowledge.md` at repo root), so the
-   wizard runs once and all agents benefit.
+2. **Init wizard** if `fleet.config.json` is missing. On a re-run with the
+   file already present, asks `Update your fleet config (provider / model
+   / agent count)? (y/N)` (default No). On yes, re-enters the wizard with
+   `force=True` and offers to keep the existing `server_url` / `username`
+   / `swarm_password` triplet so the user doesn't have to paste them again.
+3. **Tacit-knowledge phase**. First run (no source file has real content
+   yet) jumps straight into the create wizard. Subsequent runs gate behind
+   `Add or edit tacit knowledge for your agent(s)? (y/N)` (default No); on
+   yes, the per-path wizard auto-picks the create menu (file missing /
+   stub-only) or the edit menu (file has user content). Edit menu offers
+   an `Open in $EDITOR` option for direct hand-editing. By default every
+   agent in the fleet shares one file (`tacit_knowledge.md` at repo root),
+   so the wizard runs once and all agents benefit.
 4. **Launches the fleet** — same logic as `scripts/run_fleet.py`. On
    shutdown, any `- LLM:` lessons agents appended in their worktrees are
    collated back into the shared `tacit_knowledge.md` (deduped against
@@ -79,12 +85,19 @@ It prompts for, in order:
 1. `server_url`
 2. `username`
 3. `swarm_password`
-4. LLM provider (Anthropic / OpenAI / Google / Venice / `claude` CLI /
-   `codex` CLI / Venice — pick what the user has credentials for)
+4. LLM provider (Anthropic / OpenAI / Google / Venice / OpenRouter /
+   `claude` CLI / `codex` CLI — pick what the user has credentials for)
 5. Model (Enter accepts the per-provider default)
 6. Fleet size (number of parallel agents — default 1)
 
-For non-interactive setup you can pipe answers via stdin, e.g.:
+On a **re-run** against an existing `fleet.config.json` the wizard adds a
+`Keep these connection settings? [Y/n]` step right before (1) — Enter
+reuses the previous `server_url` / `username` / `swarm_password` and skips
+straight to (4). The user only ends up retyping the connection triplet if
+they type `n`.
+
+For non-interactive setup on a fresh clone (no existing config) you can
+pipe answers via stdin, e.g.:
 
 ```bash
 printf '%s\n' "$SERVER_URL" "$USERNAME" "$SWARM_PASSWORD" "1" "" "1" | python scripts/init_fleet.py
@@ -92,7 +105,8 @@ printf '%s\n' "$SERVER_URL" "$USERNAME" "$SWARM_PASSWORD" "1" "" "1" | python sc
 
 (Provider/model defaults pick Anthropic + `claude-opus-4-7`. Adjust the
 sequence if the user wants a different provider — see the prompts in
-`scripts/init_fleet.py`.)
+`scripts/init_fleet.py`.) On a re-run, add a leading `"y"` for the keep-
+settings prompt and drop the three connection lines.
 
 **Fleet size.** The trailing `"1"` in that pipe is the *number of agents to
 spawn in parallel* — not a Yes/No. Default to 1 unless the user explicitly
@@ -102,10 +116,12 @@ for the extra agents. If the user already has a `fleet.config.json` and
 wants to grow it, just duplicate one agent entry under `agents: [...]` with
 a new unique `name` — no need to re-run the wizard.
 
-The wizard writes `fleet.config.json` and prints the env var the user must
-export (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) — unless they picked a
-CLI-auth provider (`claude-code`, `claude-code-agentic`, `codex-agentic`),
-which use the CLI's own login. **Never write API keys into
+The wizard writes `fleet.config.json` and prints a one-line summary —
+`wrote fleet.config.json — N agent(s): <names>` — plus an inline reminder
+only when the chosen provider needs an API key that isn't yet exported
+(`reminder: export ANTHROPIC_API_KEY=<your-key> before launching`). CLI-auth
+providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) skip the
+reminder; they use the CLI's own login. **Never write API keys into
 `fleet.config.json` yourself.**
 
 ## Launching
@@ -114,8 +130,10 @@ which use the CLI's own login. **Never write API keys into
 python run.py
 ```
 
-`run.py` reuses the existing `fleet.config.json` (skipping the wizard) and
-asks once whether to add tacit knowledge (default No), then launches. Each
+`run.py` reuses the existing `fleet.config.json` after asking
+`Update your fleet config? (y/N)` (default No), then handles the tacit
+phase — silently jumping to the create menu on a first run, or asking
+`Add or edit tacit knowledge? (y/N)` on subsequent runs — and launches. Each
 agent spawns its own git worktree under `worktrees/<name>/`. Output is
 prefixed by agent name. `Ctrl-C` terminates the whole fleet. If the user
 restarts later, agent identities persist via `worktrees/<name>/agent.config.json`.
@@ -195,6 +213,15 @@ else — they're the failure modes our docs have actually been bitten by:
 
 - **`fleet.config.json already exists. Overwrite?`**
   → They've run the wizard before. Either answer `y` or run with `--force`.
+  (When the wizard is invoked through `python run.py`, this is handled by
+  the `Update your fleet config? (y/N)` prompt up front.)
+
+- **`Agent <name>: environment variable ANTHROPIC_API_KEY is unset or empty.`**
+  → The contributor picked an API-key provider but never exported the key.
+  Tell them to run the suggested `export …=<your-key>` command from the
+  error and re-run `python run.py`. CLI-auth providers (`claude-code`,
+  `claude-code-agentic`, `codex-agentic`) never produce this error — they
+  log in through their CLI instead.
 
 ## What you should *not* do
 

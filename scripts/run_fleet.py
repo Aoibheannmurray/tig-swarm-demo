@@ -312,7 +312,8 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
     value = os.environ.get(source, "")
     if not value:
         sys.exit(
-            f"Agent {agent['name']}: environment variable {source} is unset or empty."
+            f"Agent {agent['name']}: environment variable {source} is unset or empty.\n"
+            f"  To fix: export {source}=<your-key> and re-run `python run.py`."
         )
     return target, value
 
