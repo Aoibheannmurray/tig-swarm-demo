@@ -901,7 +901,13 @@ def gather_tacit_knowledge(
         prompt = "Choice 1/2/3/4 [2]: "
 
     while True:
-        choice = input(prompt).strip() or default
+        try:
+            choice = input(prompt).strip() or default
+        except EOFError:
+            # Non-interactive caller (closed stdin, piped, headless agent).
+            # Treat as "skip / cancel" rather than crashing the launcher.
+            print("  (stdin closed — skipping tacit wizard)")
+            return
         if choice in valid:
             break
         print(f"  invalid choice; pick one of {', '.join(valid)}")

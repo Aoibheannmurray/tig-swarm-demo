@@ -40,9 +40,15 @@ import setup as setup_mod
 def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
     """Tacit-knowledge phase.
 
-    First-run experience (no source file has real content yet): skip the
-    y/N preamble and go straight to the create wizard — there's nothing
-    to be "adding to" yet, so the question is just noise.
+    Skipped entirely when stdin isn't a TTY — coding-agent / piped flows
+    can't drive the interactive wizard (the guided capture asks six
+    questions and the edit menu opens $EDITOR), so the right pattern
+    there is for the assistant to write `tacit_knowledge.md` directly via
+    its file-write tools before launching `run.py`. See AGENTS.md.
+
+    First-run interactive experience (no source file has real content
+    yet): skip the y/N preamble and go straight to the create wizard —
+    there's nothing to be "adding to" yet, so the question is just noise.
 
     Returning-contributor experience (at least one source file has real
     content): ask "Add or edit tacit knowledge? (y/N)" first. On yes, run
@@ -50,6 +56,9 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
     $EDITOR, etc.) for files that already have content and the create
     menu for any that don't yet.
     """
+    if not sys.stdin.isatty():
+        return
+
     # Dedup by destination path: agents that share a source file (the
     # default) edit it once together.
     by_source: dict[Path, list[str]] = {}
@@ -110,7 +119,10 @@ def main() -> int:
         rc = init_fleet.run_wizard(force=False)
         if rc != 0:
             return rc
-    else:
+    elif sys.stdin.isatty():
+        # Only ask interactive contributors. Coding-agent / piped-stdin
+        # callers want a deterministic launch and would have to answer No
+        # blind anyway.
         try:
             ans = input(
                 "\nUpdate your fleet config (provider / model / agent count)? (y/N): "

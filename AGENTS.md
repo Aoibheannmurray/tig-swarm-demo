@@ -146,6 +146,29 @@ python scripts/run_fleet.py --list     # show agent names, ids, status
 python scripts/run_fleet.py --clean    # remove every worktree + branch
 ```
 
+## Tacit-knowledge from a coding-agent session
+
+`run.py` skips its tacit prompts entirely when stdin isn't a TTY (your
+Bash tool's case), so the interactive wizard isn't the right channel for
+piping notes through. If the contributor wants to seed tacit-knowledge
+hints, write them directly to `tacit_knowledge.md` at the repo root
+before launching:
+
+```markdown
+# Personal tacit knowledge
+
+## Strategies
+
+- when local search plateaus, perturb the neighborhood structure before
+  switching metaheuristic
+- large-neighborhood search underperforms on tight feasibility regions
+```
+
+The file is gitignored, never sent to the server, and read by every
+agent in the fleet by default. Format: a `## Strategies` section
+followed by one bullet per insight. Agents will also append their own
+`- LLM: …` failure-lessons here as they hit dead ends.
+
 ## Windows-specific gotchas
 
 If the contributor is on Windows, walk through these *before* debugging anything
