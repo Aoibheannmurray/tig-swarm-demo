@@ -1,6 +1,6 @@
 # Architecture: Collaborative AI Swarm Optimization
 
-This document explains how the swarm optimization demo works at a high level — how multiple LLM-driven agents collaborate to evolve a solver for one of seven TIG challenges, and how the coordination server orchestrates their work.
+This document explains how the swarm optimization demo works at a high level — how multiple LLM-driven agents collaborate to evolve a solver for one of eight TIG challenges, and how the coordination server orchestrates their work.
 
 ## The Big Picture
 
@@ -30,7 +30,7 @@ A group of autonomous LLM-driven agents — each one a contributor running `scri
 
 Every swarm is its own independent deployment with its own SQLite database — no central multi-tenant server. A host runs `python setup.py create` to stand up a new swarm; contributors point `fleet.config.json` at the URL it returns. Multiple swarms run side-by-side without overlap, even when launched by the same host. (See `README.md` for the concrete setup commands.)
 
-The singleton `config` table holds global swarm settings: `active_challenge` (the swarm-wide challenge contributors auto-follow), `swarm_name`, `owner_name`, `stagnation_threshold`, `stagnation_limit`, `hypothesis_recall_threshold`, and `admin_key`. Per-challenge sub-config (tracks, timeout, scoring_direction, initial_algorithm_code) lives in a separate `challenge_configs` table — one row per challenge, all five populated in parallel.
+The singleton `config` table holds global swarm settings: `active_challenge` (the swarm-wide challenge contributors auto-follow), `swarm_name`, `swarm_type` (`cpu` or `gpu`), `owner_name`, `stagnation_threshold`, `stagnation_limit`, `hypothesis_recall_threshold`, `inactive_minutes`, and `admin_key`. Per-challenge sub-config (tracks, timeout, scoring_direction, initial_algorithm_code) lives in a separate `challenge_configs` table — one row per challenge in this swarm's hardware class (five for CPU swarms, three for GPU), all populated in parallel by `setup.py create`.
 
 ## Multi-Challenge State
 
@@ -51,7 +51,7 @@ The host switches the active challenge via admin-key-gated `POST /api/swarm_conf
 
 ## Supported Challenges
 
-The swarm supports seven TIG challenges, selectable at setup time. Five are CPU-only; two require an NVIDIA GPU (the swarm host picks one of those modes via `swarm_type` and only the matching subset is exposed to contributors).
+The swarm supports eight TIG challenges, selectable at setup time. Five are CPU-only; three require an NVIDIA GPU (the swarm host picks one of those modes via `swarm_type` and only the matching subset is exposed to contributors).
 
 | Challenge | Hardware | Scoring | Description |
 |-----------|----------|---------|-------------|
@@ -62,6 +62,7 @@ The swarm supports seven TIG challenges, selectable at setup time. Five are CPU-
 | `energy_arbitrage` | CPU | Higher is better | Maximize profit from battery charge/discharge against energy prices |
 | `hypergraph` | GPU | Higher is better | Hypergraph partitioning: minimize edge cut across balanced parts |
 | `neuralnet_optimizer` | GPU | Higher is better | Train a small neural net under a wall-clock budget; score is validation loss vs baseline |
+| `vector_search` | GPU | Higher is better | Approximate nearest-neighbour search over a vector index |
 
 The CPU/GPU split is enforced by `challenges.CHALLENGES[name].is_gpu` — `register_agent` and `/api/swarm_config` filter `available_challenges` against the swarm's `swarm_type` so contributors only see the challenges their hardware can run.
 
@@ -71,7 +72,7 @@ Challenge-specific details (types, tips, strategy tags) live in `CHALLENGE.md`, 
 
 ## How Agents Work
 
-Each agent is one contributor running `scripts/run_loop.py` against an LLM provider (Anthropic, OpenAI, Google, any OpenAI-compatible endpoint, or the local `claude` CLI in either one-shot or agent mode). The script clones this repo, reads `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop.
+Each agent is one contributor running `scripts/run_loop.py` against an LLM provider (Anthropic, OpenAI, Google, Venice, OpenRouter, any OpenAI-compatible endpoint, or the local `claude` / `codex` CLI in either one-shot or agent mode). The script clones this repo, reads `CHALLENGE.md` (challenge-specific details), and enters an autonomous optimization loop.
 
 ### Two contributor modes
 
@@ -90,14 +91,14 @@ The agent registers with the server and receives a unique ID and a randomly gene
 
 ### 2. Check State
 
-The agent asks the server for the current state, passing its `agent_id`. The server returns the agent's **own current best** algorithm code (or the swarm's host-configured *initial algorithm* on first run; see "Initial algorithm" below), so each agent advances its own lineage. If the agent is stagnating (`runs_since_improvement >= 2`), the response may also include `inspiration_code` from a random active peer to study.
+The agent asks the server for the current state, passing its `agent_id`. The server returns the agent's **own current best** algorithm code (or the swarm's host-configured *initial algorithm* on first run; see "Initial algorithm" below), so each agent advances its own lineage. If the agent is stagnating (`runs_since_improvement >= stagnation_threshold`, default 2), the response may also include `inspiration_code` from a random active peer to study.
 
 #### How inspiration is picked
 
 Inspiration is the only channel for cross-pollination between lineages, so the selection rule matters. It is deliberately simple:
 
-- **Trigger.** Inspiration is attached to the `/api/state` response whenever `runs_since_improvement >= N_STAGNATION` (currently `N_STAGNATION = 2`). The counter increments on every non-improving publish and resets to 0 the moment the agent beats its own best. So an agent sees inspiration starting on its *3rd* state fetch after a breakthrough — i.e. after two failed attempts against its current best — and keeps seeing it every poll until it improves.
-- **Candidate pool.** The pool is built from every agent's *current best* (one row per agent, via `db.list_agent_bests`), with two filters: (a) the requesting agent is excluded, and (b) only peers with `last_heartbeat` within the last `INACTIVE_MINUTES` (currently 20) are eligible. Dormant agents are skipped entirely — you only cross-pollinate with peers that are actively working right now.
+- **Trigger.** Inspiration is attached to the `/api/state` response whenever `runs_since_improvement >= stagnation_threshold` (the swarm-config setting, default 2). The counter increments on every non-improving publish and resets to 0 the moment the agent beats its own best. So at the default an agent sees inspiration starting on its *3rd* state fetch after a breakthrough — i.e. after two failed attempts against its current best — and keeps seeing it every poll until it improves.
+- **Candidate pool.** The pool is built from every agent's *current best* (one row per agent, via `db.list_agent_bests`), with two filters: (a) the requesting agent is excluded, and (b) only peers whose `agent_challenge_state.last_active_at` for the *active* challenge is within the last `inactive_minutes` (swarm-config setting, default 20) are eligible. Dormant agents — including agents whose global heartbeat is recent but who have not touched this challenge lately — are skipped entirely.
 - **Selection.** Uniform random (`random.choice`) over the filtered pool. **Not** weighted by score, recency, improvement rate, or diversity. A mid-pack active agent is just as likely to be picked as the current leader, and the pool can hand you a peer whose best is *worse* than yours — the value is in structural ideas, not in the score.
 - **Memorylessness.** Selection is re-rolled on every state fetch while the agent is stagnating. There is no "don't repeat last pick" rule and no rotation guarantee: two consecutive polls can return the same peer, and over many polls coverage of the pool is probabilistic rather than guaranteed. The *content* of a peer's entry can also change between polls as that peer publishes new bests.
 - **Empty pool.** If no peer passes the active-and-not-self filter (e.g. the agent is alone, or all peers are dormant), `inspiration_code` is simply `null` for that poll — stagnation continues without a suggestion.
@@ -107,11 +108,11 @@ The state includes:
 - **Best algorithm code** — the Rust source code of the agent's own current best branch.
 - **Best score** — the current global best score across all agents.
 - **Personal counters** — own best score, runs completed, improvements, and runs since last improvement.
-- **Recent hypotheses (last 20)** — every idea the agent has already tried against its current best branch, regardless of outcome. No success/fail label is surfaced: the point is "here's what you've already explored from this starting point, so don't repeat it."
+- **Prior hypotheses (up to 20)** — only attached once the agent has stagnated past `hypothesis_recall_threshold` (default 3). The list is the most recent **failed** hypotheses any agent tried against *this exact program* — the point is "here's what's already been ruled out from this starting point, so don't repeat it."
 - **Inspiration code** — optional code from a random active peer when stagnating.
 - **Leaderboard** — agent rankings by best score.
 
-The recent-hypotheses list is scoped to the agent's own current branch via `target_best_experiment_id`, so the moment the agent lands a new best, the list naturally resets to the attempts made against that new starting point.
+The prior-hypotheses list is scoped by `program_id` (carried on `agent_challenge_state.current_program_id`), so the moment the agent lands a new best — or adopts a trajectory from the inactive pool — the list naturally resets to the attempts made against that new starting point.
 
 ### 3. Propose a Hypothesis
 
@@ -162,7 +163,7 @@ The agent reads the updated state and starts the cycle again. Over many iteratio
 
 The starting code every agent sees on a fresh trajectory — both the very first iteration and the "fresh start" slot of trajectory resets — is the swarm's **initial algorithm**, set by the host once at swarm creation.
 
-The repo ships with a single editable file at the root: `initial_algorithm.rs`. Its default content is a challenge-agnostic stub (`solve_challenge` signature with `unimplemented!()` body); the host can replace the body with any starter algorithm before running `python setup.py create`. `setup.py create` reads the file, sends its full contents to the server alongside the rest of the swarm config, and the server stores it under the `initial_algorithm_code` config key.
+The repo ships with one editable file per challenge under `initial_algorithms/<challenge>.rs` (plus `initial_algorithms/<challenge>.cu` for GPU challenges that ship a CUDA kernel). Each file's default content is a near-trivial baseline; the host can replace any of them with a stronger starter before running `python setup.py create`. `setup.py create` reads every file via `read_initial_algorithms()`, sends them to the server as part of the per-challenge `challenge_configs` payload, and the server stores each one under that challenge's `initial_algorithm_code` (and `initial_kernel_code`, where applicable).
 
 When a trajectory reset occurs (`runs_since_improvement >= stagnation_limit`), the server picks between a fresh start and an inactive-pool adoption using the rule `go_fresh = not inactive_pool or T^1.5 < P`, where **T** is the total number of trajectories ever created for this challenge and **P** is the total number of deactivations across all of them (`server/server.py:729-734`). If `go_fresh` is true, the agent's new starting code is the swarm's initial algorithm — same as on iteration 1; otherwise the server uniformly samples one entry from the inactive pool, removes it (consume-once), and reactivates that trajectory.
 
@@ -221,11 +222,10 @@ All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` 
 | `setup.py` | Host-admin CLI — `create` / `switch` / `sync` / `tacit`. Contributors don't need it. |
 | `scripts/run_fleet.py` | Spawns one worktree per agent in `fleet.config.json` and runs `run_loop.py` in each |
 | `scripts/run_loop.py` | Per-agent driver loop — LLM call, code mutation, benchmark, publish |
-| `scripts/migrate_config.py` | One-shot migration from the legacy `swarm.config.json` + root `agent.config.json` |
 | `CHALLENGE.md` | Per-challenge details — types, scoring, tips (templated from `src/<challenge>/README.md`) |
 | `server/server.py` | Coordination server — FastAPI, WebSocket, all agent APIs |
 | `server/db.py` | SQLite schema, migrations, direction-aware queries |
-| `initial_algorithm.rs` | Host-editable starting algorithm; broadcast at swarm creation |
+| `initial_algorithms/<challenge>.{rs,cu}` | Host-editable starting algorithm per challenge (+ optional CUDA kernel); broadcast at swarm creation |
 | `src/<challenge>/algorithm/mod.rs` | The single file agents edit |
 | `src/<challenge>/mod.rs` | Challenge module — types, generator, evaluator |
 | `scripts/benchmark.py` | Build + run + evaluate + score |
@@ -247,9 +247,11 @@ All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` 
 
 ### Endpoints
 
+All endpoints except `/api/agents/register` require an `X-Agent-Token` header (issued at registration); `/api/agents/register` itself requires `X-Username` and `X-Swarm-Password` headers, verified against the host's `swarm_password` config.
+
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/agents/register` | Register an agent. Body: `{client_version, agent_name?, llm_type?}`. Returns `{agent_id, agent_name}`. Persist both — every subsequent call needs the `agent_id`. |
+| `POST` | `/api/agents/register` | Register an agent. Body: `{client_version, agent_name?, llm_type?}`. Returns `{agent_id, agent_name, agent_token}`. Persist all three — every subsequent call sends `agent_id` in the body and `agent_token` as `X-Agent-Token`. |
 | `GET`  | `/api/state?agent_id=...` | Fetch current state for the loop (see fields below). |
 | `POST` | `/api/iterations` | Publish an iteration's results (best done via `scripts/publish.py`, which wraps the schema). |
 | `POST` | `/api/messages` | Post a chat message to the dashboard feed. Body: `{agent_name, agent_id, content, msg_type}`. |
