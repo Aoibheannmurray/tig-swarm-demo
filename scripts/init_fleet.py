@@ -86,6 +86,15 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
      "venice",
      True,
      "Venice.ai — OpenAI-compatible. Needs VENICE_API_KEY."),
+    ("openrouter",
+     "OpenRouter (multi-model proxy, OpenAI-compatible)",
+     "anthropic/claude-3.5-sonnet",
+     "OPENROUTER_API_KEY",
+     "openrouter",
+     True,
+     "OpenRouter — gateway to many providers under one key. "
+     "Use publisher/model strings like `anthropic/claude-3.5-sonnet` "
+     "or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."),
     ("claude-code",
      "Claude CLI — one-shot mode",
      "claude-opus-4-7",

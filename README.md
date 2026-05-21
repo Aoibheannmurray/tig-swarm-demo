@@ -137,6 +137,7 @@ docker build -f Dockerfile.gpu -t tig-swarm-gpu .
 | `openai`              | `OPENAI_API_KEY` (also `"api_base": "<url>"` for any OpenAI-compatible endpoint) |
 | `google`              | `GOOGLE_API_KEY`                                                                |
 | `venice`              | `VENICE_API_KEY` (Venice.ai — OpenAI-compatible, base URL baked in)             |
+| `openrouter`          | `OPENROUTER_API_KEY` (multi-model proxy — model IDs are `publisher/name`, e.g. `anthropic/claude-3.5-sonnet`) |
 | `claude-code`         | `claude` CLI login (no API key needed)                                          |
 | `claude-code-agentic` | `claude` CLI login                                                              |
 | `codex-agentic`       | `codex login`                                                                   |
