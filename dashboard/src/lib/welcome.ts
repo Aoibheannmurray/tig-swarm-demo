@@ -23,7 +23,7 @@ const PAL_PURPLE     = "#8B6B8C";
 const REPO_URL = "https://github.com/Aoibheannmurray/tig-swarm-demo.git";
 
 const STEPS: { cmd: string }[] = [
-  { cmd: `git clone ${REPO_URL} && cd tig-swarm-demo && python scripts/init_fleet.py` },
+  { cmd: `git clone ${REPO_URL} && cd tig-swarm-demo && python run.py` },
 ];
 
 export function initWelcome() {

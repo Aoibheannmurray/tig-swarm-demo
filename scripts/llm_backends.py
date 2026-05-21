@@ -1,9 +1,11 @@
 """LLM provider backends — raw urllib, no SDK dependencies.
 
-Supports Anthropic (Claude), OpenAI (GPT / o-series), Google (Gemini), and
-Venice (https://venice.ai). The --api-base flag on the OpenAI provider works
-with any OpenAI-compatible endpoint (Together, Groq, DeepSeek, Ollama, etc.).
-Venice is a first-class shortcut for `provider: openai` + Venice's base URL.
+Supports Anthropic (Claude), OpenAI (GPT / o-series), Google (Gemini),
+Venice (https://venice.ai), and OpenRouter (https://openrouter.ai). The
+--api-base flag on the OpenAI provider works with any OpenAI-compatible
+endpoint (Together, Groq, DeepSeek, Ollama, etc.). Venice and OpenRouter
+are first-class shortcuts — both are `call_openai` under the hood with
+their respective base URLs pre-filled.
 
 Each call_* function returns ``(text, usage)`` where ``usage`` is a dict
 with ``input_tokens`` and ``output_tokens`` (both int, 0 when unavailable).
@@ -23,9 +25,11 @@ DEFAULT_MODELS = {
     "openai": "gpt-4o",
     "google": "gemini-2.5-flash",
     "venice": "zai-org-glm-5",
+    "openrouter": "anthropic/claude-3.5-sonnet",
 }
 
 VENICE_API_BASE = "https://api.venice.ai/api/v1"
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 Usage = dict[str, int]  # {"input_tokens": N, "output_tokens": N}
 
@@ -90,8 +94,19 @@ _PRICING: list[tuple[str, float, float]] = [
 def estimate_cost(model: str, usage: Usage) -> float:
     """Estimate USD cost from model name and token usage."""
     m = model.lower()
+    # OpenRouter / Together-style "publisher/model" names (e.g.
+    # "anthropic/claude-3.5-sonnet") — strip the publisher segment before
+    # the prefix lookup so routed Anthropic / OpenAI / Google models still
+    # price correctly. Non-routed models (no slash) are unaffected.
+    if "/" in m:
+        m = m.split("/", 1)[1]
+    # Normalize dot vs dash separators on BOTH sides so the matcher
+    # tolerates either spelling (OpenRouter uses `claude-3.5-sonnet`
+    # while Anthropic's API uses `claude-3-5-sonnet`; Google uses
+    # `gemini-2.5-pro` natively too).
+    m_norm = m.replace(".", "-")
     for prefix, inp_price, out_price in _PRICING:
-        if m.startswith(prefix):
+        if m_norm.startswith(prefix.replace(".", "-")):
             return (
                 usage["input_tokens"] * inp_price / 1_000_000
                 + usage["output_tokens"] * out_price / 1_000_000
@@ -250,6 +265,8 @@ def call_llm(
         return call_openai(system, prompt, model, api_key, api_base)
     if provider == "venice":
         return call_openai(system, prompt, model, api_key, api_base or VENICE_API_BASE)
+    if provider == "openrouter":
+        return call_openai(system, prompt, model, api_key, api_base or OPENROUTER_API_BASE)
     if provider == "google":
         return call_google(system, prompt, model, api_key)
     raise ValueError(f"Unknown provider: {provider}")

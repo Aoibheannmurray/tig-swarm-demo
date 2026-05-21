@@ -1,10 +1,10 @@
 # TIG Swarm Demo
 
-Multiple agents optimize TIG challenge solvers in Rust, coordinated by a FastAPI server and live dashboard.
+Multiple LLM agents optimize TIG challenge solvers in Rust, coordinated by a FastAPI server and live dashboard.
 
-Each contributor runs `scripts/run_fleet.py`, which spawns one or more agents — each calling any LLM (Anthropic, OpenAI, Google, OpenAI-compatible endpoints, or your local `claude` / `codex` CLI in headless agent mode) in a loop and contributing to the swarm.
+Each contributor runs `python run.py`, which spawns one or more agents — each calling an LLM (Anthropic, OpenAI, Google, OpenRouter, Venice, or your local `claude` / `codex` CLI) in a loop and contributing to the swarm.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for how the swarm works internally, including the server protocol contributors call into.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for internals.
 
 ## Host
 
@@ -12,110 +12,83 @@ Requirements: Python 3, Railway CLI, Railway account.
 
 ```bash
 railway login
-python setup.py create
+python setup.py create              # deploys a Railway swarm, scaffolds fleet.config.json
+python setup.py switch knapsack     # change the active challenge later
 ```
 
-Deploys a Railway swarm, prints the dashboard URL and admin key, and scaffolds a starter `fleet.config.json` so you can immediately participate. Edit `initial_algorithms/<challenge>.rs` first if you want a custom seed.
-
-Switch the active challenge later:
-
-```bash
-python setup.py switch knapsack
-```
-
-`setup.py` is host-only. Contributors do not need it — they edit `fleet.config.json` and run `scripts/run_fleet.py` directly.
+`setup.py` is host-only. Contributors run `python run.py`.
 
 ## Contributor
 
 Requirements:
 - Python 3
-- [Docker](https://www.docker.com/products/docker-desktop/) — benchmarks run inside a local Docker container. Install Docker Desktop and make sure it's running (`docker info` should succeed) before launching the fleet. On Windows, Docker Desktop also requires WSL 2; its installer will prompt you.
-- Credentials for whichever LLM provider you choose (Anthropic, OpenAI, Google, etc.).
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/), running (Windows also needs WSL 2)
+- Either an API key for your chosen provider, or a logged-in `claude` / `codex` CLI
 
-Don't have a terminal handy? Open this repo in [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://docs.claude.com/en/docs/claude-code) — both auto-discover `AGENTS.md` / `CLAUDE.md` and will walk you through setup.
-
-**Step 1. Generate `fleet.config.json`.** Pick one of the two options below.
-
-*Option A — run the wizard (recommended):*
+No terminal handy? Open this repo in [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://docs.claude.com/en/docs/claude-code) — both read `AGENTS.md` and walk you through setup.
 
 ```bash
-python scripts/init_fleet.py
+python run.py
 ```
 
-You'll be asked for the three values the host shared (`server_url`, `username`, `swarm_password`), which LLM provider/model to use, and how many agents to run (default: 1). The wizard never writes API keys to disk — it tells you what to export.
+It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
 
-*Option B — copy the example and hand-edit:*
+Export the API key your provider needs before launching:
+
+```bash
+export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+```
+
+`Ctrl-C` terminates the whole fleet. Each agent runs in its own git worktree under `worktrees/<name>/`; identities persist across restarts.
+
+### Hand-editing
+
+To skip the wizard:
 
 ```bash
 cp fleet.config.example.json fleet.config.json
 $EDITOR fleet.config.json
+python run.py
 ```
 
-The wizard only sets up one provider at a time. For a mixed fleet (e.g. Anthropic + OpenAI + Google together), run the wizard for a starter, then hand-edit additional entries.
-
-**Step 2. Export the API key(s) your entries reference:**
-
-```bash
-export ANTHROPIC_API_KEY=sk-...    # or OPENAI_API_KEY / GOOGLE_API_KEY
-```
-
-**Step 3. Launch the fleet:**
-
-```bash
-python scripts/run_fleet.py
-```
-
-Each agent gets its own git worktree under `worktrees/<name>/`, its own `agent_id`, and runs `scripts/run_loop.py` as a subprocess. Output is prefixed by agent name; `Ctrl-C` terminates the whole fleet. `agent_id` is persisted per worktree so restarts resume the same dashboard identity.
-
-`fleet.config.json` schema (see `fleet.config.example.json` for a fuller sample):
-
-```json
-{
-  "server_url": "https://test-swarm-1-production.up.railway.app",
-  "agents": [
-    {
-      "name": "phil",
-      "provider": "openai",
-      "model": "gpt-5.5",
-      "api_key_env": "OPENAI_API_KEY"
-    }
-  ]
-}
-```
-
-Per-entry fields:
+Per-agent fields:
 
 | field            | meaning                                                                 |
 |------------------|-------------------------------------------------------------------------|
 | `name`           | Worktree dir + dashboard label.                                         |
 | `provider`       | LLM provider — see [Providers](#providers).                             |
-| `model`          | Model ID; per-provider defaults live in `DEFAULT_MODELS` in `run_loop.py`. |
-| `api_key_env`    | Env var to read the API key from. Omit for CLI-auth providers.          |
-| `tacit_knowledge`| Optional path to a private hint file; auto-copied into the worktree.    |
+| `model`          | Model ID; per-provider defaults live in `DEFAULT_MODELS` (`scripts/llm_backends.py`). |
+| `api_key_env`    | Env var holding the API key. Omit for CLI-auth providers.               |
+| `tacit_knowledge`| Optional per-agent override of the shared `tacit_knowledge.md` file.    |
 
-Fleet management:
+### Tacit knowledge
+
+`tacit_knowledge.md` is a private hints file your agents read when they get stuck. It's gitignored and never leaves your machine. All your agents share it by default, so insights accumulate across the whole fleet.
+
+Agents also **write back to it**: when one has been failing for a stretch and is about to start over from scratch, it adds a one-line `- LLM:` "what didn't work" note — so future attempts can avoid the same dead end.
+
+To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python setup.py tacit` directly. Both append rather than overwrite, and the edit menu can open the file in your `$EDITOR`. Deeper detail — when agents append, how files resolve per agent — lives in [ARCHITECTURE.md](./ARCHITECTURE.md#tacit-knowledge).
+
+### Manual / power-user flow
+
+The underlying commands `run.py` orchestrates also work directly:
 
 ```bash
-python scripts/run_fleet.py --list             # show agent names, agent_ids, worktree status
+python scripts/init_fleet.py                   # just the setup wizard
+python setup.py tacit [<name>]                 # just the tacit wizard
+python scripts/run_fleet.py                    # launch only
+python scripts/run_fleet.py --list             # agent status
 python scripts/run_fleet.py --only claude-1    # run a subset (repeatable)
-python scripts/run_fleet.py --clean            # remove every fleet worktree and its branch
-```
-
-To paste/upload tacit-knowledge hints for an agent (the one interactive bit that survives JSON):
-
-```bash
-python setup.py tacit claude-1
+python scripts/run_fleet.py --clean            # remove every worktree + branch
 ```
 
 ## Benchmark image
 
-Benchmarks run inside a local Docker container. Build the image once before the first launch:
+Build once before the first launch:
 
 ```bash
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
-
-# for GPU swarms/challenges:
-docker build -f Dockerfile.gpu -t tig-swarm-gpu .
+docker build -f Dockerfile.gpu -t tig-swarm-gpu .       # GPU challenges only
 ```
 
 ## Providers
@@ -125,32 +98,23 @@ docker build -f Dockerfile.gpu -t tig-swarm-gpu .
 | `anthropic`           | `ANTHROPIC_API_KEY`                                                             |
 | `openai`              | `OPENAI_API_KEY` (also `"api_base": "<url>"` for any OpenAI-compatible endpoint) |
 | `google`              | `GOOGLE_API_KEY`                                                                |
-| `venice`              | `VENICE_API_KEY` (Venice.ai — OpenAI-compatible, base URL baked in)             |
+| `venice`              | `VENICE_API_KEY` (OpenAI-compatible, base URL baked in)                         |
+| `openrouter`          | `OPENROUTER_API_KEY` (multi-model proxy; model IDs are `publisher/name`)        |
 | `claude-code`         | `claude` CLI login (no API key needed)                                          |
 | `claude-code-agentic` | `claude` CLI login                                                              |
 | `codex-agentic`       | `codex login`                                                                   |
 
-Per-provider default models live in `DEFAULT_MODELS` (scripts/run_loop.py). The CLI providers accept any model ID their CLI accepts. Omit `api_key_env` for `claude-code` and the `-agentic` providers — those use the CLI's own login.
+`claude-code` is one-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 15 min per iteration; don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
 
-### Agent vs one-shot mode
-
-`claude-code` is one-shot: the CLI returns a code blob and `run_loop.py` benchmarks it. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — the agent edits the algorithm file itself, runs `cargo check`, then `run_loop.py` benchmarks and publishes. Far more capable per iteration but burns ~5–20× tokens; only worth it under a subscription. Sandbox details in [ARCHITECTURE.md](./ARCHITECTURE.md#how-agents-work).
-
-Each iteration shells out to `claude -p` from a temp directory so the CLI's `CLAUDE.md` auto-discovery doesn't inject anything from this repo into the system prompt — `run_loop.py` supplies its own. Trade-offs vs the API providers: per-call latency is higher (subprocess startup), and the dashboard's cost column reads $0 because the CLI doesn't surface token usage.
-
-> **Agentic providers run silently.** `claude-code-agentic` and `codex-agentic` each invoke their CLI inside a single subprocess with `capture_output=True` so we can read the trace afterwards — there is **no live stdout** for the duration of that call. Expect no terminal output for up to `--agentic-timeout` seconds (default **900s / 15 min**) per iteration. The fleet still heartbeats every 60s in the background, and `[BENCH]` / Docker activity only starts after the agent returns.
-
-## Config Rule
+## Local files
 
 Swarm state lives on the server. Local files only tell this clone how to connect and run:
 
-| file                     | purpose                                                       |
-|--------------------------|---------------------------------------------------------------|
-| `fleet.config.json`      | User-edited — list of agents to spawn (contributors).         |
-| `swarm.admin.json`       | Host-only — admin key + swarm tuning. Created by `setup.py create`. |
-| `.swarm-cache.json`      | Machine-managed — mirror of `/api/swarm_config`. Auto-refreshed by `setup.py sync` on every iteration. |
-| `worktrees/<name>/agent.config.json` | Per-worktree state — provider/model + persisted `agent_id`. |
+| file                  | purpose                                                       |
+|-----------------------|---------------------------------------------------------------|
+| `fleet.config.json`   | Your fleet's agents (user-edited).                            |
+| `tacit_knowledge.md`  | Your private hint file (gitignored).                          |
+| `.swarm-cache.json`   | Auto-refreshed mirror of `/api/swarm_config`.                 |
+| `swarm.admin.json`    | Host-only — admin key + swarm tuning.                         |
 
-Secrets stay in environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`).
-
-See `ARCHITECTURE.md` for internals and the swarm protocol contributors call into.
+Secrets stay in environment variables.

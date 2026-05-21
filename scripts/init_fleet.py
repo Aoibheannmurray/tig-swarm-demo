@@ -86,6 +86,15 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
      "venice",
      True,
      "Venice.ai — OpenAI-compatible. Needs VENICE_API_KEY."),
+    ("openrouter",
+     "OpenRouter (multi-model proxy, OpenAI-compatible)",
+     "anthropic/claude-3.5-sonnet",
+     "OPENROUTER_API_KEY",
+     "openrouter",
+     True,
+     "OpenRouter — gateway to many providers under one key. "
+     "Use publisher/model strings like `anthropic/claude-3.5-sonnet` "
+     "or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."),
     ("claude-code",
      "Claude CLI — one-shot mode",
      "claude-opus-4-7",
@@ -263,7 +272,36 @@ def _read_paste_block() -> str:
     return "\n".join(lines)
 
 
-def _prompt_host_connection() -> tuple[str, str, str]:
+def _prompt_host_connection(
+    defaults: dict | None = None,
+) -> tuple[str, str, str]:
+    """Collect `server_url`, `username`, `swarm_password`. When `defaults`
+    contains all three (re-runs against an existing fleet.config.json),
+    offer to keep them as-is so the user doesn't have to paste / retype.
+    On 'no' (or partial / missing defaults), fall through to the paste-
+    block flow, with whatever defaults we have wired into the per-field
+    prompts as fallbacks."""
+    defaults = defaults or {}
+    have_all = all(
+        defaults.get(k) for k in ("server_url", "username", "swarm_password")
+    )
+    if have_all:
+        pw = defaults["swarm_password"]
+        pw_shown = pw[:6] + "…" + pw[-4:] if len(pw) > 12 else "set"
+        print("Existing connection settings:")
+        print(f"  server_url     = {defaults['server_url']}")
+        print(f"  username       = {defaults['username']}")
+        print(f"  swarm_password = {pw_shown}")
+        print()
+        if _prompt_yes_no(
+            "Keep these connection settings?", default=True,
+        ):
+            return (
+                defaults["server_url"],
+                defaults["username"],
+                defaults["swarm_password"],
+            )
+
     print("Paste the three lines your swarm host sent you. Example:")
     print('    "server_url": "https://my-swarm.up.railway.app",')
     print('    "username": "your-name",')
@@ -284,9 +322,15 @@ def _prompt_host_connection() -> tuple[str, str, str]:
             if key in parsed:
                 print(f"  ✓ {key} = {parsed[key]}")
 
-    server_url = parsed.get("server_url") or _prompt("server_url")
-    username = parsed.get("username") or _prompt("username")
-    swarm_password = parsed.get("swarm_password") or _prompt("swarm_password")
+    server_url = parsed.get("server_url") or _prompt(
+        "server_url", default=defaults.get("server_url") or None,
+    )
+    username = parsed.get("username") or _prompt(
+        "username", default=defaults.get("username") or None,
+    )
+    swarm_password = parsed.get("swarm_password") or _prompt(
+        "swarm_password", default=defaults.get("swarm_password") or None,
+    )
     return server_url, username, swarm_password
 
 
@@ -301,27 +345,6 @@ def _select_provider() -> tuple[str, str, str | None, str, bool]:
     key = _prompt_choice("Which LLM provider?", choices, default_idx=default_idx)
     spec = next(p for p in PROVIDERS if p[0] == key)
     return spec[0], spec[2], spec[3], spec[4], spec[5]
-
-
-def _api_key_status(env_var: str) -> str:
-    value = os.environ.get(env_var, "").strip()
-    if not value:
-        return "not set"
-    masked = value[:4] + "…" + value[-4:] if len(value) > 12 else "set"
-    return f"set ({masked})"
-
-
-def _handle_api_key(env_var: str) -> None:
-    """API keys live in environment variables, never in fleet.config.json.
-    This helper tells the user what to do without storing the key on disk."""
-    status = _api_key_status(env_var)
-    if status.startswith("set"):
-        print(f"  ✓ {env_var} is already set ({status[5:-1]}). You're good.")
-        return
-
-    print(f"  {env_var} is not set yet. Before launching the fleet, run:")
-    print(f"      export {env_var}=<your-key>")
-    print(f"  (add the same line to ~/.zshrc or ~/.bashrc to keep it around)")
 
 
 # ── Main flow ─────────────────────────────────────────────────────
@@ -368,11 +391,21 @@ def run_wizard(force: bool = False) -> int:
     print("Answer a few questions to generate fleet.config.json.")
     print("Press Ctrl-C at any time to abort.\n")
 
+    # Read the existing config (if any) BEFORE _confirm_overwrite so we
+    # can carry forward the swarm-connection triplet without forcing the
+    # user to paste / retype it on every wizard re-run.
+    existing: dict = {}
+    if FLEET_CONFIG_PATH.exists():
+        try:
+            existing = json.loads(FLEET_CONFIG_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
     _confirm_overwrite(force)
 
     print("\nSwarm connection")
     print("─" * 40)
-    server_url, username, swarm_password = _prompt_host_connection()
+    server_url, username, swarm_password = _prompt_host_connection(existing)
 
     print("\nLLM provider")
     print("─" * 40)
@@ -384,22 +417,13 @@ def run_wizard(force: bool = False) -> int:
     else:
         model = _prompt("model", allow_empty=True)
 
-    print("\nFleet size")
-    print("─" * 40)
-    print("How many copies of this agent do you want to run in parallel?")
-    count = _prompt_int("agents", default=1)
+    print()
+    count = _prompt_int("How many agents to run in parallel?", default=1)
 
     # Benchmarks always run in local Docker for now. Hand-edit fleet.config.json
     # to switch to remote backends like `c3`.
     compute = "local"
     hardware: str | None = None
-
-    print("\nAPI key")
-    print("─" * 40)
-    if api_key_env:
-        _handle_api_key(api_key_env)
-    else:
-        print(f"  No API key needed — {provider} uses its CLI's own login.")
 
     names = _generate_agent_names(count)
     config = {
@@ -414,15 +438,13 @@ def run_wizard(force: bool = False) -> int:
 
     FLEET_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
 
-    print("\n" + "─" * 40)
-    print(f"  wrote {FLEET_CONFIG_PATH.relative_to(ROOT)}")
-    print(f"  {count} agent(s): {', '.join(a['name'] for a in config['agents'])}")
-    print("\nNext steps:")
-    step = 1
+    names_str = ", ".join(a["name"] for a in config["agents"])
+    print(
+        f"\n  wrote {FLEET_CONFIG_PATH.relative_to(ROOT)} — "
+        f"{count} agent(s): {names_str}"
+    )
     if api_key_env and not os.environ.get(api_key_env, "").strip():
-        print(f"  {step}) export {api_key_env}=<your-key>")
-        step += 1
-    print(f"  {step}) python scripts/run_fleet.py")
+        print(f"  reminder: export {api_key_env}=<your-key> before launching")
     print()
     return 0
 

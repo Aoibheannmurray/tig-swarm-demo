@@ -8,6 +8,22 @@ from __future__ import annotations
 from challenge_files import is_stub_code, read_tacit_knowledge
 
 
+# ── Tacit-knowledge distillation switch ────────────────────────────
+#
+# Single source of truth for which code path owns the tacit-knowledge
+# distillation step. Both `build_agentic_user_prompt` (in-band) and
+# run_loop._should_distill_tacit (driver-mediated) read this flag.
+#
+# False (default): agentic providers (claude-code-agentic, codex-agentic)
+#   handle distillation themselves via the in-band prompt block. Cheaper
+#   — no extra LLM call — but the format is whatever the agent writes.
+# True: the driver runs a separate distillation call for every provider,
+#   including agentic ones; the in-band prompt block is suppressed.
+#   Uniform output format at the cost of one extra LLM call per
+#   trajectory reset.
+DRIVER_DISTILL_FOR_AGENTIC = False
+
+
 # ── Strategy tags ──────────────────────────────────────────────────
 
 
@@ -128,6 +144,123 @@ def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
 
     parts.append("\nPropose one specific improvement to try.")
     return "\n".join(parts)
+
+
+# ── Tacit-knowledge distillation prompts ───────────────────────────
+
+
+_TACIT_DISTILL_SYSTEM = (
+    "You are distilling a generalisable, cross-problem lesson from a "
+    "series of failed optimisation attempts.\n\n"
+    "A swarm agent has been working on a single algorithm trajectory and "
+    "is about to abandon it because none of its recent attempts improved "
+    "the score. Your job is to look at what was tried, what failed, and "
+    "write ONE short, transferable insight that would help a future "
+    "agent — possibly working on a completely different optimisation "
+    "problem — avoid the same dead-end.\n\n"
+    "Output requirements:\n"
+    "- Exactly one line, prefixed `- LLM: `.\n"
+    "- Under 30 words.\n"
+    "- No code, no scores, no instance IDs, no challenge names.\n"
+    "- Focus on FAILURE PATTERNS: \"X doesn't beat Y when Z\", "
+    "\"diagnostic A signals B is wrong\", \"C looks promising but loses "
+    "to D\".\n"
+    "- Abstract structural properties (constraint tightness, problem "
+    "size, solution-space topology) — not problem-specific terminology.\n"
+    "- If no genuinely new and transferable lesson has emerged that "
+    "isn't already in the existing notes, output exactly: SKIP"
+)
+
+
+def build_tacit_distillation_prompts(
+    state: dict, config: dict, current_code: str, existing_tacit: str,
+) -> tuple[str, str]:
+    """Build (system, user) prompts for the tacit-knowledge distillation
+    call. Fired by the driver after the iteration that's about to trigger
+    a trajectory reset — at which point `state["prior_hypotheses"]` holds
+    the trajectory's accumulated failed attempts, which is exactly the
+    material we want to distill from."""
+    my_best = state.get("my_best_score")
+    global_best = state.get("best_score")
+    runs = state.get("my_runs", 0)
+    improvements = state.get("my_improvements", 0)
+    stagnation = state.get("my_runs_since_improvement", 0)
+
+    prior = state.get("prior_hypotheses") or []
+    if prior:
+        lines = ["Hypotheses tried against this code (most recent first):"]
+        for h in prior:
+            tag = h.get("strategy_tag", "?")
+            title = h.get("title", "?")
+            score = h.get("score")
+            desc = (h.get("description") or "").strip()
+            score_part = f" — score {score}" if score is not None else ""
+            lines.append(f"  - [{tag}] {title}{score_part}")
+            if desc:
+                lines.append(f"    {desc}")
+        hypotheses_block = "\n".join(lines)
+    else:
+        hypotheses_block = (
+            "Hypotheses tried against this code: (none recorded — "
+            "trajectory has insufficient material; you will likely need "
+            "to output SKIP.)"
+        )
+
+    existing_llm = [
+        ln for ln in (existing_tacit or "").splitlines()
+        if ln.startswith("- LLM:")
+    ]
+    if existing_llm:
+        existing_block = (
+            "Existing distilled lessons (do NOT duplicate these):\n"
+            + "\n".join(f"  {ln}" for ln in existing_llm[-20:])
+        )
+    else:
+        existing_block = "Existing distilled lessons: (none yet)"
+
+    code_block = (
+        "Current algorithm (for structural reference; do NOT quote it "
+        f"in your output):\n```rust\n{current_code}\n```"
+        if current_code else "Current algorithm: (none on disk)"
+    )
+
+    user = (
+        "Trajectory summary\n"
+        f"- Best score on this trajectory: {my_best}\n"
+        f"- Global best: {global_best}\n"
+        f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}\n"
+        "\n"
+        f"{hypotheses_block}\n"
+        "\n"
+        f"{existing_block}\n"
+        "\n"
+        f"{code_block}\n"
+        "\n"
+        "Now: write one `- LLM: ` line distilling a transferable lesson "
+        "from the failed hypotheses above, or output SKIP if nothing new "
+        "and transferable has emerged."
+    )
+    return _TACIT_DISTILL_SYSTEM, user
+
+
+def parse_tacit_distillation(response: str) -> str | None:
+    """Extract a `- LLM: …` line from the model's response, or None if it
+    indicated SKIP or produced nothing usable. Trims surrounding
+    whitespace and rejects any output that doesn't start with the
+    `- LLM:` prefix on its first non-empty line."""
+    if not response:
+        return None
+    for line in response.strip().splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.upper() == "SKIP":
+            return None
+        if s.startswith("- LLM:"):
+            return s
+        # First non-empty line wasn't what we asked for — reject.
+        return None
+    return None
 
 
 # ── Code generation prompts ────────────────────────────────────────
@@ -448,6 +581,35 @@ def build_agentic_user_prompt(state: dict, config: dict) -> str:
             "Check `tacit_knowledge_personal.md` in this worktree (if "
             "present) for strategy hints the contributor wrote down. If "
             "absent, fall back to the inspiration_code block above if any."
+        )
+
+    stagnation_limit = int(config.get("stagnation_limit") or 0)
+    in_band_distill = (
+        not DRIVER_DISTILL_FOR_AGENTIC
+        and stagnation_limit >= 3
+        and stagnation == stagnation_limit - 1
+    )
+    if in_band_distill:
+        parts.append(
+            "\n## Tacit-knowledge contribution\n"
+            "Trigger: this is your LAST iteration before the server resets "
+            "your trajectory (you're at `stagnation_limit - 1`). Before "
+            "you stop, look back over the attempts in `prior_hypotheses` "
+            "above and ask: is there a *generalisable* lesson in what "
+            "HASN'T worked? If yes, append ONE short bullet to "
+            "`tacit_knowledge_personal.md` (create the file if missing) "
+            "under the `## Strategies` heading, prefixed with `- LLM:`.\n"
+            "Rules:\n"
+            "- Focus on failure: what looked promising and didn't pay off, "
+            "or what diagnostic told you a direction was a dead end.\n"
+            "- Abstract away from this specific challenge — write it so it "
+            "would help a future agent on a *different* optimisation "
+            "problem. Good: \"large-neighborhood search underperforms when "
+            "the feasible region is narrow.\" Bad: \"tabu length 12 lost "
+            "to length 8 on this instance.\"\n"
+            "- Under 30 words. No code, no scores, no instance IDs.\n"
+            "- Skip silently if nothing genuinely new and transferable has "
+            "emerged since the last `- LLM:` entry already in the file."
         )
 
     parts.append(

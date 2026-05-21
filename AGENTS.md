@@ -5,13 +5,40 @@ contributor set up their machine to join an existing TIG swarm. The user has
 probably pasted a short snippet like:
 
 ```
-git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python scripts/init_fleet.py
+git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python run.py
 server_url:     https://…railway.app
 username:       <their-handle>
 swarm_password: <hex string from the swarm host>
 ```
 
-Your job is to get `python scripts/run_fleet.py` running cleanly. Nothing more.
+Your job is to get `python run.py` running cleanly. Nothing more.
+
+`run.py` is the single contributor entry point. It orchestrates four phases
+in one command:
+
+1. Preflight (`docker` on PATH).
+2. **Init wizard** if `fleet.config.json` is missing. On a re-run with the
+   file already present, asks `Update your fleet config (provider / model
+   / agent count)? (y/N)` (default No). On yes, re-enters the wizard with
+   `force=True` and offers to keep the existing `server_url` / `username`
+   / `swarm_password` triplet so the user doesn't have to paste them again.
+3. **Tacit-knowledge phase**. First run (no source file has real content
+   yet) jumps straight into the create wizard. Subsequent runs gate behind
+   `Add or edit tacit knowledge for your agent(s)? (y/N)` (default No); on
+   yes, the per-path wizard auto-picks the create menu (file missing /
+   stub-only) or the edit menu (file has user content). Edit menu offers
+   an `Open in $EDITOR` option for direct hand-editing. By default every
+   agent in the fleet shares one file (`tacit_knowledge.md` at repo root),
+   so the wizard runs once and all agents benefit.
+4. **Launches the fleet** — same logic as `scripts/run_fleet.py`. On
+   shutdown, any `- LLM:` lessons agents appended in their worktrees are
+   collated back into the shared `tacit_knowledge.md` (deduped against
+   existing entries), so distillations accumulate across runs and across
+   agents.
+
+The underlying scripts (`scripts/init_fleet.py`, `setup.py tacit`,
+`scripts/run_fleet.py`) all still work standalone for power-user / scripted
+flows. `run.py` just calls into them, so behavior is identical.
 
 ## What this repo is (so you don't get pulled off-mission)
 
@@ -38,9 +65,9 @@ and often fails on managed machines.
 
 ## If Docker is missing
 
-`python scripts/init_fleet.py` preflight-checks for `docker` on PATH and
-exits with a link to Docker Desktop. **Send the user to that link.** Do
-*not* try to install Docker yourself via Homebrew / apt / dnf:
+`python run.py` preflight-checks for `docker` on PATH and exits with a link
+to Docker Desktop. **Send the user to that link.** Do *not* try to install
+Docker yourself via Homebrew / apt / dnf:
 
 - macOS without Homebrew → fragile.
 - Linux server installs of dockerd → need sudo and typically conflict with
@@ -49,21 +76,28 @@ exits with a link to Docker Desktop. **Send the user to that link.** Do
   grant from a coding-assistant shell.
 
 After the user installs Docker Desktop and finishes its first-run setup,
-resume from `python scripts/init_fleet.py`.
+resume from `python run.py`.
 
-## The wizard (`scripts/init_fleet.py`)
+## The wizard (invoked by `run.py`, also runnable as `scripts/init_fleet.py`)
 
 It prompts for, in order:
 
 1. `server_url`
 2. `username`
 3. `swarm_password`
-4. LLM provider (Anthropic / OpenAI / Google / Venice / `claude` CLI /
-   `codex` CLI / Venice — pick what the user has credentials for)
+4. LLM provider (Anthropic / OpenAI / Google / Venice / OpenRouter /
+   `claude` CLI / `codex` CLI — pick what the user has credentials for)
 5. Model (Enter accepts the per-provider default)
 6. Fleet size (number of parallel agents — default 1)
 
-For non-interactive setup you can pipe answers via stdin, e.g.:
+On a **re-run** against an existing `fleet.config.json` the wizard adds a
+`Keep these connection settings? [Y/n]` step right before (1) — Enter
+reuses the previous `server_url` / `username` / `swarm_password` and skips
+straight to (4). The user only ends up retyping the connection triplet if
+they type `n`.
+
+For non-interactive setup on a fresh clone (no existing config) you can
+pipe answers via stdin, e.g.:
 
 ```bash
 printf '%s\n' "$SERVER_URL" "$USERNAME" "$SWARM_PASSWORD" "1" "" "1" | python scripts/init_fleet.py
@@ -71,7 +105,8 @@ printf '%s\n' "$SERVER_URL" "$USERNAME" "$SWARM_PASSWORD" "1" "" "1" | python sc
 
 (Provider/model defaults pick Anthropic + `claude-opus-4-7`. Adjust the
 sequence if the user wants a different provider — see the prompts in
-`scripts/init_fleet.py`.)
+`scripts/init_fleet.py`.) On a re-run, add a leading `"y"` for the keep-
+settings prompt and drop the three connection lines.
 
 **Fleet size.** The trailing `"1"` in that pipe is the *number of agents to
 spawn in parallel* — not a Yes/No. Default to 1 unless the user explicitly
@@ -81,28 +116,58 @@ for the extra agents. If the user already has a `fleet.config.json` and
 wants to grow it, just duplicate one agent entry under `agents: [...]` with
 a new unique `name` — no need to re-run the wizard.
 
-The wizard writes `fleet.config.json` and prints the env var the user must
-export (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) — unless they picked a
-CLI-auth provider (`claude-code`, `claude-code-agentic`, `codex-agentic`),
-which use the CLI's own login. **Never write API keys into
+The wizard writes `fleet.config.json` and prints a one-line summary —
+`wrote fleet.config.json — N agent(s): <names>` — plus an inline reminder
+only when the chosen provider needs an API key that isn't yet exported
+(`reminder: export ANTHROPIC_API_KEY=<your-key> before launching`). CLI-auth
+providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) skip the
+reminder; they use the CLI's own login. **Never write API keys into
 `fleet.config.json` yourself.**
 
 ## Launching
 
 ```bash
-python scripts/run_fleet.py
+python run.py
 ```
 
-Each agent spawns its own git worktree under `worktrees/<name>/`. Output is
+`run.py` reuses the existing `fleet.config.json` after asking
+`Update your fleet config? (y/N)` (default No), then handles the tacit
+phase — silently jumping to the create menu on a first run, or asking
+`Add or edit tacit knowledge? (y/N)` on subsequent runs — and launches. Each
+agent spawns its own git worktree under `worktrees/<name>/`. Output is
 prefixed by agent name. `Ctrl-C` terminates the whole fleet. If the user
 restarts later, agent identities persist via `worktrees/<name>/agent.config.json`.
 
-Useful fleet management:
+Useful fleet management (still on `scripts/run_fleet.py`, since `run.py`
+doesn't forward management flags):
 
 ```bash
 python scripts/run_fleet.py --list     # show agent names, ids, status
 python scripts/run_fleet.py --clean    # remove every worktree + branch
 ```
+
+## Tacit-knowledge from a coding-agent session
+
+`run.py` skips its tacit prompts entirely when stdin isn't a TTY (your
+Bash tool's case), so the interactive wizard isn't the right channel for
+piping notes through. If the contributor wants to seed tacit-knowledge
+hints, write them directly to `tacit_knowledge.md` at the repo root
+before launching:
+
+```markdown
+# Personal tacit knowledge
+
+## Strategies
+
+- when local search plateaus, perturb the neighborhood structure before
+  switching metaheuristic
+- large-neighborhood search underperforms on tight feasibility regions
+```
+
+The file is gitignored, never sent to the server, and read by every
+agent in the fleet by default. Format: a `## Strategies` section
+followed by one bullet per insight. Agents will also append their own
+`- LLM: …` failure-lessons here as they hit dead ends.
 
 ## Windows-specific gotchas
 
@@ -117,7 +182,7 @@ else — they're the failure modes our docs have actually been bitten by:
   BOM by default. The loader now reads via `utf-8-sig` so this should no longer
   break things, but the safe write idiom is
   `$json | Out-File -Encoding utf8NoBOM fleet.config.json`. Better still: use
-  `python scripts/init_fleet.py`.
+  `python run.py` (which calls the wizard).
 - **Codex CLI: prefer the npm install.** The Windows Store alias for `codex`
   (`%LOCALAPPDATA%\Microsoft\WindowsApps\codex.exe`) commonly returns
   `Access is denied` when invoked from a subprocess. Have the user run
@@ -171,6 +236,15 @@ else — they're the failure modes our docs have actually been bitten by:
 
 - **`fleet.config.json already exists. Overwrite?`**
   → They've run the wizard before. Either answer `y` or run with `--force`.
+  (When the wizard is invoked through `python run.py`, this is handled by
+  the `Update your fleet config? (y/N)` prompt up front.)
+
+- **`Agent <name>: environment variable ANTHROPIC_API_KEY is unset or empty.`**
+  → The contributor picked an API-key provider but never exported the key.
+  Tell them to run the suggested `export …=<your-key>` command from the
+  error and re-run `python run.py`. CLI-auth providers (`claude-code`,
+  `claude-code-agentic`, `codex-agentic`) never produce this error — they
+  log in through their CLI instead.
 
 ## What you should *not* do
 

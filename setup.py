@@ -610,69 +610,181 @@ def tacit_header(stagnation_threshold: int = 2) -> str:
     swarm's actual config (the server reads it from swarm.admin.json on the
     host, POSTed at `setup.py create` time)."""
     return (
-        "# Personal tacit knowledge\n\n"
-        "Hints only **your local agent** sees. Never sent to the server.\n"
-        "Other agents in the swarm cannot read this file.\n\n"
-        f"Read by your agent when stagnating (`my_runs_since_improvement >= {stagnation_threshold}`)\n"
-        "— at that point the server randomly picks (50/50) between this file\n"
-        "and the swarm's `inspiration_code` for the iteration's hint.\n\n"
-        "Your local agent occasionally appends its own distilled,\n"
-        "challenge-agnostic \"when stuck, try X\" lessons here — specifically\n"
-        "when it has stagnated 10 iterations in a row, or every 50 total\n"
-        "iterations. These are general algorithmic know-how derived from\n"
-        "looking back at every iteration so far, intentionally written so they\n"
-        "stay useful even if the swarm switches to a different challenge later.\n\n"
-        "## Strategies\n\n"
+    "# Personal tacit knowledge\n\n"
+    "Private local-agent notes; never uploaded or shared across the swarm.\n\n"
+    "Shared fleet-wide by default unless a per-agent `tacit_knowledge`\n"
+    "path is set in `fleet.config.json`.\n\n"
+    f"Used when stagnating (`my_runs_since_improvement >= {stagnation_threshold}`),\n"
+    "where the server randomly selects between this file and `inspiration_code`\n"
+    "for the next hint.\n\n"
+    "Agents append distilled lessons before trajectory resets as `- LLM:`\n"
+    "entries focused on generalized failure patterns and ineffective strategies.\n\n"
+    "## Strategies\n\n"
     )
 
 
-def gather_tacit_knowledge(tk_path: Path, stagnation_threshold: int = 2) -> None:
-    """Populate the personal tacit-knowledge file, all at once.
+# ── Tacit-knowledge guided capture ────────────────────────────────────
 
-    Three input modes (no per-hint loop):
-      1. Upload from an existing file (give a path; whole file is copied in).
-      2. Paste/type every strategy at once in the terminal, ended by Ctrl-D
-         (Unix) or Ctrl-Z+Enter (Windows). The whole block is dropped into
-         the file verbatim — bullet style is up to the user.
-      3. Skip — the stub stays in place.
-    """
-    print(
-        "\n── Tacit knowledge (optional) ──\n"
-        "Give your local agent private strategy hints. These are read\n"
-        f"when the agent stagnates ({stagnation_threshold}+ iterations without improvement) —\n"
-        "at which point the server picks 50/50 between consulting this file and\n"
-        "the swarm's `inspiration_code` for the iteration's hint. The file is\n"
-        "gitignored and never sent to the server.\n"
-    )
-    print("How would you like to provide them?")
-    print("  1. Upload from an existing tacit-knowledge file (give a path)")
-    print("  2. Type or paste every strategy now, all at once")
-    print("  3. Skip — leave the existing file in place\n")
 
+TACIT_QUESTIONS = [
+    {
+        "title": "When standard approaches stop working, what do you reach for first?",
+        "hint": (
+            "Think of the moves you make AFTER the obvious ones don't work\"."
+        ),
+    },
+    {
+        "title": "What signals tell you a line of inquiry is promising vs a dead end?",
+        "hint": (
+            "How do you decide whether to push harder or back out?\n"
+            "Example: \"if the first 100 iterations don't beat random restart,\n"
+            "the parameterisation is wrong — abandon and retune\"."
+        ),
+    },
+    {
+        "title": "What rules of thumb have you picked up that aren't in the textbooks?",
+        "hint": (
+            "Practical know-how — the things you'd tell your new PhD student\n"
+            "on day one to guide them\"."
+        ),
+    },
+    {
+        "title": "What pattern-recognition cues do you trust? \"When I see X, I try Y.\"",
+        "hint": (
+            "Diagnostic intuitions — what input or intermediate signal triggers\n"
+            "which strategy in your head?\"."
+        ),
+    },
+    {
+        "title": "What looks promising on paper but consistently underperforms in practice?",
+        "hint": (
+            "Tempting dead ends — things that sound good in talks or papers\n"
+            "but lose to simpler approaches when you actually run them\"."
+        ),
+    },
+    {
+        "title": "Anything else worth knowing — judgment calls, instincts, field experiences.",
+        "hint": (
+            "Free-form catch-all for the stuff that didn't fit above.\n"
+            "Skip if you've already covered everything that comes to mind."
+        ),
+    },
+]
+
+
+def _read_block_until_dot() -> str:
+    """Read multi-line input terminated by `.` on its own line, EOF, or
+    an empty first line (= skip). Returns the captured text (stripped) or
+    empty string."""
+    lines: list[str] = []
     while True:
-        choice = input("Choice 1/2/3 [3]: ").strip() or "3"
-        if choice in ("1", "2", "3"):
+        prompt = "  > " if not lines else "    "
+        try:
+            line = input(prompt)
+        except EOFError:
             break
-        print("  invalid choice; pick 1, 2, or 3")
+        if line.strip() == ".":
+            break
+        if not lines and not line.strip():
+            return ""
+        lines.append(line)
+    return "\n".join(lines).rstrip()
 
-    if choice == "3":
-        print(f"  no hints added (edit {tk_path.relative_to(ROOT)} any time)")
+
+def _guided_tacit_capture() -> str:
+    """Walk the user through TACIT_QUESTIONS and assemble a markdown body
+    (no header — caller prepends `tacit_header`). Returns empty string if
+    every question was skipped or the user cancelled."""
+    bar = "═" * 72
+    rule = "─" * 72
+    print()
+    print(bar)
+    print("  Tacit knowledge — guided capture".center(72))
+    print(bar)
+    print(
+        "\n  Tacit knowledge is the practical, hard-won expertise you've built\n"
+        "  through years of practice — the strategies, heuristics, and judgment\n"
+        "  calls you reach for instinctively but rarely write down. Your local\n"
+        "  agent will consult these notes whenever it stagnates.\n"
+        f"\n  {len(TACIT_QUESTIONS)} short prompts follow. Press Enter on an empty\n"
+        "  answer to skip any one of them; finish a multi-line answer with a\n"
+        "  single `.` on its own line.\n"
+    )
+
+    sections: list[str] = []
+    for idx, q in enumerate(TACIT_QUESTIONS, 1):
+        print(rule)
+        print(f"  Question {idx} / {len(TACIT_QUESTIONS)}")
+        print()
+        print(f"  {q['title']}")
+        print()
+        for line in q["hint"].splitlines():
+            print(f"    {line}")
+        print()
+        try:
+            body = _read_block_until_dot()
+        except KeyboardInterrupt:
+            print("\n  cancelled — partial input discarded")
+            return ""
+        if body:
+            sections.append(f"### {q['title']}\n\n{body}")
+            print("  ✓ recorded\n")
+        else:
+            print("  · skipped\n")
+
+    print(rule)
+    return "\n\n".join(sections)
+
+
+_TACIT_STUB_LINE = "- (replace this with your own hint, or run setup again)\n"
+
+
+def _has_user_content(tk_path: Path) -> bool:
+    """True when the tacit file has substantive content beyond the
+    auto-generated header + placeholder stub. Used to decide whether the
+    wizard should show the 'create' menu (empty/stubbed) or the 'edit'
+    menu (real notes already there)."""
+    if not tk_path.exists():
+        return False
+    body = tk_path.read_text().replace(_TACIT_STUB_LINE, "")
+    if "## Strategies" in body:
+        _, after = body.split("## Strategies", 1)
+        return bool(after.strip())
+    return bool(body.strip())
+
+
+def _append_or_seed(
+    tk_path: Path, new_body: str, stagnation_threshold: int, *, append: bool,
+) -> None:
+    """Write `new_body` into the tacit file. When append=True and the file
+    already has user content, the body is appended at the end; otherwise the
+    file is (re)written from the header + body. The boilerplate "replace
+    this with your own hint" stub line is stripped on first real append so
+    the contributor's notes don't get prefixed with placeholder noise."""
+    if append and tk_path.exists():
+        existing = tk_path.read_text().replace(_TACIT_STUB_LINE, "")
+        if not existing.endswith("\n"):
+            existing += "\n"
+        tk_path.write_text(existing + "\n" + new_body + "\n")
+    else:
+        tk_path.write_text(tacit_header(stagnation_threshold) + new_body + "\n")
+
+
+def _gather_via_guided(
+    tk_path: Path, stagnation_threshold: int, *, append: bool,
+) -> None:
+    body = _guided_tacit_capture()
+    if not body:
+        print("  every question skipped — leaving existing file in place")
         return
+    _append_or_seed(tk_path, body, stagnation_threshold, append=append)
+    verb = "appended to" if append and tk_path.exists() else "wrote"
+    print(f"\n  {verb} {tk_path.relative_to(ROOT)}")
 
-    if choice == "1":
-        src = input("Path to your tacit-knowledge file: ").strip()
-        if not src:
-            print("  no path given; leaving existing file in place")
-            return
-        src_path = Path(src).expanduser()
-        if not src_path.is_file():
-            print(f"  not a file: {src_path}; leaving existing file in place")
-            return
-        tk_path.write_text(src_path.read_text())
-        print(f"  copied {src_path} -> {tk_path.relative_to(ROOT)}")
-        return
 
-    # choice == "2": single multi-line paste
+def _gather_via_paste(
+    tk_path: Path, stagnation_threshold: int, *, append: bool,
+) -> None:
     print(
         "\nPaste or type ALL of your strategies below — one per line, any\n"
         "format you like. When finished, press Ctrl-D (Unix/macOS) or\n"
@@ -687,8 +799,147 @@ def gather_tacit_knowledge(tk_path: Path, stagnation_threshold: int = 2) -> None
     if not text:
         print("  no text entered; leaving existing file in place")
         return
-    tk_path.write_text(tacit_header(stagnation_threshold) + text + "\n")
-    print(f"  wrote your strategies to {tk_path.relative_to(ROOT)}")
+    _append_or_seed(tk_path, text, stagnation_threshold, append=append)
+    verb = "appended to" if append and tk_path.exists() else "wrote"
+    print(f"  {verb} {tk_path.relative_to(ROOT)}")
+
+
+def _gather_via_upload(tk_path: Path) -> None:
+    src = input("Path to your tacit-knowledge file: ").strip()
+    if not src:
+        print("  no path given; leaving existing file in place")
+        return
+    src_path = Path(src).expanduser()
+    if not src_path.is_file():
+        print(f"  not a file: {src_path}; leaving existing file in place")
+        return
+    tk_path.write_text(src_path.read_text())
+    print(f"  copied {src_path} -> {tk_path.relative_to(ROOT)}")
+
+
+def _open_in_editor(tk_path: Path) -> None:
+    """Hand the file off to the contributor's $EDITOR (or $VISUAL) for
+    direct editing. Falls back to a sensible platform default. Whatever
+    they save when the editor exits is the new file content."""
+    editor = (
+        os.environ.get("VISUAL")
+        or os.environ.get("EDITOR")
+        or ("notepad" if os.name == "nt" else "vi")
+    )
+    try:
+        sp.run([editor, str(tk_path)], check=False)
+    except FileNotFoundError:
+        print(
+            f"  could not launch editor {editor!r}. Set $EDITOR or $VISUAL "
+            "to your preferred editor and try again."
+        )
+        return
+    try:
+        shown = tk_path.relative_to(ROOT)
+    except ValueError:
+        shown = tk_path
+    print(f"  editor closed; saved as-is ({shown})")
+
+
+def gather_tacit_knowledge(
+    tk_path: Path, stagnation_threshold: int = 2, *, append: bool = True,
+) -> None:
+    """Populate or edit the personal tacit-knowledge file.
+
+    Auto-detects whether the file has user content yet and shows the
+    appropriate menu.
+
+    Create flow (no real content yet):
+      1. Upload from an existing file (path; copied verbatim — replaces).
+      2. Guided capture — answer six short prompts (recommended).
+      3. Paste a single block — power-user escape hatch.
+      4. Skip — don't add any tacit knowledge yet.
+
+    Edit flow (file already has user content):
+      1. Add more via guided capture (recommended; appends).
+      2. Add more via paste (appends).
+      3. Open the file in your $EDITOR for direct hand-editing.
+      4. Replace entirely from another file (path).
+      5. Cancel — leave the file as-is.
+
+    With append=True (default), guided/paste modes append to existing
+    content. Upload and editor modes always overwrite (explicit replace).
+    """
+    is_edit = _has_user_content(tk_path)
+
+    if is_edit:
+        try:
+            rel = tk_path.relative_to(ROOT)
+        except ValueError:
+            rel = tk_path
+        print(f"\n── Editing tacit knowledge ({rel}) ──")
+        print("How would you like to update it?")
+        print("  1. Add more via guided capture (recommended; appends)")
+        print("  2. Add more via paste (appends)")
+        print("  3. Open the file in your $EDITOR")
+        print("  4. Replace entirely from another file (give a path)")
+        print("  5. Cancel — leave the file as-is\n")
+        valid = ("1", "2", "3", "4", "5")
+        default = "1"
+        prompt = "Choice 1/2/3/4/5 [1]: "
+    else:
+        print(
+            "\n── Tacit knowledge (optional) ──\n"
+            "Give your local agent private strategy hints. These are read\n"
+            f"when the agent stagnates ({stagnation_threshold}+ iterations without improvement) —\n"
+            "at which point the server picks 50/50 between consulting this file and\n"
+            "the swarm's `inspiration_code` for the iteration's hint. The file is\n"
+            "gitignored and never sent to the server.\n"
+        )
+        print("How would you like to provide them?")
+        print("  1. Upload from an existing tacit-knowledge file (give a path)")
+        print("  2. Guided capture — answer a few short prompts (recommended)")
+        print("  3. Paste a single block of free-form text")
+        print("  4. Skip — don't add any tacit knowledge yet\n")
+        valid = ("1", "2", "3", "4")
+        default = "2"
+        prompt = "Choice 1/2/3/4 [2]: "
+
+    while True:
+        try:
+            choice = input(prompt).strip() or default
+        except EOFError:
+            # Non-interactive caller (closed stdin, piped, headless agent).
+            # Treat as "skip / cancel" rather than crashing the launcher.
+            print("  (stdin closed — skipping tacit wizard)")
+            return
+        if choice in valid:
+            break
+        print(f"  invalid choice; pick one of {', '.join(valid)}")
+
+    if is_edit:
+        if choice == "1":
+            _gather_via_guided(tk_path, stagnation_threshold, append=append)
+        elif choice == "2":
+            _gather_via_paste(tk_path, stagnation_threshold, append=append)
+        elif choice == "3":
+            _open_in_editor(tk_path)
+        elif choice == "4":
+            _gather_via_upload(tk_path)
+        else:  # "5"
+            try:
+                shown = tk_path.relative_to(ROOT)
+            except ValueError:
+                shown = tk_path
+            print(f"  no change (edit {shown} any time)")
+    else:
+        if choice == "1":
+            _gather_via_upload(tk_path)
+        elif choice == "2":
+            _gather_via_guided(tk_path, stagnation_threshold, append=append)
+        elif choice == "3":
+            _gather_via_paste(tk_path, stagnation_threshold, append=append)
+        else:  # "4"
+            try:
+                shown = tk_path.relative_to(ROOT)
+            except ValueError:
+                shown = tk_path
+            print(f"  no hints added (edit {shown} any time)")
 
 
 def run_tacit(agent_name: str | None = None) -> int:
@@ -718,23 +969,24 @@ def run_tacit(agent_name: str | None = None) -> int:
         print("fleet.config.json has no agents.")
         return 1
 
+    fleet_tacit = fleet.get("tacit_knowledge") or None
+
+    # Resolve the source path. Precedence: per-agent override > top-level
+    # fleet default > implicit shared `tacit_knowledge.md`. By default all
+    # agents share the same file so their LLM-distilled lessons collate
+    # into one pool — set per-agent / top-level only to override that.
     if agent_name:
         match = next((a for a in agents if a.get("name") == agent_name), None)
         if not match:
             print(f"agent {agent_name!r} not found in fleet.config.json.")
             print(f"available: {', '.join(a.get('name', '?') for a in agents)}")
             return 1
-    elif len(agents) == 1:
-        match = agents[0]
+        explicit_rel = match.get("tacit_knowledge") or fleet_tacit
     else:
-        names = [a.get("name", "?") for a in agents]
-        print(
-            "fleet has multiple agents; pass one of: "
-            f"{', '.join(names)}"
-        )
-        return 1
+        match = None
+        explicit_rel = fleet_tacit
 
-    tk_rel = match.get("tacit_knowledge") or f"tacit_knowledge_{match['name']}.md"
+    tk_rel = explicit_rel or "tacit_knowledge.md"
     tk_path = Path(tk_rel)
     if not tk_path.is_absolute():
         tk_path = ROOT / tk_path
@@ -750,18 +1002,16 @@ def run_tacit(agent_name: str | None = None) -> int:
         )
         print(f"  created {tk_path.relative_to(ROOT)} (gitignored)")
 
-    gather_tacit_knowledge(tk_path, stagnation_threshold)
+    if match is None:
+        # Editing the shared file directly — show which agents will pick it up.
+        sharing = [
+            a.get("name", "?") for a in agents
+            if not a.get("tacit_knowledge")
+        ]
+        if sharing:
+            print(f"  shared file — used by: {', '.join(sharing)}")
 
-    # Hook the file path back into the fleet entry if it wasn't already set,
-    # so run_fleet.py's _seed_worktree will copy it into the worktree.
-    if not match.get("tacit_knowledge"):
-        try:
-            rel = str(tk_path.relative_to(ROOT))
-        except ValueError:
-            rel = str(tk_path)
-        match["tacit_knowledge"] = rel
-        fleet_path.write_text(json.dumps(fleet, indent=2) + "\n")
-        print(f"  linked tacit_knowledge → {rel} in fleet.config.json")
+    gather_tacit_knowledge(tk_path, stagnation_threshold)
     return 0
 
 
