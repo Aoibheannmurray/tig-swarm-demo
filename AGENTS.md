@@ -250,7 +250,7 @@ else — they're the failure modes our docs have actually been bitten by:
 
 - Don't edit Rust files, `CHALLENGE.md`, or `initial_algorithms/`.
 - Don't try to register agents via the HTTP API yourself — that's
-  `register_agent` in `scripts/server.py`, called by `run_loop.py`.
+  `register_agent` in `server/server.py`, called by `run_loop.py`.
 - Don't install Rust, cargo, or Python packages on the host.
 - Don't push, force-push, or create commits unless the user explicitly asks.
 - Don't paste the user's `swarm_password` into chat output or commit it.
