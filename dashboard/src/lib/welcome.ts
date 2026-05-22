@@ -20,10 +20,10 @@ const PAL_TEAL       = "#4A8C8A";
 const PAL_RUST       = "#A66E45";
 const PAL_PURPLE     = "#8B6B8C";
 
-const REPO_URL = "https://github.com/Aoibheannmurray/tig-swarm-demo.git";
+const REPO_URL = "https://github.com/tig-foundation/prometheus-early-beta.git";
 
 const STEPS: { cmd: string }[] = [
-  { cmd: `git clone ${REPO_URL} && cd tig-swarm-demo && python run.py` },
+  { cmd: `git clone ${REPO_URL} && cd prometheus-early-beta && python run.py` },
 ];
 
 export function initWelcome() {
