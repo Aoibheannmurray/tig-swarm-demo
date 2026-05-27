@@ -1184,6 +1184,38 @@ html, body {
 }
 
 /* ── Feed ── */
+/* Feed panel is a flex column so the list grows and the "Load older" button
+   sits beneath it without overflowing the panel. */
+.panel-inner--feed {
+  display: flex;
+  flex-direction: column;
+}
+.panel-inner--feed .feed-list {
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.feed-load-older {
+  flex: 0 0 auto;
+  margin-top: 6px;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.feed-load-older:hover:not(:disabled) {
+  color: var(--text-bright);
+  background: var(--bg-hover);
+}
+.feed-load-older:disabled { opacity: 0.6; cursor: default; }
+.feed-load-older[hidden] { display: none; }
 .feed-list {
   display: flex;
   flex-direction: column;

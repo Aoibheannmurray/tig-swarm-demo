@@ -8,6 +8,7 @@ OpenAI, Google) or any OpenAI-compatible endpoint via --api-base.
 Usage:
     python setup.py
     export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
+    # Windows: set ANTHROPIC_API_KEY=sk-...  (cmd)  /  $env:ANTHROPIC_API_KEY="sk-..."  (PowerShell)
     python scripts/run_loop.py
 
     # Overrides still work:
@@ -828,11 +829,15 @@ def main() -> int:
     config = load_config()
     agent_config = load_agent_config()
     # `setup.py sync` (called at the top of every iteration) rebuilds
-    # .swarm-cache.json from a server-field whitelist, so log_prompts can't
-    # live there. Read it from agent.config.json once and re-apply it after
-    # each load_config() inside the loop.
+    # .swarm-cache.json from a server-field whitelist, so these agent-local
+    # flags can't live there. Read them from agent.config.json once and
+    # re-apply them after each load_config() inside the loop.
     log_prompts = bool(agent_config.get("log_prompts"))
     config["log_prompts"] = log_prompts
+    # Opt-in stricter, rule-based Rust prompt for smaller/cheaper models whose
+    # raw output tends not to compile (see _rust_rules_block in prompts.py).
+    detailed_prompts = bool(agent_config.get("detailed_prompts"))
+    config["detailed_prompts"] = detailed_prompts
 
     args.provider = args.provider or agent_config.get("provider") or "anthropic"
     valid_providers = set(DEFAULT_MODELS) | {
@@ -991,6 +996,7 @@ def main() -> int:
     sync_challenge()
     config = load_config()
     config["log_prompts"] = log_prompts
+    config["detailed_prompts"] = detailed_prompts
     challenge_md = read_challenge_md()
 
     # Agentic mode (claude-code-agentic): tooled headless Claude Code inside a
@@ -1045,6 +1051,7 @@ def main() -> int:
         sync_challenge()
         config = load_config()
         config["log_prompts"] = log_prompts
+        config["detailed_prompts"] = detailed_prompts
         challenge_md = read_challenge_md()
         # Pin the iteration's challenge here so chat messages and any other
         # follow-up writes stay attributed to it even if the host runs

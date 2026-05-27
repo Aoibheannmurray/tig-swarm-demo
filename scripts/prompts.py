@@ -265,6 +265,57 @@ def parse_tacit_distillation(response: str) -> str | None:
 
 # ── Code generation prompts ────────────────────────────────────────
 
+# Rust guardrails appended to every code-generation / compile-fix system
+# prompt. These target the compile failures we see most from LLM output:
+# stray crate imports, signature drift, panics, and type mismatches. Kept
+# short so it costs little on capable models.
+RUST_RULES = """\
+
+RUST RULES (the output is compiled as-is — it MUST build):
+- Only `std` is available. Do NOT add `use` lines for external crates
+  (no rand, rayon, itertools, ndarray, etc.) and do NOT add `[dependencies]`.
+- Keep the EXACT `solve_challenge` signature, parameter names, and types you
+  were given. Call the provided `save_solution` closure to record solutions.
+- No `unsafe`, no `async`, no spawning threads.
+- Don't leave `todo!()`, `unimplemented!()`, or `panic!()` in a normal path.
+- Avoid `.unwrap()`/`.expect()` on values that can be `None`/`Err`; handle the
+  empty case. Guard indexing (`slice[i]`) so it can't go out of bounds.
+- Mind integer types: index/length math is `usize`; cast explicitly with `as`
+  rather than mixing `usize`/`u32`/`i64` in one expression.
+- When the borrow checker would object, clone the data instead of leaving
+  code that won't compile."""
+
+# Extra, more prescriptive guidance injected only when an agent sets
+# `detailed_prompts: true` (typically smaller / cheaper models whose raw Rust
+# tends not to compile). Capable models don't need this verbosity.
+RUST_RULES_DETAILED = """\
+
+EXTRA RULES FOR A CLEAN COMPILE (follow ALL of these):
+- Before finishing, mentally run `cargo check`: every variable is used or
+  prefixed with `_`; every `match` is exhaustive; every branch returns the
+  same type; no semicolons dropped where a value is expected.
+- Prefer iterator methods you are sure of (`.iter()`, `.enumerate()`,
+  `.map()`, `.filter()`, `.sum()`, `.min()/.max()`) over hand-written index
+  loops; when you do index, derive the bound from `.len()`.
+- Annotate numeric literals when the type is ambiguous (`0usize`, `1.0f64`).
+  Use `as f64` / `as usize` for casts; never rely on implicit coercion.
+- Don't introduce new generics, trait bounds, lifetimes, or macros unless the
+  starting code already uses them — they are a common source of errors.
+- Reuse the data structures already imported via `use super::*;`; don't invent
+  types that aren't defined.
+- Keep the change focused: modify the algorithm logic, not the function
+  surface, so the result still slots into the existing module."""
+
+
+def _rust_rules_block(config: dict) -> str:
+    """The Rust guardrails to append to a code prompt — base rules always,
+    plus the detailed checklist when the agent opted in via
+    `detailed_prompts`."""
+    block = RUST_RULES
+    if config.get("detailed_prompts"):
+        block += "\n" + RUST_RULES_DETAILED
+    return block
+
 
 def build_code_system_prompt(challenge_md: str, config: dict) -> str:
     challenge = config.get("challenge", "unknown")
@@ -278,6 +329,7 @@ def build_code_system_prompt(challenge_md: str, config: dict) -> str:
         f"keep improving and re-saving — the last saved solution is evaluated. If no "
         f"solution was saved when the deadline hits, the instance counts as infeasible."
     )
+    rust_rules = _rust_rules_block(config)
     if is_gpu:
         return f"""\
 You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
@@ -292,7 +344,7 @@ IMPORTANT RULES:
 - Separate them with a line containing exactly: // --- kernels.cu ---
 - The Rust file comes FIRST, then the separator, then the CUDA file.
 - No explanation, no markdown fences — just the two raw source files with the separator.
-- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu."""
+- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu.{rust_rules}"""
     return f"""\
 You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
@@ -303,7 +355,7 @@ OUTPUT FORMAT (strict):
 Your response will be written verbatim to mod.rs and compiled. The very first
 character of your response MUST be `u` from `use super::*;`. No preamble, no
 prose, no markdown fences (```), no commentary before or after the code.
-`use super::*;` must remain as the first import."""
+`use super::*;` must remain as the first import.{rust_rules}"""
 
 
 def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:

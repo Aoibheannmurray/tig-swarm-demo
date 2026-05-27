@@ -118,11 +118,12 @@ a new unique `name` — no need to re-run the wizard.
 
 The wizard writes `fleet.config.json` and prints a one-line summary —
 `wrote fleet.config.json — N agent(s): <names>` — plus an inline reminder
-only when the chosen provider needs an API key that isn't yet exported
-(`reminder: export ANTHROPIC_API_KEY=<your-key> before launching`). CLI-auth
-providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) skip the
-reminder; they use the CLI's own login. **Never write API keys into
-`fleet.config.json` yourself.**
+only when the chosen provider needs an API key that isn't yet set
+(`reminder: export ANTHROPIC_API_KEY=<your-key> before launching` on
+macOS/Linux; on Windows the reminder prints the `set …` / `$env:…` form
+instead). CLI-auth providers (`claude-code`, `claude-code-agentic`,
+`codex-agentic`) skip the reminder; they use the CLI's own login. **Never
+write API keys into `fleet.config.json` yourself.**
 
 ## Launching
 
@@ -174,10 +175,25 @@ followed by one bullet per insight. Agents will also append their own
 If the contributor is on Windows, walk through these *before* debugging anything
 else — they're the failure modes our docs have actually been bitten by:
 
-- **Docker Desktop requires WSL 2.** First-run Docker on Windows needs WSL 2 +
-  Virtual Machine Platform enabled (admin PowerShell: `wsl --install`, reboot,
-  `wsl --update`). Without this, the Docker daemon never starts and benchmarks
-  hang forever.
+- **Docker Desktop install order (the #1 beta pain).** Walk the contributor
+  through this exact sequence — skipping a step is what caused the "benchmarks
+  hang forever" reports:
+  1. **Enable WSL 2 first.** Admin PowerShell: `wsl --install`, **reboot**,
+     then `wsl --update`. This also enables the Virtual Machine Platform
+     feature. If WSL 2 isn't in place, the Docker daemon never starts and
+     benchmarks hang forever — this is the single most common failure.
+  2. **Install Docker Desktop** from
+     https://www.docker.com/products/docker-desktop/ and launch it once so it
+     finishes first-run setup.
+  3. **Confirm the daemon is up:** `docker info` should succeed (not just
+     `docker --version`, which works even when the daemon is stopped). The
+     wizard's preflight only checks `docker` is on PATH, so a stopped daemon
+     still passes preflight but stalls at the first benchmark.
+  4. **Check free disk space.** The benchmark image + cargo/Docker build cache
+     want **~15–20 GB free**. The wizard now prints a low-disk warning under
+     ~15 GB; if a build dies with "no space left on device", run
+     `docker system prune` and free up the drive. Docker Desktop's disk image
+     also grows over time — reclaim it via Settings → Resources if needed.
 - **`fleet.config.json` BOM.** PowerShell `Set-Content` writes UTF-8 *with* a
   BOM by default. The loader now reads via `utf-8-sig` so this should no longer
   break things, but the safe write idiom is
@@ -240,11 +256,14 @@ else — they're the failure modes our docs have actually been bitten by:
   the `Update your fleet config? (y/N)` prompt up front.)
 
 - **`Agent <name>: environment variable ANTHROPIC_API_KEY is unset or empty.`**
-  → The contributor picked an API-key provider but never exported the key.
-  Tell them to run the suggested `export …=<your-key>` command from the
-  error and re-run `python run.py`. CLI-auth providers (`claude-code`,
-  `claude-code-agentic`, `codex-agentic`) never produce this error — they
-  log in through their CLI instead.
+  → The contributor picked an API-key provider but never set the key. Tell
+  them to run the suggested set-the-env-var command from the error and re-run
+  `python run.py`. **Use the platform-correct form:** macOS/Linux
+  `export KEY=<your-key>`; Windows `cmd` `set KEY=<your-key>` (no quotes,
+  no `export`); Windows PowerShell `$env:KEY="<your-key>"`. The env var must
+  be set in the *same* shell session that launches `python run.py`. CLI-auth
+  providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) never
+  produce this error — they log in through their CLI instead.
 
 ## What you should *not* do
 

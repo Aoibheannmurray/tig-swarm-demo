@@ -13,7 +13,9 @@ interface TopEntry {
   created_at?: string;
 }
 
-const MAX_ROWS = 20;
+// Rows shown on the strategy leaderboard. The server caps /api/top_scores at
+// 100; we request and keep this many and let the list scroll.
+const MAX_ROWS = 50;
 
 // Colored pills for the eight canonical strategy tags. Mapped to the earthen
 // viz palette (--viz-1..--viz-8) so each tag has a stable, on-brand hue.

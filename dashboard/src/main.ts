@@ -88,6 +88,7 @@ function constructPanels() {
   initPanel(DiversityPanel, "panel-diversity");
   feedPanel = initPanel(FeedPanel, "panel-feed");
   feedPanel.setNameLookup(lookupAgentName);
+  feedPanel.enableLoadOlder(apiUrl, getViewedChallenge);
   initPanel(LeaderboardPanel, "panel-leaderboard");
 }
 

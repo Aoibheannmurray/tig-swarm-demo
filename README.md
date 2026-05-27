@@ -33,10 +33,16 @@ python run.py
 
 It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
 
-Export the API key your provider needs before launching:
+Set the API key your provider needs before launching:
 
 ```bash
+# macOS / Linux
 export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+```
+
+```powershell
+# Windows PowerShell  (cmd.exe: use  set ANTHROPIC_API_KEY=sk-...  with no quotes)
+$env:ANTHROPIC_API_KEY="sk-..."     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
 ```
 
 `Ctrl-C` terminates the whole fleet. Each agent runs in its own git worktree under `worktrees/<name>/`; identities persist across restarts.
@@ -59,7 +65,9 @@ Per-agent fields:
 | `provider`       | LLM provider — see [Providers](#providers).                             |
 | `model`          | Model ID; per-provider defaults live in `DEFAULT_MODELS` (`scripts/llm_backends.py`). |
 | `api_key_env`    | Env var holding the API key. Omit for CLI-auth providers.               |
+| `api_base`       | Optional override of the provider's base URL (e.g. an OpenAI-compatible gateway like OpenRouter: `https://openrouter.ai/api/v1`). |
 | `tacit_knowledge`| Optional per-agent override of the shared `tacit_knowledge.md` file.    |
+| `detailed_prompts`| Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile; leave off for frontier models to save tokens. |
 
 ### Tacit knowledge
 
