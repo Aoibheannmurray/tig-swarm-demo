@@ -219,6 +219,12 @@ _CACHE_FIELDS = (
     "server_url", "active_challenge", "challenge", "swarm_type",
     "tracks", "timeout", "scoring_direction",
     "algorithm_path", "kernel_path", "is_gpu",
+    # Non-secret tuning knobs the *client* needs. The driver
+    # (run_loop.py) times tacit-knowledge distillation off stagnation_limit;
+    # without these in the cache, config.get("stagnation_limit") is absent
+    # and distillation never fires. They're a public mirror of
+    # /api/swarm_config — the secret copies stay in swarm.admin.json.
+    "stagnation_threshold", "stagnation_limit",
     # write_swarm_cache stamps synced_at itself, so the field is set even
     # when cfg doesn't carry one in.
     "synced_at",
@@ -1565,6 +1571,12 @@ def run_switch(challenge: str) -> int:
         refreshed["tracks"] = sub.get("tracks", {})
         refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
+    # Carry the stagnation knobs into the host's cache too (switch doesn't
+    # fetch /api/swarm_config, so source them from swarm.admin.json). Keeps
+    # the host's own driver able to time tacit-knowledge distillation.
+    for knob in ("stagnation_threshold", "stagnation_limit"):
+        if admin.get(knob) is not None:
+            refreshed[knob] = admin[knob]
     write_swarm_cache(refreshed)
 
     prior_challenge = cache.get("active_challenge")
@@ -1636,6 +1648,11 @@ def run_sync() -> int:
         refreshed["tracks"] = sub.get("tracks", {})
         refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
+    # Mirror the client-relevant stagnation knobs so the driver can time
+    # tacit-knowledge distillation (see _CACHE_FIELDS).
+    for knob in ("stagnation_threshold", "stagnation_limit"):
+        if live.get(knob) is not None:
+            refreshed[knob] = live[knob]
     write_swarm_cache(refreshed)
 
     # Don't early-return when CHALLENGE.md is missing: a fresh fleet worktree

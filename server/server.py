@@ -1353,12 +1353,26 @@ async def create_message(req: MessageCreate):
 
 
 @app.get("/api/messages")
-async def list_messages(limit: int = 50, challenge: str | None = None):
+async def list_messages(
+    limit: int = 50, challenge: str | None = None, before: str | None = None,
+):
     """Chat messages for the requested challenge, plus agent_joined events
     regardless of challenge (joins are swarm-wide). `agent_name` is JOINed
     from `agents` so retired snapshot data in `messages.agent_name` is
-    never returned — current name only."""
+    never returned — current name only.
+
+    `before` is an optional `created_at` cursor (ISO string): when set, only
+    messages strictly older than it are returned. The dashboard feed uses
+    this to page backwards ("load older") through history that has scrolled
+    off its in-memory buffer."""
     challenge = await resolve_challenge(challenge)
+    limit = max(1, min(limit, 200))
+    where = "(m.challenge = ? OR m.msg_type = 'agent_joined')"
+    params: list = [challenge]
+    if before:
+        where += " AND m.created_at < ?"
+        params.append(before)
+    params.append(limit)
     async with db.connect() as conn:
         cursor = await conn.execute(
             "SELECT m.id, m.agent_id, m.challenge, "
@@ -1366,9 +1380,39 @@ async def list_messages(limit: int = 50, challenge: str | None = None):
             "       m.content, m.msg_type, m.created_at "
             "FROM messages m "
             "LEFT JOIN agents a ON a.id = m.agent_id "
-            "WHERE m.challenge = ? OR m.msg_type = 'agent_joined' "
+            f"WHERE {where} "
             "ORDER BY m.created_at DESC LIMIT ?",
-            (challenge, limit),
+            params,
+        )
+        rows = [dict(row) for row in await cursor.fetchall()]
+    return rows
+
+
+@app.get("/api/hypotheses")
+async def list_hypotheses(
+    limit: int = 30, challenge: str | None = None, before: str | None = None,
+):
+    """Recent hypotheses for the challenge, newest-first. Mirrors the
+    `recent_hypotheses` block of /api/state but is paginated via an optional
+    `before` (created_at) cursor so the Ideas research feed can page backwards
+    through history that scrolled off its in-memory buffer."""
+    challenge = await resolve_challenge(challenge)
+    limit = max(1, min(limit, 200))
+    where = "h.challenge = ?"
+    params: list = [challenge]
+    if before:
+        where += " AND h.created_at < ?"
+        params.append(before)
+    params.append(limit)
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT h.id, h.title, h.strategy_tag, h.description, "
+            "       a.name as agent_name, h.agent_id, h.parent_hypothesis_id, "
+            "       h.created_at "
+            "FROM hypotheses h JOIN agents a ON a.id = h.agent_id "
+            f"WHERE {where} "
+            "ORDER BY h.created_at DESC LIMIT ?",
+            params,
         )
         rows = [dict(row) for row in await cursor.fetchall()]
     return rows

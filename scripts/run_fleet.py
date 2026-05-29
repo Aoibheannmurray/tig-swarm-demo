@@ -77,6 +77,8 @@ _AGENT_CONFIG_KEYS = (
     # /api/agents/register call so restarts resume the same identity.
     "agent_id", "agent_name",
     "log_prompts",
+    # Opt-in stricter Rust prompt for smaller/cheaper models (prompts.py).
+    "detailed_prompts",
 )
 
 _PROVIDER_TO_DEFAULT_ENV = {

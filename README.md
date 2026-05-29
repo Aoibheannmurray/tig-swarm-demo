@@ -37,10 +37,16 @@ python3 run.py
 
 It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
 
-Export the API key your provider needs before launching:
+Set the API key your provider needs before launching:
 
 ```bash
+# macOS / Linux
 export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+```
+
+```powershell
+# Windows PowerShell  (cmd.exe: use  set ANTHROPIC_API_KEY=sk-...  with no quotes)
+$env:ANTHROPIC_API_KEY="sk-..."     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
 ```
 
 `Ctrl-C` terminates the whole fleet. Each agent runs in its own git worktree under `worktrees/<name>/`; identities persist across restarts.
@@ -61,9 +67,11 @@ Per-agent fields:
 |------------------|-------------------------------------------------------------------------|
 | `name`           | Worktree dir + dashboard label.                                         |
 | `provider`       | LLM provider — see [Providers](#providers).                             |
-| `model`          | Model ID; per-provider defaults live in `DEFAULT_MODELS` (`scripts/llm_backends.py`). |
+| `model`          | Model ID. Run `python scripts/list_models.py <provider>` to see what's available; per-provider defaults live in `DEFAULT_MODELS` (`scripts/llm_backends.py`). |
 | `api_key_env`    | Env var holding the API key. Omit for CLI-auth providers.               |
+| `api_base`       | Optional override of the provider's base URL (e.g. an OpenAI-compatible gateway like OpenRouter: `https://openrouter.ai/api/v1`). |
 | `tacit_knowledge`| Optional per-agent override of the shared `tacit_knowledge.md` file.    |
+| `detailed_prompts`| Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile; leave off for frontier models to save tokens. |
 
 ### Tacit knowledge
 
@@ -107,6 +115,21 @@ docker build -f Dockerfile.gpu -t tig-swarm-gpu .       # GPU challenges only
 | `claude-code`         | `claude` CLI login (no API key needed)                                          |
 | `claude-code-agentic` | `claude` CLI login                                                              |
 | `codex-agentic`       | `codex login`                                                                   |
+
+**Which models can I use?** Run `python scripts/list_models.py <provider>` to
+print a provider's live model list — the IDs you can drop into the `model`
+field above:
+
+```bash
+python scripts/list_models.py                 # providers + their defaults
+python scripts/list_models.py anthropic       # Anthropic's models
+python scripts/list_models.py openrouter      # OpenRouter (no key needed)
+```
+
+It reads the provider's API key from the environment (the same var in the
+table above); OpenRouter's catalog is public so no key is needed there. The
+CLI providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) have no
+models endpoint — they accept any model ID their CLI knows.
 
 `claude-code` is one-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 15 min per iteration; don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
 

@@ -54,6 +54,10 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
+# OpenRouter's OpenAI-compatible endpoint. Mirrors OPENROUTER_API_BASE in
+# scripts/llm_backends.py; the wizard writes it as an explicit api_base.
+_OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the
 # provider list in scripts/run_loop.py. Tuple: (label, default_model,
 # api_key_env or None, short_name_stub, supports_c3, blurb).
@@ -88,12 +92,13 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
      "Venice.ai — OpenAI-compatible. Needs VENICE_API_KEY."),
     ("openrouter",
      "OpenRouter (multi-model proxy, OpenAI-compatible)",
-     "anthropic/claude-3.5-sonnet",
+     "qwen/qwen-2.5-coder-32b-instruct",
      "OPENROUTER_API_KEY",
      "openrouter",
      True,
-     "OpenRouter — gateway to many providers under one key. "
-     "Use publisher/model strings like `anthropic/claude-3.5-sonnet` "
+     "OpenRouter — gateway to many providers under one key. Written to the "
+     "config as an OpenAI-compatible endpoint (provider `openai` + api_base). "
+     "Use publisher/model strings like `qwen/qwen-2.5-coder-32b-instruct` "
      "or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."),
     ("claude-code",
      "Claude CLI — one-shot mode",
@@ -370,6 +375,7 @@ def _build_agent(
     api_key_env: str | None,
     compute: str,
     hardware: str | None,
+    api_base: str | None = None,
 ) -> dict:
     entry: dict = {
         "name": name,
@@ -379,6 +385,8 @@ def _build_agent(
         entry["model"] = model
     if api_key_env:
         entry["api_key_env"] = api_key_env
+    if api_base:
+        entry["api_base"] = api_base
     entry["compute"] = compute
     if compute == "c3" and hardware:
         entry["hardware"] = hardware
@@ -412,6 +420,14 @@ def run_wizard(force: bool = False) -> int:
     print("Which LLM should your agents call?")
     provider, default_model, api_key_env, name_stub, supports_c3 = _select_provider()
 
+    # OpenRouter is OpenAI-compatible: write it as provider `openai` with an
+    # explicit api_base so it routes through the OpenAI client against the
+    # OpenRouter gateway (api_key_env stays OPENROUTER_API_KEY).
+    api_base: str | None = None
+    if provider == "openrouter":
+        provider = "openai"
+        api_base = _OPENROUTER_API_BASE
+
     if default_model:
         model = _prompt("model (press Enter for default)", default=default_model)
     else:
@@ -431,7 +447,8 @@ def run_wizard(force: bool = False) -> int:
         "username": username,
         "swarm_password": swarm_password,
         "agents": [
-            _build_agent(name, provider, model, api_key_env, compute, hardware)
+            _build_agent(name, provider, model, api_key_env, compute, hardware,
+                         api_base=api_base)
             for name in names
         ],
     }
@@ -444,7 +461,14 @@ def run_wizard(force: bool = False) -> int:
         f"{count} agent(s): {names_str}"
     )
     if api_key_env and not os.environ.get(api_key_env, "").strip():
-        print(f"  reminder: export {api_key_env}=<your-key> before launching")
+        # Windows `cmd`/PowerShell don't understand `export`; print the
+        # platform-correct set-the-env-var command so it can be pasted as-is.
+        if os.name == "nt":
+            setline = (f"set {api_key_env}=<your-key>   (cmd)   or   "
+                       f"$env:{api_key_env}=\"<your-key>\"   (PowerShell)")
+        else:
+            setline = f"export {api_key_env}=<your-key>"
+        print(f"  reminder: {setline} before launching")
     print()
     return 0
 
@@ -458,9 +482,14 @@ def parse_args() -> argparse.Namespace:
 
 _DOCKER_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
 
+# Building the benchmark image plus the cargo/Docker build cache comfortably
+# wants this much free space. Below it, builds fail late with confusing
+# "no space left on device" errors — so warn up front rather than hard-fail.
+_MIN_FREE_GB = 15
+
 
 def _preflight_docker() -> None:
-    """Fail before the wizard if Docker isn't installed.
+    """Fail before the wizard if Docker isn't installed, and warn on low disk.
 
     Benchmarks always run in a local Docker container (see
     scripts/benchmark.py). benchmark.py's _ensure_docker_daemon() already
@@ -476,6 +505,24 @@ def _preflight_docker() -> None:
             "on PATH.\n"
             f"Install Docker Desktop from {_DOCKER_INSTALL_URL}, then re-run "
             "`python scripts/init_fleet.py`."
+        )
+    _warn_low_disk()
+
+
+def _warn_low_disk() -> None:
+    """Non-fatal heads-up when the repo drive is low on space. The Docker
+    image + build cache need ~15 GB; on Windows especially this has bitten
+    contributors with a late, opaque 'no space left on device' mid-build."""
+    try:
+        free_gb = shutil.disk_usage(ROOT).free / 1e9
+    except OSError:
+        return  # can't stat the drive — don't block the wizard
+    if free_gb < _MIN_FREE_GB:
+        print(
+            f"  warning: only {free_gb:.1f} GB free on the repo drive — the "
+            f"Docker image and build cache want ~{_MIN_FREE_GB} GB. Builds may "
+            "fail with 'no space left on device'. Free up space (e.g. "
+            "`docker system prune`) before launching the fleet.\n"
         )
 
 
