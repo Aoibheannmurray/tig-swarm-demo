@@ -735,6 +735,9 @@ async def get_state(
                 n_traj, total_deact = await db.trajectory_counts(conn, challenge)
                 go_fresh = not inactive_pool or n_traj ** 1.5 < total_deact
 
+                # Carries the adopted trajectory's peak score (None on a fresh
+                # start) so we can seed it as the agent's personal best below.
+                adopted_score = None
                 if go_fresh:
                     new_code, new_kernel_code = await load_initial_algorithm(challenge)
                     new_program_id = new_id()
@@ -744,10 +747,11 @@ async def get_state(
                     new_code = picked["algorithm_code"]
                     new_kernel_code = picked.get("kernel_code")
                     new_program_id = picked.get("program_id") or new_id()
+                    adopted_score = picked.get("score")
                     await db.remove_inactive(conn, picked["id"])
                     trajectory_reset = {
                         "type": "adopted_inactive",
-                        "prior_score": picked["score"],
+                        "prior_score": adopted_score,
                     }
                     if picked.get("trajectory_id"):
                         new_traj_id = picked["trajectory_id"]
@@ -762,7 +766,38 @@ async def get_state(
                     kernel_code=my_best.get("kernel_code"),
                 )
 
-                await db.clear_agent_best(conn, agent_id, challenge)
+                # Seed the agent's personal best with the adopted trajectory's
+                # peak so it builds UP from that best instead of from zero.
+                # Without this the floor is gone: the agent's first (possibly
+                # worse) result becomes its new best and the trajectory drifts
+                # below the peak it was handed. It also kept the adopted code
+                # alive only until the next publish — if that publish failed,
+                # the next state fell back to the stub (see the `else` branch
+                # below). Fresh starts, and pool entries with no score, keep the
+                # original clear-to-empty behaviour.
+                if adopted_score is not None:
+                    adopted_experiment_id = new_id()
+                    await db.upsert_agent_best(
+                        conn, agent_id=agent_id, challenge=challenge,
+                        experiment_id=adopted_experiment_id,
+                        algorithm_code=new_code, score=adopted_score,
+                        feasible=True, challenge_metrics=None,
+                        solution_data=None, updated_at=timestamp,
+                        trajectory_id=new_traj_id, kernel_code=new_kernel_code,
+                    )
+                    my_best = {
+                        "algorithm_code": new_code,
+                        "score": adopted_score,
+                        "experiment_id": adopted_experiment_id,
+                        "kernel_code": new_kernel_code,
+                    }
+                    my_best_score = adopted_score
+                    my_best_experiment_id = adopted_experiment_id
+                else:
+                    await db.clear_agent_best(conn, agent_id, challenge)
+                    my_best = None
+                    my_best_score = None
+                    my_best_experiment_id = None
                 await db.update_agent_challenge_state(
                     conn, agent_id, challenge,
                     set_fields={
@@ -772,11 +807,8 @@ async def get_state(
                     },
                 )
                 await conn.commit()
-                my_best = None
                 my_best_code = new_code
                 my_best_kernel_code = new_kernel_code
-                my_best_score = None
-                my_best_experiment_id = None
                 runs_since = 0
                 agent_name = await get_agent_name(conn, agent_id)
                 await manager.broadcast(ws_events.TrajectoryReset(

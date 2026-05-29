@@ -132,10 +132,17 @@ def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
     if reset:
         rtype = reset.get("type", "")
         if rtype == "adopted_inactive":
-            parts.append(
+            msg = (
                 "\nYou are starting from another agent's previous algorithm. "
                 "Study the code above and propose an improvement to build on it."
             )
+            prior = reset.get("prior_score")
+            if prior is not None:
+                msg += (
+                    f" This code is already this trajectory's best "
+                    f"(score {prior}) and is your floor — your change must beat it."
+                )
+            parts.append(msg)
         else:
             parts.append(
                 "\nYou are starting from the template algorithm. "
