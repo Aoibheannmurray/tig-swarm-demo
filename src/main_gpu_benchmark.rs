@@ -205,7 +205,7 @@ fn run_instance(
                                 "elapsed": elapsed,
                             });
                             append_viz_data!(json, challenge_name, instance, solution,
-                                            module, stream, prop, quality);
+                                            module, stream, &prop, quality);
                             println!("{}", json);
                         }
                         Err(e) => {

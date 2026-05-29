@@ -389,6 +389,24 @@ def _pull_artifacts(job_id: str, env: dict, cwd: Path) -> str:
     )
 
 
+def _read_benchmark_stderr(stage: Path) -> str:
+    """Return the most-recent non-empty benchmark.stderr artifact, if any.
+
+    This is where benchmark.py's real failure (e.g. a cargo/rustc compile
+    error) lands — the C3 job's own stdout only carries runner noise such as
+    the rustup install banner.
+    """
+    candidates = sorted(
+        stage.rglob("benchmark.stderr"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        if path.stat().st_size:
+            return path.read_text(encoding="utf-8", errors="replace")
+    return ""
+
+
 def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
     candidates = sorted(
         stage.rglob("benchmark.json"),
@@ -408,14 +426,7 @@ def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
             print(f"    [C3] Results extracted from {path}")
             return bench, ""
 
-    benchmark_stderr = ""
-    stderr_candidates = sorted(
-        stage.rglob("benchmark.stderr"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if stderr_candidates:
-        benchmark_stderr = stderr_candidates[0].read_text(encoding="utf-8", errors="replace")
+    benchmark_stderr = _read_benchmark_stderr(stage)
 
     detail = "\n".join(decode_errors[-3:])
     if benchmark_stderr:
@@ -503,9 +514,15 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
         if status != "completed":
             err = f"[C3] Job {job_id} {status}"
             print(f"    {err}")
-            if logs_out:
-                print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
+            # Pull artifacts first: benchmark.py's real failure (cargo/rustc
+            # errors) lands in benchmark.stderr, not the job's stdout, which
+            # only carries runner noise (e.g. the rustup install banner).
             pull_output = _pull_artifacts(job_id, env, stage)
+            bench_stderr = _read_benchmark_stderr(stage)
+            if bench_stderr:
+                print(f"    [C3] Last 4000 chars of benchmark.stderr:\n{bench_stderr[-4000:]}")
+            elif logs_out:
+                print(f"    [C3] Last 4000 chars of job logs:\n{logs_out[-4000:]}")
             _, parse_err = _load_benchmark_json(stage)
             details = "\n".join(
                 part for part in (parse_err, pull_output[-2000:], logs_out[-2000:]) if part
