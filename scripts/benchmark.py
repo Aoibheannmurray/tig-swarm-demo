@@ -458,7 +458,47 @@ def _reexec_in_docker(cfg: dict) -> int:
         image,
         "python3", "/app/scripts/benchmark.py",
     ]
-    return subprocess.run(cmd).returncode
+    try:
+        return subprocess.run(cmd).returncode
+    finally:
+        _chown_worktree_back(image, cfg)
+
+
+def _chown_worktree_back(image: str, cfg: dict) -> None:
+    """Give root-owned files the container created back to the invoking user.
+
+    The benchmark container runs as root and writes into the bind-mounted
+    worktree (datasets/, solution files, .swarm/), leaving root-owned files
+    that make `git worktree remove` / `run_fleet.py --clean` fail with
+    permission-denied. We can't simply run the build as `--user` without
+    breaking cargo's root-owned ~/.cargo, so instead we hand ownership back
+    afterwards via a throwaway root container.
+
+    `find -xdev` stops at filesystem boundaries, so the `target/` and cargo
+    registry volume mounts (separate devices) are skipped — only the
+    bind-mounted worktree files get chowned. POSIX-only; on Windows/macOS
+    Docker Desktop maps ownership for the sharing user already.
+    """
+    if not hasattr(os, "getuid"):
+        return  # Windows: no uid concept, Docker Desktop handles ownership
+    uid, gid = os.getuid(), os.getgid()
+    if uid == 0:
+        return  # already root; files are removable as-is
+    suffix = "gpu" if is_gpu_challenge(cfg) else "cpu"
+    cmd = [
+        "docker", "run", "--rm",
+        "-v", f"{ROOT_DIR}:/app",
+        "-v", f"{_cargo_target_volume(cfg)}:/app/target",
+        "-v", f"tig-cargo-registry-{suffix}:/root/.cargo/registry",
+        image,
+        "find", "/app", "-xdev", "-exec", "chown", f"{uid}:{gid}", "{}", "+",
+    ]
+    try:
+        subprocess.run(cmd, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"  [BENCH] could not reclaim worktree ownership: {e}",
+              file=sys.stderr)
 
 
 # ── GPU build & run (native — always called from inside Docker) ──

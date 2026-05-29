@@ -746,7 +746,7 @@ def _has_user_content(tk_path: Path) -> bool:
     menu (real notes already there)."""
     if not tk_path.exists():
         return False
-    body = tk_path.read_text().replace(_TACIT_STUB_LINE, "")
+    body = tk_path.read_text(encoding="utf-8", errors="replace").replace(_TACIT_STUB_LINE, "")
     if "## Strategies" in body:
         _, after = body.split("## Strategies", 1)
         return bool(after.strip())
@@ -762,12 +762,12 @@ def _append_or_seed(
     this with your own hint" stub line is stripped on first real append so
     the contributor's notes don't get prefixed with placeholder noise."""
     if append and tk_path.exists():
-        existing = tk_path.read_text().replace(_TACIT_STUB_LINE, "")
+        existing = tk_path.read_text(encoding="utf-8", errors="replace").replace(_TACIT_STUB_LINE, "")
         if not existing.endswith("\n"):
             existing += "\n"
-        tk_path.write_text(existing + "\n" + new_body + "\n")
+        tk_path.write_text(existing + "\n" + new_body + "\n", encoding="utf-8")
     else:
-        tk_path.write_text(tacit_header(stagnation_threshold) + new_body + "\n")
+        tk_path.write_text(tacit_header(stagnation_threshold) + new_body + "\n", encoding="utf-8")
 
 
 def _gather_via_guided(
@@ -813,7 +813,7 @@ def _gather_via_upload(tk_path: Path) -> None:
     if not src_path.is_file():
         print(f"  not a file: {src_path}; leaving existing file in place")
         return
-    tk_path.write_text(src_path.read_text())
+    tk_path.write_text(src_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
     print(f"  copied {src_path} -> {tk_path.relative_to(ROOT)}")
 
 
@@ -998,7 +998,8 @@ def run_tacit(agent_name: str | None = None) -> int:
         tk_path.parent.mkdir(parents=True, exist_ok=True)
         tk_path.write_text(
             tacit_header(stagnation_threshold)
-            + "- (replace this with your own hint, or run setup again)\n"
+            + "- (replace this with your own hint, or run setup again)\n",
+            encoding="utf-8",
         )
         print(f"  created {tk_path.relative_to(ROOT)} (gitignored)")
 

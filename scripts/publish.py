@@ -103,7 +103,7 @@ def main():
     algo_path, kernel_path = _resolve_algo_path()
     if not algo_path.exists():
         sys.exit(f"publish.py: algorithm file not found: {algo_path}")
-    code = algo_path.read_text()
+    code = algo_path.read_text(encoding="utf-8", errors="replace")
 
     payload = {
         "agent_id": agent_id,
@@ -119,7 +119,7 @@ def main():
         "challenge": bench.get("challenge"),
     }
     if kernel_path and kernel_path.exists():
-        payload["kernel_code"] = kernel_path.read_text()
+        payload["kernel_code"] = kernel_path.read_text(encoding="utf-8", errors="replace")
     # Opaque per-challenge roll-up. Only present for challenges whose
     # benchmark.py registered an aggregator (e.g. VRP emits num_vehicles +
     # total_distance here). Absent for everyone else.

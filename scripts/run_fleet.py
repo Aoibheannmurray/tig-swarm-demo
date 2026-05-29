@@ -429,26 +429,81 @@ def _remove_cargo_volumes(agent_name: str) -> None:
         # because most agents only used one of cpu/gpu (or none yet).
 
 
+def _clean_one(name: str, docker_available: bool) -> None:
+    """Remove a single agent's worktree, fleet branch, and cargo volumes."""
+    path = WORKTREES_DIR / name
+    branch = f"fleet/{name}"
+    if path.exists():
+        try:
+            _git(["worktree", "remove", "--force", str(path)])
+            print(f"  removed worktree {path}")
+        except RuntimeError as e:
+            # Not a registered worktree, or git refused — fall back to a plain
+            # directory delete so a half-removed/orphaned dir doesn't linger.
+            try:
+                shutil.rmtree(path)
+                print(f"  removed orphaned directory {path}")
+            except OSError as oe:
+                print(f"  could not remove {path}: {e}; rmtree also failed: {oe}",
+                      file=sys.stderr)
+    if _branch_exists(branch):
+        try:
+            _git(["branch", "-D", branch])
+            print(f"  deleted branch {branch}")
+        except RuntimeError as e:
+            print(f"  could not delete branch {branch}: {e}", file=sys.stderr)
+    if docker_available:
+        _remove_cargo_volumes(name)
+
+
+def _describe_exit(rc: int | None) -> str:
+    """Human-readable process exit description.
+
+    A negative returncode means the child was killed by signal -rc. SIGTERM/
+    SIGINT here is the fleet's own clean teardown, not a crash — say so,
+    because a bare "exited with code -15" reads like a fault to contributors.
+    """
+    if rc is not None and rc < 0:
+        try:
+            sig = signal.Signals(-rc).name
+        except ValueError:
+            sig = f"signal {-rc}"
+        clean = " (clean shutdown)" if -rc in (signal.SIGTERM, signal.SIGINT) else ""
+        return f"stopped via {sig}{clean}"
+    return f"exited with code {rc}"
+
+
+def _fleet_branch_names() -> set[str]:
+    """All local `fleet/<name>` branches, returned as bare `<name>`s."""
+    out = _git(["branch", "--list", "fleet/*", "--format=%(refname:short)"])
+    return {line[len("fleet/"):] for line in out.splitlines()
+            if line.startswith("fleet/")}
+
+
 def cmd_clean(agents: list[dict]) -> int:
     docker_available = shutil.which("docker") is not None
-    for agent in agents:
-        name = agent["name"]
-        path = WORKTREES_DIR / name
-        branch = f"fleet/{name}"
-        if path.exists():
-            try:
-                _git(["worktree", "remove", "--force", str(path)])
-                print(f"  removed worktree {path}")
-            except RuntimeError as e:
-                print(f"  could not remove {path}: {e}", file=sys.stderr)
-        if _branch_exists(branch):
-            try:
-                _git(["branch", "-D", branch])
-                print(f"  deleted branch {branch}")
-            except RuntimeError as e:
-                print(f"  could not delete branch {branch}: {e}", file=sys.stderr)
-        if docker_available:
-            _remove_cargo_volumes(name)
+
+    # Names from the current config…
+    config_names = [a["name"] for a in agents]
+
+    # …plus any worktree dir or fleet/ branch left behind by a *previous*
+    # config (e.g. the agent was renamed). Matching only current config names
+    # would strand those forever, so glob the filesystem and the branch list.
+    orphan_names: set[str] = set()
+    if WORKTREES_DIR.exists():
+        orphan_names |= {p.name for p in WORKTREES_DIR.iterdir() if p.is_dir()}
+    try:
+        orphan_names |= _fleet_branch_names()
+    except RuntimeError as e:
+        print(f"  could not list fleet branches: {e}", file=sys.stderr)
+    orphan_names -= set(config_names)
+
+    for name in config_names:
+        _clean_one(name, docker_available)
+    for name in sorted(orphan_names):
+        print(f"  [clean] orphaned agent (not in current config): {name}")
+        _clean_one(name, docker_available)
+
     _git(["worktree", "prune"])
     return 0
 
@@ -547,7 +602,7 @@ def cmd_run(
 
     for name, p, t in procs:
         t.join(timeout=2)
-        print(f"  [fleet] {name} exited with code {p.returncode}")
+        print(f"  [fleet] {name} {_describe_exit(p.returncode)}")
 
     _sync_tacit_back(agents, fleet_tacit)
     return 0

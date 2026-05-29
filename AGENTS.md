@@ -5,13 +5,13 @@ contributor set up their machine to join an existing TIG swarm. The user has
 probably pasted a short snippet like:
 
 ```
-git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python run.py
+git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python3 run.py
 server_url:     https://…railway.app
 username:       <their-handle>
 swarm_password: <hex string from the swarm host>
 ```
 
-Your job is to get `python run.py` running cleanly. Nothing more.
+Your job is to get `python3 run.py` running cleanly. Nothing more.
 
 `run.py` is the single contributor entry point. It orchestrates four phases
 in one command:
@@ -55,6 +55,9 @@ runtime agent's job, not yours.
 - **Python 3** — for the wizard and fleet driver. Stdlib only; **no pip
   install needed**. Do not run `pip install -r requirements.txt`. That
   `requirements.txt` is for the benchmark Docker image, not the host.
+  Examples use `python3` (macOS Homebrew and most Linux have no bare
+  `python`). On Windows use `python`. Child processes are spawned with
+  `sys.executable`, so whichever interpreter starts `run.py` is reused.
 - **Docker** — benchmarks run inside a container. The user needs the
   `docker` CLI on PATH; the daemon being stopped is fine (`run_fleet.py`
   auto-launches Docker Desktop / OrbStack via `scripts/benchmark.py`).
@@ -65,7 +68,7 @@ and often fails on managed machines.
 
 ## If Docker is missing
 
-`python run.py` preflight-checks for `docker` on PATH and exits with a link
+`python3 run.py` preflight-checks for `docker` on PATH and exits with a link
 to Docker Desktop. **Send the user to that link.** Do *not* try to install
 Docker yourself via Homebrew / apt / dnf:
 
@@ -76,7 +79,7 @@ Docker yourself via Homebrew / apt / dnf:
   grant from a coding-assistant shell.
 
 After the user installs Docker Desktop and finishes its first-run setup,
-resume from `python run.py`.
+resume from `python3 run.py`.
 
 ## The wizard (invoked by `run.py`, also runnable as `scripts/init_fleet.py`)
 
@@ -100,7 +103,7 @@ For non-interactive setup on a fresh clone (no existing config) you can
 pipe answers via stdin, e.g.:
 
 ```bash
-printf '%s\n' "$SERVER_URL" "$USERNAME" "$SWARM_PASSWORD" "1" "" "1" | python scripts/init_fleet.py
+printf '%s\n' "$SERVER_URL" "$USERNAME" "$SWARM_PASSWORD" "1" "" "1" | python3 scripts/init_fleet.py
 ```
 
 (Provider/model defaults pick Anthropic + `claude-opus-4-7`. Adjust the
@@ -127,7 +130,7 @@ reminder; they use the CLI's own login. **Never write API keys into
 ## Launching
 
 ```bash
-python run.py
+python3 run.py
 ```
 
 `run.py` reuses the existing `fleet.config.json` after asking
@@ -142,8 +145,8 @@ Useful fleet management (still on `scripts/run_fleet.py`, since `run.py`
 doesn't forward management flags):
 
 ```bash
-python scripts/run_fleet.py --list     # show agent names, ids, status
-python scripts/run_fleet.py --clean    # remove every worktree + branch
+python3 scripts/run_fleet.py --list     # show agent names, ids, status
+python3 scripts/run_fleet.py --clean    # remove every worktree + branch
 ```
 
 ## Tacit-knowledge from a coding-agent session
@@ -182,7 +185,7 @@ else — they're the failure modes our docs have actually been bitten by:
   BOM by default. The loader now reads via `utf-8-sig` so this should no longer
   break things, but the safe write idiom is
   `$json | Out-File -Encoding utf8NoBOM fleet.config.json`. Better still: use
-  `python run.py` (which calls the wizard).
+  `python3 run.py` (which calls the wizard).
 - **Codex CLI: prefer the npm install.** The Windows Store alias for `codex`
   (`%LOCALAPPDATA%\Microsoft\WindowsApps\codex.exe`) commonly returns
   `Access is denied` when invoked from a subprocess. Have the user run
@@ -236,13 +239,13 @@ else — they're the failure modes our docs have actually been bitten by:
 
 - **`fleet.config.json already exists. Overwrite?`**
   → They've run the wizard before. Either answer `y` or run with `--force`.
-  (When the wizard is invoked through `python run.py`, this is handled by
+  (When the wizard is invoked through `python3 run.py`, this is handled by
   the `Update your fleet config? (y/N)` prompt up front.)
 
 - **`Agent <name>: environment variable ANTHROPIC_API_KEY is unset or empty.`**
   → The contributor picked an API-key provider but never exported the key.
   Tell them to run the suggested `export …=<your-key>` command from the
-  error and re-run `python run.py`. CLI-auth providers (`claude-code`,
+  error and re-run `python3 run.py`. CLI-auth providers (`claude-code`,
   `claude-code-agentic`, `codex-agentic`) never produce this error — they
   log in through their CLI instead.
 
