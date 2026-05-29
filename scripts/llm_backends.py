@@ -126,6 +126,82 @@ def _post_json(url: str, body: dict, headers: dict) -> dict:
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
 
 
+def _get_json(url: str, headers: dict) -> dict:
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:800]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from None
+
+
+# CLI-auth providers have no HTTP models endpoint to query — they accept
+# whatever model IDs their CLI knows about.
+_CLI_PROVIDERS = ("claude-code", "claude-code-agentic", "codex-agentic")
+
+
+def list_models(
+    provider: str, api_key: str | None = None, api_base: str | None = None,
+) -> list[str]:
+    """Return a sorted list of model IDs `provider` exposes via its API.
+
+    Hits the provider's `/models` (or Gemini's `models`) endpoint live, so
+    the result is whatever the account actually has access to today. Most
+    providers require `api_key`; OpenRouter's catalog is public so the key
+    is optional there.
+
+    Raises ``ValueError`` for the CLI-auth providers (no endpoint exists) and
+    ``RuntimeError`` (with the HTTP status / body) on an API error — typically
+    a missing or invalid key."""
+    if provider in _CLI_PROVIDERS:
+        raise ValueError(
+            f"{provider} authenticates through its own CLI, not an HTTP API, "
+            "so there is no models endpoint to query. It accepts any model ID "
+            "the CLI knows — for the Claude CLI see `claude --help`; for the "
+            "Codex CLI accept the wizard's empty default and it picks its own."
+        )
+
+    if provider == "google":
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models"
+            f"?key={api_key or ''}&pageSize=1000"
+        )
+        data = _get_json(url, {})
+        ids: list[str] = []
+        for m in data.get("models", []):
+            # Only models that can answer a generateContent call are usable as
+            # an agent backend — skip embedding / tuning-only entries.
+            if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+                continue
+            name = m.get("name", "")
+            ids.append(name[len("models/"):] if name.startswith("models/") else name)
+        return sorted(set(ids))
+
+    if provider == "anthropic":
+        data = _get_json(
+            "https://api.anthropic.com/v1/models?limit=1000",
+            {"x-api-key": api_key or "", "anthropic-version": "2023-06-01"},
+        )
+        return sorted(m["id"] for m in data.get("data", []) if m.get("id"))
+
+    # OpenAI-compatible providers (openai, venice, openrouter, plus any
+    # OpenAI-compatible gateway passed via api_base) all share the /models shape.
+    if provider == "venice":
+        base = api_base or VENICE_API_BASE
+    elif provider == "openrouter":
+        base = api_base or OPENROUTER_API_BASE
+    elif provider == "openai":
+        base = api_base or "https://api.openai.com"
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+    base = base.rstrip("/")
+    url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    data = _get_json(url, headers)
+    return sorted(m.get("id", "") for m in data.get("data", []) if m.get("id"))
+
+
 def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> tuple[str, Usage]:
     data = _post_json(
         "https://api.anthropic.com/v1/messages",

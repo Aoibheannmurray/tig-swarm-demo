@@ -87,7 +87,10 @@ It prompts for, in order:
 3. `swarm_password`
 4. LLM provider (Anthropic / OpenAI / Google / Venice / OpenRouter /
    `claude` CLI / `codex` CLI — pick what the user has credentials for)
-5. Model (Enter accepts the per-provider default)
+5. Model (Enter accepts the per-provider default). To see what model IDs a
+   provider offers, run `python scripts/list_models.py <provider>` — it queries
+   the provider's live models endpoint (reads the API key from the env; the
+   CLI providers have no endpoint and accept any ID their CLI knows).
 6. Fleet size (number of parallel agents — default 1)
 
 On a **re-run** against an existing `fleet.config.json` the wizard adds a
