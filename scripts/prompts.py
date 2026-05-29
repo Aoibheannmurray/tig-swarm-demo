@@ -272,8 +272,9 @@ def parse_tacit_distillation(response: str) -> str | None:
 RUST_RULES = """\
 
 RUST RULES (the output is compiled as-is — it MUST build):
-- Only `std` is available. Do NOT add `use` lines for external crates
-  (no rand, rayon, itertools, ndarray, etc.) and do NOT add `[dependencies]`.
+- Use only `std` plus the crates listed under "Available crates" in the
+  challenge spec above. Do NOT add any other external crate (no rayon,
+  itertools, etc.) and do NOT add or edit a `[dependencies]` section.
 - Keep the EXACT `solve_challenge` signature, parameter names, and types you
   were given. Call the provided `save_solution` closure to record solutions.
 - No `unsafe`, no `async`, no spawning threads.
@@ -290,21 +291,76 @@ RUST RULES (the output is compiled as-is — it MUST build):
 # tends not to compile). Capable models don't need this verbosity.
 RUST_RULES_DETAILED = """\
 
-EXTRA RULES FOR A CLEAN COMPILE (follow ALL of these):
+EXTRA RULES FOR A CLEAN COMPILE (smaller models — follow ALL of these):
+
+RULE 1 - NO DUPLICATE STRUCTS:
+  Each struct (e.g. a Hyperparameters config) is defined ONCE. Modify the
+  existing definition in place; never add a second
+  `pub struct <Name> { ... }` with a name that already exists.
+
+RULE 2 - BORROW CHECKER:
+  Copy a value out before mutating the collection it came from.
+  BAD:  let item = vec.choose(&mut rng).unwrap(); vec.retain(...);
+  GOOD: let item = *vec.choose(&mut rng).unwrap(); vec.retain(...);
+  Alternative: remove by index with `let x = vec.remove(idx);`. When the
+  borrow checker objects, clone the data rather than leaving code that won't
+  build.
+
+RULE 3 - TRAIT IMPORTS:
+  Import every trait whose methods you call, with the other `use` lines at the
+  top of the file — e.g. `use rand::prelude::{SliceRandom, IteratorRandom};`
+  for `.choose()` / `.shuffle()`. A missing trait import is a compile error.
+
+RULE 4 - BRACE BALANCE:
+  Before returning, verify every `{`, `(`, and `[` has a matching close.
+
+RULE 5 - COUNT SYMMETRIC PAIRS ONCE:
+  When summing over a symmetric matrix, iterate unordered pairs only:
+  `for i in 0..n { for j in (i+1)..n { /* use m[i][j] */ } }` — double-counting
+  silently doubles the objective.
+
+RULE 6 - USE i64 FOR ACCUMULATORS:
+  Sum into an i64 to avoid u32/i32 overflow and to allow negative deltas:
+  `let mut total: i64 = 0; total += value as i64;`
+
+RULE 7 - DEFINE BEFORE USE:
+  Every variable must be declared before its first use within its scope; don't
+  reference a binding from a sibling or inner block that isn't visible there.
+
+GENERAL COMPILE HYGIENE:
 - Before finishing, mentally run `cargo check`: every variable is used or
   prefixed with `_`; every `match` is exhaustive; every branch returns the
-  same type; no semicolons dropped where a value is expected.
+  same type; no semicolon dropped where a value is expected.
 - Prefer iterator methods you are sure of (`.iter()`, `.enumerate()`,
   `.map()`, `.filter()`, `.sum()`, `.min()/.max()`) over hand-written index
   loops; when you do index, derive the bound from `.len()`.
-- Annotate numeric literals when the type is ambiguous (`0usize`, `1.0f64`).
-  Use `as f64` / `as usize` for casts; never rely on implicit coercion.
+- Annotate ambiguous numeric literals (`0usize`, `1.0f64`); cast explicitly
+  with `as`, never rely on implicit coercion.
 - Don't introduce new generics, trait bounds, lifetimes, or macros unless the
-  starting code already uses them — they are a common source of errors.
-- Reuse the data structures already imported via `use super::*;`; don't invent
-  types that aren't defined.
-- Keep the change focused: modify the algorithm logic, not the function
-  surface, so the result still slots into the existing module."""
+  starting code already uses them.
+- Reuse the types already in scope via `use super::*;`; don't invent types
+  that aren't defined.
+- Keep the change focused: modify the algorithm logic, not the
+  `solve_challenge` signature, so the result still slots into the module."""
+
+
+# Always appended to the code system prompt (every provider, not just the
+# detailed/smaller-model path). Frames the task as evolutionary search and
+# fixes the optimisation priority order. Kept terse on purpose — it is sent
+# every iteration, so each line has to earn its tokens.
+EVOLUTION_GUIDANCE = """\
+
+This is an evolutionary search environment — code is mutated over many
+iterations. Favour code that is:
+- Modular: construction, refinement, local search, perturbation as separate fns.
+- Mutatable: key decisions in named params/consts so later iterations can tune them.
+- Robust: handle every instance size and parameter/budget range, not one case.
+- Adaptive: detect instance characteristics and adjust strategy accordingly.
+- Not overfitted to a single scenario.
+
+Priorities, in order: 1) feasibility (never violate constraints) 2) solution
+quality (maximise the objective) 3) stability across instances 4) runtime
+efficiency (leave headroom for more refinement iterations)."""
 
 
 def _rust_rules_block(config: dict) -> str:
@@ -323,9 +379,7 @@ def build_code_system_prompt(challenge_md: str, config: dict) -> str:
     timeout = config.get("timeout", 30)
     time_guidance = (
         f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
-        f"after this hard deadline. Use a time-based loop (std::time::Instant + deadline) "
-        f"that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2-5s) "
-        f"for cleanup. Call save_solution() early with your first feasible solution, then "
+        f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
         f"keep improving and re-saving — the last saved solution is evaluated. If no "
         f"solution was saved when the deadline hits, the instance counts as infeasible."
     )
@@ -344,7 +398,7 @@ IMPORTANT RULES:
 - Separate them with a line containing exactly: // --- kernels.cu ---
 - The Rust file comes FIRST, then the separator, then the CUDA file.
 - No explanation, no markdown fences — just the two raw source files with the separator.
-- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu.{rust_rules}"""
+- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu.{rust_rules}{EVOLUTION_GUIDANCE}"""
     return f"""\
 You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
@@ -355,7 +409,7 @@ OUTPUT FORMAT (strict):
 Your response will be written verbatim to mod.rs and compiled. The very first
 character of your response MUST be `u` from `use super::*;`. No preamble, no
 prose, no markdown fences (```), no commentary before or after the code.
-`use super::*;` must remain as the first import.{rust_rules}"""
+`use super::*;` must remain as the first import.{rust_rules}{EVOLUTION_GUIDANCE}"""
 
 
 def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
