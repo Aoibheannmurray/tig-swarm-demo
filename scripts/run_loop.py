@@ -169,7 +169,8 @@ def _call_llm_logged(
                 f"- output_tokens: {usage.get('output_tokens', 0)}\n\n"
                 f"## SYSTEM\n\n{system}\n\n"
                 f"## USER\n\n{prompt}\n\n"
-                f"## RESPONSE\n\n{response}\n"
+                f"## RESPONSE\n\n{response}\n",
+                encoding="utf-8",
             )
         except Exception as e:
             print(f"  [LOG] Prompt log write failed: {e}", file=sys.stderr)
