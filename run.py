@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Single contributor entry point for the TIG swarm demo.
 
-One command per session:
+One command per session (use `python` instead of `python3` on Windows):
 
-    python run.py
+    python3 run.py
 
 Phases (each only runs when it has something to do):
 
@@ -11,16 +11,16 @@ Phases (each only runs when it has something to do):
   2. Init wizard   - if fleet.config.json is missing.
   3. Tacit prompt  - ask whether to add/edit tacit knowledge (default No,
                      append-mode so existing notes are preserved).
-  4. Launch fleet  - same logic as `python scripts/run_fleet.py`.
+  4. Launch fleet  - same logic as `python3 scripts/run_fleet.py`.
   5. Sync-back     - on shutdown, any `- LLM:` notes appended by the agent
                      are copied from the worktree back to the source file.
 
 The underlying scripts still work for power-user / scripted flows:
 
-    python scripts/init_fleet.py        # just the wizard
-    python setup.py tacit [<name>]      # just the tacit wizard (append)
-    python scripts/run_fleet.py --list  # fleet status
-    python scripts/run_fleet.py --clean # tear down worktrees
+    python3 scripts/init_fleet.py        # just the wizard
+    python3 setup.py tacit [<name>]      # just the tacit wizard (append)
+    python3 scripts/run_fleet.py --list  # fleet status
+    python3 scripts/run_fleet.py --clean # tear down worktrees
 """
 
 from __future__ import annotations
@@ -97,7 +97,8 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
             tk_path.parent.mkdir(parents=True, exist_ok=True)
             tk_path.write_text(
                 setup_mod.tacit_header(stagnation_threshold)
-                + "- (replace this with your own hint, or run setup again)\n"
+                + "- (replace this with your own hint, or run setup again)\n",
+                encoding="utf-8",
             )
             try:
                 shown = tk_path.relative_to(ROOT)

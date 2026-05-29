@@ -39,45 +39,49 @@ def kernel_path(config: dict) -> Path | None:
 # ── Read / write ───────────────────────────────────────────────────
 
 
+# LLM output and user-authored files are always written/read as UTF-8 so a
+# model emitting non-ASCII punctuation (em-dash, →, non-breaking hyphen) can't
+# crash the run on a host whose default encoding is cp125x (Windows). Reads use
+# errors="replace" so a file left half-written by a prior crash still loads.
 def read_optional(path: Path | None) -> str:
     if path and path.exists():
-        return path.read_text()
+        return path.read_text(encoding="utf-8", errors="replace")
     return ""
 
 
 def write_algorithm(code: str, config: dict) -> None:
     p = algo_path(config)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(code)
+    p.write_text(code, encoding="utf-8")
 
 
 def write_kernel(code: str, config: dict) -> None:
     p = kernel_path(config)
     if p:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(code)
+        p.write_text(code, encoding="utf-8")
 
 
 def read_algorithm(config: dict) -> str:
     p = algo_path(config)
-    return p.read_text() if p.exists() else ""
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
 def read_kernel(config: dict) -> str:
     p = kernel_path(config)
     if p and p.exists():
-        return p.read_text()
+        return p.read_text(encoding="utf-8", errors="replace")
     return ""
 
 
 def read_challenge_md() -> str:
     p = ROOT / "CHALLENGE.md"
-    return p.read_text() if p.exists() else ""
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
 def read_tacit_knowledge() -> str:
     p = ROOT / "tacit_knowledge_personal.md"
-    return p.read_text() if p.exists() else ""
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
 def is_stub_code(code: str) -> bool:

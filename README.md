@@ -2,7 +2,7 @@
 
 Multiple LLM agents optimize TIG challenge solvers in Rust, coordinated by a FastAPI server and live dashboard.
 
-Each contributor runs `python run.py`, which spawns one or more agents — each calling an LLM (Anthropic, OpenAI, Google, OpenRouter, Venice, or your local `claude` / `codex` CLI) in a loop and contributing to the swarm.
+Each contributor runs `python3 run.py`, which spawns one or more agents — each calling an LLM (Anthropic, OpenAI, Google, OpenRouter, Venice, or your local `claude` / `codex` CLI) in a loop and contributing to the swarm.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for internals.
 
@@ -12,11 +12,11 @@ Requirements: Python 3, Railway CLI, Railway account.
 
 ```bash
 railway login
-python setup.py create              # deploys a Railway swarm, scaffolds fleet.config.json
-python setup.py switch knapsack     # change the active challenge later
+python3 setup.py create              # deploys a Railway swarm, scaffolds fleet.config.json
+python3 setup.py switch knapsack     # change the active challenge later
 ```
 
-`setup.py` is host-only. Contributors run `python run.py`.
+`setup.py` is host-only. Contributors run `python3 run.py`.
 
 ## Contributor
 
@@ -25,10 +25,14 @@ Requirements:
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/), running (Windows also needs WSL 2)
 - Either an API key for your chosen provider, or a logged-in `claude` / `codex` CLI
 
+> **Windows:** use `python` instead of `python3` in the commands below. On macOS
+> (Homebrew) and most Linux the interpreter is `python3` and there is no bare
+> `python`, so the examples use `python3`.
+
 No terminal handy? Open this repo in [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://docs.claude.com/en/docs/claude-code) — both read `AGENTS.md` and walk you through setup.
 
 ```bash
-python run.py
+python3 run.py
 ```
 
 It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
@@ -54,7 +58,7 @@ To skip the wizard:
 ```bash
 cp fleet.config.example.json fleet.config.json
 $EDITOR fleet.config.json
-python run.py
+python3 run.py
 ```
 
 Per-agent fields:
@@ -75,19 +79,19 @@ Per-agent fields:
 
 Agents also **write back to it**: when one has been failing for a stretch and is about to start over from scratch, it adds a one-line `- LLM:` "what didn't work" note — so future attempts can avoid the same dead end.
 
-To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python setup.py tacit` directly. Both append rather than overwrite, and the edit menu can open the file in your `$EDITOR`. Deeper detail — when agents append, how files resolve per agent — lives in [ARCHITECTURE.md](./ARCHITECTURE.md#tacit-knowledge).
+To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python3 setup.py tacit` directly. Both append rather than overwrite, and the edit menu can open the file in your `$EDITOR`. Deeper detail — when agents append, how files resolve per agent — lives in [ARCHITECTURE.md](./ARCHITECTURE.md#tacit-knowledge).
 
 ### Manual / power-user flow
 
 The underlying commands `run.py` orchestrates also work directly:
 
 ```bash
-python scripts/init_fleet.py                   # just the setup wizard
-python setup.py tacit [<name>]                 # just the tacit wizard
-python scripts/run_fleet.py                    # launch only
-python scripts/run_fleet.py --list             # agent status
-python scripts/run_fleet.py --only claude-1    # run a subset (repeatable)
-python scripts/run_fleet.py --clean            # remove every worktree + branch
+python3 scripts/init_fleet.py                   # just the setup wizard
+python3 setup.py tacit [<name>]                 # just the tacit wizard
+python3 scripts/run_fleet.py                    # launch only
+python3 scripts/run_fleet.py --list             # agent status
+python3 scripts/run_fleet.py --only claude-1    # run a subset (repeatable)
+python3 scripts/run_fleet.py --clean            # remove every worktree + branch
 ```
 
 ## Benchmark image

@@ -163,10 +163,10 @@ def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
         # Clean stale directory if we're switching from multi-file to single-file.
         if bundle_dir.exists():
             shutil.rmtree(bundle_dir)
-        target.write_text(cleaned["mod.rs"])
+        target.write_text(cleaned["mod.rs"], encoding="utf-8")
         if cu_target is not None:
             cu_path = next(p for p in cleaned if p.endswith(".cu"))
-            cu_target.write_text(cleaned[cu_path])
+            cu_target.write_text(cleaned[cu_path], encoding="utf-8")
         elif legacy_cu.exists() and force:
             legacy_cu.unlink()
         return target
@@ -189,7 +189,7 @@ def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
     for rel, body in cleaned.items():
         out = bundle_dir / rel
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(body)
+        out.write_text(body, encoding="utf-8")
     return bundle_dir
 
 
