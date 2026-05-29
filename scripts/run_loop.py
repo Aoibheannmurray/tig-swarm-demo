@@ -90,6 +90,7 @@ from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
 from challenge_files import (
     ChallengeFiles,
+    ensure_super_import,
     is_stub_code,
     read_challenge_md,
     validate_code,
@@ -755,10 +756,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument(
-        "--agentic-timeout", type=int, default=900,
+        "--agentic-timeout", type=int, default=1500,
         help=(
             "Wall-clock timeout in seconds for one agentic iteration "
-            "(claude-code-agentic only). Default 900 (15 min). The claude "
+            "(claude-code-agentic only). Default 1500 (25 min). The claude "
             "CLI has no --max-turns flag, so this is the only ceiling."
         ),
     )
@@ -1142,6 +1143,10 @@ def main() -> int:
                 # spam every dashboard viewer once per iteration.
                 continue
 
+            # The agent often rewrites the import block and drops the required
+            # `use super::*;` anchor (or spells it the long way), which would
+            # otherwise discard the whole run. Re-insert it before validating.
+            code = ensure_super_import(code)
             violation = validate_code(code)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")

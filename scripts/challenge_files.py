@@ -104,6 +104,30 @@ def _strip_fences(text: str) -> str:
 _FENCED_BLOCK_RE = re.compile(r"```(?:[\w+-]*)\s*\n(.*?)\n```", re.DOTALL)
 
 
+def ensure_super_import(code: str) -> str:
+    """Re-insert the required `use super::*;` anchor if it's missing.
+
+    The swarm puts each algorithm at `src/<challenge>/algorithm/mod.rs`, a
+    submodule of the challenge module, so `use super::*;` (equivalently
+    `use crate::<challenge>::*;`) pulls the Challenge/Solution types into
+    scope. Agents — especially the tooled agentic backend — sometimes rewrite
+    the import block and drop the literal anchor (or spell it the long way),
+    which previously discarded an otherwise-valid candidate. Inserting it is
+    safe: if the parent glob is already imported some other way the worst case
+    is an unused-import warning, never an error.
+    """
+    if not code or "use super::*;" in code:
+        return code
+    lines = code.splitlines(keepends=True)
+    # Insert before the first top-level `use` (which sits after any leading
+    # comments and `#![...]` inner attributes), else at the very top.
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("use "):
+            lines.insert(i, "use super::*;\n")
+            return "".join(lines)
+    return "use super::*;\n" + code
+
+
 def parse_code(text: str) -> str:
     # Defensive against chatty LLMs that ignore "no preamble / no fences":
     # if the response wraps the code in ```...```, take the first fenced
@@ -118,7 +142,7 @@ def parse_code(text: str) -> str:
     idx = text.find("use super::*;")
     if idx > 0:
         text = text[idx:]
-    return text.strip()
+    return ensure_super_import(text.strip())
 
 
 def parse_gpu_code(text: str) -> tuple[str, str]:
@@ -130,10 +154,10 @@ def parse_gpu_code(text: str) -> tuple[str, str]:
     text = _strip_fences(text)
     m = _KERNEL_SEPARATOR_RE.search(text)
     if m is None:
-        return text.strip(), ""
+        return ensure_super_import(text.strip()), ""
     rust = text[: m.start()].strip()
     cuda = text[m.end():].strip()
-    return _strip_fences(rust), _strip_fences(cuda)
+    return ensure_super_import(_strip_fences(rust)), _strip_fences(cuda)
 
 
 def validate_code(code: str) -> str | None:
