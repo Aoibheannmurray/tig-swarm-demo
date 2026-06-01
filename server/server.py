@@ -1,5 +1,6 @@
 import json
 import asyncio
+import hashlib
 import logging
 import random
 import secrets
@@ -14,7 +15,7 @@ from pathlib import Path
 from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
-    AdminRevoke, AdminSeedInactive,
+    AdminRevoke, AdminSeedInactive, AdminSeedPool,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
@@ -23,6 +24,7 @@ from models import (
 from names import generate_agent_name, load_used_names
 from dedup import fingerprint
 import db
+import tiers
 import ws_events
 import api_models
 import challenges
@@ -142,6 +144,50 @@ async def load_initial_algorithm(challenge: str) -> tuple[str, str]:
         cfg.get("initial_algorithm_code") or "",
         cfg.get("initial_kernel_code") or "",
     )
+
+
+async def seed_for_agent(
+    conn, agent_id: str, challenge: str, tier: str, role: str,
+    *, direction: str, cutoff_ts: str,
+) -> tuple[str, str, str]:
+    """Pick the starting code for an agent on a fresh trajectory.
+
+    Frontier explorers keep the bare stub (they bootstrap). Standard-tier OR
+    exploiter agents get working code via a fallback chain:
+      seed pool (diverse per-agent assignment) → best active peer → stub.
+
+    Returns (algorithm_code, kernel_code, start) where `start` is one of
+    'seed' | 'peer' | 'stub' for the dashboard.
+    """
+    needs_seed = (tier == "standard") or (role == "exploiter")
+    if not needs_seed:
+        code, kernel = await load_initial_algorithm(challenge)
+        return code, kernel, "stub"
+
+    seeds = await db.list_seeds(conn, challenge)
+    if seeds:
+        # Deterministic per-agent assignment spreads the population across the
+        # available seeds (and is stable across this agent's resets).
+        idx = int(hashlib.sha1(agent_id.encode()).hexdigest(), 16) % len(seeds)
+        s = seeds[idx]
+        return s["algorithm_code"], s.get("kernel_code") or "", "seed"
+
+    # Empty seed pool → adopt the best active peer's current algorithm so the
+    # agent exploits a real working lineage instead of idling on the stub.
+    peers = await db.list_agent_bests(
+        conn, challenge,
+        exclude_agent_ids=[agent_id],
+        direction=direction,
+        active_only=True,
+        inactive_cutoff=cutoff_ts,
+    )
+    if peers:
+        best = peers[0]
+        return best["algorithm_code"], best.get("kernel_code") or "", "peer"
+
+    # True cold start: no seeds and no feasible peers yet.
+    code, kernel = await load_initial_algorithm(challenge)
+    return code, kernel, "stub"
 
 
 async def get_direction(challenge: str | None = None) -> str:
@@ -491,12 +537,19 @@ async def register_agent(
     if agent_name is None:
         agent_name = generate_agent_name()
     llm_type = (req.llm_type or "").strip() or None
+    # Auto-classify the model tier (frontier/standard) at register. Prefer the
+    # structured provider/model when supplied; otherwise parse the llm_type
+    # label the client already sends. Tier drives seeding only.
+    if req.provider or req.model:
+        tier = tiers.classify_tier(req.provider, req.model)
+    else:
+        tier = tiers.classify_tier_from_label(llm_type)
 
     async with db.connect() as conn:
         await conn.execute(
-            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type, token, contributor_username) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type, agent_token, contributor_username),
+            "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type, token, contributor_username, tier) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type, agent_token, contributor_username, tier),
         )
         config = await db.get_config(conn)
         # Persist a join event so the dashboard's live feed can replay it
@@ -635,6 +688,7 @@ async def heartbeat(agent_id: str, req: HeartbeatRequest):
 async def get_state(
     agent_id: str | None = None,
     challenge: str | None = None,
+    role: str | None = None,
 ):
     """Return current swarm state for the given challenge.
 
@@ -706,6 +760,12 @@ async def get_state(
             my_best = await db.get_agent_best(conn, agent_id, challenge)
             acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
             runs_since = acs["runs_since_improvement"] if acs else 0
+            agent_tier = await db.get_agent_tier(conn, agent_id)
+            # Role is contributor-owned, reported by the client each poll and
+            # not persisted as authority. Normalize to the two known values;
+            # anything unrecognized (or absent) is an explorer — today's
+            # default behavior.
+            agent_role = "exploiter" if (role or "").strip().lower() == "exploiter" else "explorer"
 
             # ── Trajectory reset on stagnation_limit ──
             trajectory_reset = None
@@ -736,9 +796,12 @@ async def get_state(
                 go_fresh = not inactive_pool or n_traj ** 1.5 < total_deact
 
                 if go_fresh:
-                    new_code, new_kernel_code = await load_initial_algorithm(challenge)
+                    new_code, new_kernel_code, _start = await seed_for_agent(
+                        conn, agent_id, challenge, agent_tier, agent_role,
+                        direction=direction, cutoff_ts=cutoff_ts,
+                    )
                     new_program_id = new_id()
-                    trajectory_reset = {"type": "fresh_start"}
+                    trajectory_reset = {"type": "fresh_start", "start": _start}
                 else:
                     picked = random.choice(inactive_pool)
                     new_code = picked["algorithm_code"]
@@ -793,7 +856,10 @@ async def get_state(
                     my_best_code = my_best["algorithm_code"]
                     my_best_kernel_code = my_best.get("kernel_code")
                 else:
-                    my_best_code, my_best_kernel_code = await load_initial_algorithm(challenge)
+                    my_best_code, my_best_kernel_code, _start = await seed_for_agent(
+                        conn, agent_id, challenge, agent_tier, agent_role,
+                        direction=direction, cutoff_ts=cutoff_ts,
+                    )
                 my_best_score = my_best["score"] if my_best else None
                 my_best_experiment_id = my_best["experiment_id"] if my_best else None
 
@@ -891,6 +957,15 @@ async def get_state(
             ch_def = challenges.CHALLENGES.get(challenge)
             is_gpu = ch_def.is_gpu if ch_def else False
 
+            # Soft niching: suggest the least-covered strategy family to
+            # explorers (a hint the client nudges toward; the agent may ignore
+            # it). Exploiters make localized edits and don't pick a family.
+            assigned_strategy_tag = None
+            if agent_role == "explorer" and ch_def:
+                assigned_strategy_tag = await db.least_covered_tag(
+                    conn, challenge, list(ch_def.strategy_tags),
+                )
+
             # Server's view of this agent's name — used by the loop client
             # to detect a local rename (swarm.config.json contributor_name
             # diverging from server's agents.name) and POST /rename.
@@ -918,6 +993,9 @@ async def get_state(
                 "stagnation_hint": stagnation_hint,
                 "trajectory_reset": trajectory_reset,
                 "leaderboard": leaderboard,
+                "tier": agent_tier,
+                "role": agent_role,
+                "assigned_strategy_tag": assigned_strategy_tag,
             }
             if is_gpu:
                 resp["best_kernel_code"] = my_best_kernel_code or None
@@ -1215,6 +1293,26 @@ async def create_iteration(req: IterationCreate):
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (exp_id, req.agent_id, challenge, agent_name, req.score, solution_data_json, timestamp),
             )
+
+        # This agent got a result through the benchmark (feasible or not), so
+        # it has "ever benchmarked" on this challenge. Agents that never reach
+        # here keep ever_benchmarked=0 — a quiet signal, no feed message.
+        await db.update_agent_challenge_state(
+            conn, req.agent_id, challenge, set_fields={"ever_benchmarked": 1},
+        )
+
+        # Auto-harvest: a frontier agent's first feasible algorithm for a
+        # strategy_tag becomes a seed for standard/exploiter agents. The
+        # UNIQUE(challenge, strategy_tag, source) index + INSERT OR IGNORE make
+        # first-feasible-per-tag win and bound the pool (≤ one seed per tag).
+        if req.feasible and req.algorithm_code.strip():
+            if (await db.get_agent_tier(conn, req.agent_id)) == "frontier":
+                await db.insert_seed(
+                    conn, challenge, req.strategy_tag, req.algorithm_code,
+                    created_at=timestamp, source="harvested", score=req.score,
+                    feasible=True, kernel_code=req.kernel_code,
+                    origin_agent_id=req.agent_id,
+                )
 
         await conn.commit()
 
@@ -1977,6 +2075,29 @@ async def admin_seed_inactive(req: AdminSeedInactive):
         "challenge": req.challenge,
         "inactive_id": inactive_id,
         "source": req.source_label,
+    }
+
+
+@app.post("/api/admin/seed_pool")
+async def admin_seed_pool(req: AdminSeedPool):
+    """Deposit a host-authored seed algorithm into `seed_pool`. Deduped by
+    (challenge, strategy_tag, source='authored'); a repeat for the same tag is
+    silently ignored (idempotent re-runs of `setup.py create`)."""
+    await verify_admin(req)
+    if not req.algorithm_code.strip():
+        raise HTTPException(status_code=400, detail="algorithm_code is empty")
+    timestamp = now()
+    async with db.connect() as conn:
+        added = await db.insert_seed(
+            conn, req.challenge, req.strategy_tag, req.algorithm_code,
+            created_at=timestamp, source="authored", score=req.score,
+            feasible=True, kernel_code=req.kernel_code,
+        )
+        await conn.commit()
+    return {
+        "seeded": added,
+        "challenge": req.challenge,
+        "strategy_tag": req.strategy_tag,
     }
 
 

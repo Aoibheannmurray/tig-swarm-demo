@@ -267,7 +267,11 @@ export interface StateResponse {
   inspiration_code?: string;
   inspiration_agent_name?: string;
   stagnation_hint?: string;
-  trajectory_reset?: { type: string; prior_score?: number };
+  trajectory_reset?: { type: string; prior_score?: number; start?: string };
+  // Auto-classified model tier; echoed role; soft strategy-tag suggestion.
+  tier?: string;
+  role?: string;
+  assigned_strategy_tag?: string;
 
   // Dashboard view fields
   baseline_score?: number | null;

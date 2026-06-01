@@ -126,6 +126,19 @@ from c3_compute import run_benchmark_c3
 
 # Backoff after a recoverable iteration-level failure (state fetch, LLM error).
 _ITERATION_BACKOFF_SECS = 5
+# An exploiter must make only a small, localized edit. Reject a generated
+# candidate whose similarity to the starting code drops below this — i.e. it
+# rewrote too much. Fed back into the _generate_code retry loop.
+_EXPLOITER_MIN_SIMILARITY = 0.70
+
+
+def _normalize_role(value: object) -> str:
+    """Map a config/state `role` value to 'exploiter' or 'explorer' (default).
+
+    Role is contributor-owned (an optional field in fleet.config.json / the
+    worktree's agent.config.json) and re-read every iteration so edits take
+    effect live. Anything unrecognized is an explorer — today's behavior."""
+    return "exploiter" if str(value or "").strip().lower() == "exploiter" else "explorer"
 # Skip the LLM re-describe call when the post-fix code is this similar to
 # the pre-fix code — the fix was almost certainly cosmetic (bounds checks,
 # error wrappers) and not worth a round-trip to confirm "no change".
@@ -249,8 +262,12 @@ def _generate_code(
     args: argparse.Namespace, model: str, api_key: str,
     state: dict, hypothesis: dict, config: dict,
     challenge_md: str, files: ChallengeFiles,
+    *, role: str = "explorer", best_code: str = "",
 ) -> tuple[str | None, str | None, int, int]:
     """LLM code generation with retry on validation failure.
+
+    For exploiters, also reject candidates that diverge too far from the
+    starting code (a full rewrite) — they must make one localized edit.
 
     Returns (code, kernel, input_tokens, output_tokens).
     """
@@ -258,15 +275,19 @@ def _generate_code(
     output_tokens = 0
     max_attempts = 3
     violation = ""
+    # Only gate exploiters when they have real code to refine (not a stub).
+    enforce_small_edit = (
+        role == "exploiter" and bool(best_code) and not is_stub_code(best_code)
+    )
 
     for attempt in range(max_attempts):
         if attempt == 0:
             print(f"  [LLM] Generating code via {args.provider}/{model}…")
-            user_prompt = build_code_user_prompt(state, hypothesis, config)
+            user_prompt = build_code_user_prompt(state, hypothesis, config, role=role)
         else:
             print(f"  [LLM] Code retry {attempt}/{max_attempts - 1}: {violation}")
             user_prompt = (
-                build_code_user_prompt(state, hypothesis, config)
+                build_code_user_prompt(state, hypothesis, config, role=role)
                 + f"\n\nYour previous response was rejected: {violation}\n"
                 "Fix the issue and return the complete source."
                 + files.separator_suffix()
@@ -275,7 +296,7 @@ def _generate_code(
             code_response, usage = _call_llm_logged(
                 "code", config,
                 args.provider, model, api_key,
-                build_code_system_prompt(challenge_md, config),
+                build_code_system_prompt(challenge_md, config, role=role),
                 user_prompt,
                 args.api_base,
             )
@@ -295,6 +316,19 @@ def _generate_code(
         if violation:
             print(f"  [LLM] Validation failed: {violation}")
             continue
+
+        if enforce_small_edit:
+            sim = difflib.SequenceMatcher(None, best_code, parsed).ratio()
+            if sim < _EXPLOITER_MIN_SIMILARITY:
+                violation = (
+                    f"too large a change for an exploiter (similarity "
+                    f"{sim * 100:.0f}% < {_EXPLOITER_MIN_SIMILARITY * 100:.0f}%); "
+                    "make ONE localized edit and return the complete file "
+                    "otherwise unchanged"
+                )
+                print(f"  [ROLE] Exploiter edit too large: {violation}")
+                continue
+
         print(f"  [LLM] Code validated OK")
         return parsed, parsed_kernel, input_tokens, output_tokens
 
@@ -674,6 +708,7 @@ def _run_agentic_iteration(
     agent_id: str, agent_name: str,
     workdir: Path, backend: agentic_backends.AgenticBackend,
     challenge_md: str, files: ChallengeFiles,
+    *, role: str = "explorer", assigned_tag: str | None = None,
 ) -> tuple[dict, str, str, agentic_backends.AgenticResult]:
     """One tooled-agent iteration. Returns (hypothesis, code, kernel, result).
 
@@ -686,7 +721,7 @@ def _run_agentic_iteration(
     _seed_worktree_files(workdir, state, files, config)
     agentic_sandbox.reset_iteration_state(workdir)
 
-    user_prompt = build_agentic_user_prompt(state, config)
+    user_prompt = build_agentic_user_prompt(state, config, role=role, assigned_tag=assigned_tag)
     print(f"  [AGENTIC] Launching {backend.name} in {workdir} (timeout {args.agentic_timeout}s)…")
     # Heads-up so the contributor's terminal doesn't look frozen. The
     # subprocess is run with capture_output=True (we need the trace for
@@ -1080,6 +1115,12 @@ def main() -> int:
     print(f"Server: {server}")
     print()
 
+    # Contributor-owned role, re-read from agent.config.json every iteration so
+    # an edit to fleet.config.json (propagated into the worktree by run_fleet)
+    # takes effect on the next loop. Defaults to 'explorer'.
+    role = _normalize_role(agent_config.get("role"))
+    print(f"Role: {role}")
+
     iteration = 0
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
@@ -1103,6 +1144,13 @@ def main() -> int:
         iter_challenge = config.get("challenge")
         print(f"  [SYNC] Challenge: {iter_challenge or '?'}  GPU: {config.get('is_gpu', False)}")
 
+        # Re-read the contributor-owned role (run_fleet patches fleet.config.json
+        # edits into this worktree's agent.config.json live). Log on change only.
+        live_role = _normalize_role(load_agent_config().get("role"))
+        if live_role != role:
+            print(f"  [ROLE] role changed: {role} -> {live_role}")
+            role = live_role
+
         try:
             swarm_cfg = server_get(f"{server}/api/swarm_config")
             config["available_challenges"] = swarm_cfg.get("available_challenges", {})
@@ -1112,7 +1160,7 @@ def main() -> int:
         # ── Get state ──────────────────────────────────────────
         print("  [STATE] Fetching agent state…")
         try:
-            state = get_state(server, agent_id)
+            state = get_state(server, agent_id, role=role)
         except Exception as e:
             print(f"  [STATE] FAILED: {e}")
             time.sleep(_ITERATION_BACKOFF_SECS)
@@ -1146,11 +1194,25 @@ def main() -> int:
                          challenge=iter_challenge,
                          agent_token=agent_token)
 
+        # Soft strategy-tag suggestion from the server (explorers only).
+        assigned_tag = state.get("assigned_strategy_tag")
+
         # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
         best_kernel = state.get("best_kernel_code") or ""
         files = ChallengeFiles(config)
         bootstrap = is_stub_code(best_code)
+
+        # Exploiters refine existing code; they never bootstrap from scratch.
+        # The server seeds standard/exploiter agents with a working algorithm
+        # (or a peer's best); a stub here means the true cold start — no seed
+        # and no feasible peers yet. Idle locally rather than rewriting, and do
+        # NOT post to the feed.
+        if role == "exploiter" and bootstrap:
+            print("  [ROLE] Exploiter awaiting seed (cold start) — skipping iteration, will not bootstrap.")
+            time.sleep(_ITERATION_BACKOFF_SECS)
+            continue
+
         if best_code and not bootstrap:
             files.write(best_code, best_kernel)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
@@ -1172,6 +1234,7 @@ def main() -> int:
             hypothesis, code, new_kernel, _agentic_result = _run_agentic_iteration(
                 args, state, config, server, agent_token, agent_id, agent_name,
                 workdir, backend, challenge_md, files,
+                role=role, assigned_tag=assigned_tag,
             )
             tag = hypothesis.get("strategy_tag", "other")
             title = hypothesis.get("title", "untitled")
@@ -1192,6 +1255,20 @@ def main() -> int:
                 if best_code:
                     files.write(best_code, best_kernel)
                 continue
+
+            # Exploiters must make a localized edit. Agentic mode has no retry
+            # loop, so reject-and-restore if the worktree diff rewrote too much.
+            if role == "exploiter" and best_code and not is_stub_code(best_code):
+                sim = difflib.SequenceMatcher(None, best_code, code).ratio()
+                if sim < _EXPLOITER_MIN_SIMILARITY:
+                    print(
+                        f"  [ROLE] Exploiter edit too large "
+                        f"({sim * 100:.0f}% < {_EXPLOITER_MIN_SIMILARITY * 100:.0f}%) "
+                        f"— restoring best, skipping iteration"
+                    )
+                    if best_code:
+                        files.write(best_code, best_kernel)
+                    continue
 
             # Copy the worktree's edited code into the main checkout so the
             # official benchmark sees it. No compile-fix retry: the agent
@@ -1232,8 +1309,8 @@ def main() -> int:
                 hyp_response, hyp_usage = _call_llm_logged(
                     "hypothesis", config,
                     args.provider, model, api_key,
-                    build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
-                    build_hypothesis_user_prompt(state, config),
+                    build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap, role=role, assigned_tag=assigned_tag),
+                    build_hypothesis_user_prompt(state, config, role=role, assigned_tag=assigned_tag),
                     args.api_base,
                 )
                 iter_input_tokens += hyp_usage["input_tokens"]
@@ -1260,7 +1337,7 @@ def main() -> int:
             # ── LLM code generation ────────────────────────────
             code, new_kernel, gen_in, gen_out = _generate_code(
                 args, model, api_key, state, hypothesis, config,
-                challenge_md, files,
+                challenge_md, files, role=role, best_code=best_code,
             )
             iter_input_tokens += gen_in
             iter_output_tokens += gen_out

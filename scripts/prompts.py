@@ -42,11 +42,51 @@ def get_strategy_tags(config: dict) -> list[str]:
     return tags if tags else DEFAULT_STRATEGY_TAGS
 
 
+# ── Role guidance ──────────────────────────────────────────────────
+#
+# Role is contributor-owned (explorer by default; exploiter opt-in). It only
+# changes the *guidance* injected into the per-iteration prompts — never the
+# stable rules in CLAUDE.md/AGENTS.md. Explorers are nudged toward novel,
+# ambitious work; exploiters are constrained to one small localized edit (the
+# driver also enforces this with a similarity gate in run_loop._generate_code).
+
+
+def _role_guidance(role: str) -> str:
+    """One short role steer for the hypothesis/code SYSTEM prompts."""
+    if role == "exploiter":
+        return (
+            "ROLE — EXPLOITER (localized edits only): You are refining an "
+            "existing working algorithm, NOT rewriting it. Make ONE small, "
+            "localized change (a parameter, a single block, one function body). "
+            "Preserve the overall structure, control flow, and function set of "
+            "the code shown to you. Do NOT rewrite from scratch or change the "
+            "algorithmic approach. If you would touch more than ~15% of the "
+            "lines, narrow the change."
+        )
+    return (
+        "ROLE — EXPLORER: Bias toward NOVEL, structurally-different strategies "
+        "the swarm has not tried. Ambitious rewrites are welcome if you believe "
+        "they can leapfrog the current best."
+    )
+
+
+def _niche_nudge(role: str, assigned_tag: str | None) -> str:
+    """Soft strategy-tag suggestion (explorers only). Never forced."""
+    if role == "exploiter" or not assigned_tag:
+        return ""
+    return (
+        f"The '{assigned_tag}' strategy family looks under-explored right now — "
+        f"consider proposing within it, but pick a different STRATEGY_TAG if you "
+        f"have a stronger idea."
+    )
+
+
 # ── Hypothesis prompts ─────────────────────────────────────────────
 
 
 def build_hypothesis_system_prompt(
     challenge_md: str, config: dict, *, is_bootstrap: bool = False,
+    role: str = "explorer", assigned_tag: str | None = None,
 ) -> str:
     challenge = config.get("challenge", "unknown")
     tags = ", ".join(get_strategy_tags(config))
@@ -57,12 +97,18 @@ def build_hypothesis_system_prompt(
         )
     else:
         job = "propose ONE specific change to try."
+    # Bootstrap is an explorer-only path (exploiters are guarded out client-side
+    # and seeded with working code), so the role steer never conflicts with it.
+    extra = "\n\n" + _role_guidance(role)
+    niche = _niche_nudge(role, assigned_tag)
+    if niche:
+        extra += "\n\n" + niche
     return f"""\
 You are planning an improvement to a Rust algorithm for the "{challenge}" challenge.
 
 {challenge_md}
 
-Your job: {job} Do NOT write code — just describe the idea.
+Your job: {job} Do NOT write code — just describe the idea.{extra}
 
 Respond in EXACTLY this format (4 lines, nothing else):
 
@@ -84,9 +130,15 @@ def _format_inspiration(state: dict, is_gpu: bool, headline: str) -> list[str]:
     return out
 
 
-def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
+def build_hypothesis_user_prompt(
+    state: dict, config: dict, *, role: str = "explorer",
+    assigned_tag: str | None = None,
+) -> str:
     parts: list[str] = []
     is_gpu = bool(config.get("is_gpu"))
+    niche = _niche_nudge(role, assigned_tag)
+    if niche:
+        parts.append(niche)
 
     code = state.get("best_algorithm_code") or ""
     bootstrap = is_stub_code(code)
@@ -142,7 +194,13 @@ def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
                 "Propose an initial strategy to improve it."
             )
 
-    parts.append("\nPropose one specific improvement to try.")
+    if role == "exploiter":
+        parts.append(
+            "\nPropose ONE small, localized improvement to the existing code "
+            "above — a single parameter or block, not a rewrite."
+        )
+    else:
+        parts.append("\nPropose one specific improvement to try.")
     return "\n".join(parts)
 
 
@@ -317,7 +375,9 @@ def _rust_rules_block(config: dict) -> str:
     return block
 
 
-def build_code_system_prompt(challenge_md: str, config: dict) -> str:
+def build_code_system_prompt(
+    challenge_md: str, config: dict, *, role: str = "explorer",
+) -> str:
     challenge = config.get("challenge", "unknown")
     is_gpu = bool(config.get("is_gpu"))
     timeout = config.get("timeout", 30)
@@ -329,6 +389,10 @@ def build_code_system_prompt(challenge_md: str, config: dict) -> str:
         f"keep improving and re-saving — the last saved solution is evaluated. If no "
         f"solution was saved when the deadline hits, the instance counts as infeasible."
     )
+    # For exploiters, inject the localized-edit rule between the time budget and
+    # the output-format rules so it's read before they start writing.
+    if role == "exploiter":
+        time_guidance += "\n\n" + _role_guidance(role)
     rust_rules = _rust_rules_block(config)
     if is_gpu:
         return f"""\
@@ -358,12 +422,16 @@ prose, no markdown fences (```), no commentary before or after the code.
 `use super::*;` must remain as the first import.{rust_rules}"""
 
 
-def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
+def build_code_user_prompt(
+    state: dict, hypothesis: dict, config: dict, *, role: str = "explorer",
+) -> str:
     parts: list[str] = []
     is_gpu = bool(config.get("is_gpu"))
 
     code = state.get("best_algorithm_code") or ""
-    bootstrap = is_stub_code(code)
+    # Exploiters never bootstrap (the driver guards stub + exploiter), so treat
+    # their starting code as real even on the off chance a stub slips through.
+    bootstrap = is_stub_code(code) and role != "exploiter"
     if bootstrap:
         parts.append(
             "Current algorithm (mod.rs) is a stub — replace it with a complete "
@@ -392,6 +460,12 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
     description = hypothesis.get("description", "")
     verb = "Implement this strategy" if bootstrap else "Apply this change"
     parts.append(f"\n{verb}:\n{title}\n{description}")
+
+    if role == "exploiter":
+        parts.append(
+            "\nApply ONE localized change only — preserve the rest of the code "
+            "and return the COMPLETE file (still starting with `use super::*;`)."
+        )
 
     return "\n".join(parts)
 
@@ -536,12 +610,17 @@ def parse_hypothesis(text: str) -> dict:
 # ── Agentic mode user prompt ───────────────────────────────────────
 
 
-def build_agentic_user_prompt(state: dict, config: dict) -> str:
+def build_agentic_user_prompt(
+    state: dict, config: dict, *, role: str = "explorer",
+    assigned_tag: str | None = None,
+) -> str:
     """Per-iteration prompt for tooled (agentic) Claude Code.
 
     Stable rules — file scope, hypothesis.json schema, cargo allowlist,
     solver constraints — live in CLAUDE.md. This prompt is just the
-    variable state the agent needs to decide what to try this iteration.
+    variable state the agent needs to decide what to try this iteration
+    (role and niche are per-iteration server state, so they live here, not
+    in CLAUDE.md).
     """
     parts: list[str] = []
     is_gpu = bool(config.get("is_gpu"))
@@ -561,6 +640,26 @@ def build_agentic_user_prompt(state: dict, config: dict) -> str:
         f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}"
     )
 
+    if role == "exploiter":
+        parts.append(
+            "\n## Role — exploiter (localized edit only)\n"
+            "Make ONE small, localized change to the existing algorithm. "
+            "Preserve its structure, control flow, and function set — do NOT "
+            "rewrite or restructure. If you'd touch more than ~15% of the "
+            "lines, narrow the change."
+        )
+    else:
+        parts.append(
+            "\n## Role — explorer\n"
+            "Bias toward novel, structurally-different strategies the swarm "
+            "hasn't tried; ambitious rewrites are welcome if they can leapfrog "
+            "the current best."
+        )
+
+    niche = _niche_nudge(role, assigned_tag)
+    if niche:
+        parts.append("\n## Assigned niche (suggestion)\n" + niche)
+
     reset = state.get("trajectory_reset")
     if reset:
         rtype = reset.get("type", "")
@@ -579,7 +678,9 @@ def build_agentic_user_prompt(state: dict, config: dict) -> str:
                 "Propose an initial strategy from scratch."
             )
 
-    bootstrap = is_stub_code(state.get("best_algorithm_code") or "")
+    # Exploiters are guarded out of the stub path by the driver, but gate the
+    # bootstrap block on role too so a stray stub never tells them to rewrite.
+    bootstrap = is_stub_code(state.get("best_algorithm_code") or "") and role != "exploiter"
     if bootstrap:
         parts.append(
             "\n## Bootstrap iteration\n"
