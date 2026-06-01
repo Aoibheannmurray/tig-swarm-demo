@@ -141,3 +141,49 @@ Swarm state lives on the server. Local files only tell this clone how to connect
 | `swarm.admin.json`    | Host-only — admin key + swarm tuning.                         |
 
 Secrets stay in environment variables.
+
+## Remote benchmarking with C3
+
+By default benchmarks run locally in Docker. To run them on
+[C3](https://cthree.cloud) cloud compute instead — useful for GPU challenges or
+when your host lacks the hardware — set `"compute": "c3"` on an agent in
+`fleet.config.json`, then launch as usual with `python run.py`.
+
+First install the `c3` CLI (from `https://cthree.cloud/install.sh`) and
+authenticate, via either:
+
+- `c3 login` (uses your existing session), or
+- `c3 apikey create tig-swarm` then export `C3_API_KEY=...`, or
+- put the key in `fleet.config.json` — a top-level `"c3_api_key"` applies to
+  every agent, and a per-agent `"c3_api_key"` overrides it for that agent.
+  An agent with no key set anywhere falls back to `C3_API_KEY` / `c3 login`.
+
+Then add the C3 keys to the agent:
+
+```jsonc
+{
+  "name": "claude-1",
+  "provider": "anthropic",
+  "model": "claude-opus-4-7",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "compute": "c3",          // run benchmarks on C3 instead of local Docker
+  "c3_hardware": "l40",     // GPU profile (default: l40)
+  "c3_time": "02:00:00",    // per-job walltime (default: 02:00:00)
+  "c3_provider": null,      // optional C3 backend (c3 deploy -p ...)
+  "c3_api_key": null,       // optional per-agent C3 key; omit to fall back
+  "env_image": null         // Docker Hub image override (see below)
+}
+```
+
+| key            | purpose                                                              |
+|----------------|---------------------------------------------------------------------|
+| `compute`      | `"c3"` to run on C3, `"local"` (default) for local Docker.          |
+| `c3_hardware`  | C3 GPU profile (default: `l40`).                                    |
+| `c3_time`      | Per-job walltime (default: `02:00:00`).                             |
+| `c3_provider`  | Optional C3 backend passed as `c3 deploy -p ...`.                  |
+| `c3_api_key`   | Optional per-agent C3 API key (raw value). Omit to inherit the top-level fleet `c3_api_key`, then `C3_API_KEY`, then the `c3 login` session. Lets agents bill C3 to different keys. |
+| `env_image`    | Docker Hub image for the job. Defaults: `rust:1-bookworm` (CPU) or `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (GPU). Use `env_cpu` / `env_gpu` to set each separately. |
+
+Each C3 benchmark runs the same `scripts/benchmark.py` inside that Docker Hub
+image: the loop stages a minimal workspace, deploys it, polls until the job
+finishes, then pulls the `benchmark.json` result back.
