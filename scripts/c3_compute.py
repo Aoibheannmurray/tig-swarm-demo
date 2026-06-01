@@ -109,7 +109,7 @@ def _write_current_source_files(stage: Path, config: dict) -> None:
     if algorithm_code:
         algorithm_path = stage / algorithm_rel
         algorithm_path.parent.mkdir(parents=True, exist_ok=True)
-        algorithm_path.write_text(algorithm_code)
+        algorithm_path.write_text(algorithm_code, encoding="utf-8")
 
     kernel_rel = config.get("kernel_path")
     if kernel_rel:
@@ -117,7 +117,7 @@ def _write_current_source_files(stage: Path, config: dict) -> None:
         if kernel_code:
             kernel_path = stage / kernel_rel
             kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text(kernel_code)
+            kernel_path.write_text(kernel_code, encoding="utf-8")
 
 
 def _create_workspace(stage: Path, config: dict, server: str) -> dict:
@@ -177,7 +177,7 @@ docker:
 output:
   - ./c3-artifacts
 """
-    (stage / ".c3").write_text(c3_config)
+    (stage / ".c3").write_text(c3_config, encoding="utf-8")
 
     gpu_check = ""
     if bool(config.get("is_gpu")):
@@ -234,7 +234,7 @@ cp "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" c3-artifacts/benchmark.stderr 2>/dev
 exit "$status"
 """
     script_path = stage / script_name
-    script_path.write_text(runner)
+    script_path.write_text(runner, encoding="utf-8")
     script_path.chmod(0o755)
     return script_name
 
@@ -418,7 +418,7 @@ def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
         if path.stat().st_size == 0:
             continue
         try:
-            bench = json.loads(path.read_text())
+            bench = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             decode_errors.append(f"{path}: {exc}")
             continue

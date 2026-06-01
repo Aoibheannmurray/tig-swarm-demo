@@ -170,7 +170,8 @@ def _call_llm_logged(
                 f"- output_tokens: {usage.get('output_tokens', 0)}\n\n"
                 f"## SYSTEM\n\n{system}\n\n"
                 f"## USER\n\n{prompt}\n\n"
-                f"## RESPONSE\n\n{response}\n"
+                f"## RESPONSE\n\n{response}\n",
+                encoding="utf-8",
             )
         except Exception as e:
             print(f"  [LOG] Prompt log write failed: {e}", file=sys.stderr)
@@ -302,6 +303,37 @@ def _generate_code(
     return None, None, input_tokens, output_tokens
 
 
+def _print_bench_result(bench: dict, indent: str = "  ") -> None:
+    """Print the benchmark score with context.
+
+    A failed/infeasible track injects a large fixed penalty into a shifted
+    geometric mean, so one bad track can drag the aggregate negative. Print
+    that inline instead of leaving a bare, alarming negative number that
+    every beta reporter flagged as confusing. ASCII-only on purpose so the
+    line itself can't trip a non-UTF-8 Windows console.
+    """
+    score = bench.get("score", 0)
+    feasible = bench.get("feasible", False)
+    track_scores = bench.get("track_scores", {})
+    errors = bench.get("errors") or []
+    print(f"{indent}[BENCH] Score: {score:.0f}  Feasible: {feasible}")
+    if track_scores:
+        for tk, ts in track_scores.items():
+            note = "  (below baseline)" if ts < 0 else ""
+            print(f"{indent}        Track {tk}: {ts:.0f}{note}")
+    if score < 0 or not feasible:
+        msg = ("-> negative = below baseline; a failed/infeasible track incurs "
+               "a large penalty in the shifted geometric mean")
+        failed = [str(tk) for tk, ts in track_scores.items() if ts < 0]
+        if failed:
+            msg += f" (weak tracks: {', '.join(failed)})"
+        print(f"{indent}        {msg}")
+    if errors:
+        print(f"{indent}[BENCH] Errors ({len(errors)}):")
+        for e in errors[:5]:
+            print(f"{indent}        {e}")
+
+
 def _try_compile_fix(
     args: argparse.Namespace, model: str, api_key: str,
     config: dict, challenge_md: str,
@@ -339,6 +371,9 @@ def _try_compile_fix(
     before_fix, _ = files.read()
     sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
     print(f"  Fix similarity to broken code: {sim * 100:.0f}%")
+    if sim >= 0.99:
+        print("  Fix made no changes (identical to broken code) — aborting retry.")
+        return False, usage["input_tokens"], usage["output_tokens"]
     files.write(fixed, fixed_kernel)
     return True, usage["input_tokens"], usage["output_tokens"]
 
@@ -443,6 +478,9 @@ def _fix_runtime_errors(
 
         sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
         print(f"  Fix similarity: {sim * 100:.0f}%")
+        if sim >= 0.99:
+            print("  Fix made no changes (identical to broken code) — restoring previous best.")
+            return restore_and_fail()
         files.write(fixed, fixed_kernel)
         code_changed = True
 
@@ -467,7 +505,7 @@ def _fix_runtime_errors(
                 return restore_and_fail()
 
         bench = bench_result
-        print(f"  Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
+        _print_bench_result(bench)
 
     return bench, code_changed, input_tokens, output_tokens
 
@@ -478,18 +516,27 @@ def _fix_runtime_errors(
 _AGENTIC_HEARTBEAT_INTERVAL_S = 60
 
 
-def _start_heartbeat_thread(server: str, agent_id: str, agent_token: str) -> threading.Event:
+def _start_heartbeat_thread(
+    server: str, agent_id: str, agent_token: str,
+    timeout_s: int | None = None,
+) -> threading.Event:
     """Send a heartbeat every minute while the agentic call is running.
 
     Mode-2 iterations can run 10+ minutes inside a single `claude -p`
     subprocess. Without a background heartbeat the agent would drop from
-    the server's inspiration pool mid-iteration. Returns a stop event the
+    the server's inspiration pool mid-iteration. The same loop also prints
+    a periodic elapsed-time line to the terminal so the silent capture
+    doesn't look like a hang ("is it frozen?"). Returns a stop event the
     caller must set when the agentic call exits.
     """
     stop = threading.Event()
+    started = time.monotonic()
 
     def _beat() -> None:
         while not stop.wait(_AGENTIC_HEARTBEAT_INTERVAL_S):
+            elapsed = int(time.monotonic() - started)
+            budget = f" / {timeout_s}s budget" if timeout_s else ""
+            print(f"  [AGENTIC] …still working ({elapsed}s elapsed{budget})")
             try:
                 send_heartbeat(server, agent_id, agent_token=agent_token)
             except Exception as e:
@@ -516,13 +563,13 @@ def _seed_worktree_files(
     algo_path = workdir / algo_rel
     algo_path.parent.mkdir(parents=True, exist_ok=True)
     if best_code:
-        algo_path.write_text(best_code)
+        algo_path.write_text(best_code, encoding="utf-8")
 
     kernel_rel = config.get("kernel_path")
     if files.is_gpu and kernel_rel and best_kernel:
         kp = workdir / kernel_rel
         kp.parent.mkdir(parents=True, exist_ok=True)
-        kp.write_text(best_kernel)
+        kp.write_text(best_kernel, encoding="utf-8")
 
     agentic_sandbox.seed_worktree_config(workdir)
 
@@ -560,17 +607,18 @@ def _append_tacit_line(line: str) -> None:
     new line back to the source `tacit_knowledge.md` on shutdown."""
     path = ROOT / "tacit_knowledge_personal.md"
     if path.exists():
-        existing = path.read_text()
+        existing = path.read_text(encoding="utf-8", errors="replace")
         if line in existing:
             return  # already present — keep things idempotent within a run
         if not existing.endswith("\n"):
             existing += "\n"
-        path.write_text(existing + line + "\n")
+        path.write_text(existing + line + "\n", encoding="utf-8")
     else:
         path.write_text(
             "# Personal tacit knowledge (worktree copy)\n\n"
             "## Strategies\n\n"
-            + line + "\n"
+            + line + "\n",
+            encoding="utf-8",
         )
 
 
@@ -588,7 +636,7 @@ def _distill_tacit_if_due(
 
     current_code, _ = files.read()
     tacit_path = ROOT / "tacit_knowledge_personal.md"
-    existing_tacit = tacit_path.read_text() if tacit_path.exists() else ""
+    existing_tacit = tacit_path.read_text(encoding="utf-8", errors="replace") if tacit_path.exists() else ""
 
     system_prompt, user_prompt = build_tacit_distillation_prompts(
         state, config, current_code, existing_tacit,
@@ -619,12 +667,12 @@ def _read_worktree_files(
 ) -> tuple[str, str]:
     """Read whatever the agent left on disk in the worktree."""
     algo_path = workdir / config["algorithm_path"]
-    code = algo_path.read_text() if algo_path.exists() else ""
+    code = algo_path.read_text(encoding="utf-8", errors="replace") if algo_path.exists() else ""
     kernel = ""
     if files.is_gpu and config.get("kernel_path"):
         kp = workdir / config["kernel_path"]
         if kp.exists():
-            kernel = kp.read_text()
+            kernel = kp.read_text(encoding="utf-8", errors="replace")
     return code, kernel
 
 
@@ -654,12 +702,15 @@ def _run_agentic_iteration(
     # backend can run for the full --agentic-timeout before printing anything
     # else. Docker stays idle too: benchmark.py only runs *after* this returns.
     print(
-        f"  [AGENTIC] Output is captured; expect no further log lines until "
-        f"the agent finishes (up to {args.agentic_timeout}s). "
+        f"  [AGENTIC] Output is captured; the agent runs silently (up to "
+        f"{args.agentic_timeout}s) with a heartbeat every "
+        f"{_AGENTIC_HEARTBEAT_INTERVAL_S}s so you can see it's alive. "
         f"Docker stays idle until then."
     )
 
-    stop = _start_heartbeat_thread(server, agent_id, agent_token)
+    stop = _start_heartbeat_thread(
+        server, agent_id, agent_token, timeout_s=args.agentic_timeout,
+    )
     try:
         result = backend.iterate(
             workdir, user_prompt,
@@ -1178,16 +1229,7 @@ def main() -> int:
                     files.write(best_code, best_kernel)
                 continue
 
-            track_scores = bench.get("track_scores", {})
-            errors = bench.get("errors") or []
-            print(f"  [BENCH] Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
-            if track_scores:
-                for tk, ts in track_scores.items():
-                    print(f"          Track {tk}: {ts:.0f}")
-            if errors:
-                print(f"  [BENCH] Errors ({len(errors)}):")
-                for e in errors[:5]:
-                    print(f"          {e}")
+            _print_bench_result(bench)
         else:
             # ── Mode 1: single-shot LLM completion ─────────────
             # ── LLM hypothesis ─────────────────────────────────
@@ -1284,16 +1326,7 @@ def main() -> int:
                     files.write(best_code, best_kernel)
                 continue
 
-            track_scores = bench.get("track_scores", {})
-            errors = bench.get("errors") or []
-            print(f"  [BENCH] Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
-            if track_scores:
-                for tk, ts in track_scores.items():
-                    print(f"          Track {tk}: {ts:.0f}")
-            if errors:
-                print(f"  [BENCH] Errors ({len(errors)}):")
-                for e in errors[:5]:
-                    print(f"          {e}")
+            _print_bench_result(bench)
 
             # ── Runtime error retry ────────────────────────────
             runtime_errors = bench.get("errors") or []
@@ -1348,7 +1381,13 @@ def main() -> int:
             "input_tokens": iter_input_tokens,
             "output_tokens": iter_output_tokens,
         })
-        print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
+        if iter_input_tokens == 0 and iter_output_tokens == 0:
+            # claude-code / claude-code-agentic run via the `claude` CLI, which
+            # doesn't surface token counts. Zeros here mean "not reported", not
+            # "the model did nothing" — say so instead of a misleading $0.0000.
+            print(f"  [TOKENS] not reported by {args.provider} provider")
+        else:
+            print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
         print(f"  [PUBLISH] Publishing results to server…")
         is_new_best = False
         try:
