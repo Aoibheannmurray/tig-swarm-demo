@@ -302,13 +302,14 @@ def _generate_code(
 
 
 def _print_bench_result(bench: dict, indent: str = "  ") -> None:
-    """Print the benchmark score with context.
+    """Print the benchmark score with per-track context.
 
     A failed/infeasible track injects a large fixed penalty into a shifted
-    geometric mean, so one bad track can drag the aggregate negative. Print
-    that inline instead of leaving a bare, alarming negative number that
-    every beta reporter flagged as confusing. ASCII-only on purpose so the
-    line itself can't trip a non-UTF-8 Windows console.
+    geometric mean, so one bad track can drag the aggregate negative. Tracks
+    below baseline are flagged inline; what a negative aggregate means is
+    documented once in README.md ("Reading the score") rather than reprinted
+    every iteration. ASCII-only on purpose so the line itself can't trip a
+    non-UTF-8 Windows console.
     """
     score = bench.get("score", 0)
     feasible = bench.get("feasible", False)
@@ -319,13 +320,6 @@ def _print_bench_result(bench: dict, indent: str = "  ") -> None:
         for tk, ts in track_scores.items():
             note = "  (below baseline)" if ts < 0 else ""
             print(f"{indent}        Track {tk}: {ts:.0f}{note}")
-    if score < 0 or not feasible:
-        msg = ("-> negative = below baseline; a failed/infeasible track incurs "
-               "a large penalty in the shifted geometric mean")
-        failed = [str(tk) for tk, ts in track_scores.items() if ts < 0]
-        if failed:
-            msg += f" (weak tracks: {', '.join(failed)})"
-        print(f"{indent}        {msg}")
     if errors:
         print(f"{indent}[BENCH] Errors ({len(errors)}):")
         for e in errors[:5]:

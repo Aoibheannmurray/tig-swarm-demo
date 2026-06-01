@@ -133,6 +133,19 @@ models endpoint — they accept any model ID their CLI knows.
 
 `claude-code` is one-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 15 min per iteration; don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
 
+## Reading the score
+
+Each iteration prints a `[BENCH]` line — the aggregate `Score`, `Feasible`, and a per-track breakdown:
+
+```
+[BENCH] Score: -199814  Feasible: False
+        Track 0: 52000
+        Track 1: -1000000  (below baseline)
+        Track 2: 46800
+```
+
+The aggregate is a **shifted geometric mean** across tracks, and a failed or infeasible track is assigned a large fixed penalty. Because of that penalty, **a single bad track can drag the whole aggregate negative** even when the other tracks scored well. 
+
 ## Local files
 
 Swarm state lives on the server. Local files only tell this clone how to connect and run:
@@ -144,4 +157,3 @@ Swarm state lives on the server. Local files only tell this clone how to connect
 | `.swarm-cache.json`   | Auto-refreshed mirror of `/api/swarm_config`.                 |
 | `swarm.admin.json`    | Host-only — admin key + swarm tuning.                         |
 
-Secrets stay in environment variables.
