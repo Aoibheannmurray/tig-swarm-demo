@@ -40,6 +40,8 @@ Files this script reads / writes:
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
 import json
 import os
 import re
@@ -479,33 +481,63 @@ def seed_inactive_pool_from_mainnet(
             print(f"  {ch}: could not reach {server_url} ({e}); skipping seed.")
 
 
-def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> bool:
-    """POST multi-challenge swarm config to a running server, then verify it
-    landed. Returns True on success, False if the config could not be
-    persisted after retries.
+def encode_challenges_blob(challenges_cfg: dict) -> str:
+    """gzip+base64 the per-challenge sub-config dict for transport as a single
+    Railway service variable (`SWARM_CHALLENGES_B64`).
 
-    This must be robust: if the POST silently fails the server keeps the
-    bare `DEFAULT_CONFIG` (active_challenge=satisfiability, swarm_type=cpu,
-    no challenge_configs) forever — `init_db` seeds those with INSERT OR
-    IGNORE and never overwrites them — so contributors quietly run the wrong
-    challenge on the wrong hardware. A fresh Railway deploy is also slow to
-    answer its first write, so we use a generous timeout and a few retries
-    rather than a single best-effort shot, and we GET the config back to
-    confirm `active_challenge` / `swarm_type` actually took.
+    The server applies it at boot in `db._apply_env_swarm_config`, so the swarm
+    is configured the instant it comes up — no dependence on a post-deploy POST
+    landing on the right container during rollout. Compact JSON + gzip keeps it
+    well within Railway's per-variable size limit even for GPU challenges whose
+    sub-configs embed the initial algorithm + kernel source; base64 keeps it to
+    a single argv-safe token."""
+    raw = json.dumps(challenges_cfg, separators=(",", ":")).encode()
+    return base64.b64encode(gzip.compress(raw)).decode()
+
+
+def _swarm_config_matches(live: dict, cfg: dict) -> bool:
+    """True iff the server's live config reflects the intended swarm config."""
+    return (
+        live.get("active_challenge") == cfg["active_challenge"]
+        and live.get("swarm_type") == cfg.get("swarm_type", "cpu")
+        and set((live.get("available_challenges") or {}).keys()) >= set(cfg["challenges"])
+    )
+
+
+def push_config_to_server(
+    server_url: str, admin_key: str, cfg: dict, *, deadline_s: int = 300,
+) -> bool:
+    """Ensure the running server reflects `cfg`, re-asserting until it sticks.
+
+    The owner's config is also injected as boot-time env vars (see
+    `db._apply_env_swarm_config`), so on a current server image the swarm is
+    already configured before this runs and the first verify passes
+    immediately. This POST stays as belt-and-suspenders: it re-asserts the
+    config (idempotent — the endpoint upserts) and, crucially, *verifies it
+    held*, which guards the historical failure where the config was lost.
+
+    Why a deadline loop instead of a few quick retries: `railway up --ci`
+    returns on build success, but the new container's health-rollout lags. A
+    POST during that window can land on a transient/old container and be
+    discarded once the persistent-/data container becomes authoritative —
+    leaving the swarm on bare `DEFAULT_CONFIG` (satisfiability / cpu) forever,
+    since `init_db` seeds those with INSERT OR IGNORE. So we keep POSTing and
+    require the GET-back to match for TWO consecutive reads a few seconds apart
+    (a single match can be the doomed container) before declaring success, up
+    to `deadline_s`. Returns True once verified-stable, False if the deadline
+    passes.
 
     `cfg["challenges"]` is a dict of {challenge: {tracks, timeout,
-    scoring_direction, initial_algorithm_code}}; `cfg["active_challenge"]`
+    scoring_direction, initial_algorithm_code, ...}}; `cfg["active_challenge"]`
     selects which one contributors auto-follow.
     """
-    want_active = cfg["active_challenge"]
-    want_type = cfg.get("swarm_type", "cpu")
     payload = {
         "admin_key": admin_key,
-        "active_challenge": want_active,
+        "active_challenge": cfg["active_challenge"],
         "challenges": cfg["challenges"],
         "swarm_name": cfg.get("swarm_name", ""),
         "owner_name": cfg.get("owner_name", ""),
-        "swarm_type": want_type,
+        "swarm_type": cfg.get("swarm_type", "cpu"),
         "stagnation_threshold": cfg.get("stagnation_threshold", 2),
         "stagnation_limit": cfg.get("stagnation_limit", 10),
         "hypothesis_recall_threshold": cfg.get("hypothesis_recall_threshold", 3),
@@ -513,8 +545,12 @@ def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> bool:
     url = f"{server_url.rstrip('/')}/api/swarm_config"
     data = json.dumps(payload).encode()
 
+    deadline = time.time() + deadline_s
     last_err: Exception | None = None
-    for attempt in range(1, 5):
+    confirmations = 0
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
         try:
             req = urllib.request.Request(
                 url, data=data,
@@ -523,27 +559,34 @@ def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> bool:
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 json.load(resp)
-            # Confirm it persisted — a 200 isn't enough if a later step or a
-            # racing default-seed clobbered it. Read it back and check.
+            # A 200 isn't proof: read the config back and require it to match
+            # for two consecutive reads so a write that landed on a container
+            # about to be replaced during rollout can't masquerade as success.
             with urllib.request.urlopen(url, timeout=15) as r:
                 live = json.load(r)
-            got_active = live.get("active_challenge")
-            got_type = live.get("swarm_type")
-            got_ch = set((live.get("available_challenges") or {}).keys())
-            if got_active == want_active and got_type == want_type and got_ch >= set(cfg["challenges"]):
-                print(f"  POSTed + verified config at {url} "
-                      f"(active={got_active}, type={got_type})")
-                return True
+            if _swarm_config_matches(live, cfg):
+                confirmations += 1
+                if confirmations >= 2:
+                    print(f"  POSTed + verified config at {url} "
+                          f"(active={live.get('active_challenge')}, "
+                          f"type={live.get('swarm_type')})")
+                    return True
+                time.sleep(4)
+                continue
+            confirmations = 0
             last_err = RuntimeError(
-                f"server reports active={got_active!r} type={got_type!r} "
-                f"challenges={sorted(got_ch)} after POST"
+                f"server reports active={live.get('active_challenge')!r} "
+                f"type={live.get('swarm_type')!r} "
+                f"challenges={sorted((live.get('available_challenges') or {}).keys())}"
             )
         except (urllib.error.URLError, urllib.error.HTTPError,
                 TimeoutError, OSError, ValueError) as e:
+            confirmations = 0
             last_err = e
-        if attempt < 4:
-            print(f"  config push attempt {attempt} failed ({last_err}); retrying…")
-            time.sleep(3 * attempt)
+        if time.time() < deadline:
+            print(f"  config push attempt {attempt} not yet confirmed "
+                  f"({last_err}); retrying…")
+            time.sleep(5)
 
     print(
         f"\n  ERROR: could not persist swarm config to {url} ({last_err}).\n"
@@ -1492,22 +1535,30 @@ def _ensure_https(domain: str) -> str:
     return f"https://{domain}".rstrip("/")
 
 
-def _wait_for_server(url: str, timeout: int = 60) -> bool:
-    """Poll <url>/api/swarm_config until it responds or timeout passes.
+def _wait_for_server(url: str, timeout: int = 240) -> bool:
+    """Poll <url>/api/swarm_config until it answers *stably* or timeout passes.
 
-    `railway up --ci` returns when the container starts; the FastAPI app
-    needs a few extra seconds to bind. Without this poll, the immediate
-    POST /api/swarm_config below races the app startup."""
+    `railway up --ci` returns when the build succeeds, but the container's
+    health-rollout lags and DNS/TLS for a brand-new public domain can take a
+    while — a GPU image with the CUDA toolchain is slow to its first byte. We
+    therefore wait generously (default 4 min) and require two consecutive 200s
+    a couple seconds apart, so we don't hand off to the config push the instant
+    a transient/rolling container first answers."""
     deadline = time.time() + timeout
     probe = f"{url.rstrip('/')}/api/swarm_config"
+    ok = 0
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(probe, timeout=4) as r:
+            with urllib.request.urlopen(probe, timeout=5) as r:
                 if r.status == 200:
-                    return True
+                    ok += 1
+                    if ok >= 2:
+                        return True
+                    time.sleep(2)
+                    continue
         except Exception:
-            pass
-        time.sleep(2)
+            ok = 0
+        time.sleep(3)
     return False
 
 
@@ -1657,11 +1708,26 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     if resumed:
         print("  (resuming a prior half-finished run — adopting existing resources)")
 
+    owner_name = os.environ.get("USER", "owner")
     print("  setting environment variables…")
+    # The swarm config travels as deploy-time env vars (applied at server boot
+    # by db._apply_env_swarm_config) so the swarm comes up correctly configured
+    # the instant it deploys — independent of whether the post-deploy POST
+    # below lands during the Railway rollout. Set BEFORE the volume/deploy so
+    # the very first boot already has them. INSERT OR REPLACE on every boot
+    # means a redeploy never reverts to bare satisfiability/cpu defaults.
     _railway_set_variables(swarm_name, {
         "DATA_DIR": "/data",
         "ADMIN_KEY": admin_key,
         "SWARM_PASSWORD": swarm_password,
+        "ACTIVE_CHALLENGE": active_challenge,
+        "SWARM_TYPE": swarm_type,
+        "SWARM_NAME": swarm_name,
+        "OWNER_NAME": owner_name,
+        "STAGNATION_THRESHOLD": str(stagnation_threshold),
+        "STAGNATION_LIMIT": str(stagnation_limit),
+        "HYPOTHESIS_RECALL_THRESHOLD": str(hypothesis_recall_threshold),
+        "SWARM_CHALLENGES_B64": encode_challenges_blob(challenges_cfg),
     })
 
     print("  attaching /data volume…")
@@ -1694,7 +1760,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     active_def = _CHALLENGE_REGISTRY[active_challenge]
     cfg = {
         "swarm_name": swarm_name,
-        "owner_name": os.environ.get("USER", "owner"),
+        "owner_name": owner_name,
         "server_url": server_url,
         "admin_key": admin_key,
         "swarm_password": swarm_password,
@@ -1717,20 +1783,24 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         cfg["kernel_path"] = f"src/{active_challenge}/algorithm/kernels.cu"
         cfg["is_gpu"] = True
 
-    print("  pushing swarm config to the server…")
+    print("  verifying swarm config on the server…")
     config_ok = push_config_to_server(server_url, admin_key, cfg)
 
-    if seed_inactive_pool:
-        print("\nSeeding inactive trajectory pool from TIG mainnet…")
-        seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
+    # Only seed once the config is verified — seeding a server that's still on
+    # bare defaults loads pool entries for challenges nobody is running, and
+    # masks the real failure. If config failed, skip and let the user re-run.
+    if config_ok:
+        if seed_inactive_pool:
+            print("\nSeeding inactive trajectory pool from TIG mainnet…")
+            seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
 
-    # Load any host-authored seed algorithms (initial_algorithms/<ch>/seeds/)
-    # into the seed pool so standard-tier / exploiter agents start from working
-    # code instead of the stub.
-    authored_seeds = read_authored_seeds()
-    if authored_seeds:
-        print()
-        seed_pool_from_authored(server_url, admin_key, authored_seeds)
+        # Load any host-authored seed algorithms (initial_algorithms/<ch>/seeds/)
+        # into the seed pool so standard-tier / exploiter agents start from working
+        # code instead of the stub.
+        authored_seeds = read_authored_seeds()
+        if authored_seeds:
+            print()
+            seed_pool_from_authored(server_url, admin_key, authored_seeds)
 
     print("\nWriting local files…")
     template_files(
@@ -1797,7 +1867,10 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print("  edit the agent entry then run `python scripts/run_fleet.py` to participate.")
     print("\n  Manage the service in Railway: https://railway.com/dashboard")
     print()
-    return 0
+    # Non-zero exit when the config never verified so the failure is loud (CI,
+    # scripts, and the operator all see it) instead of a half-initialised swarm
+    # masquerading as ready.
+    return 0 if config_ok else 1
 
 
 def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:
