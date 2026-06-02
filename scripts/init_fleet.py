@@ -42,6 +42,13 @@ ROOT = Path(__file__).resolve().parent.parent
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
 EXAMPLE_PATH = ROOT / "fleet.config.example.json"
 
+# Reuse the server's single source of truth for model tiering so the wizard's
+# `detailed_prompts` default can't drift from the seeding logic. server/tiers.py
+# is a pure module (constants + functions, no server imports), so importing it
+# client-side is safe.
+sys.path.insert(0, str(ROOT / "server"))
+import tiers  # noqa: E402
+
 # Windows console crashes on the box-drawing characters / checkmark glyphs this
 # wizard prints when the active code page isn't UTF-8 ("UnicodeEncodeError:
 # 'charmap' codec can't encode …"). Force the stream to UTF-8 with replacement
@@ -390,6 +397,15 @@ def _build_agent(
     entry["compute"] = compute
     if compute == "c3" and hardware:
         entry["hardware"] = hardware
+    # Standard-tier (smaller/cheaper) models get the stricter, more prescriptive
+    # Rust prompt by default — their raw output tends not to compile. Keyed off
+    # the MODEL via classify_tier, not the provider: OpenRouter is a multi-model
+    # gateway that carries both tiny and frontier models, so the provider alone
+    # says nothing about capability. Frontier models are left without the flag
+    # (they don't need the verbosity). Contributors can override either way by
+    # editing the flag in fleet.config.json.
+    if tiers.classify_tier(provider, model) == "standard":
+        entry["detailed_prompts"] = True
     return entry
 
 

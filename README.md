@@ -13,7 +13,7 @@ Requirements: Python 3, Railway CLI, Railway account.
 ```bash
 railway login
 python3 setup.py create              # deploys a Railway swarm, scaffolds fleet.config.json
-python3 setup.py switch knapsack     # change the active challenge later
+python3 setup.py switch energy_arbitrage     # change the active challenge later
 ```
 
 `setup.py` is host-only. Contributors run `python3 run.py`.

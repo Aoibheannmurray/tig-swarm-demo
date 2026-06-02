@@ -110,6 +110,7 @@ from prompts import (
     build_code_system_prompt,
     build_code_user_prompt,
     build_compile_fix_prompt,
+    build_compile_fix_system_prompt,
     build_hypothesis_system_prompt,
     build_hypothesis_user_prompt,
     build_redescribe_hypothesis_prompt,
@@ -335,6 +336,20 @@ def _generate_code(
     return None, None, input_tokens, output_tokens
 
 
+def _clean_score(x):
+    """Snap floating-point noise near zero to a clean 0.0 for display.
+
+    A baseline-matching solution should score 0, but the shifted-geomean
+    round-trip (and any value the server persisted before that was fixed) can
+    land it at ~-3.7e-09. Anything below the meaningful integer-scaled
+    precision is noise; also normalises -0.0 -> 0.0 so `:.0f` prints "0",
+    never "-0". Passes None through unchanged (score not yet known).
+    """
+    if x is None:
+        return x
+    return 0.0 if abs(x) < 1e-6 else x
+
+
 def _print_bench_result(bench: dict, indent: str = "  ") -> None:
     """Print the benchmark score with per-track context.
 
@@ -345,13 +360,14 @@ def _print_bench_result(bench: dict, indent: str = "  ") -> None:
     every iteration. ASCII-only on purpose so the line itself can't trip a
     non-UTF-8 Windows console.
     """
-    score = bench.get("score", 0)
+    score = _clean_score(bench.get("score", 0))
     feasible = bench.get("feasible", False)
     track_scores = bench.get("track_scores", {})
     errors = bench.get("errors") or []
     print(f"{indent}[BENCH] Score: {score:.0f}  Feasible: {feasible}")
     if track_scores:
         for tk, ts in track_scores.items():
+            ts = _clean_score(ts)
             note = "  (below baseline)" if ts < 0 else ""
             print(f"{indent}        Track {tk}: {ts:.0f}{note}")
     if errors:
@@ -362,11 +378,14 @@ def _print_bench_result(bench: dict, indent: str = "  ") -> None:
 
 def _try_compile_fix(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, challenge_md: str,
+    config: dict,
     files: ChallengeFiles,
     build_err: str,
 ) -> tuple[bool, int, int]:
     """Ask the LLM to fix compiler errors, write the result.
+
+    Uses a focused fix prompt (minimal-edit instruction + distilled errors)
+    rather than the full code-generation prompt — see prompts.py.
 
     Returns (success, input_tokens, output_tokens).
     """
@@ -376,7 +395,7 @@ def _try_compile_fix(
         fix_response, usage = _call_llm_logged(
             "compile_fix", config,
             args.provider, model, api_key,
-            build_code_system_prompt(challenge_md, config),
+            build_compile_fix_system_prompt(config),
             fix_prompt,
             args.api_base,
         )
@@ -394,19 +413,24 @@ def _try_compile_fix(
         print(f"  Fix failed validation: {violation}")
         return False, usage["input_tokens"], usage["output_tokens"]
 
-    before_fix, _ = files.read()
-    sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
-    print(f"  Fix similarity to broken code: {sim * 100:.0f}%")
-    if sim >= 0.99:
-        print("  Fix made no changes (identical to broken code) — aborting retry.")
+    before_fix, before_kernel = files.read()
+    # Abort ONLY on a byte-identical echo (the model returned the broken code
+    # unchanged). A ratio threshold would mis-fire here: a legitimate one-line
+    # fix in a long file is ~99.7% similar, so `sim >= 0.99` used to reject
+    # exactly the small, correct fixes we want. The similarity is kept purely
+    # as a diagnostic readout.
+    if fixed == before_fix and (fixed_kernel or "") == (before_kernel or ""):
+        print("  Fix returned the broken code unchanged (no-op) — aborting retry.")
         return False, usage["input_tokens"], usage["output_tokens"]
+    sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
+    print(f"  Fix changed the code (similarity to broken: {sim * 100:.1f}%) — re-benchmarking.")
     files.write(fixed, fixed_kernel)
     return True, usage["input_tokens"], usage["output_tokens"]
 
 
 def _benchmark_with_compile_fix(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, server: str, challenge_md: str,
+    config: dict, server: str,
     files: ChallengeFiles,
 ) -> tuple[dict | None, str, bool, int, int]:
     """Run benchmark, retrying with LLM compile fixes on failure.
@@ -435,7 +459,7 @@ def _benchmark_with_compile_fix(
 
         print(f"  [BENCH] Build retry {attempt + 1}/{max_retries} — asking LLM to fix…")
         ok, it, ot = _try_compile_fix(
-            args, model, api_key, config, challenge_md,
+            args, model, api_key, config,
             files, build_err,
         )
         input_tokens += it
@@ -1178,8 +1202,8 @@ def main() -> int:
         except Exception as e:
             print(f"  [IDENT] sync skipped: {e}")
 
-        my_score = state.get("my_best_score")
-        global_best = state.get("best_score")
+        my_score = _clean_score(state.get("my_best_score"))
+        global_best = _clean_score(state.get("best_score"))
         stagnation = state.get("my_runs_since_improvement", 0)
         runs = state.get("my_runs", 0)
         improvements = state.get("my_improvements", 0)
@@ -1188,11 +1212,27 @@ def main() -> int:
 
         reset = state.get("trajectory_reset")
         if reset:
-            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')} **")
+            start = reset.get("start")
+            start_str = f" (start: {start})" if start else ""
+            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')}{start_str} **")
             post_message(server, agent_name, agent_id,
                          f"Trajectory reset: {reset.get('type')}",
                          challenge=iter_challenge,
                          agent_token=agent_token)
+
+        # Where the server sourced this iteration's starting code, when it
+        # didn't continue our own best: 'seed' (seed pool), 'peer' (best active
+        # peer adopted), or 'stub' (true cold start). Makes the standard-tier
+        # seeding path observable instead of silent — see server/tiers.py.
+        seed_start = state.get("seed_start")
+        if seed_start:
+            tier = state.get("tier", "?")
+            label = {
+                "seed": "seeded from the seed pool",
+                "peer": "adopted the best active peer's algorithm",
+                "stub": "got the bare stub (cold start — no seed/peer available)",
+            }.get(seed_start, seed_start)
+            print(f"  [STATE] Start source: {label} [tier={tier}]")
 
         # Soft strategy-tag suggestion from the server (explorers only).
         assigned_tag = state.get("assigned_strategy_tag")
@@ -1326,6 +1366,14 @@ def main() -> int:
                 time.sleep(_ITERATION_BACKOFF_SECS)
                 continue
 
+            # An empty completion (the provider returned no text, not an error)
+            # isn't a usable hypothesis — treat it like a transport failure and
+            # retry next iteration rather than proceeding with a default.
+            if not (hyp_response or "").strip():
+                print("  [LLM] HYPOTHESIS FAILED: empty response from model — skipping iteration")
+                time.sleep(_ITERATION_BACKOFF_SECS)
+                continue
+
             hypothesis = parse_hypothesis(hyp_response)
             tag = hypothesis.get("strategy_tag", "?")
             title = hypothesis.get("title", "?")
@@ -1374,7 +1422,7 @@ def main() -> int:
             send_heartbeat(server, agent_id, agent_token=agent_token)
 
             bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
-                args, model, api_key, config, server, challenge_md,
+                args, model, api_key, config, server,
                 files,
             )
             iter_input_tokens += fix_in
@@ -1447,6 +1495,12 @@ def main() -> int:
             # doesn't surface token counts. Zeros here mean "not reported", not
             # "the model did nothing" — say so instead of a misleading $0.0000.
             print(f"  [TOKENS] not reported by {args.provider} provider")
+        elif iter_cost == 0.0:
+            # Tokens were spent but estimate_cost has no price entry for this
+            # model, so it fell through to 0.0. Don't print a misleading
+            # $0.0000 — flag the missing price and still show the token spend.
+            print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  "
+                  f"est=unknown (no price entry for {model!r})")
         else:
             print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
         print(f"  [PUBLISH] Publishing results to server…")
@@ -1467,7 +1521,7 @@ def main() -> int:
         except Exception as e:
             print(f"  [PUBLISH] FAILED: {e}")
 
-        status = "NEW BEST!" if is_new_best else f"score {bench.get('score', 0):.0f}"
+        status = "NEW BEST!" if is_new_best else f"score {_clean_score(bench.get('score', 0)):.0f}"
         feasible_str = "" if bench.get("feasible") else " (INFEASIBLE)"
         post_message(server, agent_name, agent_id,
                      f"[{tag}] {title} → {status}{feasible_str}",

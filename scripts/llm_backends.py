@@ -88,6 +88,10 @@ _PRICING: list[tuple[str, float, float]] = [
     ("gemini-2.5-flash", 0.15, 0.60),
     ("gemini-2.0", 0.10, 0.40),
     ("gemini-1.5", 1.25, 5.0),
+    # OpenRouter list price for qwen3-coder (480B A35B). Routed providers vary,
+    # so this is a representative estimate, not a billed figure.
+    ("qwen3-coder", 0.22, 1.80),
+    ("qwen", 0.22, 1.80),
 ]
 
 
@@ -272,8 +276,34 @@ def call_openai(
             "Authorization": f"Bearer {api_key}",
         },
     )
+    # OpenRouter (and some gateways) return provider/moderation errors in the
+    # body with HTTP 200 rather than a 4xx/5xx, so _post_json doesn't raise.
+    # Surface them as a real error instead of silently treating it as empty.
+    if isinstance(data.get("error"), dict):
+        err = data["error"]
+        raise RuntimeError(f"provider error {err.get('code', '?')}: {err.get('message', err)}")
+
     usage = data.get("usage") or {}
-    return data["choices"][0]["message"]["content"], {
+    choice = data["choices"][0]
+    msg = choice.get("message") or {}
+    content = msg.get("content") or ""
+    if not content.strip():
+        # Empty completion with no error. Three common culprits, and
+        # finish_reason tells them apart, so include it (plus a hint about a
+        # reasoning-only reply) rather than swallowing a bare "". The caller
+        # treats this like any transport failure: log it and retry.
+        #   - "length": ran out of output budget (often a reasoning model that
+        #     spent the whole cap thinking — note if a `reasoning` field exists)
+        #   - "content_filter": the provider's moderation blocked the output
+        #   - "stop"/None: the routed upstream returned an empty body (flaky)
+        reason = choice.get("finish_reason") or choice.get("native_finish_reason") or "unknown"
+        had_reasoning = bool((msg.get("reasoning") or "").strip())
+        detail = f"finish_reason={reason}"
+        if had_reasoning:
+            detail += " (model emitted reasoning but no answer — likely hit the output-token cap)"
+        raise RuntimeError(f"model returned an empty completion ({detail})")
+
+    return content, {
         "input_tokens": usage.get("prompt_tokens", 0),
         "output_tokens": usage.get("completion_tokens", 0),
     }

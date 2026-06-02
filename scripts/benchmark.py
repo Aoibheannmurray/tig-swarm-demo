@@ -1117,7 +1117,14 @@ def _shifted_geomean(values: list[float], shift: float = GEOMEAN_SHIFT) -> float
     if not values:
         return 0.0
     log_sum = sum(math.log(v + shift) for v in values)
-    return math.exp(log_sum / len(values)) - shift
+    result = math.exp(log_sum / len(values)) - shift
+    # exp(log(x)) doesn't round-trip exactly: when every track matches the
+    # baseline (all-zero qualities) this lands at -2**-28 (-3.725e-09) rather
+    # than a clean 0.0, which then renders as a misleading "-0" / a noisy
+    # "My best: -3.7e-09". Qualities are integer-scaled (QUALITY_PRECISION =
+    # 1e6), so nothing finer than ~1e-6 carries meaning; round the sub-ULP
+    # noise off, and `+ 0.0` collapses a resulting -0.0 to +0.0.
+    return round(result, 6) + 0.0
 
 
 def aggregate(results: list[dict]) -> dict:

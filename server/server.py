@@ -769,6 +769,12 @@ async def get_state(
 
             # ── Trajectory reset on stagnation_limit ──
             trajectory_reset = None
+            # How this iteration's starting code was chosen ('seed' | 'peer' |
+            # 'stub'), whenever it came from seed_for_agent — on a fresh reset
+            # OR a true cold start. Surfaced in state so the client can log
+            # whether a standard-tier agent actually got a seed vs. the bare
+            # stub. None when the agent continued its own existing best.
+            seed_start = None
             stagnation_limit = swarm_setting(config, "stagnation_limit")
             if stagnation_limit > 0 and runs_since >= stagnation_limit and my_best is not None:
                 timestamp = now()
@@ -802,6 +808,7 @@ async def get_state(
                     )
                     new_program_id = new_id()
                     trajectory_reset = {"type": "fresh_start", "start": _start}
+                    seed_start = _start
                 else:
                     picked = random.choice(inactive_pool)
                     new_code = picked["algorithm_code"]
@@ -860,6 +867,7 @@ async def get_state(
                         conn, agent_id, challenge, agent_tier, agent_role,
                         direction=direction, cutoff_ts=cutoff_ts,
                     )
+                    seed_start = _start
                 my_best_score = my_best["score"] if my_best else None
                 my_best_experiment_id = my_best["experiment_id"] if my_best else None
 
@@ -992,6 +1000,7 @@ async def get_state(
                 "inspiration_agent_name": inspiration_agent_name,
                 "stagnation_hint": stagnation_hint,
                 "trajectory_reset": trajectory_reset,
+                "seed_start": seed_start,
                 "leaderboard": leaderboard,
                 "tier": agent_tier,
                 "role": agent_role,

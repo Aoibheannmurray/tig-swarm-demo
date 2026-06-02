@@ -330,8 +330,14 @@ def parse_tacit_distillation(response: str) -> str | None:
 RUST_RULES = """\
 
 RUST RULES (the output is compiled as-is — it MUST build):
-- Only `std` is available. Do NOT add `use` lines for external crates
-  (no rand, rayon, itertools, ndarray, etc.) and do NOT add `[dependencies]`.
+- Available crates: `std` plus `anyhow`, `rand`, `serde`, `serde_json` (already
+  in Cargo.toml). Do NOT add any OTHER crate (no rayon, itertools, ndarray, …)
+  and do NOT edit `[dependencies]`.
+- KEEP every `use` line already at the top of the starting file, verbatim —
+  especially `use super::*;`, `use anyhow::...;`, and `use serde_json::{Map,
+  Value};`. The `solve_challenge` signature references `Result` and
+  `Map<String, Value>`, so dropping those imports makes the file fail to
+  compile with `E0425: cannot find type ... in this scope`.
 - Keep the EXACT `solve_challenge` signature, parameter names, and types you
   were given. Call the provided `save_solution` closure to record solutions.
 - No `unsafe`, no `async`, no spawning threads.
@@ -340,6 +346,17 @@ RUST RULES (the output is compiled as-is — it MUST build):
   empty case. Guard indexing (`slice[i]`) so it can't go out of bounds.
 - Mind integer types: index/length math is `usize`; cast explicitly with `as`
   rather than mixing `usize`/`u32`/`i64` in one expression.
+- A method call ALWAYS needs parentheses, even with a turbofish:
+  `rng.gen_range(0..n)`, `x.powi(2)`, `v.len()` — never `rng.gen::<f64>` or
+  `x.powi::<i32>` on their own (that is `E0425: field expressions cannot have
+  generic arguments`).
+- If you need randomness it MUST be seeded so runs are deterministic. Use
+  exactly: `use rand::{rngs::StdRng, Rng, SeedableRng};` then
+  `let mut rng = StdRng::from_seed(challenge.seed);` (the seed is `[u8; 32]`).
+  Draw with `rng.gen_range(0.0..1.0)` / `rng.gen_range(0..n)`. Do NOT invent your
+  own randomness or (ab)use hashing for it — no `RandomState`, `hash_one`,
+  `DefaultHasher`, or clock/time seeds (those don't compile or aren't
+  deterministic). If you don't need randomness, don't import `rand` at all.
 - When the borrow checker would object, clone the data instead of leaving
   code that won't compile."""
 
@@ -356,11 +373,26 @@ EXTRA RULES FOR A CLEAN COMPILE (follow ALL of these):
   `.map()`, `.filter()`, `.sum()`, `.min()/.max()`) over hand-written index
   loops; when you do index, derive the bound from `.len()`.
 - Annotate numeric literals when the type is ambiguous (`0usize`, `1.0f64`).
-  Use `as f64` / `as usize` for casts; never rely on implicit coercion.
+  Use `as f64` / `as usize` for casts; never rely on implicit coercion. Calling
+  a method on a bare literal needs the type pinned: write `2.0_f64.sqrt()` or
+  `(n as f64).powi(2)`, never `2.0.sqrt()` (that is `E0689: can't call method on
+  ambiguous numeric type`).
+- Any struct YOU define that you `.clone()`, sort, or push into a `BinaryHeap`
+  must carry the right derives: `#[derive(Clone)]` (and additionally
+  `#[derive(PartialEq, Eq, PartialOrd, Ord)]` for a `BinaryHeap`). Without
+  `#[derive(Clone)]`, `x.clone()` silently clones a `&reference` instead and the
+  next mutation fails with `E0596: cannot borrow ... as mutable`.
+- A trait method only works if the trait is in scope. If rustc says `method not
+  found ... trait X ... is implemented but not in scope`, add the `use` it
+  suggests — do NOT rewrite the call into something else.
 - Don't introduce new generics, trait bounds, lifetimes, or macros unless the
   starting code already uses them — they are a common source of errors.
 - Reuse the data structures already imported via `use super::*;`; don't invent
   types that aren't defined.
+- Indexing a `Vec`/slice MOVES the element when it isn't `Copy` — that's
+  `E0507: cannot move out of ... behind a shared reference`. Bind by reference
+  (`let x = &v[i];`) or `.clone()` it; never `*v[i]` or destructure-by-value out
+  of a borrowed container (e.g. `let (_, s) = *states[k].iter().max()...;`).
 - Keep the change focused: modify the algorithm logic, not the function
   surface, so the result still slots into the existing module."""
 
@@ -510,15 +542,90 @@ def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", time
     return "\n".join(parts)
 
 
+def distill_compiler_errors(raw: str, max_chars: int = 4000) -> str:
+    """Reduce raw cargo/rustc output to just the actionable error diagnostics.
+
+    The benchmark subprocess wraps the rustc output in swarm-config status
+    lines, cargo progress, warnings, and a Python traceback. A weaker model
+    fixes far better when handed only the `error[...]` blocks (with their
+    file:line and source context) than the full noisy stream. Falls back to the
+    raw tail if nothing rustc-shaped is found (e.g. an nvcc failure), so the
+    caller never ends up with an empty error section.
+    """
+    if not raw:
+        return raw
+    # Drop the Python traceback the benchmark wrapper appends — it's about
+    # benchmark.py, not the algorithm under repair.
+    head = raw.split("\nTraceback (most recent call last):", 1)[0]
+    # rustc prints each diagnostic as a blank-line-separated block. Keep a block
+    # only when it opens an `error` (skip `warning:`/`note:` blocks and the
+    # cargo progress/status preamble); always keep the `could not compile`
+    # summary. Lines like `   |` are non-blank, so a block stays intact.
+    blocks: list[list[str]] = []
+    cur: list[str] = []
+    for ln in head.splitlines():
+        if not ln.strip():
+            if cur:
+                blocks.append(cur)
+                cur = []
+            continue
+        cur.append(ln)
+    if cur:
+        blocks.append(cur)
+    kept: list[str] = []
+    for b in blocks:
+        if b[0].startswith("error") or "could not compile" in b[0]:
+            kept.extend(b)
+            kept.append("")
+    distilled = "\n".join(kept).strip()
+    if not distilled:
+        distilled = head.strip()[-max_chars:]
+    return distilled[:max_chars]
+
+
+def build_compile_fix_system_prompt(config: dict) -> str:
+    """Focused system prompt for the compile-fix retry.
+
+    Deliberately omits the challenge spec — making the file build is mechanical,
+    not a design task — and instructs a MINIMAL edit, which weaker models handle
+    far better than "return the complete rewritten file" (which tends to make
+    them echo the broken code unchanged). Still carries the Rust guardrails so
+    the fix doesn't re-introduce the dropped-import / external-crate failures.
+    """
+    is_gpu = bool(config.get("is_gpu"))
+    rust_rules = _rust_rules_block(config)
+    if is_gpu:
+        fmt = (
+            "Return BOTH complete files separated by a line containing exactly: "
+            "// --- kernels.cu --- (the Rust file first). No markdown fences, no prose."
+        )
+    else:
+        fmt = (
+            "Return the COMPLETE corrected mod.rs. The very first character of your "
+            "response MUST be `u` from `use super::*;`. No markdown fences, no prose."
+        )
+    return f"""\
+You are fixing Rust compile errors so the file builds. The code is otherwise
+intended to work — change ONLY what the listed errors require. Keep every other
+line, every `use` import, and the exact `solve_challenge` signature unchanged.
+
+{fmt}{rust_rules}"""
+
+
 def build_compile_fix_prompt(
     code: str, kernel: str, compiler_errors: str, is_gpu: bool,
 ) -> str:
-    parts = [f"Current algorithm (mod.rs):\n```rust\n{code}\n```\n"]
+    errors = distill_compiler_errors(compiler_errors)
+    parts = [f"This Rust file (mod.rs) failed to compile:\n```rust\n{code}\n```\n"]
     if kernel:
-        parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{kernel}\n```\n")
+        parts.append(f"CUDA kernels (kernels.cu):\n```cuda\n{kernel}\n```\n")
     parts.append(
-        f"This code failed to compile. Here are the errors:\n```\n{compiler_errors}\n```\n\n"
-        "Fix the compile errors and return the complete source."
+        f"The compiler reported these errors — fix EXACTLY these and nothing else:\n"
+        f"```\n{errors}\n```\n\n"
+        "Make the smallest change that resolves every error above. Use the "
+        "file:line locations to find each problem. Do NOT rewrite the algorithm, "
+        "rename items, drop imports, or alter the `solve_challenge` signature — "
+        "the rest of the file already works."
     )
     if is_gpu:
         parts.append(
@@ -597,7 +704,9 @@ _META_DEFAULTS = {
 
 def parse_hypothesis(text: str) -> dict:
     meta = dict(_META_DEFAULTS)
-    for line in text.strip().splitlines():
+    # Tolerate a None/empty response (e.g. a provider that returned null
+    # content) — fall back to the defaults instead of crashing on .strip().
+    for line in (text or "").strip().splitlines():
         if ":" in line:
             key, _, value = line.partition(":")
             key = key.strip().lower().replace(" ", "_")
