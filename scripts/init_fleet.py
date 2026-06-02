@@ -359,6 +359,67 @@ def _select_provider() -> tuple[str, str, str | None, str, bool]:
     return spec[0], spec[2], spec[3], spec[4], spec[5]
 
 
+# ── Compute backend selection ─────────────────────────────────────
+
+
+# C3 GPU profiles offered in the wizard. The C3 backend forwards `--hardware`
+# verbatim (run_loop.py / c3_compute.py accept any profile its CLI knows), so
+# this is just the common shortlist with `l40` as the default to match the
+# run_loop.py / c3_compute.py default.
+_C3_HARDWARE_CHOICES = [
+    ("l40", "NVIDIA L40 (default)"),
+    ("a100", "NVIDIA A100"),
+    ("h100", "NVIDIA H100"),
+]
+
+_C3_INSTALL_URL = "https://cthree.cloud/install.sh"
+
+
+def _select_compute(supports_c3: bool) -> tuple[str, str | None, str | None]:
+    """Pick where each benchmark runs and gather any C3 credentials.
+
+    GPU swarm agents default to C3 cloud GPUs; CPU-only or offline setups can
+    pick local Docker. Providers that can't run on C3 skip the question and
+    stay local. Returns ``(compute, c3_hardware, c3_api_key)`` — the latter two
+    are ``None`` for local compute or when the user defers C3 auth to the
+    ``C3_API_KEY`` env var / an existing ``c3 login`` session."""
+    if not supports_c3:
+        return "local", None, None
+
+    print("\nCompute backend")
+    print("─" * 40)
+    choice = _prompt_choice(
+        "Where should each benchmark run?",
+        [
+            ("c3",
+             "C3 cloud GPU — runs benchmarks on a remote GPU "
+             "(needs the c3 CLI + an API key)"),
+            ("local",
+             "Local Docker — runs benchmarks on this machine"),
+        ],
+        default_idx=0,
+    )
+    if choice == "local":
+        return "local", None, None
+
+    if shutil.which("c3") is None:
+        print(
+            f"\n  note: the `c3` CLI isn't on PATH yet — install it from "
+            f"{_C3_INSTALL_URL}\n  before launching the fleet (the config is "
+            "still written either way)."
+        )
+
+    hardware = _prompt_choice(
+        "Which C3 GPU profile?", _C3_HARDWARE_CHOICES, default_idx=0,
+    )
+
+    print("\nC3 needs an API key. Create one with `c3 apikey create tig-swarm`,")
+    print("or leave this blank to use the C3_API_KEY env var / an existing")
+    print("`c3 login` session.")
+    c3_api_key = _prompt("c3 API key", allow_empty=True).strip() or None
+    return "c3", hardware, c3_api_key
+
+
 # ── Main flow ─────────────────────────────────────────────────────
 
 
@@ -452,30 +513,45 @@ def run_wizard(force: bool = False) -> int:
     print()
     count = _prompt_int("How many agents to run in parallel?", default=1)
 
-    # Benchmarks always run in local Docker for now. Hand-edit fleet.config.json
-    # to switch to remote backends like `c3`.
-    compute = "local"
-    hardware: str | None = None
+    # Where each benchmark runs. GPU swarm agents default to C3 cloud GPUs;
+    # local Docker stays one keystroke away. c3_api_key (when supplied) is a
+    # fleet-wide default — run_fleet.py copies it onto every agent that lacks
+    # its own.
+    compute, hardware, c3_api_key = _select_compute(supports_c3)
 
     names = _generate_agent_names(count)
-    config = {
+    config: dict = {
         "server_url": server_url,
         "username": username,
         "swarm_password": swarm_password,
-        "agents": [
-            _build_agent(name, provider, model, api_key_env, compute, hardware,
-                         api_base=api_base)
-            for name in names
-        ],
     }
+    if c3_api_key:
+        config["c3_api_key"] = c3_api_key
+    config["agents"] = [
+        _build_agent(name, provider, model, api_key_env, compute, hardware,
+                     api_base=api_base)
+        for name in names
+    ]
 
     FLEET_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
 
     names_str = ", ".join(a["name"] for a in config["agents"])
+    compute_desc = f"c3/{hardware}" if compute == "c3" else compute
     print(
         f"\n  wrote {FLEET_CONFIG_PATH.relative_to(ROOT)} — "
-        f"{count} agent(s): {names_str}"
+        f"{count} agent(s): {names_str} — compute: {compute_desc}"
     )
+    # C3 without a stored key falls back to C3_API_KEY / `c3 login`; remind the
+    # user so the first benchmark doesn't fail authentication mid-run.
+    if compute == "c3" and not c3_api_key and not os.environ.get("C3_API_KEY", "").strip():
+        if os.name == "nt":
+            setline = ('set C3_API_KEY=<your-key>   (cmd)   or   '
+                       '$env:C3_API_KEY="<your-key>"   (PowerShell)')
+        else:
+            setline = "export C3_API_KEY=<your-key>"
+        print(
+            f"  reminder: run `c3 login`, or {setline} before launching"
+        )
     if api_key_env and not os.environ.get(api_key_env, "").strip():
         # Windows `cmd`/PowerShell don't understand `export`; print the
         # platform-correct set-the-env-var command so it can be pasted as-is.

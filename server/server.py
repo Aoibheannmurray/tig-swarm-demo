@@ -152,14 +152,23 @@ async def seed_for_agent(
 ) -> tuple[str, str, str]:
     """Pick the starting code for an agent on a fresh trajectory.
 
-    Frontier explorers keep the bare stub (they bootstrap). Standard-tier OR
-    exploiter agents get working code via a fallback chain:
+    On CPU challenges frontier explorers keep the bare stub (they bootstrap),
+    while standard-tier OR exploiter agents get working code. On GPU challenges
+    *every* agent — frontier explorers included — gets working code, because
+    bootstrapping a compiling CUDA/kernel algorithm from the stub is hard even
+    for frontier models (temporary policy; see `is_gpu` below). Either way the
+    working-code path is a fallback chain:
       seed pool (diverse per-agent assignment) → best active peer → stub.
 
     Returns (algorithm_code, kernel_code, start) where `start` is one of
     'seed' | 'peer' | 'stub' for the dashboard.
     """
-    needs_seed = (tier == "standard") or (role == "exploiter")
+    # For now, GPU challenges seed every model regardless of tier/role —
+    # frontier models rarely produce a compiling kernel from the bare stub, so
+    # handing them a working seed gets the whole fleet off the ground faster.
+    ch_def = challenges.CHALLENGES.get(challenge)
+    is_gpu = ch_def.is_gpu if ch_def else False
+    needs_seed = is_gpu or (tier == "standard") or (role == "exploiter")
     if not needs_seed:
         code, kernel = await load_initial_algorithm(challenge)
         return code, kernel, "stub"
