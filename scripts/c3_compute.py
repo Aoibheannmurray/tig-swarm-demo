@@ -403,7 +403,7 @@ def _read_benchmark_stderr(stage: Path) -> str:
     )
     for path in candidates:
         if path.stat().st_size:
-            return path.read_text(errors="replace")
+            return path.read_text(encoding="utf-8", errors="replace")
     return ""
 
 
