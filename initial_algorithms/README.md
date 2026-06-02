@@ -37,10 +37,29 @@ code rather than failing to bootstrap one.
 | job_scheduling       | `greedy`       | active list scheduling      | ✅ compiled + ran |
 | vehicle_routing      | `construction` | Solomon I1 insertion (inline)| ✅ compiled + ran |
 | energy_arbitrage     | `greedy`       | flow-aware greedy policy (inline)| ✅ compiled + ran |
-| hypergraph           | `construction` | round-robin partition       | ⚠️ UNVERIFIED (no CUDA/GPU) |
-| vector_search        | `brute_force`  | host exact nearest-neighbour| ⚠️ UNVERIFIED (no CUDA/GPU) |
-| neuralnet_optimizer  | `sgd`          | host SGD step               | ⚠️ UNVERIFIED (no CUDA/GPU) |
+| hypergraph           | `construction` | GPU round-robin partition (kernel) | ✅ compiled + ran (L40/C3), feasible |
+| vector_search        | `brute_force`  | GPU exact nearest-neighbour (kernel)| ✅ compiled + ran (L40/C3), feasible (beats baseline) |
+| neuralnet_optimizer  | `sgd`          | GPU SGD step (kernel)       | ✅ compiled + ran (L40/C3), feasible (learns) |
 
-The three GPU seeds could not be compiled or run in the build environment
-(`cudarc` needs `nvcc`, which is absent). Compile and validate them on a CUDA box
-before relying on them — see the `!!! UNVERIFIED !!!` header in each file.
+All three GPU seeds use real CUDA kernels and were compiled + run on an L40 GPU
+via C3 (`nvcc` PTX build + `cudarc` cargo build all succeeded), each feasible on
+its smallest track:
+
+- **hypergraph / construction** — `round_robin_partition` kernel assigns
+  `partition[i] = i % num_parts`, one thread per node. Feasible, balanced
+  partition; the edge-cut is poor by design (score −658834 on `n_h_edges=10000`)
+  so reducing the cut is the refiner's job.
+- **vector_search / brute_force** — `nearest_neighbor_search` kernel, one thread
+  per query doing an exact full-database L2 scan. Feasible and **beats the
+  baseline** (score +44520 on `n_queries=10`). Earlier the host-side version
+  crashed with `CUDA_ERROR_INVALID_CONTEXT` (its first device op was a
+  `memcpy_dtov` on the spawned solver thread, which doesn't bind the context);
+  doing the work in a kernel makes `alloc_zeros` the first device op, which binds
+  the context. The refiner's job is to make it fast (tiling / pruning / an index).
+- **neuralnet_optimizer / sgd** — `sgd_step` kernel computes the weight *update*
+  `-lr*clip(grad)` on the GPU. An earlier host version returned the new weights
+  instead of the delta, but the scaffold's `apply_parameter_updates_direct` kernel
+  *adds* the return value (`params += update`), so it doubled the weights each step
+  and scored at the floor (−10M). Returning the delta fixed it: the model now
+  learns — loss 0.119 < noise floor 0.356, score +666570 on `n_hidden=4`. Adding
+  momentum / Adam / an lr schedule remains the refiner's job.
