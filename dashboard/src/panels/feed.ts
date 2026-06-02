@@ -231,9 +231,9 @@ export class FeedPanel implements Panel {
           return `<span style="color:${color}">${sign}${d.toFixed(3)}%</span>`;
         };
 
-        const ownDelta = msg.delta_vs_own_best_pct;
+        const ownDelta = msg.delta_vs_trajectory_best_pct;
         const globalDelta = msg.delta_vs_best_pct;
-        const beatsOwn = msg.beats_own_best === true;
+        const beatsOwn = msg.beats_trajectory_best === true;
         const score = formatScore(msg.score);
 
         if (msg.is_new_best) {

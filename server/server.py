@@ -174,7 +174,7 @@ async def seed_for_agent(
 
     # Empty seed pool → adopt the best active peer's current algorithm so the
     # agent exploits a real working lineage instead of idling on the stub.
-    peers = await db.list_agent_bests(
+    peers = await db.list_trajectory_bests(
         conn, challenge,
         exclude_agent_ids=[agent_id],
         direction=direction,
@@ -662,7 +662,7 @@ async def heartbeat(agent_id: str, req: HeartbeatRequest):
         # `last_heartbeat` fresh but `last_active_at` (only updated by
         # /api/state) goes stale — and periodic_stats's
         # `deactivate_inactive_agent_trajectories` then reaps an actively-
-        # working agent's trajectory and clears their agent_bests row.
+        # working agent's trajectory and clears their trajectory_bests row.
         #
         # "Current" challenge = the row with the most recent last_active_at
         # for this agent (i.e. whichever challenge their last /api/state was
@@ -757,7 +757,7 @@ async def get_state(
             await db.ensure_agent_challenge_state(conn, agent_id, challenge, ts_now)
             await conn.commit()
 
-            my_best = await db.get_agent_best(conn, agent_id, challenge)
+            traj_best = await db.get_trajectory_best(conn, agent_id, challenge)
             acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
             runs_since = acs["runs_since_improvement"] if acs else 0
             agent_tier = await db.get_agent_tier(conn, agent_id)
@@ -776,7 +776,7 @@ async def get_state(
             # stub. None when the agent continued its own existing best.
             seed_start = None
             stagnation_limit = swarm_setting(config, "stagnation_limit")
-            if stagnation_limit > 0 and runs_since >= stagnation_limit and my_best is not None:
+            if stagnation_limit > 0 and runs_since >= stagnation_limit and traj_best is not None:
                 timestamp = now()
                 # Deactivate the current trajectory.
                 cur_traj_id = acs["current_trajectory_id"] if acs else None
@@ -831,9 +831,9 @@ async def get_state(
                 # Now deposit the stagnated code into the per-challenge pool.
                 await db.deposit_inactive(
                     conn, agent_id, challenge,
-                    my_best["algorithm_code"], my_best["score"], timestamp,
+                    traj_best["algorithm_code"], traj_best["score"], timestamp,
                     trajectory_id=cur_traj_id, program_id=old_program_id,
-                    kernel_code=my_best.get("kernel_code"),
+                    kernel_code=traj_best.get("kernel_code"),
                 )
 
                 # Seed the agent's personal best with the adopted trajectory's
@@ -847,7 +847,7 @@ async def get_state(
                 # original clear-to-empty behaviour.
                 if adopted_score is not None:
                     adopted_experiment_id = new_id()
-                    await db.upsert_agent_best(
+                    await db.upsert_trajectory_best(
                         conn, agent_id=agent_id, challenge=challenge,
                         experiment_id=adopted_experiment_id,
                         algorithm_code=new_code, score=adopted_score,
@@ -855,19 +855,19 @@ async def get_state(
                         solution_data=None, updated_at=timestamp,
                         trajectory_id=new_traj_id, kernel_code=new_kernel_code,
                     )
-                    my_best = {
+                    traj_best = {
                         "algorithm_code": new_code,
                         "score": adopted_score,
                         "experiment_id": adopted_experiment_id,
                         "kernel_code": new_kernel_code,
                     }
-                    my_best_score = adopted_score
-                    my_best_experiment_id = adopted_experiment_id
+                    current_trajectory_best = adopted_score
+                    traj_best_experiment_id = adopted_experiment_id
                 else:
-                    await db.clear_agent_best(conn, agent_id, challenge)
-                    my_best = None
-                    my_best_score = None
-                    my_best_experiment_id = None
+                    await db.clear_trajectory_best(conn, agent_id, challenge)
+                    traj_best = None
+                    current_trajectory_best = None
+                    traj_best_experiment_id = None
                 await db.update_agent_challenge_state(
                     conn, agent_id, challenge,
                     set_fields={
@@ -877,8 +877,8 @@ async def get_state(
                     },
                 )
                 await conn.commit()
-                my_best_code = new_code
-                my_best_kernel_code = new_kernel_code
+                traj_best_code = new_code
+                traj_best_kernel_code = new_kernel_code
                 runs_since = 0
                 agent_name = await get_agent_name(conn, agent_id)
                 await manager.broadcast(ws_events.TrajectoryReset(
@@ -891,17 +891,17 @@ async def get_state(
                 # Re-read acs so subsequent reads see the reset state.
                 acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
             else:
-                if my_best:
-                    my_best_code = my_best["algorithm_code"]
-                    my_best_kernel_code = my_best.get("kernel_code")
+                if traj_best:
+                    traj_best_code = traj_best["algorithm_code"]
+                    traj_best_kernel_code = traj_best.get("kernel_code")
                 else:
-                    my_best_code, my_best_kernel_code, _start = await seed_for_agent(
+                    traj_best_code, traj_best_kernel_code, _start = await seed_for_agent(
                         conn, agent_id, challenge, agent_tier, agent_role,
                         direction=direction, cutoff_ts=cutoff_ts,
                     )
                     seed_start = _start
-                my_best_score = my_best["score"] if my_best else None
-                my_best_experiment_id = my_best["experiment_id"] if my_best else None
+                current_trajectory_best = traj_best["score"] if traj_best else None
+                traj_best_experiment_id = traj_best["experiment_id"] if traj_best else None
 
             # ── Program ID management (per-(agent, challenge)) ──
             current_program_id = (acs or {}).get("current_program_id") if acs else None
@@ -958,7 +958,7 @@ async def get_state(
                         inspiration_inc=1,
                         runs_since_improvement_inc=0,
                     )
-                all_bests = await db.list_agent_bests(
+                all_bests = await db.list_trajectory_bests(
                     conn, challenge,
                     exclude_agent_ids=[agent_id],
                     direction=direction,
@@ -987,7 +987,7 @@ async def get_state(
                 )
                 await conn.commit()
 
-            best_solution_data = my_best["solution_data"] if my_best else None
+            best_solution_data = traj_best["solution_data"] if traj_best else None
             num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
             leaderboard = await db.compute_leaderboard(
                 conn, challenge, inactive_cutoff(), direction=direction,
@@ -1015,9 +1015,9 @@ async def get_state(
                 "is_gpu": is_gpu,
                 "agent_name": self_agent_name,
                 "best_score": global_best_score,
-                "best_algorithm_code": my_best_code,
-                "best_experiment_id": my_best_experiment_id,
-                "my_best_score": my_best_score,
+                "best_algorithm_code": traj_best_code,
+                "best_experiment_id": traj_best_experiment_id,
+                "current_trajectory_best": current_trajectory_best,
                 "my_runs": (acs or {}).get("experiments_completed") if acs else 0,
                 "my_improvements": (acs or {}).get("improvements") if acs else 0,
                 "my_runs_since_improvement": runs_since,
@@ -1039,7 +1039,7 @@ async def get_state(
                 "assigned_strategy_tag": assigned_strategy_tag,
             }
             if is_gpu:
-                resp["best_kernel_code"] = my_best_kernel_code or None
+                resp["best_kernel_code"] = traj_best_kernel_code or None
                 resp["inspiration_kernel_code"] = inspiration_kernel_code or None
             return resp
 
@@ -1121,8 +1121,8 @@ async def get_state(
                     else 0
                 ),
                 "delta_vs_best_pct": e.get("delta_vs_best_pct"),
-                "delta_vs_own_best_pct": e.get("delta_vs_own_best_pct"),
-                "beats_own_best": bool(e.get("beats_own_best")),
+                "delta_vs_trajectory_best_pct": e.get("delta_vs_trajectory_best_pct"),
+                "beats_trajectory_best": bool(e.get("beats_trajectory_best")),
                 "created_at": e["created_at"],
                 "notes": e["notes"],
             }
@@ -1162,7 +1162,7 @@ async def create_iteration(req: IterationCreate):
 
         # SQLite FKs aren't enforced (no PRAGMA), so /api/iterations would
         # otherwise accept any client-supplied agent_id and silently create
-        # orphan rows in experiments/hypotheses/agent_bests/best_history.
+        # orphan rows in experiments/hypotheses/trajectory_bests/best_history.
         # Those rows then get dropped from the dashboard's INNER JOINs on
         # agents — leaderboard/recent_experiments go blank even though the
         # data is "there." Reject up front instead.
@@ -1181,19 +1181,19 @@ async def create_iteration(req: IterationCreate):
         await db.ensure_agent_challenge_state(conn, req.agent_id, challenge, timestamp)
 
         prev_best = await db.get_global_best(conn, challenge, direction=direction)
-        prev_agent_best = await db.get_agent_best(conn, req.agent_id, challenge)
+        prev_trajectory_best = await db.get_trajectory_best(conn, req.agent_id, challenge)
         baseline = await get_baseline_score(conn, challenge)
 
         is_new_best = prev_best is None or db.is_better(direction, req.score, prev_best["score"])
-        beats_own_best = (
-            prev_agent_best is None
-            or db.is_better(direction, req.score, prev_agent_best["score"])
+        beats_trajectory_best = (
+            prev_trajectory_best is None
+            or db.is_better(direction, req.score, prev_trajectory_best["score"])
         )
 
         target_best_experiment_id = (
-            prev_agent_best["experiment_id"] if prev_agent_best else None
+            prev_trajectory_best["experiment_id"] if prev_trajectory_best else None
         )
-        hyp_status = "succeeded" if beats_own_best else "failed"
+        hyp_status = "succeeded" if beats_trajectory_best else "failed"
 
         # ── Program ID: tag hypothesis with current program (per-(agent, challenge)) ──
         acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
@@ -1220,10 +1220,10 @@ async def create_iteration(req: IterationCreate):
             delta_vs_best_pct = round(
                 improvement_pct(prev_best["score"], req.score, direction), 6
             )
-        delta_vs_own_best_pct: float | None = None
-        if prev_agent_best is not None and prev_agent_best["score"] != 0:
-            delta_vs_own_best_pct = round(
-                improvement_pct(prev_agent_best["score"], req.score, direction), 6
+        delta_vs_trajectory_best_pct: float | None = None
+        if prev_trajectory_best is not None and prev_trajectory_best["score"] != 0:
+            delta_vs_trajectory_best_pct = round(
+                improvement_pct(prev_trajectory_best["score"], req.score, direction), 6
             )
 
         # ── Trajectory tracking (per-(agent, challenge)) ──
@@ -1232,7 +1232,7 @@ async def create_iteration(req: IterationCreate):
             trajectory_id = new_id()
             await db.create_trajectory(
                 conn, trajectory_id, challenge, timestamp,
-                current_score=req.score if beats_own_best else None,
+                current_score=req.score if beats_trajectory_best else None,
             )
             await db.update_agent_challenge_state(
                 conn, req.agent_id, challenge,
@@ -1258,7 +1258,7 @@ async def create_iteration(req: IterationCreate):
                (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
                 score, feasible,
                 challenge_metrics, notes, solution_data, track_scores,
-                delta_vs_best_pct, delta_vs_own_best_pct, beats_own_best,
+                delta_vs_best_pct, delta_vs_trajectory_best_pct, beats_trajectory_best,
                 trajectory_id, received_hint, inspiration_source_id,
                 input_tokens, output_tokens, estimated_cost, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -1266,8 +1266,8 @@ async def create_iteration(req: IterationCreate):
              req.score,
              1 if req.feasible else 0, challenge_metrics_json,
              req.notes, solution_data_json, track_scores_json,
-             delta_vs_best_pct, delta_vs_own_best_pct,
-             1 if beats_own_best else 0,
+             delta_vs_best_pct, delta_vs_trajectory_best_pct,
+             1 if beats_trajectory_best else 0,
              trajectory_id, received_hint, inspiration_source_id,
              iter_input_tokens, iter_output_tokens, iter_estimated_cost, timestamp),
         )
@@ -1282,18 +1282,27 @@ async def create_iteration(req: IterationCreate):
             )
 
         await db.update_trajectory_after_edit(
-            conn, trajectory_id, beats_own_best,
-            new_score=req.score if beats_own_best else None,
+            conn, trajectory_id, beats_trajectory_best,
+            new_score=req.score if beats_trajectory_best else None,
         )
 
-        if beats_own_best:
+        # Personal best-ever is a record of what THIS agent actually achieved
+        # with a mutation it made — it is independent of the trajectory floor.
+        # It must update on every feasible publish (even one that scores below
+        # an inherited trajectory best), and must never be raised by an
+        # infeasible run or by the adopted floor an agent is handed on pickup.
+        # increment_agent_challenge_counters applies a monotonic CASE guard, so
+        # passing the score on every feasible run only ever ratchets it up.
+        personal_best_candidate = req.score if req.feasible else None
+
+        if beats_trajectory_best:
             new_program_id = new_id()
             await db.increment_agent_challenge_counters(
                 conn, req.agent_id, challenge,
                 runs=1,
                 improvements=1,
                 runs_since_improvement_reset=True,
-                best_ever_score=req.score,
+                best_ever_score=personal_best_candidate,
                 direction=direction,
                 input_tokens=iter_input_tokens,
                 output_tokens=iter_output_tokens,
@@ -1303,7 +1312,7 @@ async def create_iteration(req: IterationCreate):
                 conn, req.agent_id, challenge,
                 set_fields={"current_program_id": new_program_id},
             )
-            await db.upsert_agent_best(
+            await db.upsert_trajectory_best(
                 conn, agent_id=req.agent_id, challenge=challenge,
                 experiment_id=exp_id,
                 algorithm_code=req.algorithm_code, score=req.score,
@@ -1319,6 +1328,8 @@ async def create_iteration(req: IterationCreate):
                 conn, req.agent_id, challenge,
                 runs=1,
                 runs_since_improvement_inc=1,
+                best_ever_score=personal_best_candidate,
+                direction=direction,
                 input_tokens=iter_input_tokens,
                 output_tokens=iter_output_tokens,
                 estimated_cost=iter_estimated_cost,
@@ -1387,8 +1398,8 @@ async def create_iteration(req: IterationCreate):
         feasible=req.feasible,
         improvement_pct=imp,
         delta_vs_best_pct=delta_vs_best_pct,
-        beats_own_best=beats_own_best,
-        delta_vs_own_best_pct=delta_vs_own_best_pct,
+        beats_trajectory_best=beats_trajectory_best,
+        delta_vs_trajectory_best_pct=delta_vs_trajectory_best_pct,
         num_instances=num_instances,
         is_new_best=is_new_best,
         hypothesis_id=hyp_id,
@@ -1424,7 +1435,7 @@ async def create_iteration(req: IterationCreate):
         experiment_id=exp_id,
         hypothesis_id=hyp_id,
         is_new_best=is_new_best,
-        beats_own_best=beats_own_best,
+        beats_trajectory_best=beats_trajectory_best,
         rank=rank,
         runs=agent_info["experiments_completed"],
         improvements=agent_info["improvements"],
@@ -1567,7 +1578,7 @@ async def get_diversity(challenge: str | None = None):
 
     Each cell compares the algorithm code that defines a trajectory:
       - Active trajectories → the latest feasible experiment on that
-        trajectory (i.e. the agent_bests row whose trajectory_id matches).
+        trajectory (i.e. the trajectory_bests row whose trajectory_id matches).
       - Inactive trajectories → the algorithm_code stored in
         inactive_algorithms when the trajectory was deposited.
 
@@ -1580,15 +1591,15 @@ async def get_diversity(challenge: str | None = None):
     order = db._direction_order(direction)
 
     async with db.connect() as conn:
-        # Active trajectories: pick the latest feasible code via agent_bests.
-        # We take the highest-scoring agent_bests row per trajectory_id when
+        # Active trajectories: pick the latest feasible code via trajectory_bests.
+        # We take the highest-scoring trajectory_bests row per trajectory_id when
         # there are multiple — this matches the trajectory's `current_score`
         # surfaced elsewhere.
         active_cur = await conn.execute(
             f"""SELECT t.id AS trajectory_id, t.started_at,
                        ab.algorithm_code, ab.agent_id, a.name AS agent_name
                   FROM trajectories t
-                  JOIN agent_bests ab
+                  JOIN trajectory_bests ab
                     ON ab.trajectory_id = t.id
                    AND ab.challenge = t.challenge
                    AND ab.feasible = 1
@@ -1615,7 +1626,7 @@ async def get_diversity(challenge: str | None = None):
 
     # Dedupe both lists by trajectory_id (one entry per trajectory). Active
     # is dedup'd because a trajectory could in theory have multiple
-    # agent_bests rows after adoption; inactive is dedup'd to keep the
+    # trajectory_bests rows after adoption; inactive is dedup'd to keep the
     # most recent deposit when re-deactivation happened.
     seen: set[str] = set()
     entries: list[dict] = []
@@ -1695,7 +1706,7 @@ async def get_inspiration_matrix(challenge: str | None = None):
     matrix[i][j] = number of times trajectory i received inspiration from
     trajectory j.  The receiver trajectory comes from the experiment's own
     trajectory_id; the source trajectory is looked up via the source agent's
-    agent_bests row (their trajectory at inspiration time is approximated by
+    trajectory_bests row (their trajectory at inspiration time is approximated by
     their current trajectory — exact enough for the dashboard view).
     """
     challenge = await resolve_challenge(challenge)
@@ -1709,7 +1720,7 @@ async def get_inspiration_matrix(challenge: str | None = None):
                FROM experiments e
                JOIN agents a_recv ON a_recv.id = e.agent_id
                JOIN agents a_src  ON a_src.id  = e.inspiration_source_id
-               JOIN agent_bests ab_src
+               JOIN trajectory_bests ab_src
                  ON ab_src.agent_id  = e.inspiration_source_id
                 AND ab_src.challenge = e.challenge
               WHERE e.challenge = ?
@@ -1859,7 +1870,7 @@ async def get_agent_experiments(
 
         code_col = ", e.algorithm_code" if include_code else ""
         cursor = await conn.execute(
-            f"""SELECT e.id, e.score, e.feasible, e.beats_own_best, e.notes,
+            f"""SELECT e.id, e.score, e.feasible, e.beats_trajectory_best, e.notes,
                       e.created_at, e.trajectory_id, e.received_hint,
                       t.status AS trajectory_status,
                       h.title, h.description, h.strategy_tag
@@ -1895,7 +1906,7 @@ async def get_agent_experiments(
             "id": r["id"],
             "score": r["score"],
             "feasible": bool(r["feasible"]),
-            "beats_own_best": bool(r["beats_own_best"]) if r["beats_own_best"] is not None else False,
+            "beats_trajectory_best": bool(r["beats_trajectory_best"]) if r["beats_trajectory_best"] is not None else False,
             "notes": r["notes"],
             "title": r["title"],
             "description": r["description"],
@@ -1988,7 +1999,7 @@ async def get_trajectory_experiments(
         code_col = ", e.algorithm_code" if include_code else ""
         cursor = await conn.execute(
             f"""SELECT e.id, e.trajectory_id, e.agent_id, a.name AS agent_name,
-                       e.score, e.feasible, e.beats_own_best, e.notes,
+                       e.score, e.feasible, e.beats_trajectory_best, e.notes,
                        e.created_at, h.title, h.description, h.strategy_tag
                        {code_col}
                 FROM experiments e
@@ -2009,7 +2020,7 @@ async def get_trajectory_experiments(
             "agent_name": r["agent_name"],
             "score": r["score"],
             "feasible": bool(r["feasible"]),
-            "beats_own_best": bool(r["beats_own_best"]) if r["beats_own_best"] is not None else False,
+            "beats_trajectory_best": bool(r["beats_trajectory_best"]) if r["beats_trajectory_best"] is not None else False,
             "notes": r["notes"],
             "title": r["title"],
             "description": r["description"],
@@ -2038,7 +2049,7 @@ async def admin_broadcast(req: AdminBroadcast):
 
 @app.post("/api/admin/reset_challenge")
 async def admin_reset_challenge(req: AdminResetChallenge):
-    """Per-challenge leaderboard reset. Drops `agent_bests` + `best_history`
+    """Per-challenge leaderboard reset. Drops `trajectory_bests` + `best_history`
     for the named challenge so the next feasible publish becomes the new
     global best. Preserves `experiments`, `hypotheses`, and `trajectories`
     so the swarm's research history isn't erased.
@@ -2057,9 +2068,9 @@ async def admin_reset_challenge(req: AdminResetChallenge):
         )
         best_history_deleted = cur.rowcount
         cur = await conn.execute(
-            "DELETE FROM agent_bests WHERE challenge = ?", (challenge,),
+            "DELETE FROM trajectory_bests WHERE challenge = ?", (challenge,),
         )
-        agent_bests_deleted = cur.rowcount
+        trajectory_bests_deleted = cur.rowcount
         await conn.commit()
     await manager.broadcast(ws_events.ResetEvt(
         challenge=challenge,
@@ -2069,7 +2080,7 @@ async def admin_reset_challenge(req: AdminResetChallenge):
         "reset": True,
         "challenge": challenge,
         "best_history_deleted": best_history_deleted,
-        "agent_bests_deleted": agent_bests_deleted,
+        "trajectory_bests_deleted": trajectory_bests_deleted,
     }
 
 

@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
-CREATE TABLE IF NOT EXISTS agent_bests (
+CREATE TABLE IF NOT EXISTS trajectory_bests (
     agent_id TEXT NOT NULL,
     challenge TEXT NOT NULL,
     experiment_id TEXT NOT NULL,
@@ -72,15 +72,15 @@ CREATE TABLE IF NOT EXISTS experiments (
     kernel_code TEXT,
     score REAL NOT NULL,
     feasible INTEGER DEFAULT 1,
-    -- See agent_bests.challenge_metrics — same opaque per-challenge dict.
+    -- See trajectory_bests.challenge_metrics — same opaque per-challenge dict.
     challenge_metrics TEXT,
     runtime_seconds REAL DEFAULT 0.0,
     notes TEXT DEFAULT '',
     solution_data TEXT,
     track_scores TEXT,
     delta_vs_best_pct REAL,
-    delta_vs_own_best_pct REAL,
-    beats_own_best INTEGER DEFAULT 0,
+    delta_vs_trajectory_best_pct REAL,
+    beats_trajectory_best INTEGER DEFAULT 0,
     trajectory_id TEXT,
     -- "tacit_knowledge" or "inspiration" when the agent fetched /api/state
     -- with that hint right before publishing this iteration; NULL otherwise.
@@ -221,11 +221,11 @@ CREATE INDEX IF NOT EXISTS idx_exp_feasible_score ON experiments(feasible, score
 CREATE INDEX IF NOT EXISTS idx_exp_agent ON experiments(agent_id);
 CREATE INDEX IF NOT EXISTS idx_hyp_status ON hypotheses(status);
 CREATE INDEX IF NOT EXISTS idx_hyp_fingerprint ON hypotheses(fingerprint);
-CREATE INDEX IF NOT EXISTS idx_agent_bests_score ON agent_bests(feasible, score);
+CREATE INDEX IF NOT EXISTS idx_trajectory_bests_score ON trajectory_bests(feasible, score);
 CREATE INDEX IF NOT EXISTS idx_msg_created ON messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_hyp_agent_target ON hypotheses(agent_id, target_best_experiment_id);
 CREATE INDEX IF NOT EXISTS idx_hyp_program_id ON hypotheses(program_id);
-CREATE INDEX IF NOT EXISTS idx_agent_bests_challenge ON agent_bests(challenge, feasible, score);
+CREATE INDEX IF NOT EXISTS idx_trajectory_bests_challenge ON trajectory_bests(challenge, feasible, score);
 CREATE INDEX IF NOT EXISTS idx_experiments_challenge ON experiments(challenge, agent_id);
 CREATE INDEX IF NOT EXISTS idx_hyp_challenge_agent ON hypotheses(challenge, agent_id, target_best_experiment_id);
 CREATE INDEX IF NOT EXISTS idx_inactive_challenge ON inactive_algorithms(challenge);
@@ -358,7 +358,7 @@ async def connect():
         of failing immediately with SQLITE_BUSY. Under concurrent publish +
         periodic_stats load this avoids spurious 500s.
       - foreign_keys=ON: SQLite ships with FK enforcement OFF by default; the
-        schema declares FKs (agent_bests.agent_id → agents.id, etc.) so we
+        schema declares FKs (trajectory_bests.agent_id → agents.id, etc.) so we
         actually enforce them.
       - journal_mode=WAL is set once globally in init_db() — it's a database-
         level setting that persists in the file, not per-connection.
@@ -391,7 +391,7 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
     return candidate > prior if direction == "max" else candidate < prior
 
 
-_AGENT_BESTS_COLS = (
+_TRAJECTORY_BESTS_COLS = (
     "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
     "kernel_code, score, feasible, challenge_metrics, solution_data, "
     "track_scores, updated_at"
@@ -403,10 +403,10 @@ async def get_global_best(
 ) -> dict | None:
     # Best-scoring feasible experiment for the challenge, across ALL
     # trajectories — active and inactive. Querying `experiments` (not
-    # `agent_bests`) means the peak score from a now-deactivated trajectory
-    # still counts: agent_bests is wiped per-agent on stagnation reset,
+    # `trajectory_bests`) means the peak score from a now-deactivated trajectory
+    # still counts: trajectory_bests is wiped per-agent on stagnation reset,
     # which would otherwise hide historical peaks once their trajectory
-    # ended. Returned shape mirrors the prior agent_bests-based result so
+    # ended. Returned shape mirrors the prior trajectory_bests-based result so
     # callers don't need to change.
     order = _direction_order(direction)
     cursor = await conn.execute(
@@ -493,11 +493,11 @@ async def least_covered_tag(
     return min(candidate_tags, key=lambda t: counts.get(t, 0))
 
 
-async def get_agent_best(
+async def get_trajectory_best(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> dict | None:
     cursor = await conn.execute(
-        f"SELECT {_AGENT_BESTS_COLS} FROM agent_bests "
+        f"SELECT {_TRAJECTORY_BESTS_COLS} FROM trajectory_bests "
         "WHERE agent_id = ? AND challenge = ?",
         (agent_id, challenge),
     )
@@ -505,7 +505,7 @@ async def get_agent_best(
     return dict(row) if row else None
 
 
-async def upsert_agent_best(
+async def upsert_trajectory_best(
     conn: aiosqlite.Connection,
     agent_id: str,
     challenge: str,
@@ -521,7 +521,7 @@ async def upsert_agent_best(
     kernel_code: str | None = None,
 ) -> None:
     await conn.execute(
-        """INSERT INTO agent_bests
+        """INSERT INTO trajectory_bests
            (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
             challenge_metrics, solution_data, track_scores, updated_at, trajectory_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -542,7 +542,7 @@ async def upsert_agent_best(
     )
 
 
-async def list_agent_bests(
+async def list_trajectory_bests(
     conn: aiosqlite.Connection,
     challenge: str,
     *,
@@ -576,7 +576,7 @@ async def list_agent_bests(
         "SELECT ab.agent_id, ab.challenge, ab.experiment_id as id, ab.experiment_id, "
         "       ab.algorithm_code, ab.kernel_code, ab.score, ab.feasible, "
         "       ab.challenge_metrics, ab.solution_data, ab.updated_at "
-        f"FROM agent_bests ab{join_clause} WHERE " + " AND ".join(where) +
+        f"FROM trajectory_bests ab{join_clause} WHERE " + " AND ".join(where) +
         f" ORDER BY ab.score {order}"
     )
     cursor = await conn.execute(query, params)
@@ -642,12 +642,12 @@ async def compute_leaderboard(
             ab.score as current_score
         FROM agent_challenge_state acs
         JOIN agents a ON a.id = acs.agent_id
-        LEFT JOIN agent_bests ab
+        LEFT JOIN trajectory_bests ab
             ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
         WHERE acs.challenge = ?
           AND acs.experiments_completed > 0
-        -- Sort by best-ever score (not current_score from agent_bests):
-        -- agent_bests is cleared when a trajectory stagnates or the
+        -- Sort by best-ever score (not current_score from trajectory_bests):
+        -- trajectory_bests is cleared when a trajectory stagnates or the
         -- inactivity sweep fires, so current_score goes NULL for agents
         -- whose trajectory has ended even though their historical peak
         -- is still meaningful. best_ever_score on acs is monotonic — it
@@ -980,11 +980,11 @@ async def get_inactive_with_deactivations(
     return [dict(row) for row in await cursor.fetchall()]
 
 
-async def clear_agent_best(
+async def clear_trajectory_best(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> None:
     await conn.execute(
-        "DELETE FROM agent_bests WHERE agent_id = ? AND challenge = ?",
+        "DELETE FROM trajectory_bests WHERE agent_id = ? AND challenge = ?",
         (agent_id, challenge),
     )
 
@@ -1030,7 +1030,7 @@ async def deactivate_inactive_agent_trajectories(
 
     An agent that crashes or disconnects never hits the stagnation-reset
     path in `publish_iteration`, so their trajectory stays flagged
-    `active` and their best algorithm is locked inside `agent_bests` —
+    `active` and their best algorithm is locked inside `trajectory_bests` —
     invisible to the per-challenge inactive pool that other agents draw
     inspiration from. This sweep handles that: for each (agent,
     challenge) whose `last_active_at` is older than `cutoff_ts` but
@@ -1041,7 +1041,7 @@ async def deactivate_inactive_agent_trajectories(
          deactivate while anyone's still working on them).
       2. Deposit the agent's best into `inactive_algorithms` so it can be
          adopted from the pool.
-      3. Clear their `agent_bests` row and null the trajectory pointer on
+      3. Clear their `trajectory_bests` row and null the trajectory pointer on
          their `agent_challenge_state` row, so a returning agent starts
          fresh on next /api/state.
 
@@ -1088,7 +1088,7 @@ async def deactivate_inactive_agent_trajectories(
         if other_live is None:
             await deactivate_trajectory(conn, traj_id, timestamp)
 
-        best = await get_agent_best(conn, agent_id, challenge)
+        best = await get_trajectory_best(conn, agent_id, challenge)
         if best is not None:
             await deposit_inactive(
                 conn, agent_id, challenge,
@@ -1096,7 +1096,7 @@ async def deactivate_inactive_agent_trajectories(
                 trajectory_id=traj_id, program_id=program_id,
                 kernel_code=best.get("kernel_code"),
             )
-            await clear_agent_best(conn, agent_id, challenge)
+            await clear_trajectory_best(conn, agent_id, challenge)
     return processed
 
 

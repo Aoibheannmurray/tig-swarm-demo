@@ -21,6 +21,8 @@ server/static/
 .swarm-cache.json
 swarm.admin.json
 fleet.config.json
+agent.config.json
+swarm.config.json
 worktrees/
 CHALLENGE.md
 data/

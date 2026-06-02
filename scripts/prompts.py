@@ -245,7 +245,7 @@ def build_tacit_distillation_prompts(
     a trajectory reset — at which point `state["prior_hypotheses"]` holds
     the trajectory's accumulated failed attempts, which is exactly the
     material we want to distill from."""
-    my_best = state.get("my_best_score")
+    traj_best = state.get("current_trajectory_best")
     global_best = state.get("best_score")
     runs = state.get("my_runs", 0)
     improvements = state.get("my_improvements", 0)
@@ -291,7 +291,7 @@ def build_tacit_distillation_prompts(
 
     user = (
         "Trajectory summary\n"
-        f"- Best score on this trajectory: {my_best}\n"
+        f"- Best score on this trajectory: {traj_best}\n"
         f"- Global best: {global_best}\n"
         f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}\n"
         "\n"
@@ -791,7 +791,7 @@ def build_agentic_user_prompt(
     is_gpu = bool(config.get("is_gpu"))
     challenge = config.get("challenge", "unknown")
 
-    my_score = state.get("my_best_score")
+    my_score = state.get("current_trajectory_best")
     global_best = state.get("best_score")
     stagnation = state.get("my_runs_since_improvement", 0)
     runs = state.get("my_runs", 0)
