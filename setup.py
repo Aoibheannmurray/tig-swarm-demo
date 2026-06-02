@@ -1198,23 +1198,85 @@ def _pick_workspace(whoami: dict) -> str | None:
     return prompt_choice("  workspace", names, default=names[0])
 
 
-def _railway_init_project(name: str, workspace: str | None = None) -> dict:
+def _railway_init_project(name: str, workspace: str | None = None) -> dict | None:
+    """Create the project. Returns the project dict on success, or None when a
+    transient timeout aborts the CLI mid-create — the mutation usually still
+    lands server-side, so the caller resumes by re-querying rather than
+    re-running init (which would spawn a duplicate). A real rejection (bad
+    auth, name taken) still hard-exits."""
     args = ["init", "-n", name, "--json"]
     if workspace:
         args += ["--workspace", workspace]
-    result = _railway_run(*args)
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {"name": name}
+    result = _railway_run(*args, check=False)
+    if result.returncode == 0:
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {"name": name}
+    if _railway_is_transient(result):
+        print("  railway init hit a transient network error mid-create.")
+        return None
+    msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+    print(f"  error: railway {' '.join(args)} failed: {msg}")
+    sys.exit(2)
 
 
-def _railway_add_service(name: str) -> dict:
-    result = _railway_run("add", "--service", name, "--json")
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {"name": name}
+def _railway_add_service(name: str) -> dict | None:
+    """Add the service to the linked project. Returns the service dict on
+    success, or None on a transient timeout (caller re-queries / retries).
+    Real rejections hard-exit."""
+    result = _railway_run("add", "--service", name, "--json", check=False)
+    if result.returncode == 0:
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {"name": name}
+    if _railway_is_transient(result):
+        print("  railway add --service hit a transient network error mid-create.")
+        return None
+    msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+    print(f"  error: railway add --service {name} failed: {msg}")
+    sys.exit(2)
+
+
+def _railway_wait_for_project(name: str, workspace: str | None) -> dict | None:
+    """Poll `railway list` for a project a timed-out init may have landed.
+
+    Railway often takes a moment to surface a project created by a CLI call
+    that itself timed out. Re-query a few times with backoff before giving up;
+    each `_railway_find_project` already retries the underlying `list`."""
+    for attempt in range(4):
+        time.sleep(4 * (attempt + 1))
+        found = _railway_find_project(name, workspace)
+        if found is not None:
+            return found
+    return None
+
+
+def _railway_ensure_service(name: str, workspace: str | None) -> dict:
+    """Add the service, recovering from a transient timeout in the same run.
+
+    On a timeout the add may have landed server-side, so re-query the project
+    and adopt the service if it's there; otherwise retry the add (confirmed
+    absent → no duplicate). Hard-exits only after repeated timeouts."""
+    service = _railway_add_service(name)
+    if service is not None:
+        return service
+    for attempt in range(4):
+        time.sleep(4 * (attempt + 1))
+        proj = _railway_find_project(name, workspace)
+        svc = _railway_service_in_project(proj, name) if proj else None
+        if svc:
+            print(f"  adopted service created by the timed-out add: {svc.get('name', name)}")
+            return svc
+        service = _railway_add_service(name)
+        if service is not None:
+            return service
+    print(
+        "  error: railway add --service timed out repeatedly; re-run "
+        "`python setup.py create` to resume once the Railway API recovers."
+    )
+    sys.exit(2)
 
 
 def _railway_find_project(name: str, workspace: str | None) -> dict | None:
@@ -1276,21 +1338,34 @@ def _railway_service_in_project(project: dict, name: str) -> dict | None:
 def _railway_provision(name: str, workspace: str | None) -> tuple[dict, dict, bool]:
     """Idempotently ensure the project + service exist and are linked to cwd.
 
-    Fresh run → `railway init` + `railway add --service`. Re-run after a
-    half-finished attempt (common when the Railway API times out mid-create)
-    → adopt and `railway link` the existing project/service instead of
-    creating duplicates. The create steps themselves are never retried in
-    place — a timed-out mutation may have already landed — but this makes a
-    plain re-run resume cleanly. Returns (project, service, resumed)."""
+    Fresh run → `railway init` + `railway add --service`. If a create step
+    times out mid-flight (common when the Railway API is flaky), the mutation
+    usually still lands server-side — so instead of re-running it in place
+    (which would spawn a duplicate), we re-query and adopt the orphaned
+    project/service in the SAME run, then `railway link` it. A later plain
+    re-run resumes the same way. Returns (project, service, resumed)."""
     existing = _railway_find_project(name, workspace)
     if existing is None:
         project = _railway_init_project(name, workspace=workspace)
-        print(f"  project: {project.get('name', name)}")
-        service = _railway_add_service(name)
-        print(f"  service: {service.get('name', name)}")
-        return project, service, False
+        if project is not None:
+            print(f"  project: {project.get('name', name)}")
+            service = _railway_ensure_service(name, workspace)
+            print(f"  service: {service.get('name', name)}")
+            return project, service, False
+        # init timed out mid-create — the project usually lands server-side
+        # anyway. Re-query and adopt it rather than re-running init (which
+        # would create a duplicate). Falls through to the resume path below.
+        existing = _railway_wait_for_project(name, workspace)
+        if existing is None:
+            print(
+                f"  error: railway init timed out and no '{name}' project "
+                f"appeared server-side; re-run `python setup.py create` once "
+                f"the Railway API recovers."
+            )
+            sys.exit(2)
+        print(f"  init timed out but project '{name}' landed server-side; adopting it.")
 
-    # Resume: adopt the project a prior run already created server-side.
+    # Resume: adopt the project a prior run (or a timed-out init above) created.
     env = _railway_project_environment(existing)
     svc_node = _railway_service_in_project(existing, name)
     link_args = ["link", "--project", existing["id"], "--environment", env]
@@ -1303,8 +1378,8 @@ def _railway_provision(name: str, workspace: str | None) -> tuple[dict, dict, bo
     if svc_node:
         print(f"  adopted existing service: {svc_node.get('name', name)}")
         return existing, svc_node, True
-    # Project existed but the service didn't land — add it now.
-    service = _railway_add_service(name)
+    # Project existed but the service didn't land — add it now (resumably).
+    service = _railway_ensure_service(name, workspace)
     print(f"  service: {service.get('name', name)}")
     return existing, service, True
 
