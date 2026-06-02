@@ -65,8 +65,8 @@ class ExperimentPublished(_EventBase):
     feasible: bool
     improvement_pct: float
     delta_vs_best_pct: Optional[float] = None
-    beats_own_best: bool = False
-    delta_vs_own_best_pct: Optional[float] = None
+    beats_trajectory_best: bool = False
+    delta_vs_trajectory_best_pct: Optional[float] = None
     num_instances: int
     is_new_best: bool
     hypothesis_id: Optional[str] = None

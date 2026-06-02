@@ -92,10 +92,10 @@ export interface ExperimentPublished {
   delta_vs_best_pct: number | null;
   // True when this iteration improved the publishing agent's own previous
   // best (not necessarily the global best).
-  beats_own_best?: boolean;
+  beats_trajectory_best?: boolean;
   // % improvement vs the agent's own previous best. Positive = score
   // dropped (improvement). Null when the agent had no prior best.
-  delta_vs_own_best_pct?: number | null;
+  delta_vs_trajectory_best_pct?: number | null;
   num_instances: number;
   is_new_best: boolean;
   hypothesis_id: string | null;
@@ -258,7 +258,7 @@ export interface StateResponse {
   // Agent-loop view fields (?agent_id=…)
   best_algorithm_code?: string;
   best_experiment_id?: string | null;
-  my_best_score?: number | null;
+  current_trajectory_best?: number | null;
   my_runs?: number;
   my_improvements?: number;
   my_runs_since_improvement?: number;

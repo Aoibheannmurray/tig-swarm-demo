@@ -244,8 +244,8 @@ export class IdeasTree {
         };
 
         if (msg.is_new_best) {
-          const ownPart = msg.delta_vs_own_best_pct != null
-            ? ` (${fmtPct(msg.delta_vs_own_best_pct)} own)`
+          const ownPart = msg.delta_vs_trajectory_best_pct != null
+            ? ` (${fmtPct(msg.delta_vs_trajectory_best_pct)} own)`
             : "";
           const globalPart = msg.delta_vs_best_pct != null
             ? ` and NEW GLOBAL BEST (${fmtPct(msg.delta_vs_best_pct)} vs global)`
@@ -258,9 +258,9 @@ export class IdeasTree {
             msgType: "milestone",
             timestamp: msg.timestamp,
           });
-        } else if (msg.beats_own_best === true) {
-          const ownPart = msg.delta_vs_own_best_pct != null
-            ? ` (${fmtPct(msg.delta_vs_own_best_pct)})`
+        } else if (msg.beats_trajectory_best === true) {
+          const ownPart = msg.delta_vs_trajectory_best_pct != null
+            ? ` (${fmtPct(msg.delta_vs_trajectory_best_pct)})`
             : "";
           this.addFeedItem({
             id: msg.experiment_id,

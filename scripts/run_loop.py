@@ -1142,7 +1142,7 @@ def main() -> int:
         except Exception as e:
             print(f"  [IDENT] sync skipped: {e}")
 
-        my_score = state.get("my_best_score")
+        my_score = state.get("current_trajectory_best")
         global_best = state.get("best_score")
         stagnation = state.get("my_runs_since_improvement", 0)
         runs = state.get("my_runs", 0)

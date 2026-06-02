@@ -83,7 +83,7 @@ class AdminBroadcast(AdminAuth):
 
 class AdminResetChallenge(AdminAuth):
     """Owner-only request to clear the leaderboard for a single challenge:
-    drops `best_history` + `agent_bests` rows for that challenge so the next
+    drops `best_history` + `trajectory_bests` rows for that challenge so the next
     feasible publish becomes the new global best. Preserves `experiments`,
     `hypotheses`, and `agent_challenge_state` so prior research and per-agent
     counters (run counts, trajectories, stagnation) remain intact."""
@@ -109,7 +109,7 @@ class AdminSeedInactive(AdminAuth):
 
     Restricted server-side to {knapsack, satisfiability} — the only
     challenges whose mainnet algorithms ship as a single mod.rs (+ optional
-    kernels.cu), which is what the `agent_bests` / `inactive_algorithms`
+    kernels.cu), which is what the `trajectory_bests` / `inactive_algorithms`
     wire format expects today.
     """
     challenge: "ChallengeName"
@@ -189,7 +189,7 @@ class IterationResponse(BaseModel):
     experiment_id: str
     hypothesis_id: str
     is_new_best: bool
-    beats_own_best: bool
+    beats_trajectory_best: bool
     rank: int
     runs: int
     improvements: int
