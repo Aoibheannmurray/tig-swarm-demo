@@ -1094,18 +1094,65 @@ _RAILWAY_INSTALL_HINT = (
 )
 
 
-def _railway_run(*args: str, check: bool = True) -> sp.CompletedProcess:
-    """Run `railway <args>` and capture output. Exit on non-zero unless check=False."""
-    try:
-        result = sp.run(
-            ["railway", *args],
-            capture_output=True,
-            text=True,
-            cwd=str(ROOT),
-        )
-    except FileNotFoundError:
-        print("Railway CLI not found in PATH.\n" + _RAILWAY_INSTALL_HINT)
-        sys.exit(2)
+# Substrings that mark a *transient* Railway failure — the GraphQL API
+# (backboard.railway.com) momentarily unreachable or slow — as opposed to a
+# real rejection (bad auth, name taken, build error). Matched case-insensitively
+# against combined stderr+stdout to decide whether a retry is worth attempting.
+_RAILWAY_TRANSIENT_MARKERS = (
+    "operation timed out",
+    "error sending request for url",
+    "failed to fetch",
+    "connection reset",
+    "connection refused",
+    "temporary failure in name resolution",
+    "503 service",
+    "502 bad gateway",
+    "gateway time-out",
+)
+
+
+def _railway_is_transient(result: sp.CompletedProcess) -> bool:
+    blob = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
+    return any(m in blob for m in _RAILWAY_TRANSIENT_MARKERS)
+
+
+def _railway_run(
+    *args: str, check: bool = True, retries: int = 0, backoff: int = 4
+) -> sp.CompletedProcess:
+    """Run `railway <args>` and capture output. Exit on non-zero unless check=False.
+
+    With `retries > 0`, transient network failures (the Railway GraphQL API
+    momentarily timing out — see `_RAILWAY_TRANSIENT_MARKERS`) are retried with
+    linear backoff (`backoff`, `2*backoff`, … seconds) before giving up. Real
+    rejections (bad auth, duplicate name, build failure) are never retried.
+
+    Only pass `retries` for IDEMPOTENT calls. A timed-out Railway *mutation*
+    frequently still lands server-side, so blindly retrying a create (`init` /
+    `add --service`) would spawn a duplicate project/service — exactly the
+    orphans this repo's create flow now resumes instead. Reads (`whoami`,
+    `list`, `domain`) and upserts (`variable set`, `volume add`) are safe."""
+    for attempt in range(retries + 1):
+        try:
+            result = sp.run(
+                ["railway", *args],
+                capture_output=True,
+                text=True,
+                cwd=str(ROOT),
+            )
+        except FileNotFoundError:
+            print("Railway CLI not found in PATH.\n" + _RAILWAY_INSTALL_HINT)
+            sys.exit(2)
+        if result.returncode == 0:
+            return result
+        if attempt < retries and _railway_is_transient(result):
+            wait = backoff * (attempt + 1)
+            print(
+                f"  railway {args[0] if args else ''} hit a transient network "
+                f"error; retrying in {wait}s ({attempt + 1}/{retries})…"
+            )
+            time.sleep(wait)
+            continue
+        break
     if check and result.returncode != 0:
         msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
         print(f"  error: railway {' '.join(args)} failed: {msg}")
@@ -1121,7 +1168,7 @@ def _railway_check_installed() -> None:
 
 def _railway_check_auth() -> dict:
     """Return whoami JSON, or exit telling the user to `railway login`."""
-    result = _railway_run("whoami", "--json", check=False)
+    result = _railway_run("whoami", "--json", check=False, retries=3)
     if result.returncode != 0:
         print(
             "Not logged in to Railway. Run this in another terminal, complete the\n"
@@ -1170,11 +1217,103 @@ def _railway_add_service(name: str) -> dict:
         return {"name": name}
 
 
+def _railway_find_project(name: str, workspace: str | None) -> dict | None:
+    """Return the live (non-deleted) project named `name`, or None.
+
+    A timed-out `railway init` usually creates the project server-side even
+    though the CLI errors out, so on a re-run we adopt that project rather
+    than spawning a duplicate. Projects already scheduled for deletion
+    (`deletedAt` set — e.g. earlier empty orphans) are skipped. When
+    `workspace` is given, projects in it win; ties break on most-recent
+    update."""
+    result = _railway_run("list", "--json", check=False, retries=4)
+    try:
+        projects = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(projects, list):
+        return None
+    matches = [
+        p for p in projects
+        if p.get("name") == name and not p.get("deletedAt")
+    ]
+    if workspace:
+        scoped = [
+            p for p in matches
+            if (p.get("workspace") or {}).get("name") == workspace
+        ]
+        if scoped:
+            matches = scoped
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda p: p.get("updatedAt") or p.get("createdAt") or "",
+        reverse=True,
+    )
+    return matches[0]
+
+
+def _railway_project_environment(project: dict) -> str:
+    """Pick the environment to link to — prefer `production` (the init default)."""
+    edges = (project.get("environments") or {}).get("edges") or []
+    names = [(e.get("node") or {}).get("name") for e in edges]
+    names = [n for n in names if n]
+    if "production" in names:
+        return "production"
+    return names[0] if names else "production"
+
+
+def _railway_service_in_project(project: dict, name: str) -> dict | None:
+    """Return the service node named `name` within `project`, or None."""
+    edges = (project.get("services") or {}).get("edges") or []
+    for e in edges:
+        node = e.get("node") or {}
+        if node.get("name") == name:
+            return node
+    return None
+
+
+def _railway_provision(name: str, workspace: str | None) -> tuple[dict, dict, bool]:
+    """Idempotently ensure the project + service exist and are linked to cwd.
+
+    Fresh run → `railway init` + `railway add --service`. Re-run after a
+    half-finished attempt (common when the Railway API times out mid-create)
+    → adopt and `railway link` the existing project/service instead of
+    creating duplicates. The create steps themselves are never retried in
+    place — a timed-out mutation may have already landed — but this makes a
+    plain re-run resume cleanly. Returns (project, service, resumed)."""
+    existing = _railway_find_project(name, workspace)
+    if existing is None:
+        project = _railway_init_project(name, workspace=workspace)
+        print(f"  project: {project.get('name', name)}")
+        service = _railway_add_service(name)
+        print(f"  service: {service.get('name', name)}")
+        return project, service, False
+
+    # Resume: adopt the project a prior run already created server-side.
+    env = _railway_project_environment(existing)
+    svc_node = _railway_service_in_project(existing, name)
+    link_args = ["link", "--project", existing["id"], "--environment", env]
+    if workspace:
+        link_args += ["--workspace", workspace]
+    if svc_node:
+        link_args += ["--service", svc_node["name"]]
+    _railway_run(*link_args, retries=4)
+    print(f"  adopted existing project: {existing.get('name', name)}")
+    if svc_node:
+        print(f"  adopted existing service: {svc_node.get('name', name)}")
+        return existing, svc_node, True
+    # Project existed but the service didn't land — add it now.
+    service = _railway_add_service(name)
+    print(f"  service: {service.get('name', name)}")
+    return existing, service, True
+
+
 def _railway_set_variables(service: str, vars: dict[str, str]) -> None:
     args = ["variable", "set", "--service", service, "--skip-deploys"]
     for k, v in vars.items():
         args.append(f"{k}={v}")
-    _railway_run(*args)
+    _railway_run(*args, retries=4)
 
 
 def _railway_add_volume(service: str, mount_path: str) -> None:
@@ -1186,7 +1325,7 @@ def _railway_add_volume(service: str, mount_path: str) -> None:
 
     `volume add` is the one non-idempotent step — it bails if a volume is
     already mounted on the linked service. Treat that as success."""
-    result = _railway_run("volume", "add", "--mount-path", mount_path, check=False)
+    result = _railway_run("volume", "add", "--mount-path", mount_path, check=False, retries=4)
     if result.returncode == 0:
         return
     err = (result.stderr or "").lower()
@@ -1212,7 +1351,7 @@ def _railway_up(service: str) -> None:
 
 def _railway_domain(service: str) -> str:
     """Get (or generate) the public URL for `service`. Idempotent."""
-    result = _railway_run("domain", "--service", service, "--json")
+    result = _railway_run("domain", "--service", service, "--json", retries=4)
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
@@ -1399,11 +1538,9 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         shutil.rmtree(railway_dir)
 
     print("\nProvisioning on Railway…")
-    project = _railway_init_project(swarm_name, workspace=workspace)
-    print(f"  project: {project.get('name', swarm_name)}")
-
-    service = _railway_add_service(swarm_name)
-    print(f"  service: {service.get('name', swarm_name)}")
+    project, service, resumed = _railway_provision(swarm_name, workspace)
+    if resumed:
+        print("  (resuming a prior half-finished run — adopting existing resources)")
 
     print("  setting environment variables…")
     _railway_set_variables(swarm_name, {
