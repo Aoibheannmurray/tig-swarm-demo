@@ -30,3 +30,21 @@
 //        curand_init(((uint64_t *)(seed))[0], 0, 0, &state);
 //        ...
 //    }
+
+// SGD weight-update kernel. Returns the *update to add* to each parameter
+// (the scaffold applies it via `apply_parameter_updates_direct`, i.e.
+// params += update): update = -learning_rate * clip(grad, -1, 1). The gradient
+// clip keeps a single large gradient from blowing the step up.
+extern "C" __global__ void sgd_step(
+    const float* __restrict__ gradients,
+    const unsigned int n,
+    const float learning_rate,
+    float* __restrict__ updates
+) {
+    const unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // Simple SGD: clip the gradient for stability, then step against it.
+        const float g = fminf(fmaxf(gradients[idx], -1.0f), 1.0f);
+        updates[idx] = -learning_rate * g;
+    }
+}

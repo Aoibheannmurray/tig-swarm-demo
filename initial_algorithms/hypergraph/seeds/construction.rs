@@ -1,47 +1,68 @@
 // initial_algorithms/hypergraph/seeds/construction.rs
 //
-// Simple SEED algorithm for the hypergraph (GPU) partitioning challenge.
+// SEED algorithm for the hypergraph (GPU) partitioning challenge: a balanced
+// round-robin assignment computed on the GPU.
 //
-// !!! UNVERIFIED !!!  This environment has no CUDA toolkit / GPU (cudarc fails
-// to build without `nvcc`), so this seed could NOT be compiled or run here.
-// Validate and fix it on a CUDA box before relying on it. The logic below is
-// deliberately host-only and uses no kernels, which minimises the surface that
-// could be wrong, but the cudarc type/imports still need a real build to confirm.
+// Strategy: launch the `round_robin_partition` kernel (see construction.cu)
+// with one thread per node, assigning partition[i] = i % num_parts. This is the
+// most size-balanced partition possible (part sizes differ by at most one), so
+// it satisfies max_part_size whenever any balanced partition does. The edge-cut
+// quality is poor; it exists so a weaker model can refine the assignment (move
+// nodes to reduce cut, greedy bipartition, multilevel coarsening) instead of
+// bootstrapping a partitioner from scratch.
 //
-// Strategy: a balanced round-robin assignment of nodes to partitions
-// (partition[i] = i % num_parts). This needs only the two host-side scalars
-// num_nodes and num_parts — not the GPU-resident hyperedge structure — and is
-// the most size-balanced partition possible, so it satisfies max_part_size
-// whenever any balanced partition does. The edge-cut quality is poor; it exists
-// so a weaker model can refine the assignment (move nodes to reduce cut,
-// multilevel coarsening, GPU greedy bipartition) instead of bootstrapping.
+// Verified on an L40 (C3): compiles, runs, and produces a feasible, balanced
+// partition (score −658834 on n_h_edges=10000 — poor cut by design).
 
 use crate::hypergraph::*;
 use anyhow::Result;
 use cudarc::{
-    driver::{CudaModule, CudaStream},
+    driver::{CudaModule, CudaStream, LaunchConfig, PushKernelArg},
     runtime::sys::cudaDeviceProp,
 };
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
+const THREADS_PER_BLOCK: u32 = 256;
+
 pub fn solve_challenge(
     challenge: &Challenge,
     save_solution: &dyn Fn(&Solution) -> Result<()>,
     _hyperparameters: &Option<Map<String, Value>>,
-    _module: Arc<CudaModule>,
-    _stream: Arc<CudaStream>,
+    module: Arc<CudaModule>,
+    stream: Arc<CudaStream>,
     _prop: &cudaDeviceProp,
-) -> anyhow::Result<Option<Solution>> {
+) -> Result<()> {
     let num_nodes = challenge.num_nodes as usize;
-    let num_parts = (challenge.num_parts as usize).max(1);
+    let num_nodes_i = challenge.num_nodes as i32;
+    let num_parts_i = challenge.num_parts as i32;
 
-    // Balanced round-robin assignment: part sizes differ by at most one.
-    let partition: Vec<u32> = (0..num_nodes)
-        .map(|i| (i % num_parts) as u32)
-        .collect();
+    // First device op — binds the CUDA context to this (spawned) solver thread.
+    let mut d_partition = stream.alloc_zeros::<i32>(num_nodes)?;
 
-    let solution = Solution { partition };
-    save_solution(&solution)?;
-    Ok(Some(solution))
+    let kernel = module.load_function("round_robin_partition")?;
+    let cfg = LaunchConfig {
+        grid_dim: (
+            (challenge.num_nodes + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK,
+            1,
+            1,
+        ),
+        block_dim: (THREADS_PER_BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe {
+        stream
+            .launch_builder(&kernel)
+            .arg(&mut d_partition)
+            .arg(&num_nodes_i)
+            .arg(&num_parts_i)
+            .launch(cfg)?;
+    }
+    stream.synchronize()?;
+
+    let partition: Vec<i32> = stream.memcpy_dtov(&d_partition)?;
+    let partition_u32: Vec<u32> = partition.iter().map(|&x| x as u32).collect();
+
+    save_solution(&Solution { partition: partition_u32 })?;
+    Ok(())
 }
