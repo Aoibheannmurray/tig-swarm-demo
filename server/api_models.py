@@ -173,6 +173,11 @@ class StateResponse(_ResponseBase):
     inspiration_agent_name: Optional[str] = None
     stagnation_hint: Optional[str] = None
     trajectory_reset: Optional[dict] = None
+    # Auto-classified model tier ('frontier'/'standard'); drives seeding.
+    tier: Optional[str] = None
+    # Echoed role ('explorer'/'exploiter') and a soft strategy-tag suggestion.
+    role: Optional[str] = None
+    assigned_strategy_tag: Optional[str] = None
 
     # Dashboard view fields
     baseline_score: Optional[float] = None

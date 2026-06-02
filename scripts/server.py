@@ -109,6 +109,12 @@ def register_agent(
         body["agent_name"] = resolved_name
 
     body["llm_type"] = derive_llm_label(provider, model)
+    # Structured provider/model let the server auto-classify the model tier
+    # (frontier/standard) precisely instead of parsing the llm_type label.
+    if provider:
+        body["provider"] = provider
+    if model:
+        body["model"] = model
 
     data = server_post(
         f"{server}/api/agents/register", body,
@@ -118,8 +124,11 @@ def register_agent(
     return data["agent_id"], data["agent_name"], data["agent_token"]
 
 
-def get_state(server: str, agent_id: str) -> dict:
-    return server_get(f"{server}/api/state?agent_id={urllib.parse.quote(agent_id)}")
+def get_state(server: str, agent_id: str, role: str | None = None) -> dict:
+    url = f"{server}/api/state?agent_id={urllib.parse.quote(agent_id)}"
+    if role:
+        url += f"&role={urllib.parse.quote(role)}"
+    return server_get(url)
 
 
 def agent_exists(server: str, agent_id: str) -> bool:

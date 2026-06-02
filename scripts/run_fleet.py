@@ -83,7 +83,16 @@ _AGENT_CONFIG_KEYS = (
     "log_prompts",
     # Opt-in stricter Rust prompt for smaller/cheaper models (prompts.py).
     "detailed_prompts",
+    # Contributor-owned behavior role (explorer/exploiter). Materialized at
+    # spawn AND re-synced live by the monitor loop so editing it in
+    # fleet.config.json takes effect on the agent's next iteration.
+    "role",
 )
+
+# Fleet-entry fields the monitor loop re-syncs into a running worktree's
+# agent.config.json when they change. Only role is hot-reloadable today —
+# identity/provider/model are fixed for the life of a process.
+_HOT_RELOAD_KEYS = ("role",)
 
 _PROVIDER_TO_DEFAULT_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -523,6 +532,51 @@ def cmd_clean(agents: list[dict]) -> int:
     return 0
 
 
+def _sync_hot_reload_to_worktrees(agents: list[dict]) -> None:
+    """Patch hot-reloadable fields (role) from fleet.config.json into each
+    running worktree's agent.config.json when they've changed.
+
+    Best-effort: a transient read/parse/write error on one agent is logged and
+    skipped, never crashing the fleet monitor. Only fields in _HOT_RELOAD_KEYS
+    are touched; everything else in agent.config.json (identity, provider,
+    runtime defaults run_loop wrote) is preserved."""
+    try:
+        fleet = _read_json(FLEET_CONFIG_PATH)
+    except Exception:
+        return
+    entries = {
+        a.get("name"): a
+        for a in (fleet.get("agents") or [])
+        if a.get("name")
+    }
+    for agent in agents:
+        name = agent.get("name")
+        entry = entries.get(name)
+        if not entry:
+            continue
+        wt_cfg_path = WORKTREES_DIR / name / "agent.config.json"
+        try:
+            current = _read_json(wt_cfg_path)
+        except Exception:
+            continue
+        if not isinstance(current, dict):
+            continue
+        changed = False
+        for key in _HOT_RELOAD_KEYS:
+            desired = entry.get(key)
+            if desired is not None and current.get(key) != desired:
+                current[key] = desired
+                changed = True
+        if changed:
+            try:
+                wt_cfg_path.write_text(
+                    json.dumps(current, indent=2) + "\n", encoding="utf-8",
+                )
+                print(f"  [fleet] {name}: role -> {current.get('role')}")
+            except OSError as e:
+                print(f"  [fleet] {name}: role sync failed: {e}", file=sys.stderr)
+
+
 def cmd_run(
     agents: list[dict],
     only: list[str] | None,
@@ -612,8 +666,17 @@ def cmd_run(
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
+    # Re-sync hot-reloadable fields (role) from fleet.config.json into each
+    # running worktree's agent.config.json on a cadence, so a contributor can
+    # change an agent's role mid-run by editing fleet.config.json. run_loop.py
+    # re-reads agent.config.json every iteration and picks the change up.
+    _SYNC_EVERY_S = 5
+    ticks = 0
     while any(p.poll() is None for _, p, _ in procs):
         time.sleep(1)
+        ticks += 1
+        if ticks % _SYNC_EVERY_S == 0:
+            _sync_hot_reload_to_worktrees(agents)
 
     for name, p, t in procs:
         t.join(timeout=2)

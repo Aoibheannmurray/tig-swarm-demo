@@ -531,6 +531,66 @@ def read_initial_algorithms() -> dict[str, dict[str, str]]:
     return out
 
 
+def read_authored_seeds() -> list[dict]:
+    """Scan ``initial_algorithms/<challenge>/seeds/`` for host-authored seed
+    algorithms. Each ``<tag>.rs`` (with an optional matching ``<tag>.cu``) is
+    one seed whose ``strategy_tag`` is the filename stem. These are handed to
+    standard-tier / exploiter agents on a fresh trajectory instead of the
+    stub. Returns a list of
+    ``{challenge, strategy_tag, algorithm_code, kernel_code}``."""
+    seeds: list[dict] = []
+    for ch in CHALLENGES:
+        seeds_dir = ROOT / "initial_algorithms" / ch / "seeds"
+        if not seeds_dir.is_dir():
+            continue
+        for rs in sorted(seeds_dir.glob("*.rs")):
+            cu = rs.with_suffix(".cu")
+            seeds.append({
+                "challenge": ch,
+                "strategy_tag": rs.stem,
+                "algorithm_code": rs.read_text(),
+                "kernel_code": cu.read_text() if cu.is_file() else None,
+            })
+    return seeds
+
+
+def seed_pool_from_authored(
+    server_url: str, admin_key: str, seeds: list[dict],
+) -> None:
+    """POST each host-authored seed to ``/api/admin/seed_pool``. Best-effort:
+    network/server errors are warned-and-skipped rather than aborting setup.
+    Idempotent — the server dedupes by (challenge, strategy_tag, source), so
+    re-running create silently ignores seeds already present."""
+    if not seeds:
+        return
+    print(f"Seeding the seed pool with {len(seeds)} authored algorithm(s)…")
+    for s in seeds:
+        payload = {
+            "admin_key": admin_key,
+            "challenge": s["challenge"],
+            "strategy_tag": s["strategy_tag"],
+            "algorithm_code": s["algorithm_code"],
+            "kernel_code": s["kernel_code"],
+        }
+        req = urllib.request.Request(
+            f"{server_url.rstrip('/')}/api/admin/seed_pool",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        label = f"{s['challenge']}/{s['strategy_tag']}"
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = json.load(resp)
+            status = "added" if body.get("seeded") else "already present"
+            print(f"  {label}: seed {status}")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:200]
+            print(f"  {label}: server rejected seed (HTTP {e.code}: {detail}); skipping.")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"  {label}: could not reach {server_url} ({e}); skipping seed.")
+
+
 def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
     """Pull a challenge's tracks/timeout/scoring_direction from the live
     server. Used by switch / sync to mirror the active challenge's sub-config
@@ -1411,6 +1471,14 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     if seed_inactive_pool:
         print("\nSeeding inactive trajectory pool from TIG mainnet…")
         seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
+
+    # Load any host-authored seed algorithms (initial_algorithms/<ch>/seeds/)
+    # into the seed pool so standard-tier / exploiter agents start from working
+    # code instead of the stub.
+    authored_seeds = read_authored_seeds()
+    if authored_seeds:
+        print()
+        seed_pool_from_authored(server_url, admin_key, authored_seeds)
 
     print("\nWriting local files…")
     template_files(

@@ -13,7 +13,7 @@ Requirements: Python 3, Railway CLI, Railway account.
 ```bash
 railway login
 python3 setup.py create              # deploys a Railway swarm, scaffolds fleet.config.json
-python3 setup.py switch knapsack     # change the active challenge later
+python3 setup.py switch energy_arbitrage     # change the active challenge later
 ```
 
 `setup.py` is host-only. Contributors run `python3 run.py`.
@@ -72,6 +72,7 @@ Per-agent fields:
 | `api_base`       | Optional override of the provider's base URL (e.g. an OpenAI-compatible gateway like OpenRouter: `https://openrouter.ai/api/v1`). |
 | `tacit_knowledge`| Optional per-agent override of the shared `tacit_knowledge.md` file.    |
 | `detailed_prompts`| Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile; leave off for frontier models to save tokens. |
+| `role`           | `explorer` (default) writes novel/ambitious algorithms; `exploiter` makes only small localized edits, never a rewrite. **Hot-editable** — change it in `fleet.config.json` while the fleet runs and it takes effect on the agent's next iteration. |
 
 ### Tacit knowledge
 
@@ -132,6 +133,19 @@ CLI providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) have no
 models endpoint — they accept any model ID their CLI knows.
 
 `claude-code` is one-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 15 min per iteration; don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
+
+## Reading the score
+
+Each iteration prints a `[BENCH]` line — the aggregate `Score`, `Feasible`, and a per-track breakdown:
+
+```
+[BENCH] Score: -199814  Feasible: False
+        Track 0: 52000
+        Track 1: -1000000  (below baseline)
+        Track 2: 46800
+```
+
+The aggregate is a **shifted geometric mean** across tracks, and a failed or infeasible track is assigned a large fixed penalty. Because of that penalty, **a single bad track can drag the whole aggregate negative** even when the other tracks scored well. 
 
 ## Local files
 

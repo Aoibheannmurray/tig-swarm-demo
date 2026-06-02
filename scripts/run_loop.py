@@ -111,6 +111,7 @@ from prompts import (
     build_code_system_prompt,
     build_code_user_prompt,
     build_compile_fix_prompt,
+    build_compile_fix_system_prompt,
     build_hypothesis_system_prompt,
     build_hypothesis_user_prompt,
     build_redescribe_hypothesis_prompt,
@@ -127,6 +128,15 @@ from c3_compute import run_benchmark_c3
 
 # Backoff after a recoverable iteration-level failure (state fetch, LLM error).
 _ITERATION_BACKOFF_SECS = 5
+
+
+def _normalize_role(value: object) -> str:
+    """Map a config/state `role` value to 'exploiter' or 'explorer' (default).
+
+    Role is contributor-owned (an optional field in fleet.config.json / the
+    worktree's agent.config.json) and re-read every iteration so edits take
+    effect live. Anything unrecognized is an explorer — today's behavior."""
+    return "exploiter" if str(value or "").strip().lower() == "exploiter" else "explorer"
 # Skip the LLM re-describe call when the post-fix code is this similar to
 # the pre-fix code — the fix was almost certainly cosmetic (bounds checks,
 # error wrappers) and not worth a round-trip to confirm "no change".
@@ -251,8 +261,12 @@ def _generate_code(
     args: argparse.Namespace, model: str, api_key: str,
     state: dict, hypothesis: dict, config: dict,
     challenge_md: str, files: ChallengeFiles,
+    *, role: str = "explorer",
 ) -> tuple[str | None, str | None, int, int]:
     """LLM code generation with retry on validation failure.
+
+    Role only steers the prompt guidance (explorer vs exploiter); it no longer
+    gates the candidate on similarity to the starting code.
 
     Returns (code, kernel, input_tokens, output_tokens).
     """
@@ -264,11 +278,11 @@ def _generate_code(
     for attempt in range(max_attempts):
         if attempt == 0:
             print(f"  [LLM] Generating code via {args.provider}/{model}…")
-            user_prompt = build_code_user_prompt(state, hypothesis, config)
+            user_prompt = build_code_user_prompt(state, hypothesis, config, role=role)
         else:
             print(f"  [LLM] Code retry {attempt}/{max_attempts - 1}: {violation}")
             user_prompt = (
-                build_code_user_prompt(state, hypothesis, config)
+                build_code_user_prompt(state, hypothesis, config, role=role)
                 + f"\n\nYour previous response was rejected: {violation}\n"
                 "Fix the issue and return the complete source."
                 + files.separator_suffix()
@@ -277,7 +291,7 @@ def _generate_code(
             code_response, usage = _call_llm_logged(
                 "code", config,
                 args.provider, model, api_key,
-                build_code_system_prompt(challenge_md, config),
+                build_code_system_prompt(challenge_md, config, role=role),
                 user_prompt,
                 args.api_base,
             )
@@ -297,37 +311,47 @@ def _generate_code(
         if violation:
             print(f"  [LLM] Validation failed: {violation}")
             continue
+
         print(f"  [LLM] Code validated OK")
         return parsed, parsed_kernel, input_tokens, output_tokens
 
     return None, None, input_tokens, output_tokens
 
 
+def _clean_score(x):
+    """Snap floating-point noise near zero to a clean 0.0 for display.
+
+    A baseline-matching solution should score 0, but the shifted-geomean
+    round-trip (and any value the server persisted before that was fixed) can
+    land it at ~-3.7e-09. Anything below the meaningful integer-scaled
+    precision is noise; also normalises -0.0 -> 0.0 so `:.0f` prints "0",
+    never "-0". Passes None through unchanged (score not yet known).
+    """
+    if x is None:
+        return x
+    return 0.0 if abs(x) < 1e-6 else x
+
+
 def _print_bench_result(bench: dict, indent: str = "  ") -> None:
-    """Print the benchmark score with context.
+    """Print the benchmark score with per-track context.
 
     A failed/infeasible track injects a large fixed penalty into a shifted
-    geometric mean, so one bad track can drag the aggregate negative. Print
-    that inline instead of leaving a bare, alarming negative number that
-    every beta reporter flagged as confusing. ASCII-only on purpose so the
-    line itself can't trip a non-UTF-8 Windows console.
+    geometric mean, so one bad track can drag the aggregate negative. Tracks
+    below baseline are flagged inline; what a negative aggregate means is
+    documented once in README.md ("Reading the score") rather than reprinted
+    every iteration. ASCII-only on purpose so the line itself can't trip a
+    non-UTF-8 Windows console.
     """
-    score = bench.get("score", 0)
+    score = _clean_score(bench.get("score", 0))
     feasible = bench.get("feasible", False)
     track_scores = bench.get("track_scores", {})
     errors = bench.get("errors") or []
     print(f"{indent}[BENCH] Score: {score:.0f}  Feasible: {feasible}")
     if track_scores:
         for tk, ts in track_scores.items():
+            ts = _clean_score(ts)
             note = "  (below baseline)" if ts < 0 else ""
             print(f"{indent}        Track {tk}: {ts:.0f}{note}")
-    if score < 0 or not feasible:
-        msg = ("-> negative = below baseline; a failed/infeasible track incurs "
-               "a large penalty in the shifted geometric mean")
-        failed = [str(tk) for tk, ts in track_scores.items() if ts < 0]
-        if failed:
-            msg += f" (weak tracks: {', '.join(failed)})"
-        print(f"{indent}        {msg}")
     if errors:
         print(f"{indent}[BENCH] Errors ({len(errors)}):")
         for e in errors[:5]:
@@ -336,11 +360,14 @@ def _print_bench_result(bench: dict, indent: str = "  ") -> None:
 
 def _try_compile_fix(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, challenge_md: str,
+    config: dict,
     files: ChallengeFiles,
     build_err: str,
 ) -> tuple[bool, int, int]:
     """Ask the LLM to fix compiler errors, write the result.
+
+    Uses a focused fix prompt (minimal-edit instruction + distilled errors)
+    rather than the full code-generation prompt — see prompts.py.
 
     Returns (success, input_tokens, output_tokens).
     """
@@ -350,7 +377,7 @@ def _try_compile_fix(
         fix_response, usage = _call_llm_logged(
             "compile_fix", config,
             args.provider, model, api_key,
-            build_code_system_prompt(challenge_md, config),
+            build_compile_fix_system_prompt(config),
             fix_prompt,
             args.api_base,
         )
@@ -368,19 +395,24 @@ def _try_compile_fix(
         print(f"  Fix failed validation: {violation}")
         return False, usage["input_tokens"], usage["output_tokens"]
 
-    before_fix, _ = files.read()
-    sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
-    print(f"  Fix similarity to broken code: {sim * 100:.0f}%")
-    if sim >= 0.99:
-        print("  Fix made no changes (identical to broken code) — aborting retry.")
+    before_fix, before_kernel = files.read()
+    # Abort ONLY on a byte-identical echo (the model returned the broken code
+    # unchanged). A ratio threshold would mis-fire here: a legitimate one-line
+    # fix in a long file is ~99.7% similar, so `sim >= 0.99` used to reject
+    # exactly the small, correct fixes we want. The similarity is kept purely
+    # as a diagnostic readout.
+    if fixed == before_fix and (fixed_kernel or "") == (before_kernel or ""):
+        print("  Fix returned the broken code unchanged (no-op) — aborting retry.")
         return False, usage["input_tokens"], usage["output_tokens"]
+    sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
+    print(f"  Fix changed the code (similarity to broken: {sim * 100:.1f}%) — re-benchmarking.")
     files.write(fixed, fixed_kernel)
     return True, usage["input_tokens"], usage["output_tokens"]
 
 
 def _benchmark_with_compile_fix(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, server: str, challenge_md: str,
+    config: dict, server: str,
     files: ChallengeFiles,
 ) -> tuple[dict | None, str, bool, int, int]:
     """Run benchmark, retrying with LLM compile fixes on failure.
@@ -409,7 +441,7 @@ def _benchmark_with_compile_fix(
 
         print(f"  [BENCH] Build retry {attempt + 1}/{max_retries} — asking LLM to fix…")
         ok, it, ot = _try_compile_fix(
-            args, model, api_key, config, challenge_md,
+            args, model, api_key, config,
             files, build_err,
         )
         input_tokens += it
@@ -682,6 +714,7 @@ def _run_agentic_iteration(
     agent_id: str, agent_name: str,
     workdir: Path, backend: agentic_backends.AgenticBackend,
     challenge_md: str, files: ChallengeFiles,
+    *, role: str = "explorer", assigned_tag: str | None = None,
 ) -> tuple[dict, str, str, agentic_backends.AgenticResult]:
     """One tooled-agent iteration. Returns (hypothesis, code, kernel, result).
 
@@ -694,7 +727,7 @@ def _run_agentic_iteration(
     _seed_worktree_files(workdir, state, files, config)
     agentic_sandbox.reset_iteration_state(workdir)
 
-    user_prompt = build_agentic_user_prompt(state, config)
+    user_prompt = build_agentic_user_prompt(state, config, role=role, assigned_tag=assigned_tag)
     print(f"  [AGENTIC] Launching {backend.name} in {workdir} (timeout {args.agentic_timeout}s)…")
     # Heads-up so the contributor's terminal doesn't look frozen. The
     # subprocess is run with capture_output=True (we need the trace for
@@ -1092,6 +1125,12 @@ def main() -> int:
     print(f"Server: {server}")
     print()
 
+    # Contributor-owned role, re-read from agent.config.json every iteration so
+    # an edit to fleet.config.json (propagated into the worktree by run_fleet)
+    # takes effect on the next loop. Defaults to 'explorer'.
+    role = _normalize_role(agent_config.get("role"))
+    print(f"Role: {role}")
+
     iteration = 0
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
@@ -1115,6 +1154,13 @@ def main() -> int:
         iter_challenge = config.get("challenge")
         print(f"  [SYNC] Challenge: {iter_challenge or '?'}  GPU: {config.get('is_gpu', False)}")
 
+        # Re-read the contributor-owned role (run_fleet patches fleet.config.json
+        # edits into this worktree's agent.config.json live). Log on change only.
+        live_role = _normalize_role(load_agent_config().get("role"))
+        if live_role != role:
+            print(f"  [ROLE] role changed: {role} -> {live_role}")
+            role = live_role
+
         try:
             swarm_cfg = server_get(f"{server}/api/swarm_config")
             config["available_challenges"] = swarm_cfg.get("available_challenges", {})
@@ -1124,7 +1170,7 @@ def main() -> int:
         # ── Get state ──────────────────────────────────────────
         print("  [STATE] Fetching agent state…")
         try:
-            state = get_state(server, agent_id)
+            state = get_state(server, agent_id, role=role)
         except Exception as e:
             print(f"  [STATE] FAILED: {e}")
             time.sleep(_ITERATION_BACKOFF_SECS)
@@ -1142,8 +1188,8 @@ def main() -> int:
         except Exception as e:
             print(f"  [IDENT] sync skipped: {e}")
 
-        my_score = state.get("my_best_score")
-        global_best = state.get("best_score")
+        my_score = _clean_score(state.get("my_best_score"))
+        global_best = _clean_score(state.get("best_score"))
         stagnation = state.get("my_runs_since_improvement", 0)
         runs = state.get("my_runs", 0)
         improvements = state.get("my_improvements", 0)
@@ -1152,17 +1198,47 @@ def main() -> int:
 
         reset = state.get("trajectory_reset")
         if reset:
-            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')} **")
+            start = reset.get("start")
+            start_str = f" (start: {start})" if start else ""
+            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')}{start_str} **")
             post_message(server, agent_name, agent_id,
                          f"Trajectory reset: {reset.get('type')}",
                          challenge=iter_challenge,
                          agent_token=agent_token)
+
+        # Where the server sourced this iteration's starting code, when it
+        # didn't continue our own best: 'seed' (seed pool), 'peer' (best active
+        # peer adopted), or 'stub' (true cold start). Makes the standard-tier
+        # seeding path observable instead of silent — see server/tiers.py.
+        seed_start = state.get("seed_start")
+        if seed_start:
+            tier = state.get("tier", "?")
+            label = {
+                "seed": "seeded from the seed pool",
+                "peer": "adopted the best active peer's algorithm",
+                "stub": "got the bare stub (cold start — no seed/peer available)",
+            }.get(seed_start, seed_start)
+            print(f"  [STATE] Start source: {label} [tier={tier}]")
+
+        # Soft strategy-tag suggestion from the server (explorers only).
+        assigned_tag = state.get("assigned_strategy_tag")
 
         # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
         best_kernel = state.get("best_kernel_code") or ""
         files = ChallengeFiles(config)
         bootstrap = is_stub_code(best_code)
+
+        # Exploiters refine existing code; they never bootstrap from scratch.
+        # The server seeds standard/exploiter agents with a working algorithm
+        # (or a peer's best); a stub here means the true cold start — no seed
+        # and no feasible peers yet. Idle locally rather than rewriting, and do
+        # NOT post to the feed.
+        if role == "exploiter" and bootstrap:
+            print("  [ROLE] Exploiter awaiting seed (cold start) — skipping iteration, will not bootstrap.")
+            time.sleep(_ITERATION_BACKOFF_SECS)
+            continue
+
         if best_code and not bootstrap:
             files.write(best_code, best_kernel)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
@@ -1184,6 +1260,7 @@ def main() -> int:
             hypothesis, code, new_kernel, _agentic_result = _run_agentic_iteration(
                 args, state, config, server, agent_token, agent_id, agent_name,
                 workdir, backend, challenge_md, files,
+                role=role, assigned_tag=assigned_tag,
             )
             tag = hypothesis.get("strategy_tag", "other")
             title = hypothesis.get("title", "untitled")
@@ -1248,8 +1325,8 @@ def main() -> int:
                 hyp_response, hyp_usage = _call_llm_logged(
                     "hypothesis", config,
                     args.provider, model, api_key,
-                    build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
-                    build_hypothesis_user_prompt(state, config),
+                    build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap, role=role, assigned_tag=assigned_tag),
+                    build_hypothesis_user_prompt(state, config, role=role, assigned_tag=assigned_tag),
                     args.api_base,
                 )
                 iter_input_tokens += hyp_usage["input_tokens"]
@@ -1265,6 +1342,14 @@ def main() -> int:
                 time.sleep(_ITERATION_BACKOFF_SECS)
                 continue
 
+            # An empty completion (the provider returned no text, not an error)
+            # isn't a usable hypothesis — treat it like a transport failure and
+            # retry next iteration rather than proceeding with a default.
+            if not (hyp_response or "").strip():
+                print("  [LLM] HYPOTHESIS FAILED: empty response from model — skipping iteration")
+                time.sleep(_ITERATION_BACKOFF_SECS)
+                continue
+
             hypothesis = parse_hypothesis(hyp_response)
             tag = hypothesis.get("strategy_tag", "?")
             title = hypothesis.get("title", "?")
@@ -1276,7 +1361,7 @@ def main() -> int:
             # ── LLM code generation ────────────────────────────
             code, new_kernel, gen_in, gen_out = _generate_code(
                 args, model, api_key, state, hypothesis, config,
-                challenge_md, files,
+                challenge_md, files, role=role,
             )
             iter_input_tokens += gen_in
             iter_output_tokens += gen_out
@@ -1313,7 +1398,7 @@ def main() -> int:
             send_heartbeat(server, agent_id, agent_token=agent_token)
 
             bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
-                args, model, api_key, config, server, challenge_md,
+                args, model, api_key, config, server,
                 files,
             )
             iter_input_tokens += fix_in
@@ -1386,6 +1471,12 @@ def main() -> int:
             # doesn't surface token counts. Zeros here mean "not reported", not
             # "the model did nothing" — say so instead of a misleading $0.0000.
             print(f"  [TOKENS] not reported by {args.provider} provider")
+        elif iter_cost == 0.0:
+            # Tokens were spent but estimate_cost has no price entry for this
+            # model, so it fell through to 0.0. Don't print a misleading
+            # $0.0000 — flag the missing price and still show the token spend.
+            print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  "
+                  f"est=unknown (no price entry for {model!r})")
         else:
             print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
         print(f"  [PUBLISH] Publishing results to server…")
@@ -1406,7 +1497,7 @@ def main() -> int:
         except Exception as e:
             print(f"  [PUBLISH] FAILED: {e}")
 
-        status = "NEW BEST!" if is_new_best else f"score {bench.get('score', 0):.0f}"
+        status = "NEW BEST!" if is_new_best else f"score {_clean_score(bench.get('score', 0)):.0f}"
         feasible_str = "" if bench.get("feasible") else " (INFEASIBLE)"
         post_message(server, agent_name, agent_id,
                      f"[{tag}] {title} → {status}{feasible_str}",

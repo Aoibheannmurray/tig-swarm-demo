@@ -7,7 +7,8 @@
       "name": "claude-1",
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
-      "api_key_env": "ANTHROPIC_API_KEY"
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "role": "explorer"
     },
     {
       "name": "claude-2",
@@ -41,7 +42,8 @@
       "name": "venice-1",
       "provider": "venice",
       "model": "zai-org-glm-5",
-      "api_key_env": "VENICE_API_KEY"
+      "api_key_env": "VENICE_API_KEY",
+      "role": "exploiter"
     },
     {
       "name": "openrouter-1",
