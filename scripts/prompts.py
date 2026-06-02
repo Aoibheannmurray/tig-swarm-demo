@@ -440,6 +440,21 @@ GENERAL COMPILE HYGIENE:
   surface, so the result still slots into the existing module."""
 
 
+EVOLUTION_GUIDANCE = """\
+
+This is an evolutionary search environment — code is mutated over many
+iterations. Favour code that is:
+- Modular: construction, refinement, local search, perturbation as separate fns.
+- Mutatable: key decisions in named params/consts so later iterations can tune them.
+- Robust: handle every instance size and parameter/budget range, not one case.
+- Adaptive: detect instance characteristics and adjust strategy accordingly.
+- Not overfitted to a single scenario.
+
+Priorities, in order: 1) feasibility (never violate constraints) 2) solution
+quality (maximise the objective) 3) stability across instances 4) runtime
+efficiency (leave headroom for more refinement iterations)."""
+
+
 def _rust_rules_block(config: dict) -> str:
     """The Rust guardrails to append to a code prompt — base rules always,
     plus the detailed checklist when the agent opted in via
