@@ -479,41 +479,81 @@ def seed_inactive_pool_from_mainnet(
             print(f"  {ch}: could not reach {server_url} ({e}); skipping seed.")
 
 
-def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
-    """POST multi-challenge swarm config to a running server. Best-effort:
-    if the server isn't running yet, skip gracefully and tell the user how
-    to do it later.
+def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> bool:
+    """POST multi-challenge swarm config to a running server, then verify it
+    landed. Returns True on success, False if the config could not be
+    persisted after retries.
+
+    This must be robust: if the POST silently fails the server keeps the
+    bare `DEFAULT_CONFIG` (active_challenge=satisfiability, swarm_type=cpu,
+    no challenge_configs) forever — `init_db` seeds those with INSERT OR
+    IGNORE and never overwrites them — so contributors quietly run the wrong
+    challenge on the wrong hardware. A fresh Railway deploy is also slow to
+    answer its first write, so we use a generous timeout and a few retries
+    rather than a single best-effort shot, and we GET the config back to
+    confirm `active_challenge` / `swarm_type` actually took.
 
     `cfg["challenges"]` is a dict of {challenge: {tracks, timeout,
     scoring_direction, initial_algorithm_code}}; `cfg["active_challenge"]`
     selects which one contributors auto-follow.
     """
+    want_active = cfg["active_challenge"]
+    want_type = cfg.get("swarm_type", "cpu")
     payload = {
         "admin_key": admin_key,
-        "active_challenge": cfg["active_challenge"],
+        "active_challenge": want_active,
         "challenges": cfg["challenges"],
         "swarm_name": cfg.get("swarm_name", ""),
         "owner_name": cfg.get("owner_name", ""),
-        "swarm_type": cfg.get("swarm_type", "cpu"),
+        "swarm_type": want_type,
         "stagnation_threshold": cfg.get("stagnation_threshold", 2),
         "stagnation_limit": cfg.get("stagnation_limit", 10),
         "hypothesis_recall_threshold": cfg.get("hypothesis_recall_threshold", 3),
     }
-    req = urllib.request.Request(
-        f"{server_url.rstrip('/')}/api/swarm_config",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    url = f"{server_url.rstrip('/')}/api/swarm_config"
+    data = json.dumps(payload).encode()
+
+    last_err: Exception | None = None
+    for attempt in range(1, 5):
+        try:
+            req = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                json.load(resp)
+            # Confirm it persisted — a 200 isn't enough if a later step or a
+            # racing default-seed clobbered it. Read it back and check.
+            with urllib.request.urlopen(url, timeout=15) as r:
+                live = json.load(r)
+            got_active = live.get("active_challenge")
+            got_type = live.get("swarm_type")
+            got_ch = set((live.get("available_challenges") or {}).keys())
+            if got_active == want_active and got_type == want_type and got_ch >= set(cfg["challenges"]):
+                print(f"  POSTed + verified config at {url} "
+                      f"(active={got_active}, type={got_type})")
+                return True
+            last_err = RuntimeError(
+                f"server reports active={got_active!r} type={got_type!r} "
+                f"challenges={sorted(got_ch)} after POST"
+            )
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                TimeoutError, OSError, ValueError) as e:
+            last_err = e
+        if attempt < 4:
+            print(f"  config push attempt {attempt} failed ({last_err}); retrying…")
+            time.sleep(3 * attempt)
+
+    print(
+        f"\n  ERROR: could not persist swarm config to {url} ({last_err}).\n"
+        f"  The server is up but still on its DEFAULT config "
+        f"(satisfiability / cpu) — contributors would run the WRONG challenge.\n"
+        f"  Re-run `python setup.py create` (it resumes) once the server is\n"
+        f"  reachable, or POST /api/swarm_config yourself with the admin_key\n"
+        f"  from swarm.admin.json."
     )
-    try:
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            json.load(resp)
-        print(f"  POSTed config to {server_url}/api/swarm_config")
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
-        print(
-            f"  could not reach {server_url} ({e}). Start the server and re-run "
-            f"`python setup.py create`, or POST /api/swarm_config yourself once it's up."
-        )
+    return False
 
 
 def read_initial_algorithms() -> dict[str, dict[str, str]]:
@@ -1678,7 +1718,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         cfg["is_gpu"] = True
 
     print("  pushing swarm config to the server…")
-    push_config_to_server(server_url, admin_key, cfg)
+    config_ok = push_config_to_server(server_url, admin_key, cfg)
 
     if seed_inactive_pool:
         print("\nSeeding inactive trajectory pool from TIG mainnet…")
@@ -1720,12 +1760,24 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     )
 
     print("\n" + "=" * 48)
-    print(f"{type_label} SWARM IS LIVE")
+    if config_ok:
+        print(f"{type_label} SWARM IS LIVE")
+    else:
+        print(f"{type_label} SWARM DEPLOYED — CONFIG NOT APPLIED")
     print("=" * 48)
     print(f"\n  Dashboard:  {server_url}/")
     print(f"  Swarm type:  {type_label}")
     print(f"  Active challenge:  {active_challenge}")
-    print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
+    if config_ok:
+        print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
+    else:
+        print(
+            f"  WARNING: the server is still on its DEFAULT config "
+            f"(satisfiability / cpu), NOT {active_challenge} / {type_label.lower()}.\n"
+            f"  Contributors would run the wrong challenge. Re-run "
+            f"`python setup.py create` (it resumes) to push the config once the\n"
+            f"  server is reachable, before onboarding anyone."
+        )
     print("\n  Onboard each contributor with:\n")
     print("    python setup.py invite [<username>]")
     print("    # prints their username + per-contributor swarm_password.")
