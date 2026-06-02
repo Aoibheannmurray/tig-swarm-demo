@@ -184,10 +184,17 @@ def build_hypothesis_user_prompt(
     if reset:
         rtype = reset.get("type", "")
         if rtype == "adopted_inactive":
-            parts.append(
+            msg = (
                 "\nYou are starting from another agent's previous algorithm. "
                 "Study the code above and propose an improvement to build on it."
             )
+            prior = reset.get("prior_score")
+            if prior is not None:
+                msg += (
+                    f" This code is already this trajectory's best "
+                    f"(score {prior}) and is your floor — your change must beat it."
+                )
+            parts.append(msg)
         else:
             parts.append(
                 "\nYou are starting from the template algorithm. "
@@ -365,10 +372,46 @@ RUST RULES (the output is compiled as-is — it MUST build):
 # tends not to compile). Capable models don't need this verbosity.
 RUST_RULES_DETAILED = """\
 
-EXTRA RULES FOR A CLEAN COMPILE (follow ALL of these):
+EXTRA RULES FOR A CLEAN COMPILE (smaller models — follow ALL of these):
+
+RULE 1 - NO DUPLICATE STRUCTS:
+  Each struct (e.g. a Hyperparameters config) is defined ONCE. Modify the
+  existing definition in place; never add a second
+  `pub struct <Name> { ... }` with a name that already exists.
+
+RULE 2 - BORROW CHECKER:
+  Copy a value out before mutating the collection it came from.
+  BAD:  let item = vec.choose(&mut rng).unwrap(); vec.retain(...);
+  GOOD: let item = *vec.choose(&mut rng).unwrap(); vec.retain(...);
+  Alternative: remove by index with `let x = vec.remove(idx);`. When the
+  borrow checker objects, clone the data rather than leaving code that won't
+  build.
+
+RULE 3 - TRAIT IMPORTS:
+  Import every trait whose methods you call, with the other `use` lines at the
+  top of the file — e.g. `use rand::prelude::{SliceRandom, IteratorRandom};`
+  for `.choose()` / `.shuffle()`. A missing trait import is a compile error.
+
+RULE 4 - BRACE BALANCE:
+  Before returning, verify every `{`, `(`, and `[` has a matching close.
+
+RULE 5 - COUNT SYMMETRIC PAIRS ONCE:
+  When summing over a symmetric matrix, iterate unordered pairs only:
+  `for i in 0..n { for j in (i+1)..n { /* use m[i][j] */ } }` — double-counting
+  silently doubles the objective.
+
+RULE 6 - USE i64 FOR ACCUMULATORS:
+  Sum into an i64 to avoid u32/i32 overflow and to allow negative deltas:
+  `let mut total: i64 = 0; total += value as i64;`
+
+RULE 7 - DEFINE BEFORE USE:
+  Every variable must be declared before its first use within its scope; don't
+  reference a binding from a sibling or inner block that isn't visible there.
+
+GENERAL COMPILE HYGIENE:
 - Before finishing, mentally run `cargo check`: every variable is used or
   prefixed with `_`; every `match` is exhaustive; every branch returns the
-  same type; no semicolons dropped where a value is expected.
+  same type; no semicolon dropped where a value is expected.
 - Prefer iterator methods you are sure of (`.iter()`, `.enumerate()`,
   `.map()`, `.filter()`, `.sum()`, `.min()/.max()`) over hand-written index
   loops; when you do index, derive the bound from `.len()`.
@@ -415,9 +458,7 @@ def build_code_system_prompt(
     timeout = config.get("timeout", 30)
     time_guidance = (
         f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
-        f"after this hard deadline. Use a time-based loop (std::time::Instant + deadline) "
-        f"that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2-5s) "
-        f"for cleanup. Call save_solution() early with your first feasible solution, then "
+        f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
         f"keep improving and re-saving — the last saved solution is evaluated. If no "
         f"solution was saved when the deadline hits, the instance counts as infeasible."
     )
@@ -440,7 +481,7 @@ IMPORTANT RULES:
 - Separate them with a line containing exactly: // --- kernels.cu ---
 - The Rust file comes FIRST, then the separator, then the CUDA file.
 - No explanation, no markdown fences — just the two raw source files with the separator.
-- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu.{rust_rules}"""
+- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu.{rust_rules}{EVOLUTION_GUIDANCE}"""
     return f"""\
 You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
@@ -451,7 +492,7 @@ OUTPUT FORMAT (strict):
 Your response will be written verbatim to mod.rs and compiled. The very first
 character of your response MUST be `u` from `use super::*;`. No preamble, no
 prose, no markdown fences (```), no commentary before or after the code.
-`use super::*;` must remain as the first import.{rust_rules}"""
+`use super::*;` must remain as the first import.{rust_rules}{EVOLUTION_GUIDANCE}"""
 
 
 def build_code_user_prompt(

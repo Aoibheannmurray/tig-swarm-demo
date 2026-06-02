@@ -90,6 +90,7 @@ from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
 from challenge_files import (
     ChallengeFiles,
+    ensure_super_import,
     is_stub_code,
     read_challenge_md,
     validate_code,
@@ -179,7 +180,8 @@ def _call_llm_logged(
                 f"- output_tokens: {usage.get('output_tokens', 0)}\n\n"
                 f"## SYSTEM\n\n{system}\n\n"
                 f"## USER\n\n{prompt}\n\n"
-                f"## RESPONSE\n\n{response}\n"
+                f"## RESPONSE\n\n{response}\n",
+                encoding="utf-8",
             )
         except Exception as e:
             print(f"  [LOG] Prompt log write failed: {e}", file=sys.stderr)
@@ -838,10 +840,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument(
-        "--agentic-timeout", type=int, default=900,
+        "--agentic-timeout", type=int, default=1500,
         help=(
             "Wall-clock timeout in seconds for one agentic iteration "
-            "(claude-code-agentic only). Default 900 (15 min). The claude "
+            "(claude-code-agentic only). Default 1500 (25 min). The claude "
             "CLI has no --max-turns flag, so this is the only ceiling."
         ),
     )
@@ -935,6 +937,10 @@ def main() -> int:
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
     args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
+    # Per-agent C3 key from agent.config.json (forwarded by run_fleet from the
+    # agent entry or the fleet-wide default). The --c3-api-key flag still wins;
+    # if both are empty, c3_compute falls back to C3_API_KEY / `c3 login`.
+    args.c3_api_key = args.c3_api_key or agent_config.get("c3_api_key")
     args.env = args.env or agent_config.get("env")
     if args.env is None:
         args.env = agent_config.get("env_image") or agent_config.get("c3_image")
@@ -1269,6 +1275,10 @@ def main() -> int:
                 # spam every dashboard viewer once per iteration.
                 continue
 
+            # The agent often rewrites the import block and drops the required
+            # `use super::*;` anchor (or spells it the long way), which would
+            # otherwise discard the whole run. Re-insert it before validating.
+            code = ensure_super_import(code)
             violation = validate_code(code)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
