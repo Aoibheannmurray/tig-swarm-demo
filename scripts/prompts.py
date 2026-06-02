@@ -47,8 +47,8 @@ def get_strategy_tags(config: dict) -> list[str]:
 # Role is contributor-owned (explorer by default; exploiter opt-in). It only
 # changes the *guidance* injected into the per-iteration prompts — never the
 # stable rules in CLAUDE.md/AGENTS.md. Explorers are nudged toward novel,
-# ambitious work; exploiters are constrained to one small localized edit (the
-# driver also enforces this with a similarity gate in run_loop._generate_code).
+# ambitious work; exploiters are steered toward one small localized edit. This
+# is guidance only — the driver no longer enforces it with a similarity gate.
 
 
 def _role_guidance(role: str) -> str:

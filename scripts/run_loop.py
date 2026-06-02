@@ -127,10 +127,6 @@ from c3_compute import run_benchmark_c3
 
 # Backoff after a recoverable iteration-level failure (state fetch, LLM error).
 _ITERATION_BACKOFF_SECS = 5
-# An exploiter must make only a small, localized edit. Reject a generated
-# candidate whose similarity to the starting code drops below this — i.e. it
-# rewrote too much. Fed back into the _generate_code retry loop.
-_EXPLOITER_MIN_SIMILARITY = 0.70
 
 
 def _normalize_role(value: object) -> str:
@@ -263,12 +259,12 @@ def _generate_code(
     args: argparse.Namespace, model: str, api_key: str,
     state: dict, hypothesis: dict, config: dict,
     challenge_md: str, files: ChallengeFiles,
-    *, role: str = "explorer", best_code: str = "",
+    *, role: str = "explorer",
 ) -> tuple[str | None, str | None, int, int]:
     """LLM code generation with retry on validation failure.
 
-    For exploiters, also reject candidates that diverge too far from the
-    starting code (a full rewrite) — they must make one localized edit.
+    Role only steers the prompt guidance (explorer vs exploiter); it no longer
+    gates the candidate on similarity to the starting code.
 
     Returns (code, kernel, input_tokens, output_tokens).
     """
@@ -276,10 +272,6 @@ def _generate_code(
     output_tokens = 0
     max_attempts = 3
     violation = ""
-    # Only gate exploiters when they have real code to refine (not a stub).
-    enforce_small_edit = (
-        role == "exploiter" and bool(best_code) and not is_stub_code(best_code)
-    )
 
     for attempt in range(max_attempts):
         if attempt == 0:
@@ -317,18 +309,6 @@ def _generate_code(
         if violation:
             print(f"  [LLM] Validation failed: {violation}")
             continue
-
-        if enforce_small_edit:
-            sim = difflib.SequenceMatcher(None, best_code, parsed).ratio()
-            if sim < _EXPLOITER_MIN_SIMILARITY:
-                violation = (
-                    f"too large a change for an exploiter (similarity "
-                    f"{sim * 100:.0f}% < {_EXPLOITER_MIN_SIMILARITY * 100:.0f}%); "
-                    "make ONE localized edit and return the complete file "
-                    "otherwise unchanged"
-                )
-                print(f"  [ROLE] Exploiter edit too large: {violation}")
-                continue
 
         print(f"  [LLM] Code validated OK")
         return parsed, parsed_kernel, input_tokens, output_tokens
@@ -1296,20 +1276,6 @@ def main() -> int:
                     files.write(best_code, best_kernel)
                 continue
 
-            # Exploiters must make a localized edit. Agentic mode has no retry
-            # loop, so reject-and-restore if the worktree diff rewrote too much.
-            if role == "exploiter" and best_code and not is_stub_code(best_code):
-                sim = difflib.SequenceMatcher(None, best_code, code).ratio()
-                if sim < _EXPLOITER_MIN_SIMILARITY:
-                    print(
-                        f"  [ROLE] Exploiter edit too large "
-                        f"({sim * 100:.0f}% < {_EXPLOITER_MIN_SIMILARITY * 100:.0f}%) "
-                        f"— restoring best, skipping iteration"
-                    )
-                    if best_code:
-                        files.write(best_code, best_kernel)
-                    continue
-
             # Copy the worktree's edited code into the main checkout so the
             # official benchmark sees it. No compile-fix retry: the agent
             # ran `cargo check` itself before stopping. If the official
@@ -1385,7 +1351,7 @@ def main() -> int:
             # ── LLM code generation ────────────────────────────
             code, new_kernel, gen_in, gen_out = _generate_code(
                 args, model, api_key, state, hypothesis, config,
-                challenge_md, files, role=role, best_code=best_code,
+                challenge_md, files, role=role,
             )
             iter_input_tokens += gen_in
             iter_output_tokens += gen_out
