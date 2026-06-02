@@ -283,30 +283,37 @@ def run_instance(
     with tempfile.NamedTemporaryFile(suffix=".sol", delete=False) as tmp:
         sol_path = tmp.name
     try:
+        # Wall-clock the solver run only (not the evaluator) so `elapsed`
+        # matches the GPU path's semantics — algorithm run time per nonce.
+        timed_out = False
+        start = time.monotonic()
         try:
             subprocess.run(
                 [solver, challenge, str(instance_path), sol_path],
                 capture_output=True, text=True, timeout=timeout,
             )
         except subprocess.TimeoutExpired:
-            pass  # save_solution may have written a partial; evaluator will judge
+            timed_out = True  # save_solution may have written a partial; evaluator will judge
+        elapsed = time.monotonic() - start
+        timing = {"elapsed": elapsed, "timed_out": timed_out}
         if not os.path.exists(sol_path) or os.path.getsize(sol_path) == 0:
-            return {"instance": instance_id, "track": track_key, "error": "no solution saved", "feasible": False}
+            return {"instance": instance_id, "track": track_key, "error": "no solution saved", "feasible": False, **timing}
         try:
             eval_result = subprocess.run(
                 [evaluator, challenge, str(instance_path), sol_path],
                 capture_output=True, text=True, timeout=max(10, timeout),
             )
         except subprocess.TimeoutExpired:
-            return {"instance": instance_id, "track": track_key, "error": "evaluator timeout", "feasible": False}
+            return {"instance": instance_id, "track": track_key, "error": "evaluator timeout", "feasible": False, **timing}
         score, err = parse_evaluator_score(eval_result)
         if err:
-            return {"instance": instance_id, "track": track_key, "error": err, "feasible": False}
+            return {"instance": instance_id, "track": track_key, "error": err, "feasible": False, **timing}
         result = {
             "instance": instance_id,
             "track": track_key,
             "score": score,
             "feasible": True,
+            **timing,
         }
         extras = _PER_INSTANCE_EXTRAS.get(challenge)
         if extras is not None:
@@ -1120,6 +1127,57 @@ def _shifted_geomean(values: list[float], shift: float = GEOMEAN_SHIFT) -> float
     return math.exp(log_sum / len(values)) - shift
 
 
+def _log_instance_result(r: dict, timeout: int) -> None:
+    """Emit a one-line per-nonce log to stderr as each instance finishes.
+
+    stderr only — stdout carries the JSON payload that becomes benchmark.json.
+    The `(timeout)` marker is the high-value signal: it flags nonces that
+    burned the full budget vs. solvers that converged early.
+    """
+    inst = r.get("instance", "?")
+    elapsed = r.get("elapsed")
+    et = f"{elapsed:6.1f}s" if isinstance(elapsed, (int, float)) else "     ?  "
+    if r.get("feasible"):
+        status = "feasible  "
+        score = r.get("score")
+        tail = f"score={score}" if score is not None else ""
+    else:
+        status = "INFEASIBLE"
+        tail = r.get("error", "")
+    capped = r.get("timed_out") or (
+        isinstance(elapsed, (int, float)) and elapsed >= timeout
+    )
+    cap = " (timeout)" if capped else ""
+    print(f"  [{inst}]  {status}  {et}  {tail}{cap}", file=sys.stderr)
+
+
+def _print_timing_summary(results: list[dict]) -> None:
+    """Per-track wall-clock roll-up to stderr, printed at end of run."""
+    by_track: dict[str, list[float]] = defaultdict(list)
+    for r in results:
+        e = r.get("elapsed")
+        if isinstance(e, (int, float)):
+            by_track[r.get("track", "unknown")].append(float(e))
+    if not by_track:
+        return
+    print("── timing ──────────────", file=sys.stderr)
+    all_times: list[float] = []
+    for track in sorted(by_track):
+        ts = by_track[track]
+        all_times.extend(ts)
+        print(
+            f"  {track}:  n={len(ts)}  min {min(ts):.1f}s  "
+            f"avg {sum(ts) / len(ts):.1f}s  max {max(ts):.1f}s  total {sum(ts):.1f}s",
+            file=sys.stderr,
+        )
+    if len(by_track) > 1:
+        print(
+            f"  all:   n={len(all_times)}  "
+            f"avg {sum(all_times) / len(all_times):.1f}s  total {sum(all_times):.1f}s",
+            file=sys.stderr,
+        )
+
+
 def aggregate(results: list[dict]) -> dict:
     """Group per-instance qualities by track, average each track, then
     combine via shifted geometric mean. Infeasible instances contribute
@@ -1201,6 +1259,7 @@ def main() -> int:
 
         for track_key, idx in instance_list:
             r = run_gpu_instance(challenge, track_key, idx, binary, ptx, seed, timeout)
+            _log_instance_result(r, timeout)
             results.append(r)
     else:
         print(f"Building tig binaries for {challenge}…", file=sys.stderr)
@@ -1224,7 +1283,9 @@ def main() -> int:
                 for tk, iid, ipath in instances
             }
             for fut in as_completed(futures):
-                results.append(fut.result())
+                r = fut.result()
+                _log_instance_result(r, timeout)
+                results.append(r)
 
     agg = aggregate(results)
     out: dict = {
@@ -1255,6 +1316,7 @@ def main() -> int:
     if metrics_fn is not None:
         out["challenge_metrics"] = metrics_fn(results)
 
+    _print_timing_summary(results)
     print(json.dumps(out, indent=2))
     return 0
 

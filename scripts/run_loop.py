@@ -904,6 +904,10 @@ def main() -> int:
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
     args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
+    # Per-agent C3 key from agent.config.json (forwarded by run_fleet from the
+    # agent entry or the fleet-wide default). The --c3-api-key flag still wins;
+    # if both are empty, c3_compute falls back to C3_API_KEY / `c3 login`.
+    args.c3_api_key = args.c3_api_key or agent_config.get("c3_api_key")
     args.env = args.env or agent_config.get("env")
     if args.env is None:
         args.env = agent_config.get("env_image") or agent_config.get("c3_image")

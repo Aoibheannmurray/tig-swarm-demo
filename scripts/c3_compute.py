@@ -533,6 +533,13 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
         pull_output = _pull_artifacts(job_id, env, stage)
         bench, parse_err = _load_benchmark_json(stage)
         if bench is not None:
+            # benchmark.py writes the per-nonce log + timing summary to
+            # stderr (stdout is reserved for the benchmark.json payload). On
+            # failure we already surface stderr below; echo it on success too
+            # so timing is visible on a practice bench, not just on a crash.
+            bench_stderr = _read_benchmark_stderr(stage)
+            if bench_stderr:
+                print(f"    [C3] benchmark.stderr:\n{bench_stderr}")
             return bench, ""
 
         err = f"[C3] Job {job_id} completed but benchmark.json was not found or parseable"

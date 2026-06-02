@@ -71,6 +71,10 @@ for _stream in (sys.stdout, sys.stderr):
 _AGENT_CONFIG_KEYS = (
     "provider", "model", "api_base", "compute",
     "c3_hardware", "c3_time", "c3_cloud_provider", "c3_no_build",
+    # Per-agent C3 API key (raw value). Omit to inherit the top-level fleet
+    # `c3_api_key`, the C3_API_KEY env var, or the `c3 login` session — in that
+    # order. Lets each agent bill C3 to a different key without separate fleets.
+    "c3_api_key",
     # Honor hand-set agent_id / agent_name in a fleet entry — useful if a user
     # wants to point a new clone at an existing dashboard agent without
     # re-registering. Normal flow: run_loop.py writes these after the first
@@ -164,6 +168,15 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
         sys.exit("fleet.config.json has duplicate agent names.")
 
     fleet_tacit = data.get("tacit_knowledge") or None
+
+    # Top-level `c3_api_key` is a fleet-wide default: every agent that doesn't
+    # set its own inherits it. setdefault() (not overwrite) keeps per-agent keys
+    # winning. Agents with neither fall through to C3_API_KEY / `c3 login`.
+    fleet_c3_api_key = data.get("c3_api_key") or None
+    if fleet_c3_api_key:
+        for entry in agents:
+            entry.setdefault("c3_api_key", fleet_c3_api_key)
+
     return server_url, username, swarm_password, agents, fleet_tacit
 
 
