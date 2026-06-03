@@ -195,6 +195,9 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     kernel_relpath = config.get("kernel_path")
     timeout = config.get("timeout", 30)
 
+    from prompts import get_strategy_tags
+    strategy_tags = ", ".join(f"`{t}`" for t in get_strategy_tags(config))
+
     files_section = f"- `{algo_relpath}` — the algorithm file. EDIT this."
     if kernel_relpath:
         files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
@@ -259,9 +262,7 @@ Write `.swarm/hypothesis.json` with exactly this shape:
 }}
 ```
 
-Strategy tags (pick the closest match): `construction`, `local_search`,
-`metaheuristic`, `constraint_relaxation`, `decomposition`, `hybrid`,
-`data_structure`, `greedy`, `dp`, `branch_and_bound`, `other`.
+Strategy tags (pick the closest match): {strategy_tags}.
 
 ## Tools you have
 
@@ -406,6 +407,9 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     kernel_relpath = config.get("kernel_path")
     timeout = config.get("timeout", 30)
 
+    from prompts import get_strategy_tags
+    strategy_tags = ", ".join(f"`{t}`" for t in get_strategy_tags(config))
+
     files_section = f"- `{algo_relpath}` — the algorithm file. EDIT this."
     if kernel_relpath:
         files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
@@ -471,9 +475,7 @@ Write `.swarm/hypothesis.json` with exactly this shape:
 }}
 ```
 
-Strategy tags (pick the closest match): `construction`, `local_search`,
-`metaheuristic`, `constraint_relaxation`, `decomposition`, `hybrid`,
-`data_structure`, `greedy`, `dp`, `branch_and_bound`, `other`.
+Strategy tags (pick the closest match): {strategy_tags}.
 
 ## Sandbox
 

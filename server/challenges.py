@@ -146,7 +146,8 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "n_hidden=12",
         ),
         strategy_tags=(
-            "greedy", "metaheuristic", "hybrid", "data_structure", "other",
+            "adaptive_optimizer", "momentum", "lr_schedule", "regularization",
+            "lookahead", "second_order", "kernel_optimization", "hybrid", "other",
         ),
         default_timeout=120,
         is_gpu=True,
