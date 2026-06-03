@@ -840,10 +840,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument(
-        "--agentic-timeout", type=int, default=1500,
+        "--agentic-timeout", type=int, default=1800,
         help=(
             "Wall-clock timeout in seconds for one agentic iteration "
-            "(claude-code-agentic only). Default 1500 (25 min). The claude "
+            "(claude-code-agentic only). Default 1800 (30 min). The claude "
             "CLI has no --max-turns flag, so this is the only ceiling."
         ),
     )

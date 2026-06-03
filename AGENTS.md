@@ -244,7 +244,7 @@ else — they're the failure modes our docs have actually been bitten by:
   a model name.
 - **Agentic providers look frozen.** `claude-code-agentic` and `codex-agentic`
   run with `capture_output=True`, so there is no live stdout while the agent
-  is thinking — up to `--agentic-timeout` seconds (default 900). The
+  is thinking — up to `--agentic-timeout` seconds (default 1800). The
   background heartbeat keeps the dashboard happy; Docker stays idle until the
   agent returns and `[BENCH]` starts. If the contributor reports "the terminal
   is stuck," confirm an `[AGENTIC] Launching …` line is already on screen and
