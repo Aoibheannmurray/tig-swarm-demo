@@ -244,6 +244,52 @@ impl Challenge {
 
             load_solution(&mut model, solution, stream.clone())?;
 
+            // ── Frozen-layer integrity check ──
+            // The last `num_frozen_layers` linear layers are non-trainable
+            // (MLP::new: `requires_grad = l < layer_cnt - frozen_layers`) and
+            // must stay at the canonical seeded initialization the instance
+            // generated. A submitted Solution that overwrote them — e.g. a
+            // closed-form head fit directly to the (visible) test labels — is
+            // not a valid trained model. Reconstruct the seeded weights and
+            // reject any deviation as infeasible (Err => feasible:false in the
+            // benchmark harness).
+            {
+                let mut reference =
+                    MLP::new(&self.layer_dims(), self.num_frozen_layers, stream.clone())?;
+                reference.init_weights(self.seed, stream.clone(), module.clone())?;
+                let layer_cnt = model.lin.len();
+                let first_frozen = layer_cnt.saturating_sub(self.num_frozen_layers);
+                const FROZEN_TOL: f32 = 1e-4;
+                for l in first_frozen..layer_cnt {
+                    let got_w = stream.memcpy_dtov(&model.lin[l].weight)?;
+                    let ref_w = stream.memcpy_dtov(&reference.lin[l].weight)?;
+                    let got_b = stream.memcpy_dtov(&model.lin[l].bias)?;
+                    let ref_b = stream.memcpy_dtov(&reference.lin[l].bias)?;
+                    stream.synchronize()?;
+                    if got_w.len() != ref_w.len() || got_b.len() != ref_b.len() {
+                        return Err(anyhow::anyhow!(
+                            "frozen layer {} shape mismatch; solution is infeasible",
+                            l
+                        ));
+                    }
+                    let tampered = got_w
+                        .iter()
+                        .zip(ref_w.iter())
+                        .any(|(a, b)| (a - b).abs() > FROZEN_TOL)
+                        || got_b
+                            .iter()
+                            .zip(ref_b.iter())
+                            .any(|(a, b)| (a - b).abs() > FROZEN_TOL);
+                    if tampered {
+                        return Err(anyhow::anyhow!(
+                            "frozen layer {} deviates from the seeded initialization; \
+                             solution is infeasible",
+                            l
+                        ));
+                    }
+                }
+            }
+
             let (output, _) = model.forward(
                 &self.dataset.test_inputs(),
                 false,
