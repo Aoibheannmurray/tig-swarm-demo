@@ -307,7 +307,7 @@ def _generate_code(
             print("  [LLM] Empty code response — skipping iteration")
             break
 
-        violation = validate_code(parsed)
+        violation = validate_code(parsed, config)
         if violation:
             print(f"  [LLM] Validation failed: {violation}")
             continue
@@ -390,7 +390,7 @@ def _try_compile_fix(
         print("  Empty fix response — giving up")
         return False, usage["input_tokens"], usage["output_tokens"]
 
-    violation = validate_code(fixed)
+    violation = validate_code(fixed, config)
     if violation:
         print(f"  Fix failed validation: {violation}")
         return False, usage["input_tokens"], usage["output_tokens"]
@@ -503,7 +503,7 @@ def _fix_runtime_errors(
             print("  Empty fix response — giving up")
             return restore_and_fail()
 
-        violation = validate_code(fixed)
+        violation = validate_code(fixed, config)
         if violation:
             print(f"  Fix failed validation: {violation}")
             return restore_and_fail()
@@ -1279,7 +1279,7 @@ def main() -> int:
             # `use super::*;` anchor (or spells it the long way), which would
             # otherwise discard the whole run. Re-insert it before validating.
             code = ensure_super_import(code)
-            violation = validate_code(code)
+            violation = validate_code(code, config)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
                 if best_code:

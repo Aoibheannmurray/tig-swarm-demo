@@ -142,7 +142,15 @@ def build_hypothesis_user_prompt(
 
     code = state.get("best_algorithm_code") or ""
     bootstrap = is_stub_code(code)
-    if bootstrap:
+    if bootstrap and _is_optimizer_hook_challenge(config):
+        parts.append(
+            "Current algorithm (mod.rs) is a stub — propose an initial "
+            "implementation strategy from scratch. The stub below shows the "
+            "optimizer hooks your strategy must implement; `solve_challenge` and "
+            "the training loop are harness-owned and not part of this file.\n"
+            f"```rust\n{code}\n```"
+        )
+    elif bootstrap:
         parts.append(
             "Current algorithm (mod.rs) is a stub — propose an initial "
             "implementation strategy from scratch. The stub below shows the "
@@ -455,6 +463,27 @@ quality (maximise the objective) 3) stability across instances 4) runtime
 efficiency (leave headroom for more refinement iterations)."""
 
 
+# Challenges where `solve_challenge` + the training loop are harness-owned and
+# the agent edits ONLY the optimizer hooks (kept in sync with challenge_files.py
+# `_OPTIMIZER_HOOK_CHALLENGES`).
+_OPTIMIZER_HOOK_CHALLENGES = {"neuralnet_optimizer"}
+
+
+def _is_optimizer_hook_challenge(config: dict) -> bool:
+    return config.get("challenge") in _OPTIMIZER_HOOK_CHALLENGES
+
+
+# Override note appended to the Rust guardrails for optimizer-hook challenges,
+# where the generic "keep the solve_challenge signature" advice doesn't apply.
+_OPTIMIZER_HOOK_RULES = (
+    "\n- THIS CHALLENGE: `solve_challenge` and the training loop are harness-owned "
+    "and are NOT in your file — do not add or call them. Implement ONLY the "
+    "optimizer hooks `optimizer_init_state`, `optimizer_query_at_params`, and "
+    "`optimizer_step`; keep them `pub fn` with their exact signatures. `Map`/`Value` "
+    "are only needed if you add `Hyperparameters` fields."
+)
+
+
 def _rust_rules_block(config: dict) -> str:
     """The Rust guardrails to append to a code prompt — base rules always,
     plus the detailed checklist when the agent opted in via
@@ -462,6 +491,8 @@ def _rust_rules_block(config: dict) -> str:
     block = RUST_RULES
     if config.get("detailed_prompts"):
         block += "\n" + RUST_RULES_DETAILED
+    if _is_optimizer_hook_challenge(config):
+        block += _OPTIMIZER_HOOK_RULES
     return block
 
 
@@ -482,6 +513,16 @@ def build_code_system_prompt(
     if role == "exploiter":
         time_guidance += "\n\n" + _role_guidance(role)
     rust_rules = _rust_rules_block(config)
+    if _is_optimizer_hook_challenge(config):
+        entry_rule = (
+            "- `solve_challenge` and the training loop are FIXED by the harness — do NOT "
+            "define or modify them. Implement ONLY the optimizer hooks: `pub fn "
+            "optimizer_init_state`, `pub fn optimizer_query_at_params`, `pub fn "
+            "optimizer_step` (keep them `pub fn` with their exact signatures), plus "
+            "`Hyperparameters`, `help`, and any helpers you need."
+        )
+    else:
+        entry_rule = "- `fn solve_challenge(` MUST appear in your Rust output — do NOT omit it."
     if is_gpu:
         return f"""\
 You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
@@ -491,7 +532,7 @@ You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
 
 IMPORTANT RULES:
 - `use super::*;` must remain as the first import in the Rust file.
-- `fn solve_challenge(` MUST appear in your Rust output — do NOT omit it.
+{entry_rule}
 - Return BOTH files: the complete Rust source AND the complete CUDA kernel source.
 - Separate them with a line containing exactly: // --- kernels.cu ---
 - The Rust file comes FIRST, then the separator, then the CUDA file.
@@ -515,12 +556,21 @@ def build_code_user_prompt(
 ) -> str:
     parts: list[str] = []
     is_gpu = bool(config.get("is_gpu"))
+    opt_hooks = _is_optimizer_hook_challenge(config)
 
     code = state.get("best_algorithm_code") or ""
     # Exploiters never bootstrap (the driver guards stub + exploiter), so treat
     # their starting code as real even on the off chance a stub slips through.
     bootstrap = is_stub_code(code) and role != "exploiter"
-    if bootstrap:
+    if bootstrap and opt_hooks:
+        parts.append(
+            "Current algorithm (mod.rs) is a stub — replace it with a complete "
+            "implementation. `solve_challenge` and the training loop are harness-owned "
+            "(not in this file): implement only the optimizer hooks shown below, "
+            "keeping them `pub fn` with their exact signatures.\n"
+            f"```rust\n{code}\n```"
+        )
+    elif bootstrap:
         parts.append(
             "Current algorithm (mod.rs) is a stub — replace it with a complete "
             "implementation. Keep the exact `solve_challenge` signature shown "
@@ -539,9 +589,12 @@ def build_code_user_prompt(
             parts.append(
                 "\nNo CUDA kernel file yet — write any custom GPU kernels you need."
             )
+        first_file_desc = (
+            "with the optimizer hooks" if opt_hooks else "with fn solve_challenge"
+        )
         parts.append(
             "\nReturn BOTH files separated by: // --- kernels.cu ---"
-            "\nThe Rust file (with fn solve_challenge) comes first, then the separator, then the CUDA file."
+            f"\nThe Rust file ({first_file_desc}) comes first, then the separator, then the CUDA file."
         )
 
     title = hypothesis.get("title", "")
@@ -663,7 +716,8 @@ def build_compile_fix_system_prompt(config: dict) -> str:
     return f"""\
 You are fixing Rust compile errors so the file builds. The code is otherwise
 intended to work — change ONLY what the listed errors require. Keep every other
-line, every `use` import, and the exact `solve_challenge` signature unchanged.
+line, every `use` import, and the provided harness entry-point signatures
+(`solve_challenge`, or the `optimizer_*` hooks) unchanged.
 
 {fmt}{rust_rules}"""
 
@@ -680,7 +734,8 @@ def build_compile_fix_prompt(
         f"```\n{errors}\n```\n\n"
         "Make the smallest change that resolves every error above. Use the "
         "file:line locations to find each problem. Do NOT rewrite the algorithm, "
-        "rename items, drop imports, or alter the `solve_challenge` signature — "
+        "rename items, drop imports, or alter the provided harness entry-point "
+        "signatures (`solve_challenge`, or the `optimizer_*` hooks) — "
         "the rest of the file already works."
     )
     if is_gpu:
@@ -846,7 +901,17 @@ def build_agentic_user_prompt(
     # Exploiters are guarded out of the stub path by the driver, but gate the
     # bootstrap block on role too so a stray stub never tells them to rewrite.
     bootstrap = is_stub_code(state.get("best_algorithm_code") or "") and role != "exploiter"
-    if bootstrap:
+    if bootstrap and _is_optimizer_hook_challenge(config):
+        parts.append(
+            "\n## Bootstrap iteration\n"
+            "The algorithm on disk is a stub. `solve_challenge` and the training "
+            "loop are harness-owned and NOT in this file — do not add them. Write "
+            "complete implementations of the optimizer hooks (`optimizer_init_state`, "
+            "`optimizer_query_at_params`, `optimizer_step`) from scratch, keeping them "
+            "`pub fn` with their exact signatures. Read the stub first to lock in those "
+            "signatures before writing anything."
+        )
+    elif bootstrap:
         parts.append(
             "\n## Bootstrap iteration\n"
             "The algorithm on disk is a stub (`unimplemented!()`). Write a "

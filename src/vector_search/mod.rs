@@ -1,5 +1,11 @@
 pub mod algorithm;
 
+// The GPU benchmark dispatches `challenges::<name>::solve_challenge`. This
+// challenge has no harness-owned training loop to enforce, so the agent's
+// `algorithm::solve_challenge` remains the entry point — re-export it at the
+// challenge level so the uniform dispatch resolves.
+pub use algorithm::solve_challenge;
+
 use crate::QUALITY_PRECISION;
 use anyhow::{anyhow, Result};
 use cudarc::{

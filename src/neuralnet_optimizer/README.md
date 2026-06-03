@@ -135,25 +135,35 @@ The `training_loop` function handles:
 
 ## Solver Interface
 
+`solve_challenge` and the training loop are **harness-owned and not editable**.
+The harness runs the canonical `training_loop(...)` — which enforces the
+`max_epochs` budget, early stopping, and the train/validation/test data split —
+and calls your three optimizer hooks at the right times. You implement only the
+hooks (kept `pub fn` with these exact signatures):
+
 ```rust
-pub fn solve_challenge(
-    challenge: &Challenge,
-    save_solution: &dyn Fn(&Solution) -> Result<()>,
-    hyperparameters: &Option<Map<String, Value>>,
-    module: Arc<CudaModule>,
+pub fn optimizer_init_state(
+    seed: [u8; 32],
+    param_sizes: &[usize],
     stream: Arc<CudaStream>,
+    module: Arc<CudaModule>,
     prop: &cudaDeviceProp,
-) -> Result<()>
+) -> Result<Box<dyn OptimizerStateTrait>>
+
+pub fn optimizer_query_at_params(/* ... */) -> Result<Option<Vec<CudaSlice<f32>>>>
+
+pub fn optimizer_step(/* ... */) -> Result<Vec<CudaSlice<f32>>>
 ```
 
-- The default implementation calls `training_loop(...)` with your three optimizer callbacks. You generally should not need to modify `solve_challenge` itself.
+- You cannot replace the training loop or run your own — this prevents bypasses
+  such as training on the test split or exceeding the epoch budget.
 - `module` is the compiled CUDA module containing kernels from both `neuralnet_optimizer/kernels.cu` (challenge kernels) and `algorithm/kernels.cu` (your custom kernels).
 - `stream` is the CUDA stream for all GPU operations.
 - `prop` contains device properties (compute capability, shared memory size, etc.).
 
 ## Files You Edit
 
-- **`algorithm/mod.rs`** — Rust code: define `OptimizerState`, implement `optimizer_init_state`, `optimizer_query_at_params`, and `optimizer_step`.
+- **`algorithm/mod.rs`** — Rust code: define `OptimizerState`, `Hyperparameters`, `help`, and implement `optimizer_init_state`, `optimizer_query_at_params`, and `optimizer_step` (do **not** define `solve_challenge` — it is harness-owned).
 - **`algorithm/kernels.cu`** — CUDA C code: define any custom GPU kernels your optimizer needs (e.g. fused update kernels, custom reductions). Kernels from both this file and the challenge's `kernels.cu` are available via `module.load_function("kernel_name")`. You can use any library available in `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (e.g. `curand_kernel.h`, `math.h`).
 
 ## Available Crates

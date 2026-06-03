@@ -164,13 +164,42 @@ def parse_gpu_code(text: str) -> tuple[str, str]:
     return ensure_super_import(_strip_fences(rust)), _strip_fences(cuda)
 
 
-def validate_code(code: str) -> str | None:
+# Challenges whose `solve_challenge` + training loop are harness-owned and
+# non-editable: the agent supplies ONLY the optimizer hooks. For these we must
+# NOT require `fn solve_challenge(` (it lives in the locked challenge module),
+# and instead require the three optimizer hooks the harness calls.
+_OPTIMIZER_HOOK_CHALLENGES = {"neuralnet_optimizer"}
+_OPTIMIZER_HOOKS = (
+    "fn optimizer_init_state(",
+    "fn optimizer_query_at_params(",
+    "fn optimizer_step(",
+)
+
+
+def validate_code(code: str, config: dict | None = None) -> str | None:
     """Basic sanity check on LLM-generated code.
 
     Returns None if valid, or an error description."""
     if "use super::*;" not in code:
         return "`use super::*;` is missing — it must remain as the first import."
-    if "fn solve_challenge(" not in code:
+    challenge = (config or {}).get("challenge")
+    if challenge in _OPTIMIZER_HOOK_CHALLENGES:
+        if "fn solve_challenge(" in code:
+            return (
+                "`solve_challenge` is harness-owned for this challenge and must NOT be "
+                "defined here — the benchmark runs the fixed training loop and calls "
+                "your optimizer hooks. Remove your `solve_challenge` and implement only "
+                "`optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`."
+            )
+        missing = [h for h in _OPTIMIZER_HOOKS if h not in code]
+        if missing:
+            names = ", ".join(h[3:-1] for h in missing)  # strip "fn " and "("
+            return (
+                f"Missing required optimizer hook(s): {names}. `solve_challenge` and "
+                "the training loop are harness-owned — implement only the optimizer "
+                "functions, and keep them `pub fn` with their exact signatures."
+            )
+    elif "fn solve_challenge(" not in code:
         return "`fn solve_challenge(` not found — the function signature must not change."
     if is_stub_code(code):
         return (
