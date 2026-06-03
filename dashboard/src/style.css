@@ -2290,6 +2290,7 @@ html, body {
 }
 
 .nn-meter-bar-wrap {
+  position: relative;
   height: 10px;
   background: var(--bg-sunken);
   border-radius: 5px;
@@ -2301,7 +2302,7 @@ html, body {
   height: 100%;
   background: var(--color-accent);
   border-radius: 5px;
-  transition: width 0.4s ease;
+  transition: width 0.8s ease-out;
   width: 0%;
 }
 
@@ -2362,6 +2363,106 @@ html, body {
 .nn-loss-bar-noise {
   background: var(--ink-dim);
   opacity: 0.5;
+}
+
+.nn-loss-bar {
+  transition: width 0.6s ease-out;
+}
+
+/* ── Neural-net viz animations (P1 loss curve, P2 node activation, P3 epoch
+   milestones). Re-trigger on every showInstance() because the SVG/markup is
+   rebuilt each render, so each instance visibly "builds up". --t carries a
+   0→1 position so layers / milestones stagger left→right. */
+
+/* P2 — architecture nodes scale in left→right, edges fade in behind them. */
+@keyframes nn-node-grow {
+  from { opacity: 0; transform: scale(0.2); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.nn-arch-diagram .nn-node {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: nn-node-grow 0.4s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 600ms);
+}
+.nn-arch-diagram .nn-node--trainable {
+  filter: drop-shadow(0 0 2px var(--color-accent));
+}
+@keyframes nn-edge-fade {
+  from { stroke-opacity: 0; }
+  to   { stroke-opacity: 1; }
+}
+.nn-arch-diagram .nn-edge {
+  animation: nn-edge-fade 0.5s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 600ms);
+}
+
+/* P3 — milestone flags on the convergence bar. Lit (passed) flags read as a
+   cream notch on the accent fill; unlit ones as a faint line on the track. */
+.nn-flags {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.nn-flag {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  transform: translateX(-1px);
+  transform-origin: center;
+  background: var(--border-strong);
+  opacity: 0;
+  animation: nn-flag-pop 0.3s ease-out forwards;
+  animation-delay: calc(var(--t, 0) * 900ms);
+}
+.nn-flag--lit { background: var(--bg-card); }
+@keyframes nn-flag-pop {
+  from { opacity: 0; transform: translateX(-1px) scaleY(0.3); }
+  to   { opacity: 0.9; transform: translateX(-1px) scaleY(1); }
+}
+
+/* P1 — training-loss sparkline. Train line draws itself in via dashoffset
+   (pathLength normalised to 1); optional validation line fades in after. */
+.nn-loss-curve {
+  flex: 0 0 auto;
+}
+.nn-loss-curve-svg {
+  height: 56px;
+}
+.nn-loss-curve-svg svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.nn-loss-line {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: nn-loss-draw 1.2s ease-out forwards;
+}
+@keyframes nn-loss-draw {
+  to { stroke-dashoffset: 0; }
+}
+.nn-loss-line-val {
+  opacity: 0;
+  animation: nn-loss-fade 0.6s ease-out 0.5s forwards;
+}
+@keyframes nn-loss-fade {
+  to { opacity: 0.7; }
+}
+
+/* Respect reduced-motion: show the final state, skip the build-up. */
+@media (prefers-reduced-motion: reduce) {
+  .nn-arch-diagram .nn-node,
+  .nn-arch-diagram .nn-edge,
+  .nn-flag,
+  .nn-loss-line,
+  .nn-loss-line-val {
+    animation: none;
+  }
+  .nn-loss-line { stroke-dashoffset: 0; }
+  .nn-flag { opacity: 0.9; }
+  .nn-loss-line-val { opacity: 0.7; }
 }
 
 /* ── Shared challenge stat bar ──

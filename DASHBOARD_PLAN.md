@@ -200,6 +200,30 @@ architecture diagram. The rich signal — per-epoch `train_losses` /
 **Graceful degradation:** if `loss_curve` is absent (pre-export rows), fall
 back to P2+P3 so the panel still animates.
 
+### Status (implemented)
+- **P2 (node activation)** ✅ — arch-diagram nodes scale in left→right, edges
+  fade in behind them, trainable layers carry an accent glow.
+- **P3 (epoch milestones)** ✅ — 25/50/75/100% flags pop onto the convergence
+  bar, lit once that many epochs actually ran.
+- **P1 (loss curve)** — frontend ✅: `neuralnet_optimizer.ts` reads optional
+  `loss_curve` / `val_loss_curve` from `neuralnet_data` and draws an animated
+  sparkline (train line draws in via dashoffset, validation fades in); hidden
+  with graceful fallback when absent. `prefers-reduced-motion` respected.
+- **P1 backend — DEFERRED (needs a GPU build):** exporting the loss history is
+  *not* the "~15 lines" first estimated. The per-epoch `train_losses` /
+  `validation_losses` live in the local `training_loop` (src/neuralnet_optimizer/mod.rs),
+  not on `Solution`, and `Solution` is defined through the `impl_base64_serde!`
+  macro — so adding a field changes the **agent-facing submission wire format**.
+  The crate also only compiles with `cudarc/cublas/cudnn` (CUDA required), so it
+  can't be type-checked or run in this environment. Spec for the follow-up:
+  (1) add `loss_curve: Vec<f32>` (+ optional `val_loss_curve`) to `Solution`
+  with a default so existing constructors/deserialisation stay valid;
+  (2) have `training_loop` downsample its `train_losses` to ~64 points and store
+  them on the returned solution; (3) serialise them into `neuralnet_data` in
+  src/main_gpu_benchmark.rs. Must be done on a CUDA box with a round-trip
+  serialise/deserialise check so no in-flight agent submissions break. The
+  dashboard lights the curve up automatically once the field appears.
+
 ---
 
 ## Sequencing
