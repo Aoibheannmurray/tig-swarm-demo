@@ -1877,7 +1877,7 @@ async def get_agent_experiments(
             return {"agent_id": agent_id, "agent_name": None,
                     "registered_at": None, "challenge": challenge, "experiments": []}
 
-        code_col = ", e.algorithm_code" if include_code else ""
+        code_col = ", e.algorithm_code, e.kernel_code" if include_code else ""
         cursor = await conn.execute(
             f"""SELECT e.id, e.score, e.feasible, e.beats_trajectory_best, e.notes,
                       e.created_at, e.trajectory_id, e.received_hint,
@@ -1927,6 +1927,7 @@ async def get_agent_experiments(
         }
         if include_code:
             d["algorithm_code"] = r["algorithm_code"]
+            d["kernel_code"] = r["kernel_code"]
         return d
 
     return {
@@ -2005,7 +2006,7 @@ async def get_trajectory_experiments(
             traj_filter = "AND e.trajectory_id = ?"
             params.append(trajectory_id)
 
-        code_col = ", e.algorithm_code" if include_code else ""
+        code_col = ", e.algorithm_code, e.kernel_code" if include_code else ""
         cursor = await conn.execute(
             f"""SELECT e.id, e.trajectory_id, e.agent_id, a.name AS agent_name,
                        e.score, e.feasible, e.beats_trajectory_best, e.notes,
@@ -2038,6 +2039,10 @@ async def get_trajectory_experiments(
         }
         if include_code:
             d["algorithm_code"] = r["algorithm_code"]
+            # GPU challenges store the CUDA source separately in kernel_code;
+            # CPU challenges leave it NULL (serialized as null). Surfaced under
+            # the same include_code flag so one fetch returns the full pair.
+            d["kernel_code"] = r["kernel_code"]
         grouped.setdefault(tid, []).append(d)
 
     return {"challenge": challenge, "trajectories": grouped}
