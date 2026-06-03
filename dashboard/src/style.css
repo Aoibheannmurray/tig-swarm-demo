@@ -1089,6 +1089,26 @@ html, body {
   border-radius: 6px;
 }
 
+/* Pan/zoom affordance on the benchmark chart. */
+#chart-svg { cursor: grab; }
+#chart-svg:active { cursor: grabbing; }
+
+.chart-zoom-reset {
+  font-family: var(--ui);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0.5px solid var(--border-default);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.chart-zoom-reset:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 .chart-tab-btn:hover {
   color: var(--color-accent);
   border-color: var(--color-accent);
@@ -2428,6 +2448,12 @@ html, body {
     0 0 4px var(--bg-card),
     0 0 4px var(--bg-card),
     0 0 4px var(--bg-card);
+}
+/* The overlay bar is click-through (pointer-events:none) so the galaxy SVG
+   beneath it stays interactive — but the SCORE cell must still be clickable to
+   open the per-track popover, so opt it back in. */
+.stat-bar--overlay .stat-cell--score {
+  pointer-events: auto;
 }
 
 /* ── Vector search panel ──
