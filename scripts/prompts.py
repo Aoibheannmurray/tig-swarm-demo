@@ -118,9 +118,7 @@ STRATEGY_TAG: <one of: {tags}>
 NOTES: <brief interpretation of your approach>"""
 
 
-def _format_inspiration(
-    state: dict, is_gpu: bool, headline: str, opt_hooks: bool = False
-) -> list[str]:
+def _format_inspiration(state: dict, is_gpu: bool, headline: str) -> list[str]:
     insp = state.get("inspiration_code", "")
     if not insp:
         return []
@@ -129,13 +127,6 @@ def _format_inspiration(
         insp_kernel = state.get("inspiration_kernel_code", "")
         if insp_kernel:
             out.append(f"\nInspiration CUDA kernels:\n```cuda\n{insp_kernel}\n```")
-    if opt_hooks:
-        out.append(
-            "\nNOTE: take only the IDEAS from the inspiration above — it may use an "
-            "older file layout. Your file must define ONLY the optimizer hooks "
-            "(`optimizer_init_state`/`optimizer_query_at_params`/`optimizer_step`); "
-            "do NOT copy any `solve_challenge` or training loop (harness-owned)."
-        )
     return out
 
 
@@ -182,13 +173,11 @@ def build_hypothesis_user_prompt(
             lines.append(f"  - [{tag}] {title}")
         parts.append("\n".join(lines))
 
-    opt_hooks = _is_optimizer_hook_challenge(config)
     hint = state.get("stagnation_hint")
     if hint == "inspiration":
         parts.extend(_format_inspiration(
             state, is_gpu,
             "Study this approach for ideas (adapt ideas, do NOT copy wholesale):",
-            opt_hooks,
         ))
     elif hint == "tacit_knowledge":
         tk = read_tacit_knowledge().strip()
@@ -196,7 +185,7 @@ def build_hypothesis_user_prompt(
             parts.append(f"\nPersonal strategy hints:\n{tk}")
         else:
             parts.extend(_format_inspiration(
-                state, is_gpu, "Study this approach for ideas:", opt_hooks,
+                state, is_gpu, "Study this approach for ideas:",
             ))
 
     reset = state.get("trajectory_reset")
@@ -1061,12 +1050,6 @@ def build_agentic_user_prompt(
                         insp_kernel,
                         "```",
                     ]
-            if _is_optimizer_hook_challenge(config):
-                block.append(
-                    "\nNOTE: take only the IDEAS — the peer code may use an older "
-                    "layout. Keep your file to the optimizer hooks only; do NOT add "
-                    "`solve_challenge` or a training loop (harness-owned)."
-                )
             parts.append("\n".join(block))
     elif hint == "tacit_knowledge":
         parts.append(
