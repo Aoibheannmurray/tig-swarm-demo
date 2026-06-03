@@ -2302,7 +2302,7 @@ html, body {
   height: 100%;
   background: var(--color-accent);
   border-radius: 5px;
-  transition: width 0.8s ease-out;
+  transition: width 1.4s ease-out;
   width: 0%;
 }
 
@@ -2366,7 +2366,7 @@ html, body {
 }
 
 .nn-loss-bar {
-  transition: width 0.6s ease-out;
+  transition: width 1s ease-out;
 }
 
 /* ── Neural-net viz animations (P1 loss curve, P2 node activation, P3 epoch
@@ -2382,8 +2382,8 @@ html, body {
 .nn-arch-diagram .nn-node {
   transform-box: fill-box;
   transform-origin: center;
-  animation: nn-node-grow 0.4s ease-out backwards;
-  animation-delay: calc(var(--t, 0) * 600ms);
+  animation: nn-node-grow 0.7s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 1200ms);
 }
 .nn-arch-diagram .nn-node--trainable {
   filter: drop-shadow(0 0 2px var(--color-accent));
@@ -2393,8 +2393,8 @@ html, body {
   to   { stroke-opacity: 1; }
 }
 .nn-arch-diagram .nn-edge {
-  animation: nn-edge-fade 0.5s ease-out backwards;
-  animation-delay: calc(var(--t, 0) * 600ms);
+  animation: nn-edge-fade 0.8s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 1200ms);
 }
 
 /* P3 — milestone flags on the convergence bar. Lit (passed) flags read as a
@@ -2413,8 +2413,8 @@ html, body {
   transform-origin: center;
   background: var(--border-strong);
   opacity: 0;
-  animation: nn-flag-pop 0.3s ease-out forwards;
-  animation-delay: calc(var(--t, 0) * 900ms);
+  animation: nn-flag-pop 0.5s ease-out forwards;
+  animation-delay: calc(var(--t, 0) * 1600ms);
 }
 .nn-flag--lit { background: var(--bg-card); }
 @keyframes nn-flag-pop {
@@ -2438,14 +2438,14 @@ html, body {
 .nn-loss-line {
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
-  animation: nn-loss-draw 1.2s ease-out forwards;
+  animation: nn-loss-draw 2.2s ease-out forwards;
 }
 @keyframes nn-loss-draw {
   to { stroke-dashoffset: 0; }
 }
 .nn-loss-line-val {
   opacity: 0;
-  animation: nn-loss-fade 0.6s ease-out 0.5s forwards;
+  animation: nn-loss-fade 0.9s ease-out 1s forwards;
 }
 @keyframes nn-loss-fade {
   to { opacity: 0.7; }
