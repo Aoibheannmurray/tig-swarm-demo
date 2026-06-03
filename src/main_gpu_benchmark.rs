@@ -373,7 +373,7 @@ fn run_instance(
             let start = Instant::now();
             let solver_result = std::thread::scope(|s| {
                 let handle = s.spawn(|| {
-                    challenges::$c::algorithm::solve_challenge(
+                    challenges::$c::solve_challenge(
                         &instance,
                         &save_solution,
                         &None,

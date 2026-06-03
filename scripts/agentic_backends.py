@@ -257,7 +257,11 @@ publishes the score paired with your hypothesis.
 ## Solver constraints
 
 - `use super::*;` must remain the first import in the Rust file.
-- `fn solve_challenge(` must remain — do not rename the entry point.
+- Keep the harness entry points and their signatures unchanged: for most
+  challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
+  `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
+  hooks (the training loop and `solve_challenge` are harness-owned — do not add
+  or rename them). The harness calls these by name.
 - Per-instance time budget: {timeout} seconds. The solver is killed at this
   hard deadline. Use a time-based loop (`std::time::Instant`), call
   `save_solution()` early with your first feasible solution, then keep
@@ -447,7 +451,11 @@ Strategy tags (pick the closest match): `construction`, `local_search`,
 ## Solver constraints
 
 - `use super::*;` must remain the first import in the Rust file.
-- `fn solve_challenge(` must remain — do not rename the entry point.
+- Keep the harness entry points and their signatures unchanged: for most
+  challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
+  `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
+  hooks (the training loop and `solve_challenge` are harness-owned — do not add
+  or rename them). The harness calls these by name.
 - Per-instance time budget: {timeout} seconds. The solver is killed at this
   hard deadline. Use a time-based loop (`std::time::Instant`), call
   `save_solution()` early with your first feasible solution, then keep

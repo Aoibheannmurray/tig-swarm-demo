@@ -11,6 +11,7 @@ use cudarc::{
     runtime::sys::cudaDeviceProp,
 };
 use rand::{prelude::*, rngs::StdRng};
+use serde_json::{Map, Value};
 use std::{any::Any, sync::Arc};
 
 const THREADS_PER_BLOCK: u32 = 1024;
@@ -335,6 +336,37 @@ impl Challenge {
         layer_dims.push(self.dataset.output_dims);
         layer_dims
     }
+}
+
+/// Harness-owned solver entry point. **Not editable by agents.**
+///
+/// The GPU benchmark dispatches `challenges::neuralnet_optimizer::solve_challenge`
+/// (this function), not the `algorithm` module's, so the training loop — and with
+/// it the `max_epochs` budget, early-stopping, and the train/validation/test data
+/// split — is enforced by the harness. Agents implement only the optimizer hooks
+/// (`optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`) in
+/// `algorithm`, which must remain `pub fn` so this wrapper can reference them.
+///
+/// `hyperparameters` is currently unused (the benchmark always passes `None`) and
+/// is kept in the signature for parity with the CPU solver / future plumbing.
+pub fn solve_challenge(
+    challenge: &Challenge,
+    save_solution: &dyn Fn(&Solution) -> Result<()>,
+    _hyperparameters: &Option<Map<String, Value>>,
+    module: Arc<CudaModule>,
+    stream: Arc<CudaStream>,
+    prop: &cudaDeviceProp,
+) -> Result<()> {
+    training_loop(
+        challenge,
+        save_solution,
+        module,
+        stream,
+        prop,
+        algorithm::optimizer_init_state,
+        algorithm::optimizer_query_at_params,
+        algorithm::optimizer_step,
+    )
 }
 
 pub trait OptimizerStateTrait: Any + Send + Sync {
