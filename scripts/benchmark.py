@@ -30,8 +30,9 @@ algorithm for that challenge:
 Higher quality is always better. Aggregation is two-step:
 
     1. Per-track score = arithmetic mean of per-instance quality scores
-       in that track. Infeasible instances contribute `-QUALITY_PRECISION`
-       (the worst feasibly-bounded value).
+       in that track. Infeasible instances contribute `-QUALITY_CLAMP`
+       (the worst feasibly-bounded value), so an infeasible run can never
+       outscore a feasible one.
     2. Cross-track score = shifted geometric mean across the per-track
        averages. The shift (+QUALITY_PRECISION × 10 + 1) keeps every
        value strictly positive so the geometric mean is well-defined for
@@ -88,10 +89,20 @@ _INSIDE_DOCKER = Path("/.dockerenv").exists() or os.environ.get("TIG_IN_DOCKER")
 QUALITY_PRECISION = 1_000_000
 QUALITY_CLAMP = 10 * QUALITY_PRECISION
 
-# Per-instance penalty for an infeasible instance. Set to the worst
-# feasible-bounded value rather than -∞ so the per-track mean stays in a
-# sensible range and the shifted geometric mean is well-defined.
-INFEASIBLE_QUALITY = -QUALITY_PRECISION
+# Per-instance penalty for an infeasible instance. Pinned to the bottom of the
+# feasible clamp (-QUALITY_CLAMP) rather than -∞ so the per-track mean stays in
+# a sensible range and the shifted geometric mean is well-defined (shifted to
+# exactly 1, the same floor as an all-worst-feasible track).
+#
+# This MUST be ≤ the worst feasible per-instance quality (-QUALITY_CLAMP). The
+# old value (-QUALITY_PRECISION = -1M) was only 1/10th of the way down, so on
+# challenges whose feasible scores run well below -1M (the neuralnet baseline is
+# ~-2.29M) an infeasible run scored *higher* than a legitimate feasible one.
+# That let an infeasible edit win a "best" comparison and trap a trajectory at
+# the floor for 80+ edits. Server-side `beats_trajectory_best`/`is_new_best` are
+# also feasibility-gated; this is the matching defense-in-depth at the score
+# level so infeasible never outranks feasible anywhere a raw score is compared.
+INFEASIBLE_QUALITY = -QUALITY_CLAMP
 
 # Constant added to each per-track mean before taking the geometric mean.
 # Quality range after clamping is [-10M, +10M]; shift by +10M+1 → strictly
@@ -1188,8 +1199,10 @@ def _print_timing_summary(results: list[dict]) -> None:
 def aggregate(results: list[dict]) -> dict:
     """Group per-instance qualities by track, average each track, then
     combine via shifted geometric mean. Infeasible instances contribute
-    `INFEASIBLE_QUALITY` to their track's average — they're worse than
-    matching the baseline, but bounded so the geomean stays well-defined.
+    `INFEASIBLE_QUALITY` (= -QUALITY_CLAMP) to their track's average — the
+    worst feasibly-bounded value, so an all-infeasible run lands at the very
+    bottom of the feasible range and never outranks a feasible result, while
+    the geomean stays well-defined (shifted to exactly 1).
     """
     by_track: dict[str, list[float]] = defaultdict(list)
     feasible_count = 0
