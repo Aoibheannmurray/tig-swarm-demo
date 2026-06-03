@@ -87,6 +87,11 @@ CREATE TABLE IF NOT EXISTS experiments (
     -- Lets the dashboard mark hint events on per-agent progress plots.
     received_hint TEXT,
     inspiration_source_id TEXT,
+    -- Source agent's trajectory_id at the moment the inspiration hint was
+    -- issued (copied from agent_challenge_state.pending_inspiration_source_
+    -- trajectory). The inspiration matrix reads this directly so it no longer
+    -- depends on the source's current trajectory_bests row surviving.
+    inspiration_source_trajectory_id TEXT,
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
     estimated_cost REAL DEFAULT 0.0,
@@ -170,6 +175,11 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
     -- experiments.received_hint absorbs the value).
     pending_hint TEXT,
     pending_inspiration_source TEXT,
+    -- The source agent's trajectory_id captured at hint-out time. Recorded
+    -- here (and copied onto experiments) so the inspiration matrix reads the
+    -- exact source trajectory instead of reconstructing it from the source's
+    -- *current* trajectory_bests row — which is wiped on stagnation reset.
+    pending_inspiration_source_trajectory TEXT,
     total_input_tokens INTEGER DEFAULT 0,
     total_output_tokens INTEGER DEFAULT 0,
     total_estimated_cost REAL DEFAULT 0.0,
@@ -306,6 +316,11 @@ async def init_db() -> None:
         # benchmark could run — a quiet "never benchmarked" signal (no feed
         # noise). Surfaced in the dashboard/logs.
         await _add_column(db, "agent_challenge_state", "ever_benchmarked", "INTEGER DEFAULT 0")
+        # Inspiration-source trajectory capture (see schema comments). Legacy
+        # rows stay NULL; the inspiration matrix falls back to reconstruction
+        # for those and uses this column for everything published afterwards.
+        await _add_column(db, "experiments", "inspiration_source_trajectory_id", "TEXT")
+        await _add_column(db, "agent_challenge_state", "pending_inspiration_source_trajectory", "TEXT")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -394,7 +409,7 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
 _TRAJECTORY_BESTS_COLS = (
     "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
     "kernel_code, score, feasible, challenge_metrics, solution_data, "
-    "track_scores, updated_at"
+    "track_scores, updated_at, trajectory_id"
 )
 
 
