@@ -348,13 +348,15 @@ RUST RULES (the output is compiled as-is — it MUST build):
 - Available crates: `std` plus `anyhow`, `rand`, `serde`, `serde_json` (already
   in Cargo.toml). Do NOT add any OTHER crate (no rayon, itertools, ndarray, …)
   and do NOT edit `[dependencies]`.
-- KEEP every `use` line already at the top of the starting file, verbatim —
-  especially `use super::*;`, `use anyhow::...;`, and `use serde_json::{Map,
-  Value};`. The `solve_challenge` signature references `Result` and
-  `Map<String, Value>`, so dropping those imports makes the file fail to
-  compile with `E0425: cannot find type ... in this scope`.
-- Keep the EXACT `solve_challenge` signature, parameter names, and types you
-  were given. Call the provided `save_solution` closure to record solutions.
+- KEEP the `use super::*;` import and the other `use` lines the starting file
+  relies on (e.g. `use anyhow::...;`) — dropping a needed import makes the file
+  fail to compile with `E0425: cannot find type ... in this scope`.
+- Keep the EXACT signatures of the harness entry-point function(s) you were
+  given and don't rename them: for MOST challenges that is `fn solve_challenge(`
+  (call the provided `save_solution` closure to record solutions); for
+  `neuralnet_optimizer` it is the three `pub fn optimizer_*` hooks — there you
+  must NOT define `solve_challenge` or call `save_solution` (both are
+  harness-owned). Write only the function(s) your challenge actually uses.
 - No `unsafe`, no `async`, no spawning threads.
 - Don't leave `todo!()`, `unimplemented!()`, or `panic!()` in a normal path.
 - Avoid `.unwrap()`/`.expect()` on values that can be `None`/`Err`; handle the
