@@ -75,29 +75,12 @@ export class HypergraphPanel extends DisplayPanelBase<AllHypergraphData> {
             <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
           </div>
         </div>
-        <div class="hg-bottom-bar">
-          <div class="hg-stat">
-            <div class="hg-stat-label">NODES</div>
-            <div class="hg-stat-value" id="hg-nodes">---</div>
-          </div>
-          <div class="hg-stat">
-            <div class="hg-stat-label">PARTS</div>
-            <div class="hg-stat-value" id="hg-parts">---</div>
-          </div>
-          <div class="hg-stat">
-            <div class="hg-stat-label">CUTS</div>
-            <div class="hg-stat-value" id="hg-cuts">---</div>
-          </div>
-          <div class="hg-stat">
-            <div class="hg-stat-label">CONNECTIVITY</div>
-            <div class="hg-stat-value" id="hg-metric">---</div>
-          </div>
-          <div class="hg-stat hg-stat-score">
-            <div class="hg-stat-label">SCORE</div>
-            <div class="hg-stat-value" id="hg-score">---</div>
-            <div class="hg-stat-delta" id="hg-score-delta"></div>
-          </div>
-        </div>
+        ${this.statBarScaffold([
+          { label: "NODES", id: "hg-nodes" },
+          { label: "PARTS", id: "hg-parts" },
+          { label: "CUTS", id: "hg-cuts" },
+          { label: "CONNECTIVITY", id: "hg-metric" },
+        ], { barClass: "stat-bar--overlay" })}
       </div>
     `;
   }

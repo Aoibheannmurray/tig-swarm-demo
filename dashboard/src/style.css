@@ -2344,9 +2344,13 @@ html, body {
   opacity: 0.5;
 }
 
-/* Bottom stat bar — mirrors .hg-bottom-bar. Sits flush with the panel
-   bottom so HIDDEN LAYERS / PARAMETERS / SCORE never overlap. */
-.nn-bottom-bar {
+/* ── Shared challenge stat bar ──
+   Bottom-of-panel row of read-only stat cells ending in the big SCORE cell
+   (which hosts the per-track popover). Emitted by
+   DisplayPanelBase.statBarScaffold() and used by the neural-net, vector-search
+   and hypergraph panels. The hypergraph variant adds .stat-bar--overlay to
+   float the bar over its full-bleed galaxy SVG. */
+.stat-bar {
   flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
@@ -2355,13 +2359,13 @@ html, body {
   padding: 8px 4px 10px;
 }
 
-.nn-stat {
+.stat-cell {
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
-.nn-stat-label {
+.stat-label {
   font-size: 8px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
@@ -2369,7 +2373,7 @@ html, body {
   line-height: 1.2;
 }
 
-.nn-stat-value {
+.stat-value {
   font-family: var(--mono);
   font-size: 13px;
   font-weight: 400;
@@ -2379,29 +2383,56 @@ html, body {
   white-space: nowrap;
 }
 
-.nn-stat-score {
+.stat-cell--score {
   text-align: right;
   margin-left: auto;
+  /* Containing block for the `.track-breakdown` popover — StatsPanel appends it
+   * to the score cell on click and it's absolutely positioned bottom:100%. */
+  position: relative;
 }
-.nn-stat-score .nn-stat-label {
+.stat-cell--score .stat-label {
   font-size: 9px;
   letter-spacing: 0.2em;
 }
-.nn-stat-score .nn-stat-value {
+.stat-cell--score .stat-value {
   font-size: 32px;
   font-weight: 300;
   line-height: 1.1;
 }
-.nn-stat-delta {
+.stat-delta {
   font-size: 12px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
 }
 
+/* Hypergraph variant: float the stat bar over the full-bleed galaxy SVG, with
+   cream text-shadow halos so the values stay legible over cluster dots. */
+.stat-bar--overlay {
+  position: absolute;
+  bottom: 4px;
+  left: 12px;
+  right: 12px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0;
+  background: transparent;
+  z-index: 2;
+  pointer-events: none;
+  flex-wrap: wrap;
+}
+.stat-bar--overlay .stat-label,
+.stat-bar--overlay .stat-value,
+.stat-bar--overlay .stat-delta {
+  text-shadow:
+    0 0 4px var(--bg-card),
+    0 0 4px var(--bg-card),
+    0 0 4px var(--bg-card);
+}
+
 /* ── Vector search panel ──
-   Same shape as neural net + hypergraph: vs-svg-wrap fills the panel,
-   vs-bottom-bar sits flush. */
+   Same shape as neural net + hypergraph: vs-svg-wrap fills the panel, with the
+   shared .stat-bar flush beneath it. */
 .vs-panel {
   display: flex;
   flex-direction: column;
@@ -2449,59 +2480,6 @@ html, body {
   pointer-events: none;
 }
 
-.vs-bottom-bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: flex-end;
-  justify-content: flex-start;
-  gap: 24px;
-  padding: 8px 4px 10px;
-}
-
-.vs-stat {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.vs-stat-label {
-  font-size: 8px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  line-height: 1.2;
-}
-
-.vs-stat-value {
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-bright);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.15;
-  white-space: nowrap;
-}
-
-.vs-stat-score {
-  text-align: right;
-  margin-left: auto;
-}
-.vs-stat-score .vs-stat-label {
-  font-size: 9px;
-  letter-spacing: 0.2em;
-}
-.vs-stat-score .vs-stat-value {
-  font-size: 32px;
-  font-weight: 300;
-  line-height: 1.1;
-}
-.vs-stat-delta {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-}
-
 /* ── Hypergraph panel ── */
 .hg-panel {
   display: flex;
@@ -2537,75 +2515,6 @@ html, body {
   display: block;
   width: 100%;
   height: 100%;
-}
-
-/* Stats overlay. Absolute-positioned with transparent background so the
-   galaxy SVG fills the entire panel below the header and the cluster
-   labels can render right down to the panel edge. Text-shadow halos in
-   the cream panel colour keep the stat values readable when cluster
-   dots happen to sit behind them. */
-.hg-bottom-bar {
-  position: absolute;
-  bottom: 4px;
-  left: 12px;
-  right: 12px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0;
-  background: transparent;
-  z-index: 2;
-  pointer-events: none;
-  flex-wrap: wrap;
-}
-.hg-bottom-bar .hg-stat-label,
-.hg-bottom-bar .hg-stat-value,
-.hg-bottom-bar .hg-stat-delta {
-  text-shadow:
-    0 0 4px var(--bg-card),
-    0 0 4px var(--bg-card),
-    0 0 4px var(--bg-card);
-}
-.hg-stat {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.hg-stat-label {
-  font-size: 8px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  line-height: 1.2;
-}
-.hg-stat-value {
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-bright);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.15;
-  white-space: nowrap;
-}
-.hg-stat-score {
-  text-align: right;
-  margin-left: auto;
-}
-.hg-stat-score .hg-stat-label {
-  font-size: 9px;
-  letter-spacing: 0.2em;
-}
-.hg-stat-score .hg-stat-value {
-  font-size: 32px;
-  font-weight: 300;
-  line-height: 1.1;
-}
-.hg-stat-delta {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
 }
 
 /* Subtle settling animation when the panel re-renders (instance rotation,

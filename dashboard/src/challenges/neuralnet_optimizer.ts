@@ -62,21 +62,10 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
             <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
           </div>
         </div>
-        <div class="nn-bottom-bar" id="nn-bottom-bar">
-          <div class="nn-stat">
-            <div class="nn-stat-label">HIDDEN LAYERS</div>
-            <div class="nn-stat-value" id="nn-layers">---</div>
-          </div>
-          <div class="nn-stat">
-            <div class="nn-stat-label">PARAMETERS</div>
-            <div class="nn-stat-value" id="nn-params">---</div>
-          </div>
-          <div class="nn-stat nn-stat-score">
-            <div class="nn-stat-label">SCORE</div>
-            <div class="nn-stat-value" id="nn-score">---</div>
-            <div class="nn-stat-delta" id="nn-score-delta"></div>
-          </div>
-        </div>
+        ${this.statBarScaffold([
+          { label: "HIDDEN LAYERS", id: "nn-layers" },
+          { label: "PARAMETERS", id: "nn-params" },
+        ])}
       </div>
     `;
   }
@@ -91,7 +80,7 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     this.noiseBarEl = document.getElementById("nn-noise-bar")!;
     this.lossLabelEl = document.getElementById("nn-loss-label")!;
     this.vizStackEl = document.getElementById("nn-viz-stack")!;
-    this.bottomBarEl = document.getElementById("nn-bottom-bar")!;
+    this.bottomBarEl = document.getElementById("nn-stat-bar")!;
     this.lossSectionEl = document.getElementById("nn-loss-section")!;
   }
 
