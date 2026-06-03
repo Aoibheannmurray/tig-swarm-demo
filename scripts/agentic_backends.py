@@ -199,6 +199,26 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     if kernel_relpath:
         files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
 
+    # Optimizer-hook challenges (neuralnet_optimizer): the training loop owns
+    # save_solution, and the agent gets the full optimizer-hook contract.
+    opt_hooks = challenge in {"neuralnet_optimizer"}
+    if opt_hooks:
+        from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
+            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
+            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+        )
+    else:
+        opt_contract = ""
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
+            f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
+            f"  `save_solution()` early with your first feasible solution, then keep\n"
+            f"  improving and re-saving. The last saved solution is what gets scored."
+        )
+
     return f"""\
 # Swarm contributor — agentic mode
 
@@ -262,10 +282,7 @@ publishes the score paired with your hypothesis.
   `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
   hooks (the training loop and `solve_challenge` are harness-owned — do not add
   or rename them). The harness calls these by name.
-- Per-instance time budget: {timeout} seconds. The solver is killed at this
-  hard deadline. Use a time-based loop (`std::time::Instant`), call
-  `save_solution()` early with your first feasible solution, then keep
-  improving and re-saving. The last saved solution is what gets scored.
+{time_bullet}
 - Do not remove `unsafe` blocks that are already there; do not add new
   `unsafe` unless you understand the invariants.
 
@@ -279,6 +296,7 @@ self-running it wastes time.
 ## Challenge-specific details
 
 {challenge_md}
+{opt_contract}
 """
 
 
@@ -392,6 +410,24 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     if kernel_relpath:
         files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
 
+    opt_hooks = challenge in {"neuralnet_optimizer"}
+    if opt_hooks:
+        from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
+            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
+            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+        )
+    else:
+        opt_contract = ""
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
+            f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
+            f"  `save_solution()` early with your first feasible solution, then keep\n"
+            f"  improving and re-saving. The last saved solution is what gets scored."
+        )
+
     return f"""\
 # Swarm contributor — Codex agent mode
 
@@ -456,10 +492,7 @@ Strategy tags (pick the closest match): `construction`, `local_search`,
   `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
   hooks (the training loop and `solve_challenge` are harness-owned — do not add
   or rename them). The harness calls these by name.
-- Per-instance time budget: {timeout} seconds. The solver is killed at this
-  hard deadline. Use a time-based loop (`std::time::Instant`), call
-  `save_solution()` early with your first feasible solution, then keep
-  improving and re-saving. The last saved solution is what gets scored.
+{time_bullet}
 - Do not remove `unsafe` blocks that are already there; do not add new
   `unsafe` unless you understand the invariants.
 
@@ -472,6 +505,7 @@ you stop — don't run `scripts/benchmark.py` yourself, that wastes time.
 ## Challenge-specific details
 
 {challenge_md}
+{opt_contract}
 """
 
 
