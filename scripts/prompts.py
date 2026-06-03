@@ -484,6 +484,86 @@ _OPTIMIZER_HOOK_RULES = (
 )
 
 
+# Full optimizer-hook contract — injected into the code-generation system prompt
+# and the agentic CLAUDE.md/AGENTS.md for optimizer-hook challenges. This is the
+# detailed, signature-level guidance the agent needs now that `solve_challenge`
+# is harness-owned (it replaces the equivalent depth the old solve_challenge
+# guidance used to carry).
+OPTIMIZER_HOOK_CONTRACT = """\
+
+## Optimizer contract (neuralnet_optimizer) — follow EXACTLY
+
+`solve_challenge` and the training loop are HARNESS-OWNED and are NOT in your
+file. Do NOT define, call, or reference `solve_challenge` or `training_loop`.
+You implement ONLY the three optimizer hooks (plus `Hyperparameters`, `help`,
+your `OptimizerState`, and any helper functions / CUDA kernels). The hooks MUST
+be `pub fn` with these EXACT signatures — the harness calls them by name, so a
+signature/name/visibility change is a compile error:
+
+    pub fn optimizer_init_state(
+        seed: [u8; 32],
+        param_sizes: &[usize],
+        stream: Arc<CudaStream>,
+        module: Arc<CudaModule>,
+        prop: &cudaDeviceProp,
+    ) -> Result<Box<dyn OptimizerStateTrait>>
+
+    pub fn optimizer_query_at_params(
+        optimizer_state: &dyn OptimizerStateTrait,
+        model_params: &[CudaSlice<f32>],
+        epoch: usize,
+        train_loss: Option<f32>,
+        val_loss: Option<f32>,
+        stream: Arc<CudaStream>,
+        module: Arc<CudaModule>,
+        prop: &cudaDeviceProp,
+    ) -> Result<Option<Vec<CudaSlice<f32>>>>
+
+    pub fn optimizer_step(
+        optimizer_state: &mut dyn OptimizerStateTrait,
+        model_params: &[CudaSlice<f32>],
+        gradients: &[CudaSlice<f32>],
+        epoch: usize,
+        train_loss: Option<f32>,
+        val_loss: Option<f32>,
+        stream: Arc<CudaStream>,
+        module: Arc<CudaModule>,
+        prop: &cudaDeviceProp,
+    ) -> Result<Vec<CudaSlice<f32>>>
+
+State — define ONE struct that implements the provided `OptimizerStateTrait`
+(in scope via `use super::*;`) and derives Clone:
+
+    #[derive(Clone)]
+    struct OptimizerState { /* lr, step count, momentum/variance buffers, ... */ }
+    impl OptimizerStateTrait for OptimizerState {
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+        fn box_clone(&self) -> Box<dyn OptimizerStateTrait> { Box::new(self.clone()) }
+    }
+
+Recover it inside the hooks with
+`optimizer_state.as_any().downcast_ref::<OptimizerState>().unwrap()` (use
+`as_any_mut().downcast_mut::<OptimizerState>()` in `optimizer_step`).
+
+Semantics (get these right — they are the usual source of wrong output):
+  - optimizer_init_state: called ONCE before training. `param_sizes` has one
+    entry per parameter tensor, in order; size any buffers from it. Return the
+    boxed state. Do NOT use `seed` to reconstruct the dataset.
+  - optimizer_query_at_params: return `Ok(None)` for a standard optimizer.
+    Return `Some(modified_params)` only for lookahead / parameter-prediction
+    (the loop computes gradients at those params, then restores the originals).
+  - optimizer_step: return a Vec with ONE CudaSlice per parameter tensor — the
+    DELTA to ADD to the weights (the harness does `params += delta`), in the
+    SAME length and order as `gradients`. Example (SGD): `delta[i] = -lr*grad[i]`.
+    The harness applies the deltas and AUTOMATICALLY skips frozen layers — do
+    not special-case, read, or overwrite frozen layers, and never write into
+    `model_params` in place (they are copies; in-place writes do nothing and
+    are treated as tampering).
+  - You never see the test set; the harness computes the scored test loss.
+"""
+
+
 def _rust_rules_block(config: dict) -> str:
     """The Rust guardrails to append to a code prompt — base rules always,
     plus the detailed checklist when the agent opted in via
@@ -502,24 +582,35 @@ def build_code_system_prompt(
     challenge = config.get("challenge", "unknown")
     is_gpu = bool(config.get("is_gpu"))
     timeout = config.get("timeout", 30)
-    time_guidance = (
-        f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
-        f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
-        f"keep improving and re-saving — the last saved solution is evaluated. If no "
-        f"solution was saved when the deadline hits, the instance counts as infeasible."
-    )
+    opt_hooks = _is_optimizer_hook_challenge(config)
+    if opt_hooks:
+        time_guidance = (
+            f"\nPer-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and the best checkpoint it saved is "
+            f"evaluated. Keep your optimizer hooks fast so more epochs fit in the budget; "
+            f"the harness calls save_solution for you (you do NOT call it)."
+        )
+    else:
+        time_guidance = (
+            f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
+            f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
+            f"keep improving and re-saving — the last saved solution is evaluated. If no "
+            f"solution was saved when the deadline hits, the instance counts as infeasible."
+        )
     # For exploiters, inject the localized-edit rule between the time budget and
     # the output-format rules so it's read before they start writing.
     if role == "exploiter":
         time_guidance += "\n\n" + _role_guidance(role)
     rust_rules = _rust_rules_block(config)
-    if _is_optimizer_hook_challenge(config):
+    opt_contract = OPTIMIZER_HOOK_CONTRACT if opt_hooks else ""
+    if opt_hooks:
         entry_rule = (
             "- `solve_challenge` and the training loop are FIXED by the harness — do NOT "
             "define or modify them. Implement ONLY the optimizer hooks: `pub fn "
             "optimizer_init_state`, `pub fn optimizer_query_at_params`, `pub fn "
             "optimizer_step` (keep them `pub fn` with their exact signatures), plus "
-            "`Hyperparameters`, `help`, and any helpers you need."
+            "`Hyperparameters`, `help`, and any helpers you need. See the optimizer "
+            "contract below for the exact signatures."
         )
     else:
         entry_rule = "- `fn solve_challenge(` MUST appear in your Rust output — do NOT omit it."
@@ -537,7 +628,7 @@ IMPORTANT RULES:
 - Separate them with a line containing exactly: // --- kernels.cu ---
 - The Rust file comes FIRST, then the separator, then the CUDA file.
 - No explanation, no markdown fences — just the two raw source files with the separator.
-- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu.{rust_rules}{EVOLUTION_GUIDANCE}"""
+- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
     return f"""\
 You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
@@ -548,7 +639,7 @@ OUTPUT FORMAT (strict):
 Your response will be written verbatim to mod.rs and compiled. The very first
 character of your response MUST be `u` from `use super::*;`. No preamble, no
 prose, no markdown fences (```), no commentary before or after the code.
-`use super::*;` must remain as the first import.{rust_rules}{EVOLUTION_GUIDANCE}"""
+`use super::*;` must remain as the first import.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
 
 
 def build_code_user_prompt(
