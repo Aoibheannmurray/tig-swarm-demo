@@ -2252,7 +2252,9 @@ html, body {
   align-items: stretch;
   justify-content: stretch;
   position: relative;
-  padding: 4px 0 8px;
+  /* Extra top padding clears the centred instance-nav block — without it the
+     chart head ("N% to optimal") slides up under the nav row. */
+  padding: 28px 0 8px;
 }
 
 .nn-viz-stack {
