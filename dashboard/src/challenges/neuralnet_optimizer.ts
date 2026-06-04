@@ -72,7 +72,7 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
             <div class="stat-label">PARAMETERS</div>
             <div class="stat-value" id="nn-params">---</div>
           </div>
-          <div class="stat-cell stat-cell--convergence">
+          <div class="stat-cell">
             <div class="stat-label">EPOCHS</div>
             <div class="stat-value" id="nn-epochs-label">---</div>
           </div>
@@ -259,14 +259,14 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     const nLayers = layers.length;
 
     const W = 400;
-    const H = 200;
-    const pad = 40;
+    const H = 280;
+    const pad = 26;
     const layerSpacing = (W - 2 * pad) / (nLayers - 1);
 
     let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
 
     const maxNodes = 6;
-    const nodeR = 5;
+    const nodeR = 6.5;
 
     const layerPositions: Array<Array<[number, number]>> = [];
 
@@ -278,7 +278,7 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
       const positions: Array<[number, number]> = [];
 
       const totalSlots = showEllipsis ? shown + 1 : shown;
-      const spacing = Math.min(20, (H - 2 * pad) / (totalSlots + 1));
+      const spacing = Math.min(40, (H - 2 * pad) / (totalSlots + 1));
       const startY = H / 2 - (spacing * (totalSlots - 1)) / 2;
 
       for (let ni = 0; ni < shown; ni++) {

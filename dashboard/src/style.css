@@ -2308,19 +2308,9 @@ html, body {
   margin-bottom: 4px;
 }
 
-/* EPOCHS (used / max) is a plain stat value living in the bottom stat bar as a
-   wide centred cell between PARAMETERS and SCORE. The score cell's
-   margin-left:auto would otherwise eat the slack, so drop it here and let the
-   EPOCHS cell flex-fill the middle, pushing SCORE to the right edge. */
-.nn-stat-bar .stat-cell--score {
-  margin-left: 0;
-}
-.stat-cell--convergence {
-  flex: 1 1 auto;
-  align-items: center;
-  text-align: center;
-  min-width: 120px;
-}
+/* EPOCHS (used / max) is a plain stat cell grouped with HIDDEN LAYERS and
+   PARAMETERS on the left; SCORE keeps its default margin-left:auto and floats
+   to the right edge. */
 
 /* (Old LOSS vs NOISE FLOOR bars removed — the baseline / noise-limit
    references are now folded into the training-loss chart above.) */
@@ -2411,7 +2401,7 @@ html, body {
 .nn-loss-chart {
   position: relative;
   flex: 1 1 auto;
-  min-height: 84px;
+  min-height: 150px;
   margin-top: 4px;
 }
 .nn-loss-curve-svg,
