@@ -49,6 +49,12 @@ export async function startReplay(
   const stepEl = document.getElementById("replay-step")!;
   const scoreEl = document.getElementById("replay-score")!;
   const firstScore = history[0].score;
+  // The history is a stream of global bests and every challenge maximises its
+  // (baseline-relative) quality score, so improvement is `current - prev`.
+  // The earlier code computed `prev - current`, which read negative for
+  // genuine progress on these maximising scores.
+  const pct = (cur: number, base: number): number | null =>
+    base !== 0 ? ((cur - base) / Math.abs(base)) * 100 : null;
 
   // Play through each best
   for (let i = 0; i < history.length; i++) {
@@ -58,10 +64,7 @@ export async function startReplay(
 
     if (entry.solution_data) {
       const prevScore = i > 0 ? history[i - 1].score : null;
-      const incremental =
-        prevScore != null && prevScore > 0
-          ? ((prevScore - entry.score) / prevScore) * 100
-          : null;
+      const incremental = prevScore != null ? pct(entry.score, prevScore) : null;
       handleMessage({
         type: "new_global_best",
         challenge: getViewedChallenge(),
@@ -69,7 +72,7 @@ export async function startReplay(
         agent_name: entry.agent_name,
         agent_id: "",
         score: entry.score,
-        improvement_pct: firstScore > 0 ? ((firstScore - entry.score) / firstScore) * 100 : 0,
+        improvement_pct: pct(entry.score, firstScore) ?? 0,
         incremental_improvement_pct: incremental,
         num_instances: numInstances,
         solution_data: entry.solution_data,
@@ -84,7 +87,7 @@ export async function startReplay(
 
   // Show final result
   const lastScore = history[history.length - 1].score;
-  const totalImprovement = firstScore > 0 ? ((firstScore - lastScore) / firstScore) * 100 : 0;
+  const totalImprovement = pct(lastScore, firstScore) ?? 0;
 
   overlay.innerHTML = `
     <div class="replay-banner">EVOLUTION COMPLETE</div>

@@ -1089,6 +1089,26 @@ html, body {
   border-radius: 6px;
 }
 
+/* Pan/zoom affordance on the benchmark chart. */
+#chart-svg { cursor: grab; }
+#chart-svg:active { cursor: grabbing; }
+
+.chart-zoom-reset {
+  font-family: var(--ui);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0.5px solid var(--border-default);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.chart-zoom-reset:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 .chart-tab-btn:hover {
   color: var(--color-accent);
   border-color: var(--color-accent);
@@ -2205,6 +2225,14 @@ html, body {
   display: flex;
   flex-direction: column;
   padding: 2px 12px 0;
+
+  /* Panel-scoped accent: the neural-net viz reads green (training loss line,
+     trainable nodes + glow, convergence + model bars) instead of the global
+     terracotta brand. Scoped here so other panels keep --color-accent. */
+  --color-accent:     #4A7C5A;
+  --color-accent-hov: #3E6A4C;
+  --accent-bg:        rgba(74, 124, 90, 0.12);
+  --accent-bg-strong: rgba(74, 124, 90, 0.25);
 }
 
 .nn-panel .panel-label {
@@ -2224,20 +2252,38 @@ html, body {
   align-items: stretch;
   justify-content: stretch;
   position: relative;
-  padding: 4px 0 8px;
+  /* Extra top padding clears the centred instance-nav block — without it the
+     chart head ("N% to optimal") slides up under the nav row. */
+  padding: 28px 0 8px;
 }
 
 .nn-viz-stack {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 18px;
 }
 
+/* Left column: training-loss graph + convergence + loss-vs-noise, stacked and
+   vertically centred so they don't crowd the top of the panel. */
+.nn-side {
+  flex: 0 0 40%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 16px;
+}
+
+/* Right column: the architecture diagram is the focal point — it takes the
+   larger share of the width and the full panel height. */
 .nn-arch-diagram {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
+  align-self: stretch;
   display: block;
 }
 .nn-arch-diagram svg {
@@ -2246,17 +2292,10 @@ html, body {
   height: 100%;
 }
 
-.nn-meters {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: row;
-  gap: 16px;
-  padding: 0 4px;
-}
-
-.nn-meter {
-  flex: 1 1 0;
-  min-width: 0;
+/* Collapse to a single column (chart above diagram) when too narrow for two. */
+@media (max-width: 620px) {
+  .nn-viz-stack { flex-direction: column; gap: 10px; }
+  .nn-side { flex: 0 0 auto; justify-content: flex-start; }
 }
 
 .nn-meter-head {
@@ -2269,84 +2308,207 @@ html, body {
   margin-bottom: 4px;
 }
 
-.nn-meter-bar-wrap {
-  height: 10px;
-  background: var(--bg-sunken);
-  border-radius: 5px;
-  border: 1px solid var(--border-subtle);
-  overflow: hidden;
+/* EPOCHS (used / max) is a plain stat cell grouped with HIDDEN LAYERS and
+   PARAMETERS on the left; SCORE keeps its default margin-left:auto and floats
+   to the right edge. */
+
+/* (Old LOSS vs NOISE FLOOR bars removed — the baseline / noise-limit
+   references are now folded into the training-loss chart above.) */
+
+/* ── Neural-net viz animations (P1 loss curve, P2 node activation). Re-trigger
+   on every showInstance() because the SVG/markup is rebuilt each render, so
+   each instance visibly "builds up". --t carries a 0→1 position so layers
+   stagger left→right. */
+
+/* P2 — architecture nodes scale in left→right, edges fade in behind them. */
+@keyframes nn-node-grow {
+  from { opacity: 0; transform: scale(0.2); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.nn-arch-diagram .nn-node {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: nn-node-grow 0.7s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 1200ms);
+}
+.nn-arch-diagram .nn-node--trainable {
+  filter: drop-shadow(0 0 2px var(--color-accent));
+}
+@keyframes nn-edge-fade {
+  from { stroke-opacity: 0; }
+  to   { stroke-opacity: 1; }
+}
+.nn-arch-diagram .nn-edge {
+  animation: nn-edge-fade 0.8s ease-out backwards;
+  animation-delay: calc(var(--t, 0) * 1200ms);
 }
 
-.nn-meter-bar {
-  height: 100%;
-  background: var(--color-accent);
-  border-radius: 5px;
-  transition: width 0.4s ease;
-  width: 0%;
-}
-
-.nn-meter-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--ink-mid);
-  margin-top: 3px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.nn-loss-rows {
+/* P1 — training-loss chart. Train line draws itself in via dashoffset
+   (pathLength normalised to 1); validation line fades in after; the noise-limit
+   (σ²) reference marks the unbeatable floor. */
+.nn-loss-curve {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
 }
-
-.nn-loss-row {
+.nn-loss-head {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  align-items: baseline;
+  gap: 10px;
+}
+.nn-loss-headline {
+  margin-left: auto;
+  font-family: var(--ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--color-accent);
+  white-space: nowrap;
+}
+.nn-loss-headline--bad {
+  color: var(--danger);
 }
 
-.nn-loss-tag {
+/* Train/val legend — line swatches so the two loss curves are self-explanatory
+   (train = solid green, val = dashed green). */
+.nn-loss-legend {
+  display: flex;
+  gap: 10px;
   font-family: var(--ui);
   font-size: 8px;
   font-weight: 500;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ink-dim);
-  width: 34px;
-  text-align: right;
-  flex-shrink: 0;
 }
-
-.nn-loss-bar-wrap {
-  flex: 1;
-  height: 8px;
-  background: var(--bg-sunken);
-  border-radius: 4px;
-  border: 1px solid var(--border-subtle);
-  overflow: hidden;
+.nn-lg {
+  position: relative;
+  padding-left: 15px;
 }
-
-.nn-loss-bar {
+.nn-lg::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 12px;
+  border-top: 2px solid var(--color-accent);
+}
+.nn-lg--val::before {
+  border-top-style: dashed;
+  opacity: 0.6;
+}
+.nn-loss-chart {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 200px;
+  margin-top: 4px;
+}
+.nn-loss-curve-svg,
+.nn-loss-curve-svg svg {
+  display: block;
+  width: 100%;
   height: 100%;
-  border-radius: 4px;
-  transition: width 0.4s ease;
-  width: 0%;
+}
+.nn-loss-sub {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-dim);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.nn-loss-bar-model {
+/* Curves */
+.nn-loss-line {
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: nn-loss-draw 2.2s ease-out forwards;
+}
+@keyframes nn-loss-draw {
+  to { stroke-dashoffset: 0; }
+}
+.nn-loss-line-val {
+  stroke: var(--color-accent);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0;
+  animation: nn-loss-fade 0.9s ease-out 1s forwards;
+}
+@keyframes nn-loss-fade {
+  to { opacity: 0.55; }
+}
+
+/* Final test-loss marker — HTML dot on the curve's right edge */
+.nn-loss-dot {
+  position: absolute;
+  right: 1%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
   background: var(--color-accent);
+  border: 1.5px solid var(--bg-card);
+  transform: translate(50%, -50%);
 }
 
-.nn-loss-bar-noise {
-  background: var(--ink-dim);
-  opacity: 0.5;
+/* Noise-limit reference line + the unreachable band below it */
+.nn-loss-limit {
+  stroke: var(--warn);
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+}
+.nn-loss-floorband {
+  fill: var(--warn);
+  opacity: 0.07;
 }
 
-/* Bottom stat bar — mirrors .hg-bottom-bar. Sits flush with the panel
-   bottom so HIDDEN LAYERS / PARAMETERS / SCORE never overlap. */
-.nn-bottom-bar {
+/* Reference labels — HTML overlays positioned on their lines (SVG text would
+   shear under preserveAspectRatio="none"). */
+.nn-loss-refs {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.nn-ref {
+  position: absolute;
+  right: 2px;
+  transform: translateY(-50%);
+  font-family: var(--ui);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0 3px;
+  background: var(--bg-card);
+  white-space: nowrap;
+}
+.nn-ref--limit {
+  color: var(--warn);
+}
+
+/* Respect reduced-motion: show the final state, skip the build-up. */
+@media (prefers-reduced-motion: reduce) {
+  .nn-arch-diagram .nn-node,
+  .nn-arch-diagram .nn-edge,
+  .nn-loss-line,
+  .nn-loss-line-val {
+    animation: none;
+  }
+  .nn-loss-line { stroke-dashoffset: 0; }
+  .nn-loss-line-val { opacity: 0.55; }
+}
+
+/* ── Shared challenge stat bar ──
+   Bottom-of-panel row of read-only stat cells ending in the big SCORE cell
+   (which hosts the per-track popover). Emitted by
+   DisplayPanelBase.statBarScaffold() and used by the neural-net, vector-search
+   and hypergraph panels. The hypergraph variant adds .stat-bar--overlay to
+   float the bar over its full-bleed galaxy SVG. */
+.stat-bar {
   flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
@@ -2355,13 +2517,13 @@ html, body {
   padding: 8px 4px 10px;
 }
 
-.nn-stat {
+.stat-cell {
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
-.nn-stat-label {
+.stat-label {
   font-size: 8px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
@@ -2369,7 +2531,7 @@ html, body {
   line-height: 1.2;
 }
 
-.nn-stat-value {
+.stat-value {
   font-family: var(--mono);
   font-size: 13px;
   font-weight: 400;
@@ -2379,29 +2541,62 @@ html, body {
   white-space: nowrap;
 }
 
-.nn-stat-score {
+.stat-cell--score {
   text-align: right;
   margin-left: auto;
+  /* Containing block for the `.track-breakdown` popover — StatsPanel appends it
+   * to the score cell on click and it's absolutely positioned bottom:100%. */
+  position: relative;
 }
-.nn-stat-score .nn-stat-label {
+.stat-cell--score .stat-label {
   font-size: 9px;
   letter-spacing: 0.2em;
 }
-.nn-stat-score .nn-stat-value {
+.stat-cell--score .stat-value {
   font-size: 32px;
   font-weight: 300;
   line-height: 1.1;
 }
-.nn-stat-delta {
+.stat-delta {
   font-size: 12px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
 }
 
+/* Hypergraph variant: float the stat bar over the full-bleed galaxy SVG, with
+   cream text-shadow halos so the values stay legible over cluster dots. */
+.stat-bar--overlay {
+  position: absolute;
+  bottom: 4px;
+  left: 12px;
+  right: 12px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0;
+  background: transparent;
+  z-index: 2;
+  pointer-events: none;
+  flex-wrap: wrap;
+}
+.stat-bar--overlay .stat-label,
+.stat-bar--overlay .stat-value,
+.stat-bar--overlay .stat-delta {
+  text-shadow:
+    0 0 4px var(--bg-card),
+    0 0 4px var(--bg-card),
+    0 0 4px var(--bg-card);
+}
+/* The overlay bar is click-through (pointer-events:none) so the galaxy SVG
+   beneath it stays interactive — but the SCORE cell must still be clickable to
+   open the per-track popover, so opt it back in. */
+.stat-bar--overlay .stat-cell--score {
+  pointer-events: auto;
+}
+
 /* ── Vector search panel ──
-   Same shape as neural net + hypergraph: vs-svg-wrap fills the panel,
-   vs-bottom-bar sits flush. */
+   Same shape as neural net + hypergraph: vs-svg-wrap fills the panel, with the
+   shared .stat-bar flush beneath it. */
 .vs-panel {
   display: flex;
   flex-direction: column;
@@ -2449,59 +2644,6 @@ html, body {
   pointer-events: none;
 }
 
-.vs-bottom-bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: flex-end;
-  justify-content: flex-start;
-  gap: 24px;
-  padding: 8px 4px 10px;
-}
-
-.vs-stat {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.vs-stat-label {
-  font-size: 8px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  line-height: 1.2;
-}
-
-.vs-stat-value {
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-bright);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.15;
-  white-space: nowrap;
-}
-
-.vs-stat-score {
-  text-align: right;
-  margin-left: auto;
-}
-.vs-stat-score .vs-stat-label {
-  font-size: 9px;
-  letter-spacing: 0.2em;
-}
-.vs-stat-score .vs-stat-value {
-  font-size: 32px;
-  font-weight: 300;
-  line-height: 1.1;
-}
-.vs-stat-delta {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-}
-
 /* ── Hypergraph panel ── */
 .hg-panel {
   display: flex;
@@ -2537,75 +2679,6 @@ html, body {
   display: block;
   width: 100%;
   height: 100%;
-}
-
-/* Stats overlay. Absolute-positioned with transparent background so the
-   galaxy SVG fills the entire panel below the header and the cluster
-   labels can render right down to the panel edge. Text-shadow halos in
-   the cream panel colour keep the stat values readable when cluster
-   dots happen to sit behind them. */
-.hg-bottom-bar {
-  position: absolute;
-  bottom: 4px;
-  left: 12px;
-  right: 12px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0;
-  background: transparent;
-  z-index: 2;
-  pointer-events: none;
-  flex-wrap: wrap;
-}
-.hg-bottom-bar .hg-stat-label,
-.hg-bottom-bar .hg-stat-value,
-.hg-bottom-bar .hg-stat-delta {
-  text-shadow:
-    0 0 4px var(--bg-card),
-    0 0 4px var(--bg-card),
-    0 0 4px var(--bg-card);
-}
-.hg-stat {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.hg-stat-label {
-  font-size: 8px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  line-height: 1.2;
-}
-.hg-stat-value {
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-bright);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.15;
-  white-space: nowrap;
-}
-.hg-stat-score {
-  text-align: right;
-  margin-left: auto;
-}
-.hg-stat-score .hg-stat-label {
-  font-size: 9px;
-  letter-spacing: 0.2em;
-}
-.hg-stat-score .hg-stat-value {
-  font-size: 32px;
-  font-weight: 300;
-  line-height: 1.1;
-}
-.hg-stat-delta {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
 }
 
 /* Subtle settling animation when the panel re-renders (instance rotation,

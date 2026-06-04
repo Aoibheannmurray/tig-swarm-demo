@@ -97,6 +97,19 @@ macro_rules! append_viz_data {
                     nf * (1.0 - quality_ratio)
                 });
 
+                // Downsampled per-epoch training history (DASHBOARD_PLAN.md
+                // Item 5 P1). The dashboard draws the animated loss curve when
+                // `loss_curve` is present; `val_loss_curve` is only meaningful
+                // when it diverges from training (validation split > 0), so we
+                // drop it when it just mirrors the training curve.
+                let loss_curve = &sol.train_losses;
+                let val_loss_curve: Option<&Vec<f32>> =
+                    if sol.validation_losses != sol.train_losses {
+                        Some(&sol.validation_losses)
+                    } else {
+                        None
+                    };
+
                 $json["neuralnet_data"] = serde_json::json!({
                     "epochs_used": sol.epochs_used,
                     "max_epochs": inst.max_epochs,
@@ -104,6 +117,8 @@ macro_rules! append_viz_data {
                     "total_params": total_params,
                     "noise_floor": noise_floor,
                     "model_loss": model_loss,
+                    "loss_curve": loss_curve,
+                    "val_loss_curve": val_loss_curve,
                 });
             }
             #[cfg(feature = "vector_search")]

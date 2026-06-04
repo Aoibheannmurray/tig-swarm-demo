@@ -16,8 +16,8 @@
 //     the VRP panel uses this to recompute its tight viewBox)
 //   - onReset():             called from the reset handler so subclasses
 //     can clear extra chart groups / sub-stat boxes
-//   - formatScoreDelta():    panels with "lower is better" semantics
-//     override to flip the sign
+//   - formatScoreDelta():    override to customise the "% vs prev best" string
+//     (rarely needed — every challenge maximises its quality score)
 
 import type { Panel, WSMessage } from "../types";
 import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
@@ -133,6 +133,40 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       </div>
     `;
   }
+  // Shared bottom stat bar for the score-centric challenge panels (neural net,
+  // vector search, hypergraph). Emits a row of read-only stat cells followed by
+  // the big SCORE cell — which carries `data-track-score` so StatsPanel can hang
+  // the per-track popover off it, plus the `${p}-score` / `${p}-score-delta` ids
+  // populateSharedRefs() expects. `stats` are the non-score cells (give an `id`
+  // to update a cell's value later, or a static `value`); `barClass` adds a
+  // modifier (e.g. "stat-bar--overlay" to float the bar over a full-bleed SVG).
+  protected statBarScaffold(
+    stats: Array<{ label: string; id?: string; value?: string }>,
+    opts: { scoreLabel?: string; barClass?: string } = {},
+  ): string {
+    const p = this.idPrefix;
+    const cells = stats
+      .map(
+        (s) => `
+        <div class="stat-cell">
+          <div class="stat-label">${s.label}</div>
+          <div class="stat-value"${s.id ? ` id="${s.id}"` : ""}>${s.value ?? "---"}</div>
+        </div>`,
+      )
+      .join("");
+    const barClass = opts.barClass ? ` ${opts.barClass}` : "";
+    return `
+      <div class="stat-bar${barClass}" id="${p}-stat-bar">
+        ${cells}
+        <div class="stat-cell stat-cell--score">
+          <div class="stat-label">${opts.scoreLabel ?? "SCORE"}</div>
+          <div class="stat-value" id="${p}-score" data-track-score>---</div>
+          <div class="stat-delta" id="${p}-score-delta"></div>
+        </div>
+      </div>
+    `;
+  }
+
   // Called from dispose() — subclasses release their own per-instance
   // listeners/observers (e.g. ResizeObserver) here.
   protected onDispose(): void {}
@@ -347,8 +381,10 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
     this.updateEmptyState();
   }
 
-  // Default formatter: shows raw % delta with the sign of the score change.
-  // VRP overrides this to flip sign (lower distance = improvement).
+  // Default formatter: the % change of this global best over the previous one.
+  // Every challenge maximises its (baseline-relative) quality score, so a
+  // positive delta is an improvement. Overridable if a panel ever needs a
+  // bespoke string.
   protected formatScoreDelta(currentScore: number, prevScore: number) {
     // A prevScore of exactly 0 — or near-zero machine-precision noise from
     // mean-over-instances aggregation when every instance failed — would
