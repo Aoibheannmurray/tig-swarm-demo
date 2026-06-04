@@ -5,6 +5,15 @@ import { getViewedChallenge, onViewedChallengeChange } from "../lib/viewedChalle
 import { getSwarmType, onSwarmConfigChange } from "../lib/swarmConfig";
 
 
+// The clickable score lives in different DOM per challenge: CPU panels render
+// `.solution-score-value` inside `.solution-score`; GPU panels (hypergraph,
+// neuralnet_optimizer, vector_search) render it in their own stat bar and opt
+// in with `data-track-score`. We match either and treat the value's parent as
+// the popover container (toggling `solution-score--expanded` + hosting the
+// `.track-breakdown`), so the per-track popover is panel-layout-agnostic.
+const SCORE_VALUE_SELECTOR = ".solution-score-value, [data-track-score]";
+
+
 // Resolve API base URL the same way other panels do (chart.ts, gantt.ts).
 function resolveApiUrl(): string {
   const params = new URLSearchParams(window.location.search);
@@ -128,8 +137,8 @@ export class StatsPanel implements Panel {
       clearTimeout(this.scoreRetryHandle);
       this.scoreRetryHandle = null;
     }
-    const scoreParent = document.querySelector(".solution-score") as HTMLElement | null;
-    const scoreVal = scoreParent?.querySelector(".solution-score-value") as HTMLElement | null;
+    const scoreVal = document.querySelector(SCORE_VALUE_SELECTOR) as HTMLElement | null;
+    const scoreParent = scoreVal?.parentElement as HTMLElement | null;
     if (!scoreParent || !scoreVal) {
       if (retries > 0) {
         this.scoreRetryHandle = setTimeout(() => {
@@ -205,7 +214,8 @@ export class StatsPanel implements Panel {
   // Injected into the solution panel's `.solution-score` block as a popover
   // that stays hidden until the user clicks the score.
   private renderTrackBreakdown() {
-    const scoreParent = document.querySelector(".solution-score") as HTMLElement | null;
+    const scoreVal = document.querySelector(SCORE_VALUE_SELECTOR) as HTMLElement | null;
+    const scoreParent = scoreVal?.parentElement as HTMLElement | null;
     if (!scoreParent) return;
     let host = scoreParent.querySelector(".track-breakdown") as HTMLElement | null;
     if (!this.trackScores || Object.keys(this.trackScores).length === 0) {

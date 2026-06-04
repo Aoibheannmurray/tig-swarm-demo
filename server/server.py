@@ -993,6 +993,7 @@ async def get_state(
                     inactive_cutoff=cutoff_ts,
                 )
                 pending_source = None
+                pending_source_traj = None
                 if all_bests:
                     chosen = random.choice(all_bests)
                     inspiration_code = chosen["algorithm_code"]
@@ -1002,14 +1003,20 @@ async def get_state(
                     )
                     if stagnation_hint == "inspiration":
                         pending_source = chosen["agent_id"]
+                        # Capture the source trajectory NOW, while it's known to
+                        # be correct. The matrix reads this instead of looking
+                        # up the source's *current* trajectory_bests later (that
+                        # row is wiped when the source agent stagnates).
+                        pending_source_traj = chosen.get("trajectory_id")
                 # Stash the hint (and inspiration source) so the next
                 # iteration this agent publishes can be tagged with them.
-                # /api/iterations reads + clears both atomically.
+                # /api/iterations reads + clears them atomically.
                 await db.update_agent_challenge_state(
                     conn, agent_id, challenge,
                     set_fields={
                         "pending_hint": stagnation_hint,
                         "pending_inspiration_source": pending_source,
+                        "pending_inspiration_source_trajectory": pending_source_traj,
                     },
                 )
                 await conn.commit()
@@ -1289,6 +1296,9 @@ async def create_iteration(req: IterationCreate):
         # again.
         received_hint = (acs or {}).get("pending_hint")
         inspiration_source_id = (acs or {}).get("pending_inspiration_source")
+        inspiration_source_trajectory_id = (acs or {}).get(
+            "pending_inspiration_source_trajectory"
+        )
 
         iter_input_tokens = req.input_tokens or 0
         iter_output_tokens = req.output_tokens or 0
@@ -1301,8 +1311,9 @@ async def create_iteration(req: IterationCreate):
                 challenge_metrics, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_trajectory_best_pct, beats_trajectory_best,
                 trajectory_id, received_hint, inspiration_source_id,
+                inspiration_source_trajectory_id,
                 input_tokens, output_tokens, estimated_cost, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
              req.score,
              1 if req.feasible else 0, challenge_metrics_json,
@@ -1310,6 +1321,7 @@ async def create_iteration(req: IterationCreate):
              delta_vs_best_pct, delta_vs_trajectory_best_pct,
              1 if beats_trajectory_best else 0,
              trajectory_id, received_hint, inspiration_source_id,
+             inspiration_source_trajectory_id,
              iter_input_tokens, iter_output_tokens, iter_estimated_cost, timestamp),
         )
 
@@ -1319,6 +1331,7 @@ async def create_iteration(req: IterationCreate):
                 set_fields={
                     "pending_hint": None,
                     "pending_inspiration_source": None,
+                    "pending_inspiration_source_trajectory": None,
                 },
             )
 
@@ -1746,29 +1759,37 @@ async def get_inspiration_matrix(challenge: str | None = None):
 
     matrix[i][j] = number of times trajectory i received inspiration from
     trajectory j.  The receiver trajectory comes from the experiment's own
-    trajectory_id; the source trajectory is looked up via the source agent's
-    trajectory_bests row (their trajectory at inspiration time is approximated by
-    their current trajectory — exact enough for the dashboard view).
+    trajectory_id; the source trajectory is read from
+    ``experiments.inspiration_source_trajectory_id`` — captured when the hint
+    was issued, so it survives the source agent's later stagnation resets.
+
+    Legacy rows (published before that column existed) have it NULL; for those
+    we fall back to the old best-effort reconstruction via the source agent's
+    *current* trajectory_bests row, via a LEFT JOIN so the row is never dropped
+    when no such best exists. Previously this was an INNER JOIN, which silently
+    discarded every event whose source agent's trajectory_bests had been wiped
+    — emptying the matrix as trajectories churned.
     """
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         cursor = await conn.execute(
             """SELECT e.trajectory_id        AS recv_traj,
-                      ab_src.trajectory_id   AS src_traj,
+                      COALESCE(e.inspiration_source_trajectory_id,
+                               ab_src.trajectory_id) AS src_traj,
                       a_recv.name            AS recv_agent,
                       a_src.name             AS src_agent,
                       COUNT(*)               AS cnt
                FROM experiments e
                JOIN agents a_recv ON a_recv.id = e.agent_id
                JOIN agents a_src  ON a_src.id  = e.inspiration_source_id
-               JOIN trajectory_bests ab_src
+               LEFT JOIN trajectory_bests ab_src
                  ON ab_src.agent_id  = e.inspiration_source_id
                 AND ab_src.challenge = e.challenge
               WHERE e.challenge = ?
                 AND e.received_hint = 'inspiration'
                 AND e.inspiration_source_id IS NOT NULL
                 AND e.trajectory_id IS NOT NULL
-              GROUP BY e.trajectory_id, ab_src.trajectory_id""",
+              GROUP BY e.trajectory_id, src_traj""",
             (challenge,),
         )
         rows = [dict(r) for r in await cursor.fetchall()]
