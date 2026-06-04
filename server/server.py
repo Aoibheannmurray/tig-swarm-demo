@@ -837,13 +837,23 @@ async def get_state(
                         await db.reactivate_trajectory(conn, new_traj_id)
                         await db.increment_trajectory_agents(conn, new_traj_id)
 
-                # Now deposit the stagnated code into the per-challenge pool.
-                await db.deposit_inactive(
-                    conn, agent_id, challenge,
-                    traj_best["algorithm_code"], traj_best["score"], timestamp,
-                    trajectory_id=cur_traj_id, program_id=old_program_id,
-                    kernel_code=traj_best.get("kernel_code"),
-                )
+                # Now deposit the stagnated code into the per-challenge pool —
+                # but ONLY if the trajectory's best is feasible. The inactive
+                # pool is the adoption/seed pool other agents draw from on a
+                # stagnation reset (random.choice above), so an infeasible entry
+                # would hand broken code to a fresh agent and spread the
+                # infeasible-floor trap. With the feasibility-gated
+                # `beats_trajectory_best` above, trajectory_bests should already
+                # be feasible, but legacy rows (and the adopted-floor upsert)
+                # mean we can't assume it — gate explicitly here so infeasible
+                # algorithms never enter the pool.
+                if traj_best.get("feasible"):
+                    await db.deposit_inactive(
+                        conn, agent_id, challenge,
+                        traj_best["algorithm_code"], traj_best["score"], timestamp,
+                        trajectory_id=cur_traj_id, program_id=old_program_id,
+                        kernel_code=traj_best.get("kernel_code"),
+                    )
 
                 # Seed the agent's personal best with the adopted trajectory's
                 # peak so it builds UP from that best instead of from zero.
@@ -1193,8 +1203,22 @@ async def create_iteration(req: IterationCreate):
         prev_trajectory_best = await db.get_trajectory_best(conn, req.agent_id, challenge)
         baseline = await get_baseline_score(conn, challenge)
 
-        is_new_best = prev_best is None or db.is_better(direction, req.score, prev_best["score"])
-        beats_trajectory_best = (
+        # Both "best" comparisons are gated on feasibility. Without this gate an
+        # infeasible run can outrank a feasible one numerically: the infeasible
+        # aggregate is a fixed floor (benchmark.INFEASIBLE_QUALITY), while a
+        # feasible-but-below-baseline score can sit *below* that floor (e.g. the
+        # neuralnet baseline is ~-2.29M, well under the old -1M infeasible
+        # floor). When that happened, an infeasible cheat edit registered as
+        # "beats trajectory best", became the trajectory anchor, and every later
+        # feasible recovery — scoring below the floor — was then rejected as
+        # "not an improvement". The trajectory was pinned at the infeasible floor
+        # forever (observed: 80+ flat edits). Feasibility is a hard precondition
+        # for any score to count as a best; benchmark.py also lowers the floor
+        # below the feasible clamp as defense-in-depth.
+        is_new_best = req.feasible and (
+            prev_best is None or db.is_better(direction, req.score, prev_best["score"])
+        )
+        beats_trajectory_best = req.feasible and (
             prev_trajectory_best is None
             or db.is_better(direction, req.score, prev_trajectory_best["score"])
         )
