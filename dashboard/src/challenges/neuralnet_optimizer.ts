@@ -30,6 +30,9 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
   private lossHeadlineEl!: HTMLElement;
   private lossSubEl!: HTMLElement;
   private lossRefsEl!: HTMLElement;
+  // Last instance rendered — kept so the architecture diagram can re-fit to the
+  // container on resize (its viewBox is sized from the container's pixels).
+  private currentData: NeuralnetData | null = null;
 
   protected scaffoldHtml(): string {
     return `
@@ -98,9 +101,16 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     this.lossHeadlineEl = document.getElementById("nn-loss-headline")!;
     this.lossSubEl = document.getElementById("nn-loss-sub")!;
     this.lossRefsEl = document.getElementById("nn-loss-refs")!;
+
+    // Re-fit the architecture diagram when its column resizes — its viewBox is
+    // sized from the container's pixels, so it must redraw to fill a new size.
+    this.observeResize(this.archDiagramEl, () => {
+      if (this.currentData) this.renderArchDiagram(this.currentData);
+    });
   }
 
   protected onReset(): void {
+    this.currentData = null;
     this.epochsLabelEl.textContent = "---";
     this.layersEl.textContent = "---";
     this.paramsEl.textContent = "---";
@@ -128,6 +138,7 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
       this.onReset();
       return;
     }
+    this.currentData = data;
 
     this.epochsLabelEl.textContent =
       `${data.epochs_used.toLocaleString()} / ${data.max_epochs.toLocaleString()}`;
@@ -248,12 +259,16 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     const layers = [1, ...Array(nHidden).fill(256), 2];
     const nLayers = layers.length;
 
-    const W = 400;
-    const H = 320;
+    // Size the viewBox to the container's actual aspect so the drawing fills it
+    // edge-to-edge — a fixed-aspect viewBox letterboxes (the side whitespace).
+    // Matching the aspect means no gaps and (unlike preserveAspectRatio="none")
+    // no distortion: nodes stay circular. Re-rendered on resize (see attachRefs).
+    const W = Math.round(this.archDiagramEl.clientWidth) || 400;
+    const H = Math.round(this.archDiagramEl.clientHeight) || 240;
     const pad = 26;
     const layerSpacing = (W - 2 * pad) / (nLayers - 1);
 
-    let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">`;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
 
     const maxNodes = 6;
     const nodeR = 6.5;
@@ -268,7 +283,9 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
       const positions: Array<[number, number]> = [];
 
       const totalSlots = showEllipsis ? shown + 1 : shown;
-      const spacing = Math.min(40, (H - 2 * pad) / (totalSlots + 1));
+      // Spread to span the full height (cap keeps sparse layers from drifting
+      // too far apart); startY then re-centres the column.
+      const spacing = Math.min(54, (H - 2 * pad) / Math.max(totalSlots - 1, 1));
       const startY = H / 2 - (spacing * (totalSlots - 1)) / 2;
 
       for (let ni = 0; ni < shown; ni++) {
