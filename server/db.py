@@ -1,4 +1,7 @@
 import aiosqlite
+import base64
+import gzip
+import json
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -271,6 +274,65 @@ async def _add_column(db, table: str, column: str, typedef: str) -> None:
             raise
 
 
+# Owner-intended swarm config, injected as Railway service variables by
+# `setup.py create` *before* the first deploy. The global scalars travel as
+# plain vars; the per-challenge sub-configs (which include the initial
+# algorithm/kernel code and so can be tens of KB) travel as one gzip+base64
+# JSON blob to stay well within Railway's per-variable size limit.
+_ENV_CONFIG_KEYS = (
+    ("ACTIVE_CHALLENGE", "active_challenge"),
+    ("SWARM_TYPE", "swarm_type"),
+    ("SWARM_NAME", "swarm_name"),
+    ("OWNER_NAME", "owner_name"),
+    ("STAGNATION_THRESHOLD", "stagnation_threshold"),
+    ("STAGNATION_LIMIT", "stagnation_limit"),
+    ("HYPOTHESIS_RECALL_THRESHOLD", "hypothesis_recall_threshold"),
+)
+
+
+async def _apply_env_swarm_config(db: aiosqlite.Connection) -> None:
+    """Apply the owner's intended swarm config from environment variables.
+
+    `init_db` seeds the bare `DEFAULT_CONFIG` (active_challenge=satisfiability,
+    swarm_type=cpu, no challenge_configs) with INSERT OR IGNORE and never
+    overwrites it. Historically the *real* config was applied only by the
+    create-time `POST /api/swarm_config`, which races the Railway rollout: the
+    POST can land on a transient container during deploy and be discarded once
+    the persistent /data volume's container becomes authoritative, stranding
+    the swarm on the defaults forever (the volume keeps them across redeploys).
+
+    Applying the config here — from vars `setup.py create` sets before the
+    first deploy — makes the server come up correctly configured with no
+    dependence on a POST landing. The caller runs this once per fresh DB
+    (first-boot sentinel) so it authoritatively overrides the just-seeded
+    DEFAULT_CONFIG without later clobbering owner runtime changes (e.g. a
+    `setup.py switch`). Mirrors how ADMIN_KEY / SWARM_PASSWORD are injected,
+    except those are safe to re-assert every boot and this is seed-once.
+    """
+    for env_name, cfg_key in _ENV_CONFIG_KEYS:
+        val = os.environ.get(env_name)
+        if val:
+            await db.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                (cfg_key, val),
+            )
+
+    blob = os.environ.get("SWARM_CHALLENGES_B64")
+    if not blob:
+        return
+    challenges = json.loads(gzip.decompress(base64.b64decode(blob)).decode())
+    for ch, sub in challenges.items():
+        await upsert_challenge_config(
+            db, ch,
+            tracks=json.dumps(sub["tracks"]) if sub.get("tracks") is not None else None,
+            timeout=sub.get("timeout"),
+            scoring_direction=sub.get("scoring_direction"),
+            initial_algorithm_code=sub.get("initial_algorithm_code"),
+            initial_kernel_code=sub.get("initial_kernel_code"),
+            strategy_tags=json.dumps(sub["strategy_tags"]) if sub.get("strategy_tags") is not None else None,
+        )
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         # WAL mode is durable across connections — set once at startup, the
@@ -347,6 +409,29 @@ async def init_db() -> None:
                 ("swarm_password", secrets.token_urlsafe(16)),
             )
         await db.commit()
+
+        # Seed the owner's intended swarm config from deploy-time env vars on
+        # the FIRST boot of a fresh DB only (see `_apply_env_swarm_config`).
+        # First-boot gating matters: the config keys here (active_challenge,
+        # thresholds, …) are owner-tunable at runtime via POST /api/swarm_config
+        # — e.g. `setup.py switch` flips active_challenge — and that runtime
+        # state lives on the persistent /data volume. Re-applying env on every
+        # boot would revert a switch on the next redeploy. A one-time sentinel
+        # gives us "seed a fresh swarm correctly" without "clobber live state".
+        # Defensive: a malformed var must never crash boot (an unreachable
+        # server is an unfixable swarm) — log and carry on.
+        cur = await db.execute(
+            "SELECT 1 FROM config WHERE key = 'env_config_applied'"
+        )
+        if await cur.fetchone() is None:
+            try:
+                await _apply_env_swarm_config(db)
+            except Exception as e:  # noqa: BLE001 — boot must survive any bad var
+                print(f"init_db: could not apply env swarm config: {e!r}")
+            await db.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('env_config_applied', '1')"
+            )
+            await db.commit()
 
 
 @asynccontextmanager
