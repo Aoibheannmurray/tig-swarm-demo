@@ -139,24 +139,22 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     this.renderLossCurve(data);
   }
 
-  // P1 — training-loss chart with the scoring reference lines folded in.
+  // P1 — training-loss chart with the noise-limit reference folded in.
   //
   // The challenge is denoising: labels carry noise of variance σ², so the best
   // any model can do is recover the true signal, bottoming out at loss = σ²
   // (the "noise limit" — unbeatable). The score is normalised against a
   // baseline of 4σ² (= `noise_floor` from the payload, the quality-0 point):
   //     quality = (4σ² − test_loss) / 4σ²,  maxing at 0.75 when test_loss = σ².
-  // So we draw the train/val curves against two horizontal references — the
-  // baseline (4σ²) and the noise limit (σ² = noise_floor/4) — and headline how
-  // far the model got toward the σ² ceiling. Renders when we have either a
-  // loss curve or the reference values; the train line still draws itself in.
+  // So we draw the train/val curves against the noise limit (σ² = noise_floor/4)
+  // and headline how far the model got toward that σ² ceiling. Renders when we
+  // have either a loss curve or the reference value; the train line draws in.
   private renderLossCurve(data: NeuralnetData) {
     const curve = data.loss_curve && data.loss_curve.length >= 2 ? data.loss_curve : null;
     const val = data.val_loss_curve && data.val_loss_curve.length >= 2 ? data.val_loss_curve : null;
     const nf = data.noise_floor;        // baseline = 4σ²
     const ml = data.model_loss;          // final test loss
     const hasRefs = nf != null && nf > 0;
-    const baseline = hasRefs ? nf! : null;
     const limit = hasRefs ? nf! / 4 : null;   // σ², the irreducible floor
 
     if (!curve && !hasRefs) {
@@ -173,12 +171,11 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     const H = 120;
     const padX = 4;
     const padY = 8;
-    // Scale to cover every line we draw — the curves plus both references and
-    // the final-loss marker — so nothing clips off the top or bottom.
+    // Scale to cover every line we draw — the curves, the noise limit and the
+    // final-loss marker — so nothing clips off the top or bottom.
     const ys: number[] = [];
     if (curve) ys.push(...curve);
     if (val) ys.push(...val);
-    if (baseline != null) ys.push(baseline);
     if (limit != null) ys.push(limit);
     if (ml != null) ys.push(ml);
     let lo = Math.min(...ys);
@@ -201,10 +198,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
       const yL = yOf(limit);
       svg += `<rect class="nn-loss-floorband" x="0" y="${yL.toFixed(1)}" width="${W}" height="${(H - yL).toFixed(1)}"/>`;
     }
-    if (baseline != null) {
-      const yB = yOf(baseline).toFixed(1);
-      svg += `<line class="nn-loss-baseline" x1="0" y1="${yB}" x2="${W}" y2="${yB}"/>`;
-    }
     if (limit != null) {
       const yL = yOf(limit).toFixed(1);
       svg += `<line class="nn-loss-limit" x1="0" y1="${yL}" x2="${W}" y2="${yL}"/>`;
@@ -222,9 +215,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     // preserveAspectRatio="none". top% maps linearly through the stretched
     // viewBox, so yOf(v)/H positions an element on that loss value.
     let refs = "";
-    if (baseline != null) {
-      refs += `<span class="nn-ref nn-ref--baseline" style="top:${(yOf(baseline) / H * 100).toFixed(1)}%">baseline</span>`;
-    }
     if (limit != null) {
       refs += `<span class="nn-ref nn-ref--limit" style="top:${(yOf(limit) / H * 100).toFixed(1)}%">noise limit</span>`;
     }
