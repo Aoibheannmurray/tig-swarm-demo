@@ -49,7 +49,14 @@ CREATE TABLE IF NOT EXISTS hypotheses (
 CREATE TABLE IF NOT EXISTS trajectory_bests (
     agent_id TEXT NOT NULL,
     challenge TEXT NOT NULL,
-    experiment_id TEXT NOT NULL,
+    -- The experiment that produced this best. References experiments.id and
+    -- propagates as-is through the inactive pool on adoption, so on a SHARED
+    -- trajectory it may belong to a different agent than agent_id (whoever
+    -- last actually improved the lineage). NULL when provenance is genuinely
+    -- unknown: a floor inherited from a pre-experiment_id legacy inactive row,
+    -- or an admin-seeded inactive entry that was never run. Never a fabricated
+    -- id — an id here always resolves to a real experiments row.
+    experiment_id TEXT,
     algorithm_code TEXT NOT NULL,
     kernel_code TEXT,
     score REAL NOT NULL,
@@ -133,6 +140,11 @@ CREATE TABLE IF NOT EXISTS inactive_algorithms (
     deposited_at TEXT NOT NULL,
     trajectory_id TEXT,
     program_id TEXT,
+    -- The experiment that earned `score`, carried from the depositing agent's
+    -- trajectory_bests row so an adopting agent inherits real provenance
+    -- instead of a fabricated id. NULL for entries with no underlying run
+    -- (admin-seeded) or deposited before this column existed.
+    experiment_id TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -333,6 +345,64 @@ async def _apply_env_swarm_config(db: aiosqlite.Connection) -> None:
         )
 
 
+async def _column_is_notnull(db, table: str, column: str) -> bool:
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    for row in await cursor.fetchall():
+        # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk)
+        if row[1] == column:
+            return bool(row[3])
+    return False
+
+
+async def _relax_trajectory_bests_experiment_id() -> None:
+    """One-time table rebuild dropping the NOT NULL on
+    trajectory_bests.experiment_id, so an adopted floor with no known source
+    experiment can store NULL instead of a fabricated id. SQLite can't drop a
+    column constraint in place, hence the copy-and-swap. Idempotent: a no-op
+    once experiment_id is already nullable (fresh DBs created from SCHEMA, or
+    a DB already migrated). Runs in its own connection AFTER the SCHEMA /
+    SCHEMA_INDEXES pass so the source table definitely exists."""
+    # Deliberately a separate aiosqlite connection from init_db's: this is
+    # wrapped in BEGIN/COMMIT and a DROP TABLE, which we keep isolated.
+    async with aiosqlite.connect(DB_PATH) as db:
+        if not await _column_is_notnull(db, "trajectory_bests", "experiment_id"):
+            return
+        await db.executescript(
+            """
+            BEGIN;
+            CREATE TABLE trajectory_bests_new (
+                agent_id TEXT NOT NULL,
+                challenge TEXT NOT NULL,
+                experiment_id TEXT,
+                algorithm_code TEXT NOT NULL,
+                kernel_code TEXT,
+                score REAL NOT NULL,
+                feasible INTEGER NOT NULL DEFAULT 1,
+                challenge_metrics TEXT,
+                solution_data TEXT,
+                track_scores TEXT,
+                updated_at TEXT NOT NULL,
+                trajectory_id TEXT,
+                PRIMARY KEY (agent_id, challenge),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            );
+            INSERT INTO trajectory_bests_new
+                SELECT agent_id, challenge, experiment_id, algorithm_code,
+                       kernel_code, score, feasible, challenge_metrics,
+                       solution_data, track_scores, updated_at, trajectory_id
+                FROM trajectory_bests;
+            DROP TABLE trajectory_bests;
+            ALTER TABLE trajectory_bests_new RENAME TO trajectory_bests;
+            CREATE INDEX IF NOT EXISTS idx_trajectory_bests_score
+                ON trajectory_bests(feasible, score);
+            CREATE INDEX IF NOT EXISTS idx_trajectory_bests_challenge
+                ON trajectory_bests(challenge, feasible, score);
+            COMMIT;
+            """
+        )
+        await db.commit()
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         # WAL mode is durable across connections — set once at startup, the
@@ -368,6 +438,11 @@ async def init_db() -> None:
         # benchmark could run — a quiet "never benchmarked" signal (no feed
         # noise). Surfaced in the dashboard/logs.
         await _add_column(db, "agent_challenge_state", "ever_benchmarked", "INTEGER DEFAULT 0")
+        # Real experiment that earned a deposited best, carried through the
+        # inactive pool so adoption inherits true provenance (see
+        # deposit_inactive / the adoption branch in server.py). Legacy rows
+        # back-fill to NULL — their originating experiment_id was never stored.
+        await _add_column(db, "inactive_algorithms", "experiment_id", "TEXT")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -432,6 +507,11 @@ async def init_db() -> None:
                 "INSERT OR REPLACE INTO config (key, value) VALUES ('env_config_applied', '1')"
             )
             await db.commit()
+
+    # Drop the legacy NOT NULL on trajectory_bests.experiment_id so an adopted
+    # floor with unknown provenance can store NULL instead of a fabricated id.
+    # Runs in its own connection after the schema pass above; idempotent.
+    await _relax_trajectory_bests_experiment_id()
 
 
 @asynccontextmanager
@@ -1022,12 +1102,13 @@ async def deposit_inactive(
     trajectory_id: str | None = None,
     program_id: str | None = None,
     kernel_code: str | None = None,
+    experiment_id: str | None = None,
 ) -> int:
     cursor = await conn.execute(
         "INSERT INTO inactive_algorithms "
-        "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id),
+        "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id),
     )
     return cursor.lastrowid
 
@@ -1055,7 +1136,7 @@ async def get_inactive_with_deactivations(
 ) -> list[dict]:
     cursor = await conn.execute(
         "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, ia.score, "
-        "  ia.trajectory_id, ia.program_id, "
+        "  ia.trajectory_id, ia.program_id, ia.experiment_id, "
         "  COALESCE(t.num_deactivations, 1) as num_deactivations "
         "FROM inactive_algorithms ia "
         "LEFT JOIN trajectories t ON ia.trajectory_id = t.id "
@@ -1180,6 +1261,7 @@ async def deactivate_inactive_agent_trajectories(
                 best["algorithm_code"], best["score"], timestamp,
                 trajectory_id=traj_id, program_id=program_id,
                 kernel_code=best.get("kernel_code"),
+                experiment_id=best.get("experiment_id"),
             )
             await clear_trajectory_best(conn, agent_id, challenge)
     return processed
