@@ -450,6 +450,45 @@ GENERAL COMPILE HYGIENE:
   surface, so the result still slots into the existing module."""
 
 
+# Appended to the Rust guardrails for GPU challenges. This repo pins a SPECIFIC
+# cudarc fork (tig-foundation/cudarc, branch runtime-fuel/cudnn-cublas) whose API
+# differs from the older cudarc that most models were trained on. Weaker models
+# reach for `htod_copy` / `stream.module()` / `clone_into_vec` (old API) and the
+# build fails with E0599/E0609. Pin the exact current API here.
+CUDA_API_RULES = """\
+
+CUDA / cudarc API (this repo's fork — use EXACTLY these, not older cudarc names):
+- Load a kernel from the `module` parameter, NOT the stream: `let f =
+  module.load_function("kernel_name")?;`. `stream` has no `.module()` and no
+  `.dev` field.
+- Host -> device (upload a Vec/slice): `let d = stream.memcpy_stod(&host_vec)?;`
+  — NOT `htod_copy`, `copy_into_slice`, `htod_sync_copy`, or `stream.dev.*`.
+- Device -> host (download to a Vec): `let v: Vec<f32> = stream.memcpy_dtov(&d)?;`
+  — NOT `clone_into_vec`, `clone_slice_to_host`, or `dtoh_sync_copy`.
+- Device -> device (copy between two device buffers): `stream.memcpy_dtod(&src,
+  &mut dst)?;` — NOT `dtod_copy`, `copy`, or `clone`. (`stream.clone()` only
+  bumps the Arc refcount; it does NOT copy GPU data.)
+- Allocate a zeroed device buffer: `let mut d = stream.alloc_zeros::<f32>(n)?;`.
+- Launch (must be inside `unsafe`):
+      let cfg = LaunchConfig { grid_dim: (g,1,1), block_dim: (t,1,1), shared_mem_bytes: 0 };
+      unsafe { stream.launch_builder(&f).arg(&d_in).arg(&mut d_out).arg(&n).launch(cfg)? };
+- Kernel `.arg(...)` accepts ONLY: `&CudaSlice<T>`, `&mut CudaSlice<T>`, or `&T`
+  for a read-only scalar (e.g. `&(n as i32)`). You may NOT pass `&mut f32` /
+  `&mut i32` (a mutable scalar reference) — that is the E0277
+  `PushKernelArg<&mut f32>` error. To get a scalar OUT of a kernel, allocate a
+  1-element slice `let mut d_x = stream.alloc_zeros::<f32>(1)?;`, pass
+  `.arg(&mut d_x)`, then read it back with `stream.memcpy_dtov(&d_x)?[0]`.
+- A single `.launch_builder(...)` chain may NOT borrow the same buffer both
+  immutably and mutably — `.arg(&state.x[i]).arg(&mut state.x[i])` is the E0502
+  "cannot borrow as mutable because it is also borrowed as immutable" error.
+  Allocate a separate output buffer and write there, or read the input into a
+  host Vec first; never alias one slice as both an in and an out arg.
+- Kernel function names in `module.load_function("...")` must match the
+  `extern "C" __global__` names in kernels.cu exactly. Every variable the kernel
+  reads must be a declared parameter — a bare name like `second_moments` that
+  isn't a parameter is an nvcc "identifier is undefined" error."""
+
+
 EVOLUTION_GUIDANCE = """\
 
 This is an evolutionary search environment — code is mutated over many
@@ -573,6 +612,8 @@ def _rust_rules_block(config: dict) -> str:
     block = RUST_RULES
     if config.get("detailed_prompts"):
         block += "\n" + RUST_RULES_DETAILED
+    if config.get("is_gpu"):
+        block += CUDA_API_RULES
     if _is_optimizer_hook_challenge(config):
         block += _OPTIMIZER_HOOK_RULES
     return block
