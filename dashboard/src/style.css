@@ -2269,7 +2269,7 @@ html, body {
 /* Left column: training-loss graph + convergence + loss-vs-noise, stacked and
    vertically centred so they don't crowd the top of the panel. */
 .nn-side {
-  flex: 0 0 40%;
+  flex: 0 0 34%;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -2401,7 +2401,7 @@ html, body {
 .nn-loss-chart {
   position: relative;
   flex: 1 1 auto;
-  min-height: 150px;
+  min-height: 200px;
   margin-top: 4px;
 }
 .nn-loss-curve-svg,

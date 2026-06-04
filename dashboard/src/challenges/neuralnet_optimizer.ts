@@ -259,7 +259,7 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     const nLayers = layers.length;
 
     const W = 400;
-    const H = 280;
+    const H = 320;
     const pad = 26;
     const layerSpacing = (W - 2 * pad) / (nLayers - 1);
 
