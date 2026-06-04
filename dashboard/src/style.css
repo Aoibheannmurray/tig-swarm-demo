@@ -2267,11 +2267,11 @@ html, body {
 /* Left column: training-loss graph + convergence + loss-vs-noise, stacked and
    vertically centred so they don't crowd the top of the panel. */
 .nn-side {
-  flex: 0 0 38%;
+  flex: 0 0 40%;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 16px;
 }
 
@@ -2347,58 +2347,8 @@ html, body {
   text-overflow: ellipsis;
 }
 
-.nn-loss-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.nn-loss-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.nn-loss-tag {
-  font-family: var(--ui);
-  font-size: 8px;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
-  width: 34px;
-  text-align: right;
-  flex-shrink: 0;
-}
-
-.nn-loss-bar-wrap {
-  flex: 1;
-  height: 8px;
-  background: var(--bg-sunken);
-  border-radius: 4px;
-  border: 1px solid var(--border-subtle);
-  overflow: hidden;
-}
-
-.nn-loss-bar {
-  height: 100%;
-  border-radius: 4px;
-  transition: width 0.4s ease;
-  width: 0%;
-}
-
-.nn-loss-bar-model {
-  background: var(--color-accent);
-}
-
-.nn-loss-bar-noise {
-  background: var(--ink-dim);
-  opacity: 0.5;
-}
-
-.nn-loss-bar {
-  transition: width 1s ease-out;
-}
+/* (Old LOSS vs NOISE FLOOR bars removed — the baseline / noise-limit
+   references are now folded into the training-loss chart below.) */
 
 /* ── Neural-net viz animations (P1 loss curve, P2 node activation, P3 epoch
    milestones). Re-trigger on every showInstance() because the SVG/markup is
@@ -2453,20 +2403,59 @@ html, body {
   to   { opacity: 0.9; transform: translateX(-1px) scaleY(1); }
 }
 
-/* P1 — training-loss sparkline. Train line draws itself in via dashoffset
-   (pathLength normalised to 1); optional validation line fades in after. */
+/* P1 — training-loss chart. Train line draws itself in via dashoffset
+   (pathLength normalised to 1); validation line fades in after; the baseline
+   (4σ²) and noise-limit (σ²) references frame the scoring range. */
 .nn-loss-curve {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
-.nn-loss-curve-svg {
-  height: 72px;
+.nn-loss-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
 }
+.nn-loss-headline {
+  font-family: var(--ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--color-accent);
+  white-space: nowrap;
+}
+.nn-loss-headline--bad {
+  color: var(--danger);
+}
+.nn-loss-chart {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 84px;
+  margin-top: 4px;
+}
+.nn-loss-curve-svg,
 .nn-loss-curve-svg svg {
   display: block;
   width: 100%;
   height: 100%;
 }
+.nn-loss-sub {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-dim);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Curves */
 .nn-loss-line {
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
   animation: nn-loss-draw 2.2s ease-out forwards;
@@ -2475,11 +2464,71 @@ html, body {
   to { stroke-dashoffset: 0; }
 }
 .nn-loss-line-val {
+  stroke: var(--ink-mid);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
   opacity: 0;
   animation: nn-loss-fade 0.9s ease-out 1s forwards;
 }
 @keyframes nn-loss-fade {
-  to { opacity: 0.7; }
+  to { opacity: 0.55; }
+}
+
+/* Final test-loss marker — HTML dot on the curve's right edge */
+.nn-loss-dot {
+  position: absolute;
+  right: 1%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  border: 1.5px solid var(--bg-card);
+  transform: translate(50%, -50%);
+}
+
+/* Reference lines + the unreachable band below the noise limit */
+.nn-loss-baseline {
+  stroke: var(--ink-dim);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.7;
+}
+.nn-loss-limit {
+  stroke: var(--warn);
+  stroke-width: 1.25;
+  vector-effect: non-scaling-stroke;
+}
+.nn-loss-floorband {
+  fill: var(--warn);
+  opacity: 0.07;
+}
+
+/* Reference labels — HTML overlays positioned on their lines (SVG text would
+   shear under preserveAspectRatio="none"). */
+.nn-loss-refs {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.nn-ref {
+  position: absolute;
+  right: 2px;
+  transform: translateY(-50%);
+  font-family: var(--ui);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0 3px;
+  background: var(--bg-card);
+  white-space: nowrap;
+}
+.nn-ref--baseline {
+  color: var(--ink-dim);
+}
+.nn-ref--limit {
+  color: var(--warn);
 }
 
 /* Respect reduced-motion: show the final state, skip the build-up. */
