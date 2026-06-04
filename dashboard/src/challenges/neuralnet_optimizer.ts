@@ -42,32 +42,34 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
         ${this.navsScaffold()}
         <div class="nn-svg-wrap" id="nn-svg-wrap">
           <div class="nn-viz-stack" id="nn-viz-stack">
-            <div class="nn-arch-diagram" id="nn-arch-diagram"></div>
-            <div class="nn-loss-curve" id="nn-loss-curve" style="display:none">
-              <div class="nn-meter-head">TRAINING LOSS</div>
-              <div class="nn-loss-curve-svg" id="nn-loss-curve-svg"></div>
-            </div>
-            <div class="nn-meters">
-              <div class="nn-meter">
-                <div class="nn-meter-head">CONVERGENCE</div>
-                <div class="nn-meter-bar-wrap"><div class="nn-meter-bar" id="nn-epochs-bar"></div><div class="nn-flags" id="nn-epochs-flags"></div></div>
-                <div class="nn-meter-label" id="nn-epochs-label">---</div>
+            <div class="nn-side">
+              <div class="nn-loss-curve" id="nn-loss-curve" style="display:none">
+                <div class="nn-meter-head">TRAINING LOSS</div>
+                <div class="nn-loss-curve-svg" id="nn-loss-curve-svg"></div>
               </div>
-              <div class="nn-meter" id="nn-loss-section" style="display:none">
-                <div class="nn-meter-head">LOSS vs NOISE FLOOR</div>
-                <div class="nn-loss-rows">
-                  <div class="nn-loss-row">
-                    <span class="nn-loss-tag">model</span>
-                    <div class="nn-loss-bar-wrap"><div class="nn-loss-bar nn-loss-bar-model" id="nn-loss-bar"></div></div>
-                  </div>
-                  <div class="nn-loss-row">
-                    <span class="nn-loss-tag">noise</span>
-                    <div class="nn-loss-bar-wrap"><div class="nn-loss-bar nn-loss-bar-noise" id="nn-noise-bar"></div></div>
-                  </div>
+              <div class="nn-meters">
+                <div class="nn-meter">
+                  <div class="nn-meter-head">CONVERGENCE</div>
+                  <div class="nn-meter-bar-wrap"><div class="nn-meter-bar" id="nn-epochs-bar"></div><div class="nn-flags" id="nn-epochs-flags"></div></div>
+                  <div class="nn-meter-label" id="nn-epochs-label">---</div>
                 </div>
-                <div class="nn-meter-label" id="nn-loss-label">---</div>
+                <div class="nn-meter" id="nn-loss-section" style="display:none">
+                  <div class="nn-meter-head">LOSS vs NOISE FLOOR</div>
+                  <div class="nn-loss-rows">
+                    <div class="nn-loss-row">
+                      <span class="nn-loss-tag">model</span>
+                      <div class="nn-loss-bar-wrap"><div class="nn-loss-bar nn-loss-bar-model" id="nn-loss-bar"></div></div>
+                    </div>
+                    <div class="nn-loss-row">
+                      <span class="nn-loss-tag">noise</span>
+                      <div class="nn-loss-bar-wrap"><div class="nn-loss-bar nn-loss-bar-noise" id="nn-noise-bar"></div></div>
+                    </div>
+                  </div>
+                  <div class="nn-meter-label" id="nn-loss-label">---</div>
+                </div>
               </div>
             </div>
+            <div class="nn-arch-diagram" id="nn-arch-diagram"></div>
           </div>
           <div class="solution-empty-state" id="nn-empty-state">
             <div class="solution-empty-state-title">Challenge not started yet</div>

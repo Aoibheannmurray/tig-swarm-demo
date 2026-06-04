@@ -2225,6 +2225,14 @@ html, body {
   display: flex;
   flex-direction: column;
   padding: 2px 12px 0;
+
+  /* Panel-scoped accent: the neural-net viz reads green (training loss line,
+     trainable nodes + glow, convergence + model bars) instead of the global
+     terracotta brand. Scoped here so other panels keep --color-accent. */
+  --color-accent:     #4A7C5A;
+  --color-accent-hov: #3E6A4C;
+  --accent-bg:        rgba(74, 124, 90, 0.12);
+  --accent-bg-strong: rgba(74, 124, 90, 0.25);
 }
 
 .nn-panel .panel-label {
@@ -2251,13 +2259,29 @@ html, body {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 18px;
 }
 
+/* Left column: training-loss graph + convergence + loss-vs-noise, stacked and
+   vertically centred so they don't crowd the top of the panel. */
+.nn-side {
+  flex: 0 0 38%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 16px;
+}
+
+/* Right column: the architecture diagram is the focal point — it takes the
+   larger share of the width and the full panel height. */
 .nn-arch-diagram {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
+  align-self: stretch;
   display: block;
 }
 .nn-arch-diagram svg {
@@ -2269,9 +2293,16 @@ html, body {
 .nn-meters {
   flex: 0 0 auto;
   display: flex;
-  flex-direction: row;
-  gap: 16px;
-  padding: 0 4px;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0;
+}
+
+/* Collapse back to a single column when the panel is too narrow for two. */
+@media (max-width: 620px) {
+  .nn-viz-stack { flex-direction: column; gap: 10px; }
+  .nn-side { flex: 0 0 auto; justify-content: flex-start; }
+  .nn-meters { flex-direction: row; gap: 16px; }
 }
 
 .nn-meter {
@@ -2428,7 +2459,7 @@ html, body {
   flex: 0 0 auto;
 }
 .nn-loss-curve-svg {
-  height: 56px;
+  height: 72px;
 }
 .nn-loss-curve-svg svg {
   display: block;
