@@ -19,14 +19,12 @@ type AllNeuralnetData = Record<string, NeuralnetData>;
 export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
   protected idPrefix = "nn";
 
-  private epochsBarEl!: HTMLElement;
   private epochsLabelEl!: HTMLElement;
   private layersEl!: HTMLElement;
   private paramsEl!: HTMLElement;
   private archDiagramEl!: HTMLElement;
   private vizStackEl!: HTMLElement;
   private bottomBarEl!: HTMLElement;
-  private epochsFlagsEl!: HTMLElement;
   private lossCurveWrapEl!: HTMLElement;
   private lossCurveSvgEl!: HTMLElement;
   private lossHeadlineEl!: HTMLElement;
@@ -45,6 +43,10 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
               <div class="nn-loss-curve" id="nn-loss-curve" style="display:none">
                 <div class="nn-loss-head">
                   <span class="nn-meter-head">TRAINING LOSS</span>
+                  <span class="nn-loss-legend">
+                    <span class="nn-lg nn-lg--train">train</span>
+                    <span class="nn-lg nn-lg--val">val</span>
+                  </span>
                   <span class="nn-loss-headline" id="nn-loss-headline"></span>
                 </div>
                 <div class="nn-loss-chart">
@@ -52,13 +54,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
                   <div class="nn-loss-refs" id="nn-loss-refs"></div>
                 </div>
                 <div class="nn-loss-sub" id="nn-loss-sub"></div>
-              </div>
-              <div class="nn-meters">
-                <div class="nn-meter">
-                  <div class="nn-meter-head">CONVERGENCE</div>
-                  <div class="nn-meter-bar-wrap"><div class="nn-meter-bar" id="nn-epochs-bar"></div><div class="nn-flags" id="nn-epochs-flags"></div></div>
-                  <div class="nn-meter-label" id="nn-epochs-label">---</div>
-                </div>
               </div>
             </div>
             <div class="nn-arch-diagram" id="nn-arch-diagram"></div>
@@ -68,23 +63,36 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
             <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
           </div>
         </div>
-        ${this.statBarScaffold([
-          { label: "HIDDEN LAYERS", id: "nn-layers" },
-          { label: "PARAMETERS", id: "nn-params" },
-        ])}
+        <div class="stat-bar nn-stat-bar" id="nn-stat-bar">
+          <div class="stat-cell">
+            <div class="stat-label">HIDDEN LAYERS</div>
+            <div class="stat-value" id="nn-layers">---</div>
+          </div>
+          <div class="stat-cell">
+            <div class="stat-label">PARAMETERS</div>
+            <div class="stat-value" id="nn-params">---</div>
+          </div>
+          <div class="stat-cell stat-cell--convergence">
+            <div class="stat-label">EPOCHS</div>
+            <div class="stat-value" id="nn-epochs-label">---</div>
+          </div>
+          <div class="stat-cell stat-cell--score">
+            <div class="stat-label">SCORE</div>
+            <div class="stat-value" id="nn-score" data-track-score>---</div>
+            <div class="stat-delta" id="nn-score-delta"></div>
+          </div>
+        </div>
       </div>
     `;
   }
 
   protected attachRefs(_root: HTMLElement): void {
-    this.epochsBarEl = document.getElementById("nn-epochs-bar")!;
     this.epochsLabelEl = document.getElementById("nn-epochs-label")!;
     this.layersEl = document.getElementById("nn-layers")!;
     this.paramsEl = document.getElementById("nn-params")!;
     this.archDiagramEl = document.getElementById("nn-arch-diagram")!;
     this.vizStackEl = document.getElementById("nn-viz-stack")!;
     this.bottomBarEl = document.getElementById("nn-stat-bar")!;
-    this.epochsFlagsEl = document.getElementById("nn-epochs-flags")!;
     this.lossCurveWrapEl = document.getElementById("nn-loss-curve")!;
     this.lossCurveSvgEl = document.getElementById("nn-loss-curve-svg")!;
     this.lossHeadlineEl = document.getElementById("nn-loss-headline")!;
@@ -93,12 +101,10 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
   }
 
   protected onReset(): void {
-    this.epochsBarEl.style.width = "0%";
     this.epochsLabelEl.textContent = "---";
     this.layersEl.textContent = "---";
     this.paramsEl.textContent = "---";
     this.archDiagramEl.innerHTML = "";
-    this.epochsFlagsEl.innerHTML = "";
     this.lossCurveWrapEl.style.display = "none";
     this.lossCurveSvgEl.innerHTML = "";
     this.lossRefsEl.innerHTML = "";
@@ -123,34 +129,14 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
       return;
     }
 
-    const pct = data.max_epochs > 0
-      ? (data.epochs_used / data.max_epochs) * 100
-      : 0;
-    this.epochsBarEl.style.width = `${pct}%`;
     this.epochsLabelEl.textContent =
-      `${data.epochs_used.toLocaleString()} / ${data.max_epochs.toLocaleString()} epochs (${pct.toFixed(1)}%)`;
+      `${data.epochs_used.toLocaleString()} / ${data.max_epochs.toLocaleString()}`;
 
     this.layersEl.textContent = String(data.num_hidden_layers);
     this.paramsEl.textContent = data.total_params.toLocaleString();
 
-    this.renderEpochMilestones(data);
     this.renderArchDiagram(data);
     this.renderLossCurve(data);
-  }
-
-  // P3 — milestone flags overlaid on the convergence bar: 25/50/75/100% of
-  // max_epochs, lit once that many epochs were actually run, popping in
-  // left→right in time with the bar fill.
-  private renderEpochMilestones(data: NeuralnetData) {
-    const maxE = data.max_epochs || 1;
-    const used = data.epochs_used;
-    const milestones = [0.25, 0.5, 0.75, 1.0];
-    this.epochsFlagsEl.innerHTML = milestones
-      .map((m) => {
-        const reached = maxE * m <= used + 1e-9;
-        return `<span class="nn-flag${reached ? " nn-flag--lit" : ""}" style="left:${(m * 100).toFixed(1)}%;--t:${m.toFixed(2)}"></span>`;
-      })
-      .join("");
   }
 
   // P1 — training-loss chart with the scoring reference lines folded in.
@@ -237,10 +223,10 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     // viewBox, so yOf(v)/H positions an element on that loss value.
     let refs = "";
     if (baseline != null) {
-      refs += `<span class="nn-ref nn-ref--baseline" style="top:${(yOf(baseline) / H * 100).toFixed(1)}%">baseline · score 0</span>`;
+      refs += `<span class="nn-ref nn-ref--baseline" style="top:${(yOf(baseline) / H * 100).toFixed(1)}%">baseline</span>`;
     }
     if (limit != null) {
-      refs += `<span class="nn-ref nn-ref--limit" style="top:${(yOf(limit) / H * 100).toFixed(1)}%">noise limit · best possible</span>`;
+      refs += `<span class="nn-ref nn-ref--limit" style="top:${(yOf(limit) / H * 100).toFixed(1)}%">noise limit</span>`;
     }
     // Final test-loss marker, sitting on the curve's right edge.
     if (ml != null) {
@@ -260,7 +246,7 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
         this.lossHeadlineEl.className = "nn-loss-headline";
       }
       this.lossSubEl.textContent =
-        `final loss ${ml.toFixed(3)} · noise limit ${limit!.toFixed(3)} (can't beat)`;
+        `final loss ${ml.toFixed(3)} · noise limit ${limit!.toFixed(3)}`;
     } else {
       this.lossHeadlineEl.textContent = "";
       this.lossSubEl.textContent = "";

@@ -2290,24 +2290,10 @@ html, body {
   height: 100%;
 }
 
-.nn-meters {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 0;
-}
-
-/* Collapse back to a single column when the panel is too narrow for two. */
+/* Collapse to a single column (chart above diagram) when too narrow for two. */
 @media (max-width: 620px) {
   .nn-viz-stack { flex-direction: column; gap: 10px; }
   .nn-side { flex: 0 0 auto; justify-content: flex-start; }
-  .nn-meters { flex-direction: row; gap: 16px; }
-}
-
-.nn-meter {
-  flex: 1 1 0;
-  min-width: 0;
 }
 
 .nn-meter-head {
@@ -2320,40 +2306,27 @@ html, body {
   margin-bottom: 4px;
 }
 
-.nn-meter-bar-wrap {
-  position: relative;
-  height: 10px;
-  background: var(--bg-sunken);
-  border-radius: 5px;
-  border: 1px solid var(--border-subtle);
-  overflow: hidden;
+/* EPOCHS (used / max) is a plain stat value living in the bottom stat bar as a
+   wide centred cell between PARAMETERS and SCORE. The score cell's
+   margin-left:auto would otherwise eat the slack, so drop it here and let the
+   EPOCHS cell flex-fill the middle, pushing SCORE to the right edge. */
+.nn-stat-bar .stat-cell--score {
+  margin-left: 0;
 }
-
-.nn-meter-bar {
-  height: 100%;
-  background: var(--color-accent);
-  border-radius: 5px;
-  transition: width 1.4s ease-out;
-  width: 0%;
-}
-
-.nn-meter-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--ink-mid);
-  margin-top: 3px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.stat-cell--convergence {
+  flex: 1 1 auto;
+  align-items: center;
+  text-align: center;
+  min-width: 120px;
 }
 
 /* (Old LOSS vs NOISE FLOOR bars removed — the baseline / noise-limit
-   references are now folded into the training-loss chart below.) */
+   references are now folded into the training-loss chart above.) */
 
-/* ── Neural-net viz animations (P1 loss curve, P2 node activation, P3 epoch
-   milestones). Re-trigger on every showInstance() because the SVG/markup is
-   rebuilt each render, so each instance visibly "builds up". --t carries a
-   0→1 position so layers / milestones stagger left→right. */
+/* ── Neural-net viz animations (P1 loss curve, P2 node activation). Re-trigger
+   on every showInstance() because the SVG/markup is rebuilt each render, so
+   each instance visibly "builds up". --t carries a 0→1 position so layers
+   stagger left→right. */
 
 /* P2 — architecture nodes scale in left→right, edges fade in behind them. */
 @keyframes nn-node-grow {
@@ -2378,31 +2351,6 @@ html, body {
   animation-delay: calc(var(--t, 0) * 1200ms);
 }
 
-/* P3 — milestone flags on the convergence bar. Lit (passed) flags read as a
-   cream notch on the accent fill; unlit ones as a faint line on the track. */
-.nn-flags {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.nn-flag {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  transform: translateX(-1px);
-  transform-origin: center;
-  background: var(--border-strong);
-  opacity: 0;
-  animation: nn-flag-pop 0.5s ease-out forwards;
-  animation-delay: calc(var(--t, 0) * 1600ms);
-}
-.nn-flag--lit { background: var(--bg-card); }
-@keyframes nn-flag-pop {
-  from { opacity: 0; transform: translateX(-1px) scaleY(0.3); }
-  to   { opacity: 0.9; transform: translateX(-1px) scaleY(1); }
-}
-
 /* P1 — training-loss chart. Train line draws itself in via dashoffset
    (pathLength normalised to 1); validation line fades in after; the baseline
    (4σ²) and noise-limit (σ²) references frame the scoring range. */
@@ -2415,10 +2363,10 @@ html, body {
 .nn-loss-head {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
 }
 .nn-loss-headline {
+  margin-left: auto;
   font-family: var(--ui);
   font-size: 11px;
   font-weight: 600;
@@ -2428,6 +2376,35 @@ html, body {
 }
 .nn-loss-headline--bad {
   color: var(--danger);
+}
+
+/* Train/val legend — line swatches so the two loss curves are self-explanatory
+   (train = solid green, val = dashed green). */
+.nn-loss-legend {
+  display: flex;
+  gap: 10px;
+  font-family: var(--ui);
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.nn-lg {
+  position: relative;
+  padding-left: 15px;
+}
+.nn-lg::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 12px;
+  border-top: 2px solid var(--color-accent);
+}
+.nn-lg--val::before {
+  border-top-style: dashed;
+  opacity: 0.6;
 }
 .nn-loss-chart {
   position: relative;
@@ -2464,7 +2441,7 @@ html, body {
   to { stroke-dashoffset: 0; }
 }
 .nn-loss-line-val {
-  stroke: var(--ink-mid);
+  stroke: var(--color-accent);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
   opacity: 0;
@@ -2490,7 +2467,7 @@ html, body {
 .nn-loss-baseline {
   stroke: var(--ink-dim);
   stroke-width: 1;
-  stroke-dasharray: 4 3;
+  stroke-dasharray: 1 3;
   vector-effect: non-scaling-stroke;
   opacity: 0.7;
 }
@@ -2535,14 +2512,12 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
   .nn-arch-diagram .nn-node,
   .nn-arch-diagram .nn-edge,
-  .nn-flag,
   .nn-loss-line,
   .nn-loss-line-val {
     animation: none;
   }
   .nn-loss-line { stroke-dashoffset: 0; }
-  .nn-flag { opacity: 0.9; }
-  .nn-loss-line-val { opacity: 0.7; }
+  .nn-loss-line-val { opacity: 0.55; }
 }
 
 /* ── Shared challenge stat bar ──
