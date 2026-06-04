@@ -235,17 +235,17 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     }
     this.lossRefsEl.innerHTML = refs;
 
-    // Headline: fraction of the recoverable signal the model pulled out of the
-    // noise. quality 0.75 (test_loss == σ², the noise limit) = 100% recovered;
-    // quality <= 0 (no better than the 4σ² baseline) = nothing recovered.
+    // Headline: how far toward the σ² ceiling the model got. quality 0.75
+    // (test_loss == σ², the noise limit) = 100% of optimal; quality <= 0 (no
+    // better than the 4σ² baseline) = below baseline.
     if (hasRefs && ml != null) {
       const quality = 1 - ml / nf!;
       if (quality <= 0) {
-        this.lossHeadlineEl.textContent = "no signal recovered";
+        this.lossHeadlineEl.textContent = "below baseline";
         this.lossHeadlineEl.className = "nn-loss-headline nn-loss-headline--bad";
       } else {
         const pct = Math.min(100, Math.round((quality / 0.75) * 100));
-        this.lossHeadlineEl.textContent = `${pct}% of signal recovered`;
+        this.lossHeadlineEl.textContent = pct >= 99 ? "≈ optimal" : `${pct}% of optimal`;
         this.lossHeadlineEl.className = "nn-loss-headline";
       }
       this.lossSubEl.textContent =
