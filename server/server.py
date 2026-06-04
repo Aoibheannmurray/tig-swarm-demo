@@ -853,6 +853,7 @@ async def get_state(
                         traj_best["algorithm_code"], traj_best["score"], timestamp,
                         trajectory_id=cur_traj_id, program_id=old_program_id,
                         kernel_code=traj_best.get("kernel_code"),
+                        experiment_id=traj_best.get("experiment_id"),
                     )
 
                 # Seed the agent's personal best with the adopted trajectory's
@@ -865,7 +866,14 @@ async def get_state(
                 # below). Fresh starts, and pool entries with no score, keep the
                 # original clear-to-empty behaviour.
                 if adopted_score is not None:
-                    adopted_experiment_id = new_id()
+                    # Inherit the real experiment that earned this floor, carried
+                    # through the inactive pool. It belongs to whoever last
+                    # improved this (possibly shared) trajectory — not
+                    # necessarily this agent. NULL when provenance is unknown
+                    # (legacy inactive row predating experiment_id, or an
+                    # admin-seeded entry); never a fabricated id, so it always
+                    # resolves to a real experiments row or is absent.
+                    adopted_experiment_id = picked.get("experiment_id")
                     await db.upsert_trajectory_best(
                         conn, agent_id=agent_id, challenge=challenge,
                         experiment_id=adopted_experiment_id,
