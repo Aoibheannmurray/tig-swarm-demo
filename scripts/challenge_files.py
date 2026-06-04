@@ -132,7 +132,7 @@ def ensure_super_import(code: str) -> str:
     return "use super::*;\n" + code
 
 
-def parse_code(text: str) -> str:
+def _clean_rust(text: str) -> str:
     # Defensive against chatty LLMs that ignore "no preamble / no fences":
     # if the response wraps the code in ```...```, take the first fenced
     # block's contents; then drop any prose still sitting before the
@@ -149,19 +149,30 @@ def parse_code(text: str) -> str:
     return ensure_super_import(text.strip())
 
 
+def parse_code(text: str) -> str:
+    return _clean_rust(text)
+
+
 def parse_gpu_code(text: str) -> tuple[str, str]:
     """Extract Rust + CUDA code from a GPU two-file LLM response.
 
     Returns (rust_code, cuda_code). If no separator is found,
     returns the whole text as rust_code and empty cuda_code.
+
+    The Rust half goes through the same chatty-model hardening as the CPU
+    `parse_code` path (`_clean_rust`): smaller models prepend an English
+    preamble and/or wrap the code in a ```rust fence, which the bare
+    `_strip_fences` (only triggered when the WHOLE response is fenced) lets
+    leak into mod.rs — producing `unknown start of token` / `expected ! or
+    ::, found at` compile errors from prose being compiled as Rust.
     """
     text = _strip_fences(text)
     m = _KERNEL_SEPARATOR_RE.search(text)
     if m is None:
-        return ensure_super_import(text.strip()), ""
-    rust = text[: m.start()].strip()
+        return _clean_rust(text), ""
+    rust = text[: m.start()]
     cuda = text[m.end():].strip()
-    return ensure_super_import(_strip_fences(rust)), _strip_fences(cuda)
+    return _clean_rust(rust), _strip_fences(cuda)
 
 
 # Challenges whose `solve_challenge` + training loop are harness-owned and
