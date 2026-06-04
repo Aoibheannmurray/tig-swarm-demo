@@ -31,7 +31,35 @@ impl_base64_serde! {
         bn_biases: Vec<Vec<f32>>,
         bn_running_means: Vec<Vec<f32>>,
         bn_running_vars: Vec<Vec<f32>>,
+        // Downsampled per-epoch training history, carried out of the training
+        // loop so the dashboard can draw the loss curve (DASHBOARD_PLAN.md
+        // Item 5 P1). Fixed length <= LOSS_CURVE_MAX_POINTS keeps the base64
+        // solution payload small. NB: appending these fields changes the
+        // bincode wire format — solutions stored before this change won't
+        // deserialize.
+        train_losses: Vec<f32>,
+        validation_losses: Vec<f32>,
     }
+}
+
+/// Cap on the number of points kept in the serialized loss curve. The
+/// dashboard sparkline is ~400px wide, so this is ample resolution while
+/// keeping the payload tiny even when `max_epochs` is large.
+pub const LOSS_CURVE_MAX_POINTS: usize = 128;
+
+/// Evenly down-sample `v` to at most `max_points`, always preserving the first
+/// and last samples so the curve's start and end loss are exact.
+fn downsample_losses(v: &[f32], max_points: usize) -> Vec<f32> {
+    let n = v.len();
+    if n <= max_points || max_points == 0 {
+        return v.to_vec();
+    }
+    if max_points == 1 {
+        return vec![v[n - 1]];
+    }
+    (0..max_points)
+        .map(|i| v[i * (n - 1) / (max_points - 1)])
+        .collect()
 }
 
 impl Solution {
@@ -44,6 +72,8 @@ impl Solution {
             bn_biases: Vec::new(),
             bn_running_means: Vec::new(),
             bn_running_vars: Vec::new(),
+            train_losses: Vec::new(),
+            validation_losses: Vec::new(),
         }
     }
 }
@@ -652,7 +682,13 @@ pub fn training_loop(
         if avg_val_loss < lowest_loss - min_loss_delta {
             lowest_loss = avg_val_loss;
             epochs_no_improvement = 0;
-            save_solution(&to_solution(&model, epoch + 1, stream.clone())?)?;
+            save_solution(&to_solution(
+                &model,
+                epoch + 1,
+                &train_losses,
+                &validation_losses,
+                stream.clone(),
+            )?)?;
         } else {
             epochs_no_improvement += 1;
             if epochs_no_improvement >= patience {
@@ -683,7 +719,13 @@ pub fn load_solution(mlp: &mut MLP, solution: &Solution, stream: Arc<CudaStream>
     Ok(())
 }
 
-pub fn to_solution(mlp: &MLP, epochs_used: usize, stream: Arc<CudaStream>) -> Result<Solution> {
+pub fn to_solution(
+    mlp: &MLP,
+    epochs_used: usize,
+    train_losses: &[f32],
+    validation_losses: &[f32],
+    stream: Arc<CudaStream>,
+) -> Result<Solution> {
     stream.synchronize()?;
     let mut weights = Vec::new();
     let mut biases = Vec::new();
@@ -715,5 +757,7 @@ pub fn to_solution(mlp: &MLP, epochs_used: usize, stream: Arc<CudaStream>) -> Re
         bn_biases,
         bn_running_means,
         bn_running_vars,
+        train_losses: downsample_losses(train_losses, LOSS_CURVE_MAX_POINTS),
+        validation_losses: downsample_losses(validation_losses, LOSS_CURVE_MAX_POINTS),
     })
 }
