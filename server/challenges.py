@@ -147,7 +147,8 @@ CHALLENGES: dict[str, ChallengeDef] = {
         ),
         strategy_tags=(
             "adaptive_optimizer", "momentum", "lr_schedule", "regularization",
-            "lookahead", "second_order", "kernel_optimization", "hybrid", "other",
+            "lookahead", "second_order", "kernel_optimization", "hyperparameters",
+            "code_optimization", "hybrid", "other",
         ),
         default_timeout=120,
         is_gpu=True,
