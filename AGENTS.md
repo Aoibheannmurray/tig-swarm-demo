@@ -76,6 +76,10 @@ runtime agent's job, not yours.
 (`Dockerfile.cpu` / `Dockerfile.gpu`). Installing it locally is wasted effort
 and often fails on managed machines.
 
+(C3 cloud GPU users need a conditional third host tool — the `c3` CLI — see
+[If the user is using C3 cloud GPU](#if-the-user-is-using-c3-cloud-gpu) below.
+Local-GPU users don't.)
+
 ## If Docker is missing
 
 `python3 run.py` preflight-checks for `docker` on PATH and exits with a link
@@ -90,6 +94,33 @@ Docker yourself via Homebrew / apt / dnf:
 
 After the user installs Docker Desktop and finishes its first-run setup,
 resume from `python3 run.py`.
+
+## If the user is using C3 cloud GPU
+
+C3 compute needs the `c3` CLI on PATH — it's a third (conditional) host
+requirement on top of Python 3 + Docker. The wizard and `run_loop.py` only
+*warn* when it's missing (the config still gets written), so it's easy to
+launch a fleet that then can't reach C3. Install it before launching:
+
+```bash
+curl -fsSL https://cthree.cloud/install.sh | sh
+```
+
+Then point it at the user's key and confirm it's live:
+
+```bash
+export C3_API_KEY=<their c3_… key>
+c3 whoami     # confirms the key is live
+c3 balance    # shows remaining GPU budget
+```
+
+Each beta C3 key carries Pro access (up to 10 concurrent GPUs) with a fixed
+budget and expiry; `c3 balance` shows what's left. If `c3 whoami` fails, the
+key is wrong or expired — have the user ask the host for a fresh one. The key
+itself still belongs in `fleet.config.json` via the connection paste (the
+wizard stores it as the top-level `c3_api_key`); exporting `C3_API_KEY` here
+is only to verify the CLI before the fleet runs. **Local-GPU users (no key)
+skip all of this** — they pick "Local Docker" and never need the `c3` CLI.
 
 ## The wizard (invoked by `run.py`, also runnable as `scripts/init_fleet.py`)
 
