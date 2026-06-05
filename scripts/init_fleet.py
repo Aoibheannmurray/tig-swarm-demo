@@ -65,6 +65,10 @@ for _stream in (sys.stdout, sys.stderr):
 # scripts/llm_backends.py; the wizard writes it as an explicit api_base.
 _OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
+# DeepSeek's OpenAI-compatible endpoint. Like OpenRouter, the wizard writes it
+# as provider `openai` with an explicit api_base.
+_DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
+
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the
 # provider list in scripts/run_loop.py. Tuple: (label, default_model,
 # api_key_env or None, short_name_stub, supports_c3, blurb).
@@ -107,6 +111,15 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
      "config as an OpenAI-compatible endpoint (provider `openai` + api_base). "
      "Use publisher/model strings like `qwen/qwen-2.5-coder-32b-instruct` "
      "or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."),
+    ("deepseek",
+     "DeepSeek (OpenAI-compatible)",
+     "deepseek-v4-pro",
+     "DEEPSEEK_API_KEY",
+     "deepseek",
+     True,
+     "DeepSeek — OpenAI-compatible. Written to the config as provider `openai` "
+     "+ api_base. Use model ids like `deepseek-v4-pro`, `deepseek-chat` or "
+     "`deepseek-reasoner`. Needs DEEPSEEK_API_KEY."),
     ("claude-code",
      "Claude CLI — one-shot mode",
      "claude-opus-4-7",
@@ -523,13 +536,16 @@ def run_wizard(force: bool = False) -> int:
     print("Which LLM should your agents call?")
     provider, default_model, api_key_env, name_stub, supports_c3 = _select_provider()
 
-    # OpenRouter is OpenAI-compatible: write it as provider `openai` with an
-    # explicit api_base so it routes through the OpenAI client against the
-    # OpenRouter gateway (api_key_env stays OPENROUTER_API_KEY).
+    # OpenRouter and DeepSeek are OpenAI-compatible: write them as provider
+    # `openai` with an explicit api_base so they route through the OpenAI client
+    # against the right gateway (api_key_env stays the provider's own env var).
     api_base: str | None = None
     if provider == "openrouter":
         provider = "openai"
         api_base = _OPENROUTER_API_BASE
+    elif provider == "deepseek":
+        provider = "openai"
+        api_base = _DEEPSEEK_API_BASE
 
     if default_model:
         model = _prompt("model (press Enter for default)", default=default_model)
@@ -539,13 +555,27 @@ def run_wizard(force: bool = False) -> int:
     print()
     count = _prompt_int("How many agents to run in parallel?", default=1)
 
+    # Agent name. Auto-generated <adjective>-<noun> names are the default, but
+    # contributors often want a recognisable name (matching the swarm they're
+    # joining). For a single agent the prompt offers the generated name as the
+    # default; for several it takes an optional prefix and numbers them
+    # (foo-1, foo-2, …). Pressing Enter keeps the auto-generated names.
+    generated = _generate_agent_names(count)
+    if count == 1:
+        names = [_prompt("agent name (press Enter for default)", default=generated[0])]
+    else:
+        prefix = _prompt(
+            "agent name prefix (press Enter for auto-generated names)",
+            allow_empty=True,
+        )
+        names = [f"{prefix}-{i}" for i in range(1, count + 1)] if prefix else generated
+
     # Where each benchmark runs. GPU swarm agents default to C3 cloud GPUs;
     # local Docker stays one keystroke away. c3_api_key (when supplied) is a
     # fleet-wide default — run_fleet.py copies it onto every agent that lacks
     # its own.
     compute, hardware, c3_api_key = _select_compute(supports_c3, pasted_c3_api_key)
 
-    names = _generate_agent_names(count)
     config: dict = {
         "server_url": server_url,
         "username": username,
