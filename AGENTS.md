@@ -9,9 +9,19 @@ git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-
 server_url:     https://…railway.app
 username:       <their-handle>
 swarm_password: <hex string from the swarm host>
+c3_api_key:     <c3_… key, optional — for C3 cloud GPU compute>
 ```
 
 Your job is to get `python3 run.py` running cleanly. Nothing more.
+
+If the contributor includes a `c3_api_key`, they want **C3 cloud GPU**
+compute. The wizard's connection paste reads `c3_api_key` straight out of
+that block (alongside `server_url` / `username` / `swarm_password`), stores
+it as the fleet-wide top-level `c3_api_key`, and skips the "enter your C3
+key" step — so just feed the whole block to the paste prompt. No `c3_api_key`
+means they either run on a **local GPU** (pick "Local Docker" at the compute
+step — benchmarks use the machine's NVIDIA GPU via `--gpus all`) or will
+`export C3_API_KEY` themselves.
 
 `run.py` is the single contributor entry point. It orchestrates four phases
 in one command:
@@ -98,38 +108,44 @@ It prompts for, in order:
 7. Compute backend — **C3 cloud GPU (default)** or local Docker. GPU swarm
    agents default to C3, so this step defaults to `c3`. Picking `c3` then asks
    for the GPU profile (`l40` default / `a100` / `h100`) and the C3 API key.
-   The key, when supplied, is written as a fleet-wide top-level `c3_api_key`;
-   leave it blank to fall back to the `C3_API_KEY` env var or an existing
-   `c3 login` session. Providers that don't support C3 skip this step and stay
-   local.
+   The key is written as a fleet-wide top-level `c3_api_key`. **If the
+   contributor already pasted a `c3_api_key` with their connection details
+   (step 1), the wizard reuses it and skips this prompt** — otherwise enter it
+   here, or leave it blank to fall back to the `C3_API_KEY` env var or an
+   existing `c3 login` session. Choosing **local Docker** needs no key and runs
+   benchmarks on the machine's own NVIDIA GPU. Providers that don't support C3
+   skip this step and stay local.
 
 On a **re-run** against an existing `fleet.config.json` the wizard adds a
 `Keep these connection settings? [Y/n]` step right before (1) — Enter
-reuses the previous `server_url` / `username` / `swarm_password` and skips
-straight to (4). The user only ends up retyping the connection triplet if
-they type `n`.
+reuses the previous `server_url` / `username` / `swarm_password` (and the
+stored `c3_api_key`, if any) and skips straight to (4). The user only ends up
+retyping the connection details if they type `n`.
 
 For non-interactive setup on a fresh clone (no existing config) you can
 pipe answers via stdin, e.g.:
 
 ```bash
 printf '%s\n' \
-  "server_url: $SERVER_URL" "username: $USERNAME" "swarm_password: $SWARM_PASSWORD" "" \
-  "" "" "1" "" "" "$C3_API_KEY" | python3 scripts/init_fleet.py
+  "server_url: $SERVER_URL" "username: $USERNAME" "swarm_password: $SWARM_PASSWORD" \
+  "c3_api_key: $C3_API_KEY" "" \
+  "" "" "1" "" "" | python3 scripts/init_fleet.py
 ```
 
-The connection triplet must be fed as `key: value` lines (the wizard parses
-them out of the paste block); the lone `""` after them ends the paste. The
-next `""` `""` `1` accept the default provider/model and set fleet size, and
-the final three fields drive the compute step: the first `""` accepts the
-default **C3** backend, the second `""` accepts the default `l40` GPU profile,
-and `$C3_API_KEY` is the C3 key (leave it empty to defer to the `C3_API_KEY`
-env var / `c3 login`). To run benchmarks locally instead, replace that last
-block with a single `"2"` (the local-Docker choice) and drop the GPU/key
-lines. Adjust the provider/model fields if the user wants a non-default
-provider — see the prompts in `scripts/init_fleet.py`. On a re-run, add a
-leading `"y"` for the keep-settings prompt and drop the three connection
-lines.
+The connection lines must be fed as `key: value` (the wizard parses them out
+of the paste block) — include `c3_api_key` here for C3 compute. The lone `""`
+after them ends the paste. The next `""` `""` `1` accept the default
+provider/model and set fleet size, and the final `""` `""` drive the compute
+step: the first accepts the default **C3** backend, the second accepts the
+default `l40` GPU profile. Because the key came in the paste block, the wizard
+does **not** prompt for it again — so don't add a trailing key field. To defer
+C3 auth to the `C3_API_KEY` env var / `c3 login`, drop the `c3_api_key:` line.
+To run benchmarks on a **local GPU** instead, drop the `c3_api_key:` line and
+replace the final compute block with a single `"2"` (the local-Docker choice),
+dropping the GPU-profile line. Adjust the provider/model fields if the user
+wants a non-default provider — see the prompts in `scripts/init_fleet.py`. On
+a re-run, add a leading `"y"` for the keep-settings prompt and drop the
+connection lines.
 
 **Fleet size.** The trailing `"1"` in that pipe is the *number of agents to
 spawn in parallel* — not a Yes/No. Default to 1 unless the user explicitly
