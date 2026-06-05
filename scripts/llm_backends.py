@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-6",
@@ -324,20 +325,29 @@ def call_claude_code(
     from agentic_backends import _resolve_cli, _wrap_for_windows
 
     claude_bin = _resolve_cli("claude", "CLAUDE_CLI") or "claude"
-    # --tools "" disables all built-in harness tools (Read/Write/Bash/etc.).
-    # Without this, Opus sees Write in scope, treats "return the file" as
-    # "write the file," and produces chatty preamble like "It looks like file
-    # write permissions need to be granted..." which then breaks `cargo build`.
-    cmd = [claude_bin, "-p", "--system-prompt", system, "--tools", ""]
-    if model:
-        cmd += ["--model", model]
-    cmd = _wrap_for_windows(cmd)
     # Run from a temp dir so the CLI's CLAUDE.md auto-discovery doesn't pull
     # this repo's docs into every prompt — we supply our own system prompt.
     # We can't use --bare to disable discovery because --bare also disables
     # OAuth and forces ANTHROPIC_API_KEY, defeating the point of the
     # subscription path.
     with tempfile.TemporaryDirectory() as cwd:
+        # Pass the system prompt via a file, not `--system-prompt <arg>`. It
+        # embeds the full CHALLENGE.md and routinely runs ~8-9 KB, which blows
+        # past Windows' cmd.exe command-line limit (8191 chars) once
+        # _wrap_for_windows routes the .cmd through cmd.exe — surfacing as
+        # `claude -p failed (exit 1): Command line too long`. A file path keeps
+        # the command line tiny on every platform. (Named system-prompt.txt,
+        # not CLAUDE.md, so it isn't picked up by auto-discovery.)
+        sys_file = Path(cwd) / "system-prompt.txt"
+        sys_file.write_text(system, encoding="utf-8")
+        # --tools "" disables all built-in harness tools (Read/Write/Bash/etc.).
+        # Without this, Opus sees Write in scope, treats "return the file" as
+        # "write the file," and produces chatty preamble like "It looks like file
+        # write permissions need to be granted..." which then breaks `cargo build`.
+        cmd = [claude_bin, "-p", "--system-prompt-file", str(sys_file), "--tools", ""]
+        if model:
+            cmd += ["--model", model]
+        cmd = _wrap_for_windows(cmd)
         result = subprocess.run(
             cmd, input=prompt, capture_output=True, text=True,
             timeout=_TIMEOUT, cwd=cwd,
