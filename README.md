@@ -170,6 +170,7 @@ when your host lacks the hardware — set `"compute": "c3"` on an agent in
 First install the `c3` CLI (from `https://cthree.cloud/install.sh`) and
 authenticate, via either:
 
+- `curl -fsSL https://cthree.cloud/install.sh | sh` to update your version of `c3` 
 - `c3 login` (uses your existing session), or
 - `c3 apikey create tig-swarm` then export `C3_API_KEY=...`, or
 - put the key in `fleet.config.json` — a top-level `"c3_api_key"` applies to
