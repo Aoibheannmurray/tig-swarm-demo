@@ -19,6 +19,7 @@ if (selectorMount) challengeSelector.init(selectorMount);
 const root = document.getElementById("ideas-root")!;
 const ideasTree = new IdeasTree();
 ideasTree.init(root);
+ideasTree.enableLoadOlder(apiUrl, getViewedChallenge);
 
 const strategyLb = new StrategyLeaderboardPanel();
 const strategyMount = document.getElementById("strategy-lb-mount");

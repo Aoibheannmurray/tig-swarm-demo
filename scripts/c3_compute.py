@@ -109,7 +109,7 @@ def _write_current_source_files(stage: Path, config: dict) -> None:
     if algorithm_code:
         algorithm_path = stage / algorithm_rel
         algorithm_path.parent.mkdir(parents=True, exist_ok=True)
-        algorithm_path.write_text(algorithm_code)
+        algorithm_path.write_text(algorithm_code, encoding="utf-8")
 
     kernel_rel = config.get("kernel_path")
     if kernel_rel:
@@ -117,7 +117,7 @@ def _write_current_source_files(stage: Path, config: dict) -> None:
         if kernel_code:
             kernel_path = stage / kernel_rel
             kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text(kernel_code)
+            kernel_path.write_text(kernel_code, encoding="utf-8")
 
 
 def _create_workspace(stage: Path, config: dict, server: str) -> dict:
@@ -177,7 +177,7 @@ docker:
 output:
   - ./c3-artifacts
 """
-    (stage / ".c3").write_text(c3_config)
+    (stage / ".c3").write_text(c3_config, encoding="utf-8")
 
     gpu_check = ""
     if bool(config.get("is_gpu")):
@@ -234,7 +234,7 @@ cp "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" c3-artifacts/benchmark.stderr 2>/dev
 exit "$status"
 """
     script_path = stage / script_name
-    script_path.write_text(runner)
+    script_path.write_text(runner, encoding="utf-8")
     script_path.chmod(0o755)
     return script_name
 
@@ -389,6 +389,24 @@ def _pull_artifacts(job_id: str, env: dict, cwd: Path) -> str:
     )
 
 
+def _read_benchmark_stderr(stage: Path) -> str:
+    """Return the most-recent non-empty benchmark.stderr artifact, if any.
+
+    This is where benchmark.py's real failure (e.g. a cargo/rustc compile
+    error) lands — the C3 job's own stdout only carries runner noise such as
+    the rustup install banner.
+    """
+    candidates = sorted(
+        stage.rglob("benchmark.stderr"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        if path.stat().st_size:
+            return path.read_text(encoding="utf-8", errors="replace")
+    return ""
+
+
 def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
     candidates = sorted(
         stage.rglob("benchmark.json"),
@@ -400,7 +418,7 @@ def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
         if path.stat().st_size == 0:
             continue
         try:
-            bench = json.loads(path.read_text())
+            bench = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             decode_errors.append(f"{path}: {exc}")
             continue
@@ -408,14 +426,7 @@ def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
             print(f"    [C3] Results extracted from {path}")
             return bench, ""
 
-    benchmark_stderr = ""
-    stderr_candidates = sorted(
-        stage.rglob("benchmark.stderr"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if stderr_candidates:
-        benchmark_stderr = stderr_candidates[0].read_text(errors="replace")
+    benchmark_stderr = _read_benchmark_stderr(stage)
 
     detail = "\n".join(decode_errors[-3:])
     if benchmark_stderr:
@@ -503,9 +514,15 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
         if status != "completed":
             err = f"[C3] Job {job_id} {status}"
             print(f"    {err}")
-            if logs_out:
-                print(f"    [C3] Last 500 chars of logs:\n{logs_out[-500:]}")
+            # Pull artifacts first: benchmark.py's real failure (cargo/rustc
+            # errors) lands in benchmark.stderr, not the job's stdout, which
+            # only carries runner noise (e.g. the rustup install banner).
             pull_output = _pull_artifacts(job_id, env, stage)
+            bench_stderr = _read_benchmark_stderr(stage)
+            if bench_stderr:
+                print(f"    [C3] Last 4000 chars of benchmark.stderr:\n{bench_stderr[-4000:]}")
+            elif logs_out:
+                print(f"    [C3] Last 4000 chars of job logs:\n{logs_out[-4000:]}")
             _, parse_err = _load_benchmark_json(stage)
             details = "\n".join(
                 part for part in (parse_err, pull_output[-2000:], logs_out[-2000:]) if part
@@ -516,6 +533,13 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
         pull_output = _pull_artifacts(job_id, env, stage)
         bench, parse_err = _load_benchmark_json(stage)
         if bench is not None:
+            # benchmark.py writes the per-nonce log + timing summary to
+            # stderr (stdout is reserved for the benchmark.json payload). On
+            # failure we already surface stderr below; echo it on success too
+            # so timing is visible on a practice bench, not just on a crash.
+            bench_stderr = _read_benchmark_stderr(stage)
+            if bench_stderr:
+                print(f"    [C3] benchmark.stderr:\n{bench_stderr}")
             return bench, ""
 
         err = f"[C3] Job {job_id} completed but benchmark.json was not found or parseable"

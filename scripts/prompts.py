@@ -42,11 +42,51 @@ def get_strategy_tags(config: dict) -> list[str]:
     return tags if tags else DEFAULT_STRATEGY_TAGS
 
 
+# ── Role guidance ──────────────────────────────────────────────────
+#
+# Role is contributor-owned (explorer by default; exploiter opt-in). It only
+# changes the *guidance* injected into the per-iteration prompts — never the
+# stable rules in CLAUDE.md/AGENTS.md. Explorers are nudged toward novel,
+# ambitious work; exploiters are steered toward one small localized edit. This
+# is guidance only — the driver no longer enforces it with a similarity gate.
+
+
+def _role_guidance(role: str) -> str:
+    """One short role steer for the hypothesis/code SYSTEM prompts."""
+    if role == "exploiter":
+        return (
+            "ROLE — EXPLOITER (localized edits only): You are refining an "
+            "existing working algorithm, NOT rewriting it. Make ONE small, "
+            "localized change (a parameter, a single block, one function body). "
+            "Preserve the overall structure, control flow, and function set of "
+            "the code shown to you. Do NOT rewrite from scratch or change the "
+            "algorithmic approach. If you would touch more than ~15% of the "
+            "lines, narrow the change."
+        )
+    return (
+        "ROLE — EXPLORER: Bias toward NOVEL, structurally-different strategies "
+        "the swarm has not tried. Ambitious rewrites are welcome if you believe "
+        "they can leapfrog the current best."
+    )
+
+
+def _niche_nudge(role: str, assigned_tag: str | None) -> str:
+    """Soft strategy-tag suggestion (explorers only). Never forced."""
+    if role == "exploiter" or not assigned_tag:
+        return ""
+    return (
+        f"The '{assigned_tag}' strategy family looks under-explored right now — "
+        f"consider proposing within it, but pick a different STRATEGY_TAG if you "
+        f"have a stronger idea."
+    )
+
+
 # ── Hypothesis prompts ─────────────────────────────────────────────
 
 
 def build_hypothesis_system_prompt(
     challenge_md: str, config: dict, *, is_bootstrap: bool = False,
+    role: str = "explorer", assigned_tag: str | None = None,
 ) -> str:
     challenge = config.get("challenge", "unknown")
     tags = ", ".join(get_strategy_tags(config))
@@ -57,12 +97,18 @@ def build_hypothesis_system_prompt(
         )
     else:
         job = "propose ONE specific change to try."
+    # Bootstrap is an explorer-only path (exploiters are guarded out client-side
+    # and seeded with working code), so the role steer never conflicts with it.
+    extra = "\n\n" + _role_guidance(role)
+    niche = _niche_nudge(role, assigned_tag)
+    if niche:
+        extra += "\n\n" + niche
     return f"""\
 You are planning an improvement to a Rust algorithm for the "{challenge}" challenge.
 
 {challenge_md}
 
-Your job: {job} Do NOT write code — just describe the idea.
+Your job: {job} Do NOT write code — just describe the idea.{extra}
 
 Respond in EXACTLY this format (4 lines, nothing else):
 
@@ -84,13 +130,27 @@ def _format_inspiration(state: dict, is_gpu: bool, headline: str) -> list[str]:
     return out
 
 
-def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
+def build_hypothesis_user_prompt(
+    state: dict, config: dict, *, role: str = "explorer",
+    assigned_tag: str | None = None,
+) -> str:
     parts: list[str] = []
     is_gpu = bool(config.get("is_gpu"))
+    niche = _niche_nudge(role, assigned_tag)
+    if niche:
+        parts.append(niche)
 
     code = state.get("best_algorithm_code") or ""
     bootstrap = is_stub_code(code)
-    if bootstrap:
+    if bootstrap and _is_optimizer_hook_challenge(config):
+        parts.append(
+            "Current algorithm (mod.rs) is a stub — propose an initial "
+            "implementation strategy from scratch. The stub below shows the "
+            "optimizer hooks your strategy must implement; `solve_challenge` and "
+            "the training loop are harness-owned and not part of this file.\n"
+            f"```rust\n{code}\n```"
+        )
+    elif bootstrap:
         parts.append(
             "Current algorithm (mod.rs) is a stub — propose an initial "
             "implementation strategy from scratch. The stub below shows the "
@@ -132,17 +192,30 @@ def build_hypothesis_user_prompt(state: dict, config: dict) -> str:
     if reset:
         rtype = reset.get("type", "")
         if rtype == "adopted_inactive":
-            parts.append(
+            msg = (
                 "\nYou are starting from another agent's previous algorithm. "
                 "Study the code above and propose an improvement to build on it."
             )
+            prior = reset.get("prior_score")
+            if prior is not None:
+                msg += (
+                    f" This code is already this trajectory's best "
+                    f"(score {prior}) and is your floor — your change must beat it."
+                )
+            parts.append(msg)
         else:
             parts.append(
                 "\nYou are starting from the template algorithm. "
                 "Propose an initial strategy to improve it."
             )
 
-    parts.append("\nPropose one specific improvement to try.")
+    if role == "exploiter":
+        parts.append(
+            "\nPropose ONE small, localized improvement to the existing code "
+            "above — a single parameter or block, not a rewrite."
+        )
+    else:
+        parts.append("\nPropose one specific improvement to try.")
     return "\n".join(parts)
 
 
@@ -180,7 +253,7 @@ def build_tacit_distillation_prompts(
     a trajectory reset — at which point `state["prior_hypotheses"]` holds
     the trajectory's accumulated failed attempts, which is exactly the
     material we want to distill from."""
-    my_best = state.get("my_best_score")
+    traj_best = state.get("current_trajectory_best")
     global_best = state.get("best_score")
     runs = state.get("my_runs", 0)
     improvements = state.get("my_improvements", 0)
@@ -226,7 +299,7 @@ def build_tacit_distillation_prompts(
 
     user = (
         "Trajectory summary\n"
-        f"- Best score on this trajectory: {my_best}\n"
+        f"- Best score on this trajectory: {traj_best}\n"
         f"- Global best: {global_best}\n"
         f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}\n"
         "\n"
@@ -265,19 +338,325 @@ def parse_tacit_distillation(response: str) -> str | None:
 
 # ── Code generation prompts ────────────────────────────────────────
 
+# Rust guardrails appended to every code-generation / compile-fix system
+# prompt. These target the compile failures we see most from LLM output:
+# stray crate imports, signature drift, panics, and type mismatches. Kept
+# short so it costs little on capable models.
+RUST_RULES = """\
 
-def build_code_system_prompt(challenge_md: str, config: dict) -> str:
+RUST RULES (the output is compiled as-is — it MUST build):
+- Available crates: `std` plus `anyhow`, `rand`, `serde`, `serde_json` (already
+  in Cargo.toml). Do NOT add any OTHER crate (no rayon, itertools, ndarray, …)
+  and do NOT edit `[dependencies]`.
+- KEEP the `use super::*;` import and the other `use` lines the starting file
+  relies on (e.g. `use anyhow::...;`) — dropping a needed import makes the file
+  fail to compile with `E0425: cannot find type ... in this scope`.
+- Keep the EXACT signatures of the harness entry-point function(s) you were
+  given and don't rename them: for MOST challenges that is `fn solve_challenge(`
+  (call the provided `save_solution` closure to record solutions); for
+  `neuralnet_optimizer` it is the three `pub fn optimizer_*` hooks — there you
+  must NOT define `solve_challenge` or call `save_solution` (both are
+  harness-owned). Write only the function(s) your challenge actually uses.
+- No `unsafe`, no `async`, no spawning threads.
+- Don't leave `todo!()`, `unimplemented!()`, or `panic!()` in a normal path.
+- Avoid `.unwrap()`/`.expect()` on values that can be `None`/`Err`; handle the
+  empty case. Guard indexing (`slice[i]`) so it can't go out of bounds.
+- Mind integer types: index/length math is `usize`; cast explicitly with `as`
+  rather than mixing `usize`/`u32`/`i64` in one expression.
+- A method call ALWAYS needs parentheses, even with a turbofish:
+  `rng.gen_range(0..n)`, `x.powi(2)`, `v.len()` — never `rng.gen::<f64>` or
+  `x.powi::<i32>` on their own (that is `E0425: field expressions cannot have
+  generic arguments`).
+- If you need randomness it MUST be seeded so runs are deterministic. Use
+  exactly: `use rand::{rngs::StdRng, Rng, SeedableRng};` then
+  `let mut rng = StdRng::from_seed(challenge.seed);` (the seed is `[u8; 32]`).
+  Draw with `rng.gen_range(0.0..1.0)` / `rng.gen_range(0..n)`. Do NOT invent your
+  own randomness or (ab)use hashing for it — no `RandomState`, `hash_one`,
+  `DefaultHasher`, or clock/time seeds (those don't compile or aren't
+  deterministic). If you don't need randomness, don't import `rand` at all.
+- When the borrow checker would object, clone the data instead of leaving
+  code that won't compile."""
+
+# Extra, more prescriptive guidance injected only when an agent sets
+# `detailed_prompts: true` (typically smaller / cheaper models whose raw Rust
+# tends not to compile). Capable models don't need this verbosity.
+RUST_RULES_DETAILED = """\
+
+EXTRA RULES FOR A CLEAN COMPILE (smaller models — follow ALL of these):
+
+RULE 1 - NO DUPLICATE STRUCTS:
+  Each struct (e.g. a Hyperparameters config) is defined ONCE. Modify the
+  existing definition in place; never add a second
+  `pub struct <Name> { ... }` with a name that already exists.
+
+RULE 2 - BORROW CHECKER:
+  Copy a value out before mutating the collection it came from.
+  BAD:  let item = vec.choose(&mut rng).unwrap(); vec.retain(...);
+  GOOD: let item = *vec.choose(&mut rng).unwrap(); vec.retain(...);
+  Alternative: remove by index with `let x = vec.remove(idx);`. When the
+  borrow checker objects, clone the data rather than leaving code that won't
+  build.
+
+RULE 3 - TRAIT IMPORTS:
+  Import every trait whose methods you call, with the other `use` lines at the
+  top of the file — e.g. `use rand::prelude::{SliceRandom, IteratorRandom};`
+  for `.choose()` / `.shuffle()`. A missing trait import is a compile error.
+
+RULE 4 - BRACE BALANCE:
+  Before returning, verify every `{`, `(`, and `[` has a matching close.
+
+RULE 5 - COUNT SYMMETRIC PAIRS ONCE:
+  When summing over a symmetric matrix, iterate unordered pairs only:
+  `for i in 0..n { for j in (i+1)..n { /* use m[i][j] */ } }` — double-counting
+  silently doubles the objective.
+
+RULE 6 - USE i64 FOR ACCUMULATORS:
+  Sum into an i64 to avoid u32/i32 overflow and to allow negative deltas:
+  `let mut total: i64 = 0; total += value as i64;`
+
+RULE 7 - DEFINE BEFORE USE:
+  Every variable must be declared before its first use within its scope; don't
+  reference a binding from a sibling or inner block that isn't visible there.
+
+GENERAL COMPILE HYGIENE:
+- Before finishing, mentally run `cargo check`: every variable is used or
+  prefixed with `_`; every `match` is exhaustive; every branch returns the
+  same type; no semicolon dropped where a value is expected.
+- Prefer iterator methods you are sure of (`.iter()`, `.enumerate()`,
+  `.map()`, `.filter()`, `.sum()`, `.min()/.max()`) over hand-written index
+  loops; when you do index, derive the bound from `.len()`.
+- Annotate numeric literals when the type is ambiguous (`0usize`, `1.0f64`).
+  Use `as f64` / `as usize` for casts; never rely on implicit coercion. Calling
+  a method on a bare literal needs the type pinned: write `2.0_f64.sqrt()` or
+  `(n as f64).powi(2)`, never `2.0.sqrt()` (that is `E0689: can't call method on
+  ambiguous numeric type`).
+- Any struct YOU define that you `.clone()`, sort, or push into a `BinaryHeap`
+  must carry the right derives: `#[derive(Clone)]` (and additionally
+  `#[derive(PartialEq, Eq, PartialOrd, Ord)]` for a `BinaryHeap`). Without
+  `#[derive(Clone)]`, `x.clone()` silently clones a `&reference` instead and the
+  next mutation fails with `E0596: cannot borrow ... as mutable`.
+- A trait method only works if the trait is in scope. If rustc says `method not
+  found ... trait X ... is implemented but not in scope`, add the `use` it
+  suggests — do NOT rewrite the call into something else.
+- Don't introduce new generics, trait bounds, lifetimes, or macros unless the
+  starting code already uses them — they are a common source of errors.
+- Reuse the data structures already imported via `use super::*;`; don't invent
+  types that aren't defined.
+- Indexing a `Vec`/slice MOVES the element when it isn't `Copy` — that's
+  `E0507: cannot move out of ... behind a shared reference`. Bind by reference
+  (`let x = &v[i];`) or `.clone()` it; never `*v[i]` or destructure-by-value out
+  of a borrowed container (e.g. `let (_, s) = *states[k].iter().max()...;`).
+- Keep the change focused: modify the algorithm logic, not the function
+  surface, so the result still slots into the existing module."""
+
+
+# Appended to the Rust guardrails for GPU challenges. This repo pins a SPECIFIC
+# cudarc fork (tig-foundation/cudarc, branch runtime-fuel/cudnn-cublas) whose API
+# differs from the older cudarc that most models were trained on. Weaker models
+# reach for `htod_copy` / `stream.module()` / `clone_into_vec` (old API) and the
+# build fails with E0599/E0609. Pin the exact current API here.
+CUDA_API_RULES = """\
+
+CUDA / cudarc API (this repo's fork — use EXACTLY these, not older cudarc names):
+- Load a kernel from the `module` parameter, NOT the stream: `let f =
+  module.load_function("kernel_name")?;`. `stream` has no `.module()` and no
+  `.dev` field.
+- Host -> device (upload a Vec/slice): `let d = stream.memcpy_stod(&host_vec)?;`
+  — NOT `htod_copy`, `copy_into_slice`, `htod_sync_copy`, or `stream.dev.*`.
+- Device -> host (download to a Vec): `let v: Vec<f32> = stream.memcpy_dtov(&d)?;`
+  — NOT `clone_into_vec`, `clone_slice_to_host`, or `dtoh_sync_copy`.
+- Device -> device (copy between two device buffers): `stream.memcpy_dtod(&src,
+  &mut dst)?;` — NOT `dtod_copy`, `copy`, or `clone`. (`stream.clone()` only
+  bumps the Arc refcount; it does NOT copy GPU data.)
+- Allocate a zeroed device buffer: `let mut d = stream.alloc_zeros::<f32>(n)?;`.
+- Launch (must be inside `unsafe`):
+      let cfg = LaunchConfig { grid_dim: (g,1,1), block_dim: (t,1,1), shared_mem_bytes: 0 };
+      unsafe { stream.launch_builder(&f).arg(&d_in).arg(&mut d_out).arg(&n).launch(cfg)? };
+- Kernel `.arg(...)` accepts ONLY: `&CudaSlice<T>`, `&mut CudaSlice<T>`, or `&T`
+  for a read-only scalar (e.g. `&(n as i32)`). You may NOT pass `&mut f32` /
+  `&mut i32` (a mutable scalar reference) — that is the E0277
+  `PushKernelArg<&mut f32>` error. To get a scalar OUT of a kernel, allocate a
+  1-element slice `let mut d_x = stream.alloc_zeros::<f32>(1)?;`, pass
+  `.arg(&mut d_x)`, then read it back with `stream.memcpy_dtov(&d_x)?[0]`.
+- A single `.launch_builder(...)` chain may NOT borrow the same buffer both
+  immutably and mutably — `.arg(&state.x[i]).arg(&mut state.x[i])` is the E0502
+  "cannot borrow as mutable because it is also borrowed as immutable" error.
+  Allocate a separate output buffer and write there, or read the input into a
+  host Vec first; never alias one slice as both an in and an out arg.
+- Kernel function names in `module.load_function("...")` must match the
+  `extern "C" __global__` names in kernels.cu exactly. Every variable the kernel
+  reads must be a declared parameter — a bare name like `second_moments` that
+  isn't a parameter is an nvcc "identifier is undefined" error."""
+
+
+EVOLUTION_GUIDANCE = """\
+
+This is an evolutionary search environment — code is mutated over many
+iterations. Favour code that is:
+- Modular: construction, refinement, local search, perturbation as separate fns.
+- Mutatable: key decisions in named params/consts so later iterations can tune them.
+- Robust: handle every instance size and parameter/budget range, not one case.
+- Adaptive: detect instance characteristics and adjust strategy accordingly.
+- Not overfitted to a single scenario.
+
+Priorities, in order: 1) feasibility (never violate constraints) 2) solution
+quality (maximise the objective) 3) stability across instances 4) runtime
+efficiency (leave headroom for more refinement iterations)."""
+
+
+# Challenges where `solve_challenge` + the training loop are harness-owned and
+# the agent edits ONLY the optimizer hooks (kept in sync with challenge_files.py
+# `_OPTIMIZER_HOOK_CHALLENGES`).
+_OPTIMIZER_HOOK_CHALLENGES = {"neuralnet_optimizer"}
+
+
+def _is_optimizer_hook_challenge(config: dict) -> bool:
+    return config.get("challenge") in _OPTIMIZER_HOOK_CHALLENGES
+
+
+# Override note appended to the Rust guardrails for optimizer-hook challenges,
+# where the generic "keep the solve_challenge signature" advice doesn't apply.
+_OPTIMIZER_HOOK_RULES = (
+    "\n- THIS CHALLENGE: `solve_challenge` and the training loop are harness-owned "
+    "and are NOT in your file — do not add or call them. Implement ONLY the "
+    "optimizer hooks `optimizer_init_state`, `optimizer_query_at_params`, and "
+    "`optimizer_step`; keep them `pub fn` with their exact signatures. `Map`/`Value` "
+    "are only needed if you add `Hyperparameters` fields."
+)
+
+
+# Full optimizer-hook contract — injected into the code-generation system prompt
+# and the agentic CLAUDE.md/AGENTS.md for optimizer-hook challenges. This is the
+# detailed, signature-level guidance the agent needs now that `solve_challenge`
+# is harness-owned (it replaces the equivalent depth the old solve_challenge
+# guidance used to carry).
+OPTIMIZER_HOOK_CONTRACT = """\
+
+## Optimizer contract (neuralnet_optimizer) — follow EXACTLY
+
+`solve_challenge` and the training loop are HARNESS-OWNED and are NOT in your
+file. Do NOT define, call, or reference `solve_challenge` or `training_loop`.
+You implement ONLY the three optimizer hooks (plus `Hyperparameters`, `help`,
+your `OptimizerState`, and any helper functions / CUDA kernels). The hooks MUST
+be `pub fn` with these EXACT signatures — the harness calls them by name, so a
+signature/name/visibility change is a compile error:
+
+    pub fn optimizer_init_state(
+        seed: [u8; 32],
+        param_sizes: &[usize],
+        stream: Arc<CudaStream>,
+        module: Arc<CudaModule>,
+        prop: &cudaDeviceProp,
+    ) -> Result<Box<dyn OptimizerStateTrait>>
+
+    pub fn optimizer_query_at_params(
+        optimizer_state: &dyn OptimizerStateTrait,
+        model_params: &[CudaSlice<f32>],
+        epoch: usize,
+        train_loss: Option<f32>,
+        val_loss: Option<f32>,
+        stream: Arc<CudaStream>,
+        module: Arc<CudaModule>,
+        prop: &cudaDeviceProp,
+    ) -> Result<Option<Vec<CudaSlice<f32>>>>
+
+    pub fn optimizer_step(
+        optimizer_state: &mut dyn OptimizerStateTrait,
+        model_params: &[CudaSlice<f32>],
+        gradients: &[CudaSlice<f32>],
+        epoch: usize,
+        train_loss: Option<f32>,
+        val_loss: Option<f32>,
+        stream: Arc<CudaStream>,
+        module: Arc<CudaModule>,
+        prop: &cudaDeviceProp,
+    ) -> Result<Vec<CudaSlice<f32>>>
+
+State — define ONE struct that implements the provided `OptimizerStateTrait`
+(in scope via `use super::*;`) and derives Clone:
+
+    #[derive(Clone)]
+    struct OptimizerState { /* lr, step count, momentum/variance buffers, ... */ }
+    impl OptimizerStateTrait for OptimizerState {
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+        fn box_clone(&self) -> Box<dyn OptimizerStateTrait> { Box::new(self.clone()) }
+    }
+
+Recover it inside the hooks with
+`optimizer_state.as_any().downcast_ref::<OptimizerState>().unwrap()` (use
+`as_any_mut().downcast_mut::<OptimizerState>()` in `optimizer_step`).
+
+Semantics (get these right — they are the usual source of wrong output):
+  - optimizer_init_state: called ONCE before training. `param_sizes` has one
+    entry per parameter tensor, in order; size any buffers from it. Return the
+    boxed state. Do NOT use `seed` to reconstruct the dataset.
+  - optimizer_query_at_params: return `Ok(None)` for a standard optimizer.
+    Return `Some(modified_params)` only for lookahead / parameter-prediction
+    (the loop computes gradients at those params, then restores the originals).
+  - optimizer_step: return a Vec with ONE CudaSlice per parameter tensor — the
+    DELTA to ADD to the weights (the harness does `params += delta`), in the
+    SAME length and order as `gradients`. Example (SGD): `delta[i] = -lr*grad[i]`.
+    The harness applies the deltas and AUTOMATICALLY skips frozen layers — do
+    not special-case, read, or overwrite frozen layers, and never write into
+    `model_params` in place (they are copies; in-place writes do nothing and
+    are treated as tampering).
+  - You never see the test set; the harness computes the scored test loss.
+"""
+
+
+def _rust_rules_block(config: dict) -> str:
+    """The Rust guardrails to append to a code prompt — base rules always,
+    plus the detailed checklist when the agent opted in via
+    `detailed_prompts`."""
+    block = RUST_RULES
+    if config.get("detailed_prompts"):
+        block += "\n" + RUST_RULES_DETAILED
+    if config.get("is_gpu"):
+        block += CUDA_API_RULES
+    if _is_optimizer_hook_challenge(config):
+        block += _OPTIMIZER_HOOK_RULES
+    return block
+
+
+def build_code_system_prompt(
+    challenge_md: str, config: dict, *, role: str = "explorer",
+) -> str:
     challenge = config.get("challenge", "unknown")
     is_gpu = bool(config.get("is_gpu"))
     timeout = config.get("timeout", 30)
-    time_guidance = (
-        f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
-        f"after this hard deadline. Use a time-based loop (std::time::Instant + deadline) "
-        f"that runs until the budget is nearly exhausted, leaving a small margin (e.g. 2-5s) "
-        f"for cleanup. Call save_solution() early with your first feasible solution, then "
-        f"keep improving and re-saving — the last saved solution is evaluated. If no "
-        f"solution was saved when the deadline hits, the instance counts as infeasible."
-    )
+    opt_hooks = _is_optimizer_hook_challenge(config)
+    if opt_hooks:
+        time_guidance = (
+            f"\nPer-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and the best checkpoint it saved is "
+            f"evaluated. Keep your optimizer hooks fast so more epochs fit in the budget; "
+            f"the harness calls save_solution for you (you do NOT call it)."
+        )
+    else:
+        time_guidance = (
+            f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
+            f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
+            f"keep improving and re-saving — the last saved solution is evaluated. If no "
+            f"solution was saved when the deadline hits, the instance counts as infeasible."
+        )
+    # For exploiters, inject the localized-edit rule between the time budget and
+    # the output-format rules so it's read before they start writing.
+    if role == "exploiter":
+        time_guidance += "\n\n" + _role_guidance(role)
+    rust_rules = _rust_rules_block(config)
+    opt_contract = OPTIMIZER_HOOK_CONTRACT if opt_hooks else ""
+    if opt_hooks:
+        entry_rule = (
+            "- `solve_challenge` and the training loop are FIXED by the harness — do NOT "
+            "define or modify them. Implement ONLY the optimizer hooks: `pub fn "
+            "optimizer_init_state`, `pub fn optimizer_query_at_params`, `pub fn "
+            "optimizer_step` (keep them `pub fn` with their exact signatures), plus "
+            "`Hyperparameters`, `help`, and any helpers you need. See the optimizer "
+            "contract below for the exact signatures."
+        )
+    else:
+        entry_rule = "- `fn solve_challenge(` MUST appear in your Rust output — do NOT omit it."
     if is_gpu:
         return f"""\
 You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
@@ -287,12 +666,12 @@ You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
 
 IMPORTANT RULES:
 - `use super::*;` must remain as the first import in the Rust file.
-- `fn solve_challenge(` MUST appear in your Rust output — do NOT omit it.
+{entry_rule}
 - Return BOTH files: the complete Rust source AND the complete CUDA kernel source.
 - Separate them with a line containing exactly: // --- kernels.cu ---
 - The Rust file comes FIRST, then the separator, then the CUDA file.
 - No explanation, no markdown fences — just the two raw source files with the separator.
-- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu."""
+- Kernel function names in mod.rs (module.get_function("...")) must match the extern "C" __global__ function names in kernels.cu.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
     return f"""\
 You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
@@ -303,16 +682,29 @@ OUTPUT FORMAT (strict):
 Your response will be written verbatim to mod.rs and compiled. The very first
 character of your response MUST be `u` from `use super::*;`. No preamble, no
 prose, no markdown fences (```), no commentary before or after the code.
-`use super::*;` must remain as the first import."""
+`use super::*;` must remain as the first import.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
 
 
-def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
+def build_code_user_prompt(
+    state: dict, hypothesis: dict, config: dict, *, role: str = "explorer",
+) -> str:
     parts: list[str] = []
     is_gpu = bool(config.get("is_gpu"))
+    opt_hooks = _is_optimizer_hook_challenge(config)
 
     code = state.get("best_algorithm_code") or ""
-    bootstrap = is_stub_code(code)
-    if bootstrap:
+    # Exploiters never bootstrap (the driver guards stub + exploiter), so treat
+    # their starting code as real even on the off chance a stub slips through.
+    bootstrap = is_stub_code(code) and role != "exploiter"
+    if bootstrap and opt_hooks:
+        parts.append(
+            "Current algorithm (mod.rs) is a stub — replace it with a complete "
+            "implementation. `solve_challenge` and the training loop are harness-owned "
+            "(not in this file): implement only the optimizer hooks shown below, "
+            "keeping them `pub fn` with their exact signatures.\n"
+            f"```rust\n{code}\n```"
+        )
+    elif bootstrap:
         parts.append(
             "Current algorithm (mod.rs) is a stub — replace it with a complete "
             "implementation. Keep the exact `solve_challenge` signature shown "
@@ -331,15 +723,24 @@ def build_code_user_prompt(state: dict, hypothesis: dict, config: dict) -> str:
             parts.append(
                 "\nNo CUDA kernel file yet — write any custom GPU kernels you need."
             )
+        first_file_desc = (
+            "with the optimizer hooks" if opt_hooks else "with fn solve_challenge"
+        )
         parts.append(
             "\nReturn BOTH files separated by: // --- kernels.cu ---"
-            "\nThe Rust file (with fn solve_challenge) comes first, then the separator, then the CUDA file."
+            f"\nThe Rust file ({first_file_desc}) comes first, then the separator, then the CUDA file."
         )
 
     title = hypothesis.get("title", "")
     description = hypothesis.get("description", "")
     verb = "Implement this strategy" if bootstrap else "Apply this change"
     parts.append(f"\n{verb}:\n{title}\n{description}")
+
+    if role == "exploiter":
+        parts.append(
+            "\nApply ONE localized change only — preserve the rest of the code "
+            "and return the COMPLETE file (still starting with `use super::*;`)."
+        )
 
     return "\n".join(parts)
 
@@ -384,15 +785,92 @@ def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", time
     return "\n".join(parts)
 
 
+def distill_compiler_errors(raw: str, max_chars: int = 4000) -> str:
+    """Reduce raw cargo/rustc output to just the actionable error diagnostics.
+
+    The benchmark subprocess wraps the rustc output in swarm-config status
+    lines, cargo progress, warnings, and a Python traceback. A weaker model
+    fixes far better when handed only the `error[...]` blocks (with their
+    file:line and source context) than the full noisy stream. Falls back to the
+    raw tail if nothing rustc-shaped is found (e.g. an nvcc failure), so the
+    caller never ends up with an empty error section.
+    """
+    if not raw:
+        return raw
+    # Drop the Python traceback the benchmark wrapper appends — it's about
+    # benchmark.py, not the algorithm under repair.
+    head = raw.split("\nTraceback (most recent call last):", 1)[0]
+    # rustc prints each diagnostic as a blank-line-separated block. Keep a block
+    # only when it opens an `error` (skip `warning:`/`note:` blocks and the
+    # cargo progress/status preamble); always keep the `could not compile`
+    # summary. Lines like `   |` are non-blank, so a block stays intact.
+    blocks: list[list[str]] = []
+    cur: list[str] = []
+    for ln in head.splitlines():
+        if not ln.strip():
+            if cur:
+                blocks.append(cur)
+                cur = []
+            continue
+        cur.append(ln)
+    if cur:
+        blocks.append(cur)
+    kept: list[str] = []
+    for b in blocks:
+        if b[0].startswith("error") or "could not compile" in b[0]:
+            kept.extend(b)
+            kept.append("")
+    distilled = "\n".join(kept).strip()
+    if not distilled:
+        distilled = head.strip()[-max_chars:]
+    return distilled[:max_chars]
+
+
+def build_compile_fix_system_prompt(config: dict) -> str:
+    """Focused system prompt for the compile-fix retry.
+
+    Deliberately omits the challenge spec — making the file build is mechanical,
+    not a design task — and instructs a MINIMAL edit, which weaker models handle
+    far better than "return the complete rewritten file" (which tends to make
+    them echo the broken code unchanged). Still carries the Rust guardrails so
+    the fix doesn't re-introduce the dropped-import / external-crate failures.
+    """
+    is_gpu = bool(config.get("is_gpu"))
+    rust_rules = _rust_rules_block(config)
+    if is_gpu:
+        fmt = (
+            "Return BOTH complete files separated by a line containing exactly: "
+            "// --- kernels.cu --- (the Rust file first). No markdown fences, no prose."
+        )
+    else:
+        fmt = (
+            "Return the COMPLETE corrected mod.rs. The very first character of your "
+            "response MUST be `u` from `use super::*;`. No markdown fences, no prose."
+        )
+    return f"""\
+You are fixing Rust compile errors so the file builds. The code is otherwise
+intended to work — change ONLY what the listed errors require. Keep every other
+line, every `use` import, and the provided harness entry-point signatures
+(`solve_challenge`, or the `optimizer_*` hooks) unchanged.
+
+{fmt}{rust_rules}"""
+
+
 def build_compile_fix_prompt(
     code: str, kernel: str, compiler_errors: str, is_gpu: bool,
 ) -> str:
-    parts = [f"Current algorithm (mod.rs):\n```rust\n{code}\n```\n"]
+    errors = distill_compiler_errors(compiler_errors)
+    parts = [f"This Rust file (mod.rs) failed to compile:\n```rust\n{code}\n```\n"]
     if kernel:
-        parts.append(f"Current CUDA kernels (kernels.cu):\n```cuda\n{kernel}\n```\n")
+        parts.append(f"CUDA kernels (kernels.cu):\n```cuda\n{kernel}\n```\n")
     parts.append(
-        f"This code failed to compile. Here are the errors:\n```\n{compiler_errors}\n```\n\n"
-        "Fix the compile errors and return the complete source."
+        f"The compiler reported these errors — fix EXACTLY these and nothing else:\n"
+        f"```\n{errors}\n```\n\n"
+        "Make the smallest change that resolves every error above. Use the "
+        "file:line locations to find each problem. Do NOT rewrite the algorithm, "
+        "rename items, drop imports, or alter the provided harness entry-point "
+        "signatures (`solve_challenge`, or the `optimizer_*` hooks) — "
+        "the rest of the file already works."
     )
     if is_gpu:
         parts.append(
@@ -471,7 +949,9 @@ _META_DEFAULTS = {
 
 def parse_hypothesis(text: str) -> dict:
     meta = dict(_META_DEFAULTS)
-    for line in text.strip().splitlines():
+    # Tolerate a None/empty response (e.g. a provider that returned null
+    # content) — fall back to the defaults instead of crashing on .strip().
+    for line in (text or "").strip().splitlines():
         if ":" in line:
             key, _, value = line.partition(":")
             key = key.strip().lower().replace(" ", "_")
@@ -484,18 +964,23 @@ def parse_hypothesis(text: str) -> dict:
 # ── Agentic mode user prompt ───────────────────────────────────────
 
 
-def build_agentic_user_prompt(state: dict, config: dict) -> str:
+def build_agentic_user_prompt(
+    state: dict, config: dict, *, role: str = "explorer",
+    assigned_tag: str | None = None,
+) -> str:
     """Per-iteration prompt for tooled (agentic) Claude Code.
 
     Stable rules — file scope, hypothesis.json schema, cargo allowlist,
     solver constraints — live in CLAUDE.md. This prompt is just the
-    variable state the agent needs to decide what to try this iteration.
+    variable state the agent needs to decide what to try this iteration
+    (role and niche are per-iteration server state, so they live here, not
+    in CLAUDE.md).
     """
     parts: list[str] = []
     is_gpu = bool(config.get("is_gpu"))
     challenge = config.get("challenge", "unknown")
 
-    my_score = state.get("my_best_score")
+    my_score = state.get("current_trajectory_best")
     global_best = state.get("best_score")
     stagnation = state.get("my_runs_since_improvement", 0)
     runs = state.get("my_runs", 0)
@@ -508,6 +993,26 @@ def build_agentic_user_prompt(state: dict, config: dict) -> str:
         f"- Global best score: {global_best}\n"
         f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}"
     )
+
+    if role == "exploiter":
+        parts.append(
+            "\n## Role — exploiter (localized edit only)\n"
+            "Make ONE small, localized change to the existing algorithm. "
+            "Preserve its structure, control flow, and function set — do NOT "
+            "rewrite or restructure. If you'd touch more than ~15% of the "
+            "lines, narrow the change."
+        )
+    else:
+        parts.append(
+            "\n## Role — explorer\n"
+            "Bias toward novel, structurally-different strategies the swarm "
+            "hasn't tried; ambitious rewrites are welcome if they can leapfrog "
+            "the current best."
+        )
+
+    niche = _niche_nudge(role, assigned_tag)
+    if niche:
+        parts.append("\n## Assigned niche (suggestion)\n" + niche)
 
     reset = state.get("trajectory_reset")
     if reset:
@@ -527,8 +1032,20 @@ def build_agentic_user_prompt(state: dict, config: dict) -> str:
                 "Propose an initial strategy from scratch."
             )
 
-    bootstrap = is_stub_code(state.get("best_algorithm_code") or "")
-    if bootstrap:
+    # Exploiters are guarded out of the stub path by the driver, but gate the
+    # bootstrap block on role too so a stray stub never tells them to rewrite.
+    bootstrap = is_stub_code(state.get("best_algorithm_code") or "") and role != "exploiter"
+    if bootstrap and _is_optimizer_hook_challenge(config):
+        parts.append(
+            "\n## Bootstrap iteration\n"
+            "The algorithm on disk is a stub. `solve_challenge` and the training "
+            "loop are harness-owned and NOT in this file — do not add them. Write "
+            "complete implementations of the optimizer hooks (`optimizer_init_state`, "
+            "`optimizer_query_at_params`, `optimizer_step`) from scratch, keeping them "
+            "`pub fn` with their exact signatures. Read the stub first to lock in those "
+            "signatures before writing anything."
+        )
+    elif bootstrap:
         parts.append(
             "\n## Bootstrap iteration\n"
             "The algorithm on disk is a stub (`unimplemented!()`). Write a "

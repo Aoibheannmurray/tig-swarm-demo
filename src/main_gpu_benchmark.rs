@@ -52,7 +52,7 @@ macro_rules! append_viz_data {
                 let connectivity_metric = inst.evaluate_connectivity_metric(
                     sol, $module.clone(), $stream.clone(), $prop,
                 ).ok();
-                $json["hypergraph_data"] = serde_json::json!({
+                let mut hg = serde_json::json!({
                     "num_nodes": inst.num_nodes,
                     "num_parts": inst.num_parts,
                     "max_part_size": inst.max_part_size,
@@ -60,6 +60,16 @@ macro_rules! append_viz_data {
                     "connectivity_metric": connectivity_metric,
                     "baseline_connectivity_metric": inst.greedy_baseline_connectivity_metric,
                 });
+                // The dashboard panel draws nothing without `galaxy_view`; add
+                // it (plus `cuts_between` for the CUTS stat) when we can build
+                // the sampled layout from the solved partition.
+                if let Some((galaxy, cuts)) =
+                    build_hypergraph_viz(inst, sol, $stream.clone())
+                {
+                    hg["galaxy_view"] = galaxy;
+                    hg["cuts_between"] = cuts;
+                }
+                $json["hypergraph_data"] = hg;
             }
             #[cfg(feature = "neuralnet_optimizer")]
             "neuralnet_optimizer" => {
@@ -87,6 +97,19 @@ macro_rules! append_viz_data {
                     nf * (1.0 - quality_ratio)
                 });
 
+                // Downsampled per-epoch training history (DASHBOARD_PLAN.md
+                // Item 5 P1). The dashboard draws the animated loss curve when
+                // `loss_curve` is present; `val_loss_curve` is only meaningful
+                // when it diverges from training (validation split > 0), so we
+                // drop it when it just mirrors the training curve.
+                let loss_curve = &sol.train_losses;
+                let val_loss_curve: Option<&Vec<f32>> =
+                    if sol.validation_losses != sol.train_losses {
+                        Some(&sol.validation_losses)
+                    } else {
+                        None
+                    };
+
                 $json["neuralnet_data"] = serde_json::json!({
                     "epochs_used": sol.epochs_used,
                     "max_epochs": inst.max_epochs,
@@ -94,6 +117,8 @@ macro_rules! append_viz_data {
                     "total_params": total_params,
                     "noise_floor": noise_floor,
                     "model_loss": model_loss,
+                    "loss_curve": loss_curve,
+                    "val_loss_curve": val_loss_curve,
                 });
             }
             #[cfg(feature = "vector_search")]
@@ -113,6 +138,204 @@ macro_rules! append_viz_data {
             _ => {}
         }
     };
+}
+
+/// Build the hypergraph dashboard's `galaxy_view` payload (and the
+/// `cuts_between` partition matrix that drives the CUTS stat) from a solved
+/// instance.
+///
+/// The dashboard renders nothing unless it receives a `galaxy_view`: a sampled
+/// spatial layout of up to 8 partition clusters (the palette has 8 colours),
+/// ~2k nodes scattered around their cluster centroid, and a sample of cut
+/// hyperedges drawn as ribbons between them. The full graph (up to 200k nodes)
+/// is far too large to ship or draw, so we down-sample deterministically.
+///
+/// Pure host-side: we copy the hyperedge CSR arrays back from the device once
+/// (this runs a single time per instance, after solving) and lay everything
+/// out on the CPU — no new kernels.
+#[cfg(feature = "hypergraph")]
+fn build_hypergraph_viz(
+    inst: &challenges::hypergraph::Challenge,
+    sol: &challenges::hypergraph::Solution,
+    stream: std::sync::Arc<cudarc::driver::CudaStream>,
+) -> Option<(serde_json::Value, serde_json::Value)> {
+    use std::f64::consts::PI;
+
+    // Round coordinates to 1 decimal: sub-pixel precision is invisible at the
+    // panel's scale, and trimming the digits keeps the published payload small
+    // (a prior proxy/body-size limit silently dropped oversized solution_data).
+    let r1 = |v: f64| (v * 10.0).round() / 10.0;
+
+    const MAX_SHOWN_PARTS: usize = 8; // matches the dashboard PALETTE length
+    const MAX_NODES: usize = 2000;
+    const MAX_CUT_EDGES: usize = 300;
+    const MAX_EDGE_MEMBERS: usize = 8;
+    const WIDTH: f64 = 600.0;
+    const HEIGHT: f64 = 410.0;
+
+    let num_nodes = inst.num_nodes as usize;
+    let num_parts = inst.num_parts as usize;
+    let partition = &sol.partition;
+    if num_nodes == 0 || num_parts == 0 || partition.len() != num_nodes {
+        return None;
+    }
+
+    // Partition sizes, then pick the largest few to show (palette-capped).
+    let mut sizes = vec![0u32; num_parts];
+    for &p in partition {
+        if (p as usize) < num_parts {
+            sizes[p as usize] += 1;
+        }
+    }
+    let mut order: Vec<usize> = (0..num_parts).filter(|&p| sizes[p] > 0).collect();
+    order.sort_by(|&a, &b| sizes[b].cmp(&sizes[a]).then(a.cmp(&b)));
+    let shown: Vec<usize> = order.into_iter().take(MAX_SHOWN_PARTS).collect();
+    if shown.is_empty() {
+        return None;
+    }
+    let k = shown.len();
+
+    let mut part_to_slot = vec![-1i32; num_parts];
+    for (slot, &p) in shown.iter().enumerate() {
+        part_to_slot[p] = slot as i32;
+    }
+    let shown_partitions: Vec<u32> = shown.iter().map(|&p| p as u32).collect();
+    let shown_sizes: Vec<u32> = shown.iter().map(|&p| sizes[p]).collect();
+    let over_cap: Vec<bool> = shown_sizes.iter().map(|&sz| sz > inst.max_part_size).collect();
+
+    // Cluster centroids on a ring; one cluster sits dead-centre.
+    let (cx0, cy0) = (WIDTH / 2.0, HEIGHT / 2.0);
+    let ring_r = WIDTH.min(HEIGHT) * 0.33;
+    let cluster_r = if k <= 1 {
+        WIDTH.min(HEIGHT) * 0.30
+    } else {
+        (ring_r * (PI / k as f64).sin() * 0.9).min(HEIGHT * 0.22)
+    };
+    let centroids: Vec<[f64; 2]> = (0..k)
+        .map(|s| {
+            if k == 1 {
+                [cx0, cy0]
+            } else {
+                let ang = 2.0 * PI * (s as f64) / (k as f64) - PI / 2.0;
+                [r1(cx0 + ring_r * ang.cos()), r1(cy0 + ring_r * ang.sin())]
+            }
+        })
+        .collect();
+
+    // Down-sample nodes that belong to a shown partition, then place each one
+    // at a deterministic point inside its cluster disk (hash-jittered so the
+    // layout is stable across re-renders but not a rigid grid).
+    let candidates: Vec<usize> = (0..num_nodes)
+        .filter(|&n| part_to_slot[partition[n] as usize] >= 0)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let stride = (candidates.len() + MAX_NODES - 1) / MAX_NODES;
+    let sampled: Vec<usize> = candidates.iter().step_by(stride).copied().collect();
+    let mut id_to_idx = vec![-1i32; num_nodes];
+    for (i, &nid) in sampled.iter().enumerate() {
+        id_to_idx[nid] = i as i32;
+    }
+
+    let mut nodes_json: Vec<[f64; 3]> = Vec::with_capacity(sampled.len());
+    for &nid in &sampled {
+        let slot = part_to_slot[partition[nid] as usize];
+        let [cx, cy] = centroids[slot as usize];
+        // splitmix64-style hash → two uniforms → uniform point in a disk.
+        let mut h = (nid as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(0xD1B5_4A32_D192_ED03);
+        h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^= h >> 31;
+        let u1 = ((h & 0xFF_FFFF) as f64) / (0x100_0000 as f64);
+        let u2 = (((h >> 24) & 0xFF_FFFF) as f64) / (0x100_0000 as f64);
+        let r = cluster_r * u1.sqrt();
+        let theta = 2.0 * PI * u2;
+        nodes_json.push([slot as f64, r1(cx + r * theta.cos()), r1(cy + r * theta.sin())]);
+    }
+
+    // Copy the hyperedge CSR arrays back from the device for cut analysis.
+    let offsets: Vec<i32> = stream.memcpy_dtov(&inst.d_hyperedge_offsets).ok()?;
+    let hnodes: Vec<i32> = stream.memcpy_dtov(&inst.d_hyperedge_nodes).ok()?;
+    let _ = stream.synchronize();
+    let num_he = inst.num_hyperedges as usize;
+    if offsets.len() < num_he + 1 {
+        return None;
+    }
+
+    // cuts_between[i][j]: number of hyperedges that touch both partition i and
+    // partition j (full graph, all partitions). The dashboard sums the upper
+    // triangle for the CUTS stat. cut_edges: a sample of cut hyperedges among
+    // the *shown* partitions, as indices into nodes_json, for the ribbons.
+    let mut cuts_between = vec![vec![0i64; num_parts]; num_parts];
+    let mut cut_edges: Vec<Vec<i32>> = Vec::new();
+    let mut parts_buf: Vec<usize> = Vec::with_capacity(MAX_EDGE_MEMBERS);
+    for e in 0..num_he {
+        let start = offsets[e] as usize;
+        let end = offsets[e + 1] as usize;
+        if end <= start || end > hnodes.len() {
+            continue;
+        }
+
+        // Distinct partitions this hyperedge spans → pairwise cut counts.
+        parts_buf.clear();
+        for &raw in &hnodes[start..end] {
+            let nid = raw as usize;
+            if nid >= num_nodes {
+                continue;
+            }
+            let p = partition[nid] as usize;
+            if p < num_parts && !parts_buf.contains(&p) {
+                parts_buf.push(p);
+            }
+        }
+        for i in 0..parts_buf.len() {
+            for j in (i + 1)..parts_buf.len() {
+                let (a, b) = (parts_buf[i], parts_buf[j]);
+                cuts_between[a][b] += 1;
+                cuts_between[b][a] += 1;
+            }
+        }
+
+        // Ribbon sample: only sampled members, only if the edge spans ≥2 shown
+        // partitions (so the ribbon visibly crosses clusters).
+        if cut_edges.len() < MAX_CUT_EDGES {
+            let mut members: Vec<i32> = Vec::new();
+            let mut slot_mask = 0u16;
+            for &raw in &hnodes[start..end] {
+                let nid = raw as usize;
+                if nid >= num_nodes {
+                    continue;
+                }
+                let idx = id_to_idx[nid];
+                if idx < 0 {
+                    continue;
+                }
+                slot_mask |= 1u16 << part_to_slot[partition[nid] as usize] as u16;
+                if members.len() < MAX_EDGE_MEMBERS {
+                    members.push(idx);
+                }
+            }
+            if members.len() >= 2 && slot_mask.count_ones() >= 2 {
+                cut_edges.push(members);
+            }
+        }
+    }
+
+    let galaxy = serde_json::json!({
+        "shown_partitions": shown_partitions,
+        "shown_sizes": shown_sizes,
+        "over_cap": over_cap,
+        "centroids": centroids,
+        "cluster_r": r1(cluster_r),
+        "nodes": nodes_json,
+        "cut_edges": cut_edges,
+        "width": WIDTH,
+        "height": HEIGHT,
+    });
+    Some((galaxy, serde_json::json!(cuts_between)))
 }
 
 fn run_instance(
@@ -165,7 +388,7 @@ fn run_instance(
             let start = Instant::now();
             let solver_result = std::thread::scope(|s| {
                 let handle = s.spawn(|| {
-                    challenges::$c::algorithm::solve_challenge(
+                    challenges::$c::solve_challenge(
                         &instance,
                         &save_solution,
                         &None,
@@ -205,7 +428,7 @@ fn run_instance(
                                 "elapsed": elapsed,
                             });
                             append_viz_data!(json, challenge_name, instance, solution,
-                                            module, stream, prop, quality);
+                                            module, stream, &prop, quality);
                             println!("{}", json);
                         }
                         Err(e) => {

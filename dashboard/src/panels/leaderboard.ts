@@ -20,6 +20,11 @@ type SortKey =
   | "inspiration_count";
 type SortDir = "asc" | "desc";
 
+// How many agents the leaderboard renders. The server returns every agent
+// with a published experiment; we cap the rendered rows and let the list
+// scroll (see .leaderboard-list CSS) rather than grow the page unbounded.
+const MAX_ROWS = 50;
+
 const DEFAULT_DIR: Record<SortKey, SortDir> = {
   current_score: "desc",
   best_ever_score: "desc",
@@ -127,7 +132,7 @@ export class LeaderboardPanel implements Panel {
       prevValues.set(id, v === "" || v === undefined ? null : Number(v));
     });
 
-    const sorted = this.sortEntries(this.currentEntries).slice(0, 10);
+    const sorted = this.sortEntries(this.currentEntries).slice(0, MAX_ROWS);
 
     this.list.innerHTML = "";
     sorted.forEach((entry, i) => {

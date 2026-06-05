@@ -5,13 +5,13 @@ contributor set up their machine to join an existing TIG swarm. The user has
 probably pasted a short snippet like:
 
 ```
-git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python run.py
+git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python3 run.py
 server_url:     https://…railway.app
 username:       <their-handle>
 swarm_password: <hex string from the swarm host>
 ```
 
-Your job is to get `python run.py` running cleanly. Nothing more.
+Your job is to get `python3 run.py` running cleanly. Nothing more.
 
 `run.py` is the single contributor entry point. It orchestrates four phases
 in one command:
@@ -55,6 +55,9 @@ runtime agent's job, not yours.
 - **Python 3** — for the wizard and fleet driver. Stdlib only; **no pip
   install needed**. Do not run `pip install -r requirements.txt`. That
   `requirements.txt` is for the benchmark Docker image, not the host.
+  Examples use `python3` (macOS Homebrew and most Linux have no bare
+  `python`). On Windows use `python`. Child processes are spawned with
+  `sys.executable`, so whichever interpreter starts `run.py` is reused.
 - **Docker** — benchmarks run inside a container. The user needs the
   `docker` CLI on PATH; the daemon being stopped is fine (`run_fleet.py`
   auto-launches Docker Desktop / OrbStack via `scripts/benchmark.py`).
@@ -65,7 +68,7 @@ and often fails on managed machines.
 
 ## If Docker is missing
 
-`python run.py` preflight-checks for `docker` on PATH and exits with a link
+`python3 run.py` preflight-checks for `docker` on PATH and exits with a link
 to Docker Desktop. **Send the user to that link.** Do *not* try to install
 Docker yourself via Homebrew / apt / dnf:
 
@@ -76,7 +79,7 @@ Docker yourself via Homebrew / apt / dnf:
   grant from a coding-assistant shell.
 
 After the user installs Docker Desktop and finishes its first-run setup,
-resume from `python run.py`.
+resume from `python3 run.py`.
 
 ## The wizard (invoked by `run.py`, also runnable as `scripts/init_fleet.py`)
 
@@ -87,8 +90,18 @@ It prompts for, in order:
 3. `swarm_password`
 4. LLM provider (Anthropic / OpenAI / Google / Venice / OpenRouter /
    `claude` CLI / `codex` CLI — pick what the user has credentials for)
-5. Model (Enter accepts the per-provider default)
+5. Model (Enter accepts the per-provider default). To see what model IDs a
+   provider offers, run `python scripts/list_models.py <provider>` — it queries
+   the provider's live models endpoint (reads the API key from the env; the
+   CLI providers have no endpoint and accept any ID their CLI knows).
 6. Fleet size (number of parallel agents — default 1)
+7. Compute backend — **C3 cloud GPU (default)** or local Docker. GPU swarm
+   agents default to C3, so this step defaults to `c3`. Picking `c3` then asks
+   for the GPU profile (`l40` default / `a100` / `h100`) and the C3 API key.
+   The key, when supplied, is written as a fleet-wide top-level `c3_api_key`;
+   leave it blank to fall back to the `C3_API_KEY` env var or an existing
+   `c3 login` session. Providers that don't support C3 skip this step and stay
+   local.
 
 On a **re-run** against an existing `fleet.config.json` the wizard adds a
 `Keep these connection settings? [Y/n]` step right before (1) — Enter
@@ -100,13 +113,23 @@ For non-interactive setup on a fresh clone (no existing config) you can
 pipe answers via stdin, e.g.:
 
 ```bash
-printf '%s\n' "$SERVER_URL" "$USERNAME" "$SWARM_PASSWORD" "1" "" "1" | python scripts/init_fleet.py
+printf '%s\n' \
+  "server_url: $SERVER_URL" "username: $USERNAME" "swarm_password: $SWARM_PASSWORD" "" \
+  "" "" "1" "" "" "$C3_API_KEY" | python3 scripts/init_fleet.py
 ```
 
-(Provider/model defaults pick Anthropic + `claude-opus-4-7`. Adjust the
-sequence if the user wants a different provider — see the prompts in
-`scripts/init_fleet.py`.) On a re-run, add a leading `"y"` for the keep-
-settings prompt and drop the three connection lines.
+The connection triplet must be fed as `key: value` lines (the wizard parses
+them out of the paste block); the lone `""` after them ends the paste. The
+next `""` `""` `1` accept the default provider/model and set fleet size, and
+the final three fields drive the compute step: the first `""` accepts the
+default **C3** backend, the second `""` accepts the default `l40` GPU profile,
+and `$C3_API_KEY` is the C3 key (leave it empty to defer to the `C3_API_KEY`
+env var / `c3 login`). To run benchmarks locally instead, replace that last
+block with a single `"2"` (the local-Docker choice) and drop the GPU/key
+lines. Adjust the provider/model fields if the user wants a non-default
+provider — see the prompts in `scripts/init_fleet.py`. On a re-run, add a
+leading `"y"` for the keep-settings prompt and drop the three connection
+lines.
 
 **Fleet size.** The trailing `"1"` in that pipe is the *number of agents to
 spawn in parallel* — not a Yes/No. Default to 1 unless the user explicitly
@@ -118,16 +141,17 @@ a new unique `name` — no need to re-run the wizard.
 
 The wizard writes `fleet.config.json` and prints a one-line summary —
 `wrote fleet.config.json — N agent(s): <names>` — plus an inline reminder
-only when the chosen provider needs an API key that isn't yet exported
-(`reminder: export ANTHROPIC_API_KEY=<your-key> before launching`). CLI-auth
-providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) skip the
-reminder; they use the CLI's own login. **Never write API keys into
-`fleet.config.json` yourself.**
+only when the chosen provider needs an API key that isn't yet set
+(`reminder: export ANTHROPIC_API_KEY=<your-key> before launching` on
+macOS/Linux; on Windows the reminder prints the `set …` / `$env:…` form
+instead). CLI-auth providers (`claude-code`, `claude-code-agentic`,
+`codex-agentic`) skip the reminder; they use the CLI's own login. **Never
+write API keys into `fleet.config.json` yourself.**
 
 ## Launching
 
 ```bash
-python run.py
+python3 run.py
 ```
 
 `run.py` reuses the existing `fleet.config.json` after asking
@@ -142,8 +166,8 @@ Useful fleet management (still on `scripts/run_fleet.py`, since `run.py`
 doesn't forward management flags):
 
 ```bash
-python scripts/run_fleet.py --list     # show agent names, ids, status
-python scripts/run_fleet.py --clean    # remove every worktree + branch
+python3 scripts/run_fleet.py --list     # show agent names, ids, status
+python3 scripts/run_fleet.py --clean    # remove every worktree + branch
 ```
 
 ## Tacit-knowledge from a coding-agent session
@@ -174,15 +198,30 @@ followed by one bullet per insight. Agents will also append their own
 If the contributor is on Windows, walk through these *before* debugging anything
 else — they're the failure modes our docs have actually been bitten by:
 
-- **Docker Desktop requires WSL 2.** First-run Docker on Windows needs WSL 2 +
-  Virtual Machine Platform enabled (admin PowerShell: `wsl --install`, reboot,
-  `wsl --update`). Without this, the Docker daemon never starts and benchmarks
-  hang forever.
+- **Docker Desktop install order (the #1 beta pain).** Walk the contributor
+  through this exact sequence — skipping a step is what caused the "benchmarks
+  hang forever" reports:
+  1. **Enable WSL 2 first.** Admin PowerShell: `wsl --install`, **reboot**,
+     then `wsl --update`. This also enables the Virtual Machine Platform
+     feature. If WSL 2 isn't in place, the Docker daemon never starts and
+     benchmarks hang forever — this is the single most common failure.
+  2. **Install Docker Desktop** from
+     https://www.docker.com/products/docker-desktop/ and launch it once so it
+     finishes first-run setup.
+  3. **Confirm the daemon is up:** `docker info` should succeed (not just
+     `docker --version`, which works even when the daemon is stopped). The
+     wizard's preflight only checks `docker` is on PATH, so a stopped daemon
+     still passes preflight but stalls at the first benchmark.
+  4. **Check free disk space.** The benchmark image + cargo/Docker build cache
+     want **~15–20 GB free**. The wizard now prints a low-disk warning under
+     ~15 GB; if a build dies with "no space left on device", run
+     `docker system prune` and free up the drive. Docker Desktop's disk image
+     also grows over time — reclaim it via Settings → Resources if needed.
 - **`fleet.config.json` BOM.** PowerShell `Set-Content` writes UTF-8 *with* a
   BOM by default. The loader now reads via `utf-8-sig` so this should no longer
   break things, but the safe write idiom is
   `$json | Out-File -Encoding utf8NoBOM fleet.config.json`. Better still: use
-  `python run.py` (which calls the wizard).
+  `python3 run.py` (which calls the wizard).
 - **Codex CLI: prefer the npm install.** The Windows Store alias for `codex`
   (`%LOCALAPPDATA%\Microsoft\WindowsApps\codex.exe`) commonly returns
   `Access is denied` when invoked from a subprocess. Have the user run
@@ -205,7 +244,7 @@ else — they're the failure modes our docs have actually been bitten by:
   a model name.
 - **Agentic providers look frozen.** `claude-code-agentic` and `codex-agentic`
   run with `capture_output=True`, so there is no live stdout while the agent
-  is thinking — up to `--agentic-timeout` seconds (default 900). The
+  is thinking — up to `--agentic-timeout` seconds (default 1800). The
   background heartbeat keeps the dashboard happy; Docker stays idle until the
   agent returns and `[BENCH]` starts. If the contributor reports "the terminal
   is stuck," confirm an `[AGENTIC] Launching …` line is already on screen and
@@ -236,15 +275,18 @@ else — they're the failure modes our docs have actually been bitten by:
 
 - **`fleet.config.json already exists. Overwrite?`**
   → They've run the wizard before. Either answer `y` or run with `--force`.
-  (When the wizard is invoked through `python run.py`, this is handled by
+  (When the wizard is invoked through `python3 run.py`, this is handled by
   the `Update your fleet config? (y/N)` prompt up front.)
 
 - **`Agent <name>: environment variable ANTHROPIC_API_KEY is unset or empty.`**
-  → The contributor picked an API-key provider but never exported the key.
-  Tell them to run the suggested `export …=<your-key>` command from the
-  error and re-run `python run.py`. CLI-auth providers (`claude-code`,
-  `claude-code-agentic`, `codex-agentic`) never produce this error — they
-  log in through their CLI instead.
+  → The contributor picked an API-key provider but never set the key. Tell
+  them to run the suggested set-the-env-var command from the error and re-run
+  `python3 run.py`. **Use the platform-correct form:** macOS/Linux
+  `export KEY=<your-key>`; Windows `cmd` `set KEY=<your-key>` (no quotes,
+  no `export`); Windows PowerShell `$env:KEY="<your-key>"`. The env var must
+  be set in the *same* shell session that launches `python3 run.py`. CLI-auth
+  providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) never
+  produce this error — they log in through their CLI instead.
 
 ## What you should *not* do
 

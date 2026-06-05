@@ -1,0 +1,9 @@
+target/
+datasets/
+node_modules/
+*.db
+*.db-journal
+.git/
+.railway/
+__pycache__/
+dashboard/dist/

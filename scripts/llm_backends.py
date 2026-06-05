@@ -88,6 +88,10 @@ _PRICING: list[tuple[str, float, float]] = [
     ("gemini-2.5-flash", 0.15, 0.60),
     ("gemini-2.0", 0.10, 0.40),
     ("gemini-1.5", 1.25, 5.0),
+    # OpenRouter list price for qwen3-coder (480B A35B). Routed providers vary,
+    # so this is a representative estimate, not a billed figure.
+    ("qwen3-coder", 0.22, 1.80),
+    ("qwen", 0.22, 1.80),
 ]
 
 
@@ -124,6 +128,82 @@ def _post_json(url: str, body: dict, headers: dict) -> dict:
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:800]
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
+
+
+def _get_json(url: str, headers: dict) -> dict:
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:800]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from None
+
+
+# CLI-auth providers have no HTTP models endpoint to query — they accept
+# whatever model IDs their CLI knows about.
+_CLI_PROVIDERS = ("claude-code", "claude-code-agentic", "codex-agentic")
+
+
+def list_models(
+    provider: str, api_key: str | None = None, api_base: str | None = None,
+) -> list[str]:
+    """Return a sorted list of model IDs `provider` exposes via its API.
+
+    Hits the provider's `/models` (or Gemini's `models`) endpoint live, so
+    the result is whatever the account actually has access to today. Most
+    providers require `api_key`; OpenRouter's catalog is public so the key
+    is optional there.
+
+    Raises ``ValueError`` for the CLI-auth providers (no endpoint exists) and
+    ``RuntimeError`` (with the HTTP status / body) on an API error — typically
+    a missing or invalid key."""
+    if provider in _CLI_PROVIDERS:
+        raise ValueError(
+            f"{provider} authenticates through its own CLI, not an HTTP API, "
+            "so there is no models endpoint to query. It accepts any model ID "
+            "the CLI knows — for the Claude CLI see `claude --help`; for the "
+            "Codex CLI accept the wizard's empty default and it picks its own."
+        )
+
+    if provider == "google":
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models"
+            f"?key={api_key or ''}&pageSize=1000"
+        )
+        data = _get_json(url, {})
+        ids: list[str] = []
+        for m in data.get("models", []):
+            # Only models that can answer a generateContent call are usable as
+            # an agent backend — skip embedding / tuning-only entries.
+            if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+                continue
+            name = m.get("name", "")
+            ids.append(name[len("models/"):] if name.startswith("models/") else name)
+        return sorted(set(ids))
+
+    if provider == "anthropic":
+        data = _get_json(
+            "https://api.anthropic.com/v1/models?limit=1000",
+            {"x-api-key": api_key or "", "anthropic-version": "2023-06-01"},
+        )
+        return sorted(m["id"] for m in data.get("data", []) if m.get("id"))
+
+    # OpenAI-compatible providers (openai, venice, openrouter, plus any
+    # OpenAI-compatible gateway passed via api_base) all share the /models shape.
+    if provider == "venice":
+        base = api_base or VENICE_API_BASE
+    elif provider == "openrouter":
+        base = api_base or OPENROUTER_API_BASE
+    elif provider == "openai":
+        base = api_base or "https://api.openai.com"
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+    base = base.rstrip("/")
+    url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    data = _get_json(url, headers)
+    return sorted(m.get("id", "") for m in data.get("data", []) if m.get("id"))
 
 
 def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> tuple[str, Usage]:
@@ -196,8 +276,34 @@ def call_openai(
             "Authorization": f"Bearer {api_key}",
         },
     )
+    # OpenRouter (and some gateways) return provider/moderation errors in the
+    # body with HTTP 200 rather than a 4xx/5xx, so _post_json doesn't raise.
+    # Surface them as a real error instead of silently treating it as empty.
+    if isinstance(data.get("error"), dict):
+        err = data["error"]
+        raise RuntimeError(f"provider error {err.get('code', '?')}: {err.get('message', err)}")
+
     usage = data.get("usage") or {}
-    return data["choices"][0]["message"]["content"], {
+    choice = data["choices"][0]
+    msg = choice.get("message") or {}
+    content = msg.get("content") or ""
+    if not content.strip():
+        # Empty completion with no error. Three common culprits, and
+        # finish_reason tells them apart, so include it (plus a hint about a
+        # reasoning-only reply) rather than swallowing a bare "". The caller
+        # treats this like any transport failure: log it and retry.
+        #   - "length": ran out of output budget (often a reasoning model that
+        #     spent the whole cap thinking — note if a `reasoning` field exists)
+        #   - "content_filter": the provider's moderation blocked the output
+        #   - "stop"/None: the routed upstream returned an empty body (flaky)
+        reason = choice.get("finish_reason") or choice.get("native_finish_reason") or "unknown"
+        had_reasoning = bool((msg.get("reasoning") or "").strip())
+        detail = f"finish_reason={reason}"
+        if had_reasoning:
+            detail += " (model emitted reasoning but no answer — likely hit the output-token cap)"
+        raise RuntimeError(f"model returned an empty completion ({detail})")
+
+    return content, {
         "input_tokens": usage.get("prompt_tokens", 0),
         "output_tokens": usage.get("completion_tokens", 0),
     }

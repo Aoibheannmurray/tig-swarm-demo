@@ -121,7 +121,7 @@ def main():
             f"| {tid[:8]} | {status} "
             f"| {fmt_score(meta.get('current_score'))} "
             f"| {meta.get('num_edits', len(exps))} "
-            f"| {meta.get('num_improvements', sum(1 for e in exps if e.get('beats_own_best')))} "
+            f"| {meta.get('num_improvements', sum(1 for e in exps if e.get('beats_trajectory_best')))} "
             f"| {', '.join(agents)} |"
         )
     lines.append(f"")
@@ -153,7 +153,7 @@ def main():
         prev_code = ""
         for i, e in enumerate(exps, 1):
             score = e.get("score")
-            is_best = e.get("beats_own_best", False)
+            is_best = e.get("beats_trajectory_best", False)
             feasible = e.get("feasible", True)
             tag = e.get("strategy_tag", "?")
             title = e.get("title") or "untitled"

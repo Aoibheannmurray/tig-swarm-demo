@@ -88,6 +88,7 @@ function constructPanels() {
   initPanel(DiversityPanel, "panel-diversity");
   feedPanel = initPanel(FeedPanel, "panel-feed");
   feedPanel.setNameLookup(lookupAgentName);
+  feedPanel.enableLoadOlder(apiUrl, getViewedChallenge);
   initPanel(LeaderboardPanel, "panel-leaderboard");
 }
 
@@ -292,8 +293,8 @@ async function loadInitialState(apiUrl: string, challenge: string) {
           feasible: exp.feasible !== false,
           improvement_pct: exp.improvement_pct || 0,
           delta_vs_best_pct: exp.delta_vs_best_pct ?? null,
-          delta_vs_own_best_pct: exp.delta_vs_own_best_pct ?? null,
-          beats_own_best: exp.beats_own_best === true,
+          delta_vs_trajectory_best_pct: exp.delta_vs_trajectory_best_pct ?? null,
+          beats_trajectory_best: exp.beats_trajectory_best === true,
           num_instances: state.num_instances || 1,
           is_new_best: exp.is_new_best === true,
           hypothesis_id: null,

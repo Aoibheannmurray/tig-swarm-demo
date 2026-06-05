@@ -71,13 +71,28 @@ for _stream in (sys.stdout, sys.stderr):
 _AGENT_CONFIG_KEYS = (
     "provider", "model", "api_base", "compute",
     "c3_hardware", "c3_time", "c3_cloud_provider", "c3_no_build",
+    # Per-agent C3 API key (raw value). Omit to inherit the top-level fleet
+    # `c3_api_key`, the C3_API_KEY env var, or the `c3 login` session — in that
+    # order. Lets each agent bill C3 to a different key without separate fleets.
+    "c3_api_key",
     # Honor hand-set agent_id / agent_name in a fleet entry — useful if a user
     # wants to point a new clone at an existing dashboard agent without
     # re-registering. Normal flow: run_loop.py writes these after the first
     # /api/agents/register call so restarts resume the same identity.
     "agent_id", "agent_name",
     "log_prompts",
+    # Opt-in stricter Rust prompt for smaller/cheaper models (prompts.py).
+    "detailed_prompts",
+    # Contributor-owned behavior role (explorer/exploiter). Materialized at
+    # spawn AND re-synced live by the monitor loop so editing it in
+    # fleet.config.json takes effect on the agent's next iteration.
+    "role",
 )
+
+# Fleet-entry fields the monitor loop re-syncs into a running worktree's
+# agent.config.json when they change. Only role is hot-reloadable today —
+# identity/provider/model are fixed for the life of a process.
+_HOT_RELOAD_KEYS = ("role",)
 
 _PROVIDER_TO_DEFAULT_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -162,6 +177,15 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
         sys.exit("fleet.config.json has duplicate agent names.")
 
     fleet_tacit = data.get("tacit_knowledge") or None
+
+    # Top-level `c3_api_key` is a fleet-wide default: every agent that doesn't
+    # set its own inherits it. setdefault() (not overwrite) keeps per-agent keys
+    # winning. Agents with neither fall through to C3_API_KEY / `c3 login`.
+    fleet_c3_api_key = data.get("c3_api_key") or None
+    if fleet_c3_api_key:
+        for entry in agents:
+            entry.setdefault("c3_api_key", fleet_c3_api_key)
+
     return server_url, username, swarm_password, agents, fleet_tacit
 
 
@@ -429,28 +453,128 @@ def _remove_cargo_volumes(agent_name: str) -> None:
         # because most agents only used one of cpu/gpu (or none yet).
 
 
+def _clean_one(name: str, docker_available: bool) -> None:
+    """Remove a single agent's worktree, fleet branch, and cargo volumes."""
+    path = WORKTREES_DIR / name
+    branch = f"fleet/{name}"
+    if path.exists():
+        try:
+            _git(["worktree", "remove", "--force", str(path)])
+            print(f"  removed worktree {path}")
+        except RuntimeError as e:
+            # Not a registered worktree, or git refused — fall back to a plain
+            # directory delete so a half-removed/orphaned dir doesn't linger.
+            try:
+                shutil.rmtree(path)
+                print(f"  removed orphaned directory {path}")
+            except OSError as oe:
+                print(f"  could not remove {path}: {e}; rmtree also failed: {oe}",
+                      file=sys.stderr)
+    if _branch_exists(branch):
+        try:
+            _git(["branch", "-D", branch])
+            print(f"  deleted branch {branch}")
+        except RuntimeError as e:
+            print(f"  could not delete branch {branch}: {e}", file=sys.stderr)
+    if docker_available:
+        _remove_cargo_volumes(name)
+
+
+def _describe_exit(rc: int | None) -> str:
+    """Human-readable process exit description.
+
+    A negative returncode means the child was killed by signal -rc. SIGTERM/
+    SIGINT here is the fleet's own clean teardown, not a crash — say so,
+    because a bare "exited with code -15" reads like a fault to contributors.
+    """
+    if rc is not None and rc < 0:
+        try:
+            sig = signal.Signals(-rc).name
+        except ValueError:
+            sig = f"signal {-rc}"
+        clean = " (clean shutdown)" if -rc in (signal.SIGTERM, signal.SIGINT) else ""
+        return f"stopped via {sig}{clean}"
+    return f"exited with code {rc}"
+
+
+def _fleet_branch_names() -> set[str]:
+    """All local `fleet/<name>` branches, returned as bare `<name>`s."""
+    out = _git(["branch", "--list", "fleet/*", "--format=%(refname:short)"])
+    return {line[len("fleet/"):] for line in out.splitlines()
+            if line.startswith("fleet/")}
+
+
 def cmd_clean(agents: list[dict]) -> int:
     docker_available = shutil.which("docker") is not None
-    for agent in agents:
-        name = agent["name"]
-        path = WORKTREES_DIR / name
-        branch = f"fleet/{name}"
-        if path.exists():
-            try:
-                _git(["worktree", "remove", "--force", str(path)])
-                print(f"  removed worktree {path}")
-            except RuntimeError as e:
-                print(f"  could not remove {path}: {e}", file=sys.stderr)
-        if _branch_exists(branch):
-            try:
-                _git(["branch", "-D", branch])
-                print(f"  deleted branch {branch}")
-            except RuntimeError as e:
-                print(f"  could not delete branch {branch}: {e}", file=sys.stderr)
-        if docker_available:
-            _remove_cargo_volumes(name)
+
+    # Names from the current config…
+    config_names = [a["name"] for a in agents]
+
+    # …plus any worktree dir or fleet/ branch left behind by a *previous*
+    # config (e.g. the agent was renamed). Matching only current config names
+    # would strand those forever, so glob the filesystem and the branch list.
+    orphan_names: set[str] = set()
+    if WORKTREES_DIR.exists():
+        orphan_names |= {p.name for p in WORKTREES_DIR.iterdir() if p.is_dir()}
+    try:
+        orphan_names |= _fleet_branch_names()
+    except RuntimeError as e:
+        print(f"  could not list fleet branches: {e}", file=sys.stderr)
+    orphan_names -= set(config_names)
+
+    for name in config_names:
+        _clean_one(name, docker_available)
+    for name in sorted(orphan_names):
+        print(f"  [clean] orphaned agent (not in current config): {name}")
+        _clean_one(name, docker_available)
+
     _git(["worktree", "prune"])
     return 0
+
+
+def _sync_hot_reload_to_worktrees(agents: list[dict]) -> None:
+    """Patch hot-reloadable fields (role) from fleet.config.json into each
+    running worktree's agent.config.json when they've changed.
+
+    Best-effort: a transient read/parse/write error on one agent is logged and
+    skipped, never crashing the fleet monitor. Only fields in _HOT_RELOAD_KEYS
+    are touched; everything else in agent.config.json (identity, provider,
+    runtime defaults run_loop wrote) is preserved."""
+    try:
+        fleet = _read_json(FLEET_CONFIG_PATH)
+    except Exception:
+        return
+    entries = {
+        a.get("name"): a
+        for a in (fleet.get("agents") or [])
+        if a.get("name")
+    }
+    for agent in agents:
+        name = agent.get("name")
+        entry = entries.get(name)
+        if not entry:
+            continue
+        wt_cfg_path = WORKTREES_DIR / name / "agent.config.json"
+        try:
+            current = _read_json(wt_cfg_path)
+        except Exception:
+            continue
+        if not isinstance(current, dict):
+            continue
+        changed = False
+        for key in _HOT_RELOAD_KEYS:
+            desired = entry.get(key)
+            if desired is not None and current.get(key) != desired:
+                current[key] = desired
+                changed = True
+        if changed:
+            try:
+                wt_cfg_path.write_text(
+                    json.dumps(current, indent=2) + "\n", encoding="utf-8",
+                )
+                print(f"  [fleet] {name}: role -> {current.get('role')}")
+            except OSError as e:
+                print(f"  [fleet] {name}: role sync failed: {e}", file=sys.stderr)
 
 
 def cmd_run(
@@ -542,12 +666,21 @@ def cmd_run(
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
+    # Re-sync hot-reloadable fields (role) from fleet.config.json into each
+    # running worktree's agent.config.json on a cadence, so a contributor can
+    # change an agent's role mid-run by editing fleet.config.json. run_loop.py
+    # re-reads agent.config.json every iteration and picks the change up.
+    _SYNC_EVERY_S = 5
+    ticks = 0
     while any(p.poll() is None for _, p, _ in procs):
         time.sleep(1)
+        ticks += 1
+        if ticks % _SYNC_EVERY_S == 0:
+            _sync_hot_reload_to_worktrees(agents)
 
     for name, p, t in procs:
         t.join(timeout=2)
-        print(f"  [fleet] {name} exited with code {p.returncode}")
+        print(f"  [fleet] {name} {_describe_exit(p.returncode)}")
 
     _sync_tacit_back(agents, fleet_tacit)
     return 0

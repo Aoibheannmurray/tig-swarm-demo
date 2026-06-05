@@ -76,6 +76,7 @@ export class TrajectoriesPanel {
   private apiUrl = "";
   private data: TrajectoriesResponse | null = null;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private resizeObserver: ResizeObserver | null = null;
   private view: ChartView = { kind: "all" };
 
   init(container: HTMLElement, apiUrl: string) {
@@ -85,6 +86,10 @@ export class TrajectoriesPanel {
     if (this.refreshTimer !== null) {
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
+    }
+    if (this.resizeObserver !== null) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
     }
     this.container = container;
     this.apiUrl = apiUrl;
@@ -160,6 +165,20 @@ export class TrajectoriesPanel {
     document.getElementById("traj-chart-next")!.addEventListener(
       "click", () => this.cycleView(1),
     );
+
+    // renderChart() bails when the chart container has zero size (e.g. the
+    // page isn't laid out yet on first paint, or the tab was hidden). The
+    // 15s poll only repaints when the *data* changes, so a finished or
+    // stagnant run would otherwise leave the chart permanently blank. Re-run
+    // the chart against the last-fetched data whenever the container becomes
+    // measurable (or is resized).
+    const chartWrap = document.getElementById("traj-chart-wrap");
+    if (chartWrap && typeof ResizeObserver !== "undefined") {
+      this.resizeObserver = new ResizeObserver(() => {
+        if (this.data) this.renderChart(this.data.trajectories);
+      });
+      this.resizeObserver.observe(chartWrap);
+    }
 
     this.fetchData();
     this.refreshTimer = setInterval(() => this.fetchData(), 15000);

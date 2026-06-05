@@ -74,29 +74,12 @@ export class VectorSearchPanel extends DisplayPanelBase<AllVectorSearchData> {
             <div class="solution-empty-state-hint">No iterations have been published for this challenge.</div>
           </div>
         </div>
-        <div class="vs-bottom-bar" id="vs-bottom-bar">
-          <div class="vs-stat">
-            <div class="vs-stat-label">QUERIES</div>
-            <div class="vs-stat-value" id="vs-queries">---</div>
-          </div>
-          <div class="vs-stat">
-            <div class="vs-stat-label">DATABASE</div>
-            <div class="vs-stat-value" id="vs-db">---</div>
-          </div>
-          <div class="vs-stat">
-            <div class="vs-stat-label">DIMS</div>
-            <div class="vs-stat-value">250D</div>
-          </div>
-          <div class="vs-stat">
-            <div class="vs-stat-label">AVG DISTANCE</div>
-            <div class="vs-stat-value" id="vs-distance">---</div>
-          </div>
-          <div class="vs-stat vs-stat-score">
-            <div class="vs-stat-label">SCORE</div>
-            <div class="vs-stat-value" id="vs-score">---</div>
-            <div class="vs-stat-delta" id="vs-score-delta"></div>
-          </div>
-        </div>
+        ${this.statBarScaffold([
+          { label: "QUERIES", id: "vs-queries" },
+          { label: "DATABASE", id: "vs-db" },
+          { label: "DIMS", value: "250D" },
+          { label: "AVG DISTANCE", id: "vs-distance" },
+        ])}
       </div>
     `;
   }
@@ -107,7 +90,7 @@ export class VectorSearchPanel extends DisplayPanelBase<AllVectorSearchData> {
     this.dbEl = document.getElementById("vs-db")!;
     this.svgEl = document.getElementById("vs-svg") as unknown as SVGSVGElement;
     this.wrapEl = document.getElementById("vs-svg-wrap")!;
-    this.bottomBarEl = document.getElementById("vs-bottom-bar")!;
+    this.bottomBarEl = document.getElementById("vs-stat-bar")!;
     this.badgeEl = document.getElementById("vs-distance-badge")!;
 
     const resize = () => {

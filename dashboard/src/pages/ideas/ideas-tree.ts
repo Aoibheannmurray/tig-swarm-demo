@@ -11,7 +11,10 @@ interface FeedItem {
   timestamp: string;
 }
 
+// Base cap for the research feed. "Load older" raises the effective cap
+// (this.maxItems) by the number of paged-in rows so history isn't trimmed.
 const MAX_FEED_ITEMS = 40;
+const OLDER_PAGE = 60;
 
 // Tracks element + timestamp so we can keep the feed sorted newest-first
 // across racing backfill sources (chat history, hypothesis replay, etc.).
@@ -28,6 +31,17 @@ export class IdeasTree {
   private succeededCount = 0;
   private failedCount = 0;
   private messageCount = 0;
+  private maxItems = MAX_FEED_ITEMS;
+  // "Load older" pages back through two REST sources: chat messages and
+  // hypotheses. Track the oldest timestamp loaded from each as its cursor.
+  private oldestMessageTs: string | null = null;
+  private oldestHypothesisTs: string | null = null;
+  private msgHistoryDone = false;
+  private hypHistoryDone = false;
+  private loadOlderBtn: HTMLButtonElement | null = null;
+  private loadingOlder = false;
+  private apiUrl = "";
+  private getChallenge: (() => string) | null = null;
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -50,6 +64,9 @@ export class IdeasTree {
           <div class="ideas-feed-col">
             <div class="ideas-col-label">RESEARCH FEED</div>
             <div class="ideas-feed" id="ideas-feed"></div>
+            <button type="button" class="feed-load-older" id="ideas-load-older" hidden>
+              Load older
+            </button>
           </div>
           <div class="ideas-right-col" id="strategy-lb-mount"></div>
         </div>
@@ -60,6 +77,109 @@ export class IdeasTree {
 
     this.feedEl = document.getElementById("ideas-feed")!;
     this.statsEl = document.getElementById("ideas-stats")!;
+    this.loadOlderBtn = document.getElementById(
+      "ideas-load-older",
+    ) as HTMLButtonElement;
+    this.loadOlderBtn.addEventListener("click", () => void this.loadOlder());
+  }
+
+  /** Wire up "load older" paging once the API base + challenge resolver
+   *  are known (called by pages/ideas/main.ts). */
+  enableLoadOlder(apiUrl: string, getChallenge: () => string) {
+    this.apiUrl = apiUrl;
+    this.getChallenge = getChallenge;
+    this.updateLoadOlderBtn();
+  }
+
+  private updateLoadOlderBtn() {
+    if (!this.loadOlderBtn) return;
+    const hasCursor =
+      this.oldestMessageTs !== null || this.oldestHypothesisTs !== null;
+    const exhausted = this.msgHistoryDone && this.hypHistoryDone;
+    const show = !!this.getChallenge && hasCursor && !exhausted;
+    this.loadOlderBtn.hidden = !show;
+    this.loadOlderBtn.disabled = this.loadingOlder;
+    this.loadOlderBtn.textContent = this.loadingOlder ? "Loading…" : "Load older";
+  }
+
+  private async loadOlder() {
+    if (this.loadingOlder || !this.getChallenge) return;
+    this.loadingOlder = true;
+    this.updateLoadOlderBtn();
+
+    const challenge = this.getChallenge();
+    const ch = encodeURIComponent(challenge);
+    const prevFromBottom = this.feedEl.scrollHeight - this.feedEl.scrollTop;
+
+    try {
+      // Page both sources in parallel; each advances its own cursor.
+      const reqs: Promise<void>[] = [];
+
+      if (!this.msgHistoryDone && this.oldestMessageTs !== null) {
+        const url =
+          `${this.apiUrl}/api/messages?limit=${OLDER_PAGE}&challenge=${ch}` +
+          `&before=${encodeURIComponent(this.oldestMessageTs)}`;
+        reqs.push(
+          fetch(url)
+            .then((r) => (r.ok ? r.json() : []))
+            .then((rows: any[]) => {
+              if (this.getChallenge!() !== challenge) return;
+              this.maxItems += rows.length;
+              rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+              for (const m of rows) {
+                this.handleMessage({
+                  type: "chat_message",
+                  challenge,
+                  message_id: m.id,
+                  agent_name: m.agent_name,
+                  agent_id: m.agent_id,
+                  content: m.content,
+                  msg_type: m.msg_type,
+                  timestamp: m.created_at,
+                } as WSMessage);
+              }
+              if (rows.length < OLDER_PAGE) this.msgHistoryDone = true;
+            }),
+        );
+      }
+
+      if (!this.hypHistoryDone && this.oldestHypothesisTs !== null) {
+        const url =
+          `${this.apiUrl}/api/hypotheses?limit=${OLDER_PAGE}&challenge=${ch}` +
+          `&before=${encodeURIComponent(this.oldestHypothesisTs)}`;
+        reqs.push(
+          fetch(url)
+            .then((r) => (r.ok ? r.json() : []))
+            .then((rows: any[]) => {
+              if (this.getChallenge!() !== challenge) return;
+              this.maxItems += rows.length;
+              rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+              for (const h of rows) {
+                this.handleMessage({
+                  type: "hypothesis_proposed",
+                  hypothesis_id: h.id,
+                  agent_name: h.agent_name,
+                  agent_id: h.agent_id || "",
+                  title: h.title,
+                  description: h.description || "",
+                  strategy_tag: h.strategy_tag,
+                  parent_hypothesis_id: h.parent_hypothesis_id || null,
+                  timestamp: h.created_at,
+                } as WSMessage);
+              }
+              if (rows.length < OLDER_PAGE) this.hypHistoryDone = true;
+            }),
+        );
+      }
+
+      await Promise.all(reqs);
+      this.feedEl.scrollTop = this.feedEl.scrollHeight - prevFromBottom;
+    } catch (e) {
+      console.warn("[Ideas] load older failed:", e);
+    } finally {
+      this.loadingOlder = false;
+      this.updateLoadOlderBtn();
+    }
   }
 
   handleMessage(msg: WSMessage) {
@@ -71,7 +191,13 @@ export class IdeasTree {
       this.succeededCount = 0;
       this.failedCount = 0;
       this.messageCount = 0;
+      this.maxItems = MAX_FEED_ITEMS;
+      this.oldestMessageTs = null;
+      this.oldestHypothesisTs = null;
+      this.msgHistoryDone = false;
+      this.hypHistoryDone = false;
       this.updateStats();
+      this.updateLoadOlderBtn();
       return;
     }
 
@@ -85,6 +211,7 @@ export class IdeasTree {
           msgType: msg.msg_type,
           timestamp: msg.timestamp,
         });
+        this.trackOldest("message", msg.timestamp);
         this.messageCount++;
         break;
 
@@ -98,6 +225,7 @@ export class IdeasTree {
           msgType: "agent",
           timestamp: msg.timestamp,
         });
+        this.trackOldest("hypothesis", msg.timestamp);
         break;
 
       case "hypothesis_status_changed":
@@ -116,8 +244,8 @@ export class IdeasTree {
         };
 
         if (msg.is_new_best) {
-          const ownPart = msg.delta_vs_own_best_pct != null
-            ? ` (${fmtPct(msg.delta_vs_own_best_pct)} own)`
+          const ownPart = msg.delta_vs_trajectory_best_pct != null
+            ? ` (${fmtPct(msg.delta_vs_trajectory_best_pct)} own)`
             : "";
           const globalPart = msg.delta_vs_best_pct != null
             ? ` and NEW GLOBAL BEST (${fmtPct(msg.delta_vs_best_pct)} vs global)`
@@ -130,9 +258,9 @@ export class IdeasTree {
             msgType: "milestone",
             timestamp: msg.timestamp,
           });
-        } else if (msg.beats_own_best === true) {
-          const ownPart = msg.delta_vs_own_best_pct != null
-            ? ` (${fmtPct(msg.delta_vs_own_best_pct)})`
+        } else if (msg.beats_trajectory_best === true) {
+          const ownPart = msg.delta_vs_trajectory_best_pct != null
+            ? ` (${fmtPct(msg.delta_vs_trajectory_best_pct)})`
             : "";
           this.addFeedItem({
             id: msg.experiment_id,
@@ -209,9 +337,27 @@ export class IdeasTree {
 
     this.feedItems.splice(insertIdx, 0, { el, timestamp: item.timestamp });
 
-    while (this.feedItems.length > MAX_FEED_ITEMS) {
+    while (this.feedItems.length > this.maxItems) {
       const old = this.feedItems.pop()!;
       old.el.remove();
+    }
+  }
+
+  /** Advance the oldest-loaded cursor for a "load older" source. */
+  private trackOldest(source: "message" | "hypothesis", ts: string) {
+    if (!ts) return;
+    if (source === "message") {
+      if (this.oldestMessageTs === null || ts < this.oldestMessageTs) {
+        const first = this.oldestMessageTs === null;
+        this.oldestMessageTs = ts;
+        if (first) this.updateLoadOlderBtn();
+      }
+    } else {
+      if (this.oldestHypothesisTs === null || ts < this.oldestHypothesisTs) {
+        const first = this.oldestHypothesisTs === null;
+        this.oldestHypothesisTs = ts;
+        if (first) this.updateLoadOlderBtn();
+      }
     }
   }
 

@@ -40,6 +40,8 @@ Files this script reads / writes:
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
 import json
 import os
 import re
@@ -219,6 +221,12 @@ _CACHE_FIELDS = (
     "server_url", "active_challenge", "challenge", "swarm_type",
     "tracks", "timeout", "scoring_direction",
     "algorithm_path", "kernel_path", "is_gpu",
+    # Non-secret tuning knobs the *client* needs. The driver
+    # (run_loop.py) times tacit-knowledge distillation off stagnation_limit;
+    # without these in the cache, config.get("stagnation_limit") is absent
+    # and distillation never fires. They're a public mirror of
+    # /api/swarm_config — the secret copies stay in swarm.admin.json.
+    "stagnation_threshold", "stagnation_limit",
     # write_swarm_cache stamps synced_at itself, so the field is set even
     # when cfg doesn't carry one in.
     "synced_at",
@@ -473,13 +481,54 @@ def seed_inactive_pool_from_mainnet(
             print(f"  {ch}: could not reach {server_url} ({e}); skipping seed.")
 
 
-def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
-    """POST multi-challenge swarm config to a running server. Best-effort:
-    if the server isn't running yet, skip gracefully and tell the user how
-    to do it later.
+def encode_challenges_blob(challenges_cfg: dict) -> str:
+    """gzip+base64 the per-challenge sub-config dict for transport as a single
+    Railway service variable (`SWARM_CHALLENGES_B64`).
+
+    The server applies it at boot in `db._apply_env_swarm_config`, so the swarm
+    is configured the instant it comes up — no dependence on a post-deploy POST
+    landing on the right container during rollout. Compact JSON + gzip keeps it
+    well within Railway's per-variable size limit even for GPU challenges whose
+    sub-configs embed the initial algorithm + kernel source; base64 keeps it to
+    a single argv-safe token."""
+    raw = json.dumps(challenges_cfg, separators=(",", ":")).encode()
+    return base64.b64encode(gzip.compress(raw)).decode()
+
+
+def _swarm_config_matches(live: dict, cfg: dict) -> bool:
+    """True iff the server's live config reflects the intended swarm config."""
+    return (
+        live.get("active_challenge") == cfg["active_challenge"]
+        and live.get("swarm_type") == cfg.get("swarm_type", "cpu")
+        and set((live.get("available_challenges") or {}).keys()) >= set(cfg["challenges"])
+    )
+
+
+def push_config_to_server(
+    server_url: str, admin_key: str, cfg: dict, *, deadline_s: int = 300,
+) -> bool:
+    """Ensure the running server reflects `cfg`, re-asserting until it sticks.
+
+    The owner's config is also injected as boot-time env vars (see
+    `db._apply_env_swarm_config`), so on a current server image the swarm is
+    already configured before this runs and the first verify passes
+    immediately. This POST stays as belt-and-suspenders: it re-asserts the
+    config (idempotent — the endpoint upserts) and, crucially, *verifies it
+    held*, which guards the historical failure where the config was lost.
+
+    Why a deadline loop instead of a few quick retries: `railway up --ci`
+    returns on build success, but the new container's health-rollout lags. A
+    POST during that window can land on a transient/old container and be
+    discarded once the persistent-/data container becomes authoritative —
+    leaving the swarm on bare `DEFAULT_CONFIG` (satisfiability / cpu) forever,
+    since `init_db` seeds those with INSERT OR IGNORE. So we keep POSTing and
+    require the GET-back to match for TWO consecutive reads a few seconds apart
+    (a single match can be the doomed container) before declaring success, up
+    to `deadline_s`. Returns True once verified-stable, False if the deadline
+    passes.
 
     `cfg["challenges"]` is a dict of {challenge: {tracks, timeout,
-    scoring_direction, initial_algorithm_code}}; `cfg["active_challenge"]`
+    scoring_direction, initial_algorithm_code, ...}}; `cfg["active_challenge"]`
     selects which one contributors auto-follow.
     """
     payload = {
@@ -493,21 +542,61 @@ def push_config_to_server(server_url: str, admin_key: str, cfg: dict) -> None:
         "stagnation_limit": cfg.get("stagnation_limit", 10),
         "hypothesis_recall_threshold": cfg.get("hypothesis_recall_threshold", 3),
     }
-    req = urllib.request.Request(
-        f"{server_url.rstrip('/')}/api/swarm_config",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    url = f"{server_url.rstrip('/')}/api/swarm_config"
+    data = json.dumps(payload).encode()
+
+    deadline = time.time() + deadline_s
+    last_err: Exception | None = None
+    confirmations = 0
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            req = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                json.load(resp)
+            # A 200 isn't proof: read the config back and require it to match
+            # for two consecutive reads so a write that landed on a container
+            # about to be replaced during rollout can't masquerade as success.
+            with urllib.request.urlopen(url, timeout=15) as r:
+                live = json.load(r)
+            if _swarm_config_matches(live, cfg):
+                confirmations += 1
+                if confirmations >= 2:
+                    print(f"  POSTed + verified config at {url} "
+                          f"(active={live.get('active_challenge')}, "
+                          f"type={live.get('swarm_type')})")
+                    return True
+                time.sleep(4)
+                continue
+            confirmations = 0
+            last_err = RuntimeError(
+                f"server reports active={live.get('active_challenge')!r} "
+                f"type={live.get('swarm_type')!r} "
+                f"challenges={sorted((live.get('available_challenges') or {}).keys())}"
+            )
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                TimeoutError, OSError, ValueError) as e:
+            confirmations = 0
+            last_err = e
+        if time.time() < deadline:
+            print(f"  config push attempt {attempt} not yet confirmed "
+                  f"({last_err}); retrying…")
+            time.sleep(5)
+
+    print(
+        f"\n  ERROR: could not persist swarm config to {url} ({last_err}).\n"
+        f"  The server is up but still on its DEFAULT config "
+        f"(satisfiability / cpu) — contributors would run the WRONG challenge.\n"
+        f"  Re-run `python setup.py create` (it resumes) once the server is\n"
+        f"  reachable, or POST /api/swarm_config yourself with the admin_key\n"
+        f"  from swarm.admin.json."
     )
-    try:
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            json.load(resp)
-        print(f"  POSTed config to {server_url}/api/swarm_config")
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
-        print(
-            f"  could not reach {server_url} ({e}). Start the server and re-run "
-            f"`python setup.py create`, or POST /api/swarm_config yourself once it's up."
-        )
+    return False
 
 
 def read_initial_algorithms() -> dict[str, dict[str, str]]:
@@ -523,6 +612,66 @@ def read_initial_algorithms() -> dict[str, dict[str, str]]:
             "kernel_code": kernel_path.read_text() if kernel_path.is_file() else "",
         }
     return out
+
+
+def read_authored_seeds() -> list[dict]:
+    """Scan ``initial_algorithms/<challenge>/seeds/`` for host-authored seed
+    algorithms. Each ``<tag>.rs`` (with an optional matching ``<tag>.cu``) is
+    one seed whose ``strategy_tag`` is the filename stem. These are handed to
+    standard-tier / exploiter agents on a fresh trajectory instead of the
+    stub. Returns a list of
+    ``{challenge, strategy_tag, algorithm_code, kernel_code}``."""
+    seeds: list[dict] = []
+    for ch in CHALLENGES:
+        seeds_dir = ROOT / "initial_algorithms" / ch / "seeds"
+        if not seeds_dir.is_dir():
+            continue
+        for rs in sorted(seeds_dir.glob("*.rs")):
+            cu = rs.with_suffix(".cu")
+            seeds.append({
+                "challenge": ch,
+                "strategy_tag": rs.stem,
+                "algorithm_code": rs.read_text(),
+                "kernel_code": cu.read_text() if cu.is_file() else None,
+            })
+    return seeds
+
+
+def seed_pool_from_authored(
+    server_url: str, admin_key: str, seeds: list[dict],
+) -> None:
+    """POST each host-authored seed to ``/api/admin/seed_pool``. Best-effort:
+    network/server errors are warned-and-skipped rather than aborting setup.
+    Idempotent — the server dedupes by (challenge, strategy_tag, source), so
+    re-running create silently ignores seeds already present."""
+    if not seeds:
+        return
+    print(f"Seeding the seed pool with {len(seeds)} authored algorithm(s)…")
+    for s in seeds:
+        payload = {
+            "admin_key": admin_key,
+            "challenge": s["challenge"],
+            "strategy_tag": s["strategy_tag"],
+            "algorithm_code": s["algorithm_code"],
+            "kernel_code": s["kernel_code"],
+        }
+        req = urllib.request.Request(
+            f"{server_url.rstrip('/')}/api/admin/seed_pool",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        label = f"{s['challenge']}/{s['strategy_tag']}"
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = json.load(resp)
+            status = "added" if body.get("seeded") else "already present"
+            print(f"  {label}: seed {status}")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:200]
+            print(f"  {label}: server rejected seed (HTTP {e.code}: {detail}); skipping.")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"  {label}: could not reach {server_url} ({e}); skipping seed.")
 
 
 def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
@@ -746,7 +895,7 @@ def _has_user_content(tk_path: Path) -> bool:
     menu (real notes already there)."""
     if not tk_path.exists():
         return False
-    body = tk_path.read_text().replace(_TACIT_STUB_LINE, "")
+    body = tk_path.read_text(encoding="utf-8", errors="replace").replace(_TACIT_STUB_LINE, "")
     if "## Strategies" in body:
         _, after = body.split("## Strategies", 1)
         return bool(after.strip())
@@ -762,12 +911,12 @@ def _append_or_seed(
     this with your own hint" stub line is stripped on first real append so
     the contributor's notes don't get prefixed with placeholder noise."""
     if append and tk_path.exists():
-        existing = tk_path.read_text().replace(_TACIT_STUB_LINE, "")
+        existing = tk_path.read_text(encoding="utf-8", errors="replace").replace(_TACIT_STUB_LINE, "")
         if not existing.endswith("\n"):
             existing += "\n"
-        tk_path.write_text(existing + "\n" + new_body + "\n")
+        tk_path.write_text(existing + "\n" + new_body + "\n", encoding="utf-8")
     else:
-        tk_path.write_text(tacit_header(stagnation_threshold) + new_body + "\n")
+        tk_path.write_text(tacit_header(stagnation_threshold) + new_body + "\n", encoding="utf-8")
 
 
 def _gather_via_guided(
@@ -813,7 +962,7 @@ def _gather_via_upload(tk_path: Path) -> None:
     if not src_path.is_file():
         print(f"  not a file: {src_path}; leaving existing file in place")
         return
-    tk_path.write_text(src_path.read_text())
+    tk_path.write_text(src_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
     print(f"  copied {src_path} -> {tk_path.relative_to(ROOT)}")
 
 
@@ -998,7 +1147,8 @@ def run_tacit(agent_name: str | None = None) -> int:
         tk_path.parent.mkdir(parents=True, exist_ok=True)
         tk_path.write_text(
             tacit_header(stagnation_threshold)
-            + "- (replace this with your own hint, or run setup again)\n"
+            + "- (replace this with your own hint, or run setup again)\n",
+            encoding="utf-8",
         )
         print(f"  created {tk_path.relative_to(ROOT)} (gitignored)")
 
@@ -1027,18 +1177,65 @@ _RAILWAY_INSTALL_HINT = (
 )
 
 
-def _railway_run(*args: str, check: bool = True) -> sp.CompletedProcess:
-    """Run `railway <args>` and capture output. Exit on non-zero unless check=False."""
-    try:
-        result = sp.run(
-            ["railway", *args],
-            capture_output=True,
-            text=True,
-            cwd=str(ROOT),
-        )
-    except FileNotFoundError:
-        print("Railway CLI not found in PATH.\n" + _RAILWAY_INSTALL_HINT)
-        sys.exit(2)
+# Substrings that mark a *transient* Railway failure — the GraphQL API
+# (backboard.railway.com) momentarily unreachable or slow — as opposed to a
+# real rejection (bad auth, name taken, build error). Matched case-insensitively
+# against combined stderr+stdout to decide whether a retry is worth attempting.
+_RAILWAY_TRANSIENT_MARKERS = (
+    "operation timed out",
+    "error sending request for url",
+    "failed to fetch",
+    "connection reset",
+    "connection refused",
+    "temporary failure in name resolution",
+    "503 service",
+    "502 bad gateway",
+    "gateway time-out",
+)
+
+
+def _railway_is_transient(result: sp.CompletedProcess) -> bool:
+    blob = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
+    return any(m in blob for m in _RAILWAY_TRANSIENT_MARKERS)
+
+
+def _railway_run(
+    *args: str, check: bool = True, retries: int = 0, backoff: int = 4
+) -> sp.CompletedProcess:
+    """Run `railway <args>` and capture output. Exit on non-zero unless check=False.
+
+    With `retries > 0`, transient network failures (the Railway GraphQL API
+    momentarily timing out — see `_RAILWAY_TRANSIENT_MARKERS`) are retried with
+    linear backoff (`backoff`, `2*backoff`, … seconds) before giving up. Real
+    rejections (bad auth, duplicate name, build failure) are never retried.
+
+    Only pass `retries` for IDEMPOTENT calls. A timed-out Railway *mutation*
+    frequently still lands server-side, so blindly retrying a create (`init` /
+    `add --service`) would spawn a duplicate project/service — exactly the
+    orphans this repo's create flow now resumes instead. Reads (`whoami`,
+    `list`, `domain`) and upserts (`variable set`, `volume add`) are safe."""
+    for attempt in range(retries + 1):
+        try:
+            result = sp.run(
+                ["railway", *args],
+                capture_output=True,
+                text=True,
+                cwd=str(ROOT),
+            )
+        except FileNotFoundError:
+            print("Railway CLI not found in PATH.\n" + _RAILWAY_INSTALL_HINT)
+            sys.exit(2)
+        if result.returncode == 0:
+            return result
+        if attempt < retries and _railway_is_transient(result):
+            wait = backoff * (attempt + 1)
+            print(
+                f"  railway {args[0] if args else ''} hit a transient network "
+                f"error; retrying in {wait}s ({attempt + 1}/{retries})…"
+            )
+            time.sleep(wait)
+            continue
+        break
     if check and result.returncode != 0:
         msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
         print(f"  error: railway {' '.join(args)} failed: {msg}")
@@ -1054,7 +1251,7 @@ def _railway_check_installed() -> None:
 
 def _railway_check_auth() -> dict:
     """Return whoami JSON, or exit telling the user to `railway login`."""
-    result = _railway_run("whoami", "--json", check=False)
+    result = _railway_run("whoami", "--json", check=False, retries=3)
     if result.returncode != 0:
         print(
             "Not logged in to Railway. Run this in another terminal, complete the\n"
@@ -1084,30 +1281,197 @@ def _pick_workspace(whoami: dict) -> str | None:
     return prompt_choice("  workspace", names, default=names[0])
 
 
-def _railway_init_project(name: str, workspace: str | None = None) -> dict:
+def _railway_init_project(name: str, workspace: str | None = None) -> dict | None:
+    """Create the project. Returns the project dict on success, or None when a
+    transient timeout aborts the CLI mid-create — the mutation usually still
+    lands server-side, so the caller resumes by re-querying rather than
+    re-running init (which would spawn a duplicate). A real rejection (bad
+    auth, name taken) still hard-exits."""
     args = ["init", "-n", name, "--json"]
     if workspace:
         args += ["--workspace", workspace]
-    result = _railway_run(*args)
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {"name": name}
+    result = _railway_run(*args, check=False)
+    if result.returncode == 0:
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {"name": name}
+    if _railway_is_transient(result):
+        print("  railway init hit a transient network error mid-create.")
+        return None
+    msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+    print(f"  error: railway {' '.join(args)} failed: {msg}")
+    sys.exit(2)
 
 
-def _railway_add_service(name: str) -> dict:
-    result = _railway_run("add", "--service", name, "--json")
+def _railway_add_service(name: str) -> dict | None:
+    """Add the service to the linked project. Returns the service dict on
+    success, or None on a transient timeout (caller re-queries / retries).
+    Real rejections hard-exit."""
+    result = _railway_run("add", "--service", name, "--json", check=False)
+    if result.returncode == 0:
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {"name": name}
+    if _railway_is_transient(result):
+        print("  railway add --service hit a transient network error mid-create.")
+        return None
+    msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+    print(f"  error: railway add --service {name} failed: {msg}")
+    sys.exit(2)
+
+
+def _railway_wait_for_project(name: str, workspace: str | None) -> dict | None:
+    """Poll `railway list` for a project a timed-out init may have landed.
+
+    Railway often takes a moment to surface a project created by a CLI call
+    that itself timed out. Re-query a few times with backoff before giving up;
+    each `_railway_find_project` already retries the underlying `list`."""
+    for attempt in range(4):
+        time.sleep(4 * (attempt + 1))
+        found = _railway_find_project(name, workspace)
+        if found is not None:
+            return found
+    return None
+
+
+def _railway_ensure_service(name: str, workspace: str | None) -> dict:
+    """Add the service, recovering from a transient timeout in the same run.
+
+    On a timeout the add may have landed server-side, so re-query the project
+    and adopt the service if it's there; otherwise retry the add (confirmed
+    absent → no duplicate). Hard-exits only after repeated timeouts."""
+    service = _railway_add_service(name)
+    if service is not None:
+        return service
+    for attempt in range(4):
+        time.sleep(4 * (attempt + 1))
+        proj = _railway_find_project(name, workspace)
+        svc = _railway_service_in_project(proj, name) if proj else None
+        if svc:
+            print(f"  adopted service created by the timed-out add: {svc.get('name', name)}")
+            return svc
+        service = _railway_add_service(name)
+        if service is not None:
+            return service
+    print(
+        "  error: railway add --service timed out repeatedly; re-run "
+        "`python setup.py create` to resume once the Railway API recovers."
+    )
+    sys.exit(2)
+
+
+def _railway_find_project(name: str, workspace: str | None) -> dict | None:
+    """Return the live (non-deleted) project named `name`, or None.
+
+    A timed-out `railway init` usually creates the project server-side even
+    though the CLI errors out, so on a re-run we adopt that project rather
+    than spawning a duplicate. Projects already scheduled for deletion
+    (`deletedAt` set — e.g. earlier empty orphans) are skipped. When
+    `workspace` is given, projects in it win; ties break on most-recent
+    update."""
+    result = _railway_run("list", "--json", check=False, retries=4)
     try:
-        return json.loads(result.stdout)
+        projects = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return {"name": name}
+        return None
+    if not isinstance(projects, list):
+        return None
+    matches = [
+        p for p in projects
+        if p.get("name") == name and not p.get("deletedAt")
+    ]
+    if workspace:
+        scoped = [
+            p for p in matches
+            if (p.get("workspace") or {}).get("name") == workspace
+        ]
+        if scoped:
+            matches = scoped
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda p: p.get("updatedAt") or p.get("createdAt") or "",
+        reverse=True,
+    )
+    return matches[0]
+
+
+def _railway_project_environment(project: dict) -> str:
+    """Pick the environment to link to — prefer `production` (the init default)."""
+    edges = (project.get("environments") or {}).get("edges") or []
+    names = [(e.get("node") or {}).get("name") for e in edges]
+    names = [n for n in names if n]
+    if "production" in names:
+        return "production"
+    return names[0] if names else "production"
+
+
+def _railway_service_in_project(project: dict, name: str) -> dict | None:
+    """Return the service node named `name` within `project`, or None."""
+    edges = (project.get("services") or {}).get("edges") or []
+    for e in edges:
+        node = e.get("node") or {}
+        if node.get("name") == name:
+            return node
+    return None
+
+
+def _railway_provision(name: str, workspace: str | None) -> tuple[dict, dict, bool]:
+    """Idempotently ensure the project + service exist and are linked to cwd.
+
+    Fresh run → `railway init` + `railway add --service`. If a create step
+    times out mid-flight (common when the Railway API is flaky), the mutation
+    usually still lands server-side — so instead of re-running it in place
+    (which would spawn a duplicate), we re-query and adopt the orphaned
+    project/service in the SAME run, then `railway link` it. A later plain
+    re-run resumes the same way. Returns (project, service, resumed)."""
+    existing = _railway_find_project(name, workspace)
+    if existing is None:
+        project = _railway_init_project(name, workspace=workspace)
+        if project is not None:
+            print(f"  project: {project.get('name', name)}")
+            service = _railway_ensure_service(name, workspace)
+            print(f"  service: {service.get('name', name)}")
+            return project, service, False
+        # init timed out mid-create — the project usually lands server-side
+        # anyway. Re-query and adopt it rather than re-running init (which
+        # would create a duplicate). Falls through to the resume path below.
+        existing = _railway_wait_for_project(name, workspace)
+        if existing is None:
+            print(
+                f"  error: railway init timed out and no '{name}' project "
+                f"appeared server-side; re-run `python setup.py create` once "
+                f"the Railway API recovers."
+            )
+            sys.exit(2)
+        print(f"  init timed out but project '{name}' landed server-side; adopting it.")
+
+    # Resume: adopt the project a prior run (or a timed-out init above) created.
+    env = _railway_project_environment(existing)
+    svc_node = _railway_service_in_project(existing, name)
+    link_args = ["link", "--project", existing["id"], "--environment", env]
+    if workspace:
+        link_args += ["--workspace", workspace]
+    if svc_node:
+        link_args += ["--service", svc_node["name"]]
+    _railway_run(*link_args, retries=4)
+    print(f"  adopted existing project: {existing.get('name', name)}")
+    if svc_node:
+        print(f"  adopted existing service: {svc_node.get('name', name)}")
+        return existing, svc_node, True
+    # Project existed but the service didn't land — add it now (resumably).
+    service = _railway_ensure_service(name, workspace)
+    print(f"  service: {service.get('name', name)}")
+    return existing, service, True
 
 
 def _railway_set_variables(service: str, vars: dict[str, str]) -> None:
     args = ["variable", "set", "--service", service, "--skip-deploys"]
     for k, v in vars.items():
         args.append(f"{k}={v}")
-    _railway_run(*args)
+    _railway_run(*args, retries=4)
 
 
 def _railway_add_volume(service: str, mount_path: str) -> None:
@@ -1119,7 +1483,7 @@ def _railway_add_volume(service: str, mount_path: str) -> None:
 
     `volume add` is the one non-idempotent step — it bails if a volume is
     already mounted on the linked service. Treat that as success."""
-    result = _railway_run("volume", "add", "--mount-path", mount_path, check=False)
+    result = _railway_run("volume", "add", "--mount-path", mount_path, check=False, retries=4)
     if result.returncode == 0:
         return
     err = (result.stderr or "").lower()
@@ -1145,7 +1509,7 @@ def _railway_up(service: str) -> None:
 
 def _railway_domain(service: str) -> str:
     """Get (or generate) the public URL for `service`. Idempotent."""
-    result = _railway_run("domain", "--service", service, "--json")
+    result = _railway_run("domain", "--service", service, "--json", retries=4)
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
@@ -1171,22 +1535,30 @@ def _ensure_https(domain: str) -> str:
     return f"https://{domain}".rstrip("/")
 
 
-def _wait_for_server(url: str, timeout: int = 60) -> bool:
-    """Poll <url>/api/swarm_config until it responds or timeout passes.
+def _wait_for_server(url: str, timeout: int = 240) -> bool:
+    """Poll <url>/api/swarm_config until it answers *stably* or timeout passes.
 
-    `railway up --ci` returns when the container starts; the FastAPI app
-    needs a few extra seconds to bind. Without this poll, the immediate
-    POST /api/swarm_config below races the app startup."""
+    `railway up --ci` returns when the build succeeds, but the container's
+    health-rollout lags and DNS/TLS for a brand-new public domain can take a
+    while — a GPU image with the CUDA toolchain is slow to its first byte. We
+    therefore wait generously (default 4 min) and require two consecutive 200s
+    a couple seconds apart, so we don't hand off to the config push the instant
+    a transient/rolling container first answers."""
     deadline = time.time() + timeout
     probe = f"{url.rstrip('/')}/api/swarm_config"
+    ok = 0
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(probe, timeout=4) as r:
+            with urllib.request.urlopen(probe, timeout=5) as r:
                 if r.status == 200:
-                    return True
+                    ok += 1
+                    if ok >= 2:
+                        return True
+                    time.sleep(2)
+                    continue
         except Exception:
-            pass
-        time.sleep(2)
+            ok = 0
+        time.sleep(3)
     return False
 
 
@@ -1332,17 +1704,30 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         shutil.rmtree(railway_dir)
 
     print("\nProvisioning on Railway…")
-    project = _railway_init_project(swarm_name, workspace=workspace)
-    print(f"  project: {project.get('name', swarm_name)}")
+    project, service, resumed = _railway_provision(swarm_name, workspace)
+    if resumed:
+        print("  (resuming a prior half-finished run — adopting existing resources)")
 
-    service = _railway_add_service(swarm_name)
-    print(f"  service: {service.get('name', swarm_name)}")
-
+    owner_name = os.environ.get("USER", "owner")
     print("  setting environment variables…")
+    # The swarm config travels as deploy-time env vars (applied at server boot
+    # by db._apply_env_swarm_config) so the swarm comes up correctly configured
+    # the instant it deploys — independent of whether the post-deploy POST
+    # below lands during the Railway rollout. Set BEFORE the volume/deploy so
+    # the very first boot already has them. INSERT OR REPLACE on every boot
+    # means a redeploy never reverts to bare satisfiability/cpu defaults.
     _railway_set_variables(swarm_name, {
         "DATA_DIR": "/data",
         "ADMIN_KEY": admin_key,
         "SWARM_PASSWORD": swarm_password,
+        "ACTIVE_CHALLENGE": active_challenge,
+        "SWARM_TYPE": swarm_type,
+        "SWARM_NAME": swarm_name,
+        "OWNER_NAME": owner_name,
+        "STAGNATION_THRESHOLD": str(stagnation_threshold),
+        "STAGNATION_LIMIT": str(stagnation_limit),
+        "HYPOTHESIS_RECALL_THRESHOLD": str(hypothesis_recall_threshold),
+        "SWARM_CHALLENGES_B64": encode_challenges_blob(challenges_cfg),
     })
 
     print("  attaching /data volume…")
@@ -1375,7 +1760,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     active_def = _CHALLENGE_REGISTRY[active_challenge]
     cfg = {
         "swarm_name": swarm_name,
-        "owner_name": os.environ.get("USER", "owner"),
+        "owner_name": owner_name,
         "server_url": server_url,
         "admin_key": admin_key,
         "swarm_password": swarm_password,
@@ -1398,12 +1783,24 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         cfg["kernel_path"] = f"src/{active_challenge}/algorithm/kernels.cu"
         cfg["is_gpu"] = True
 
-    print("  pushing swarm config to the server…")
-    push_config_to_server(server_url, admin_key, cfg)
+    print("  verifying swarm config on the server…")
+    config_ok = push_config_to_server(server_url, admin_key, cfg)
 
-    if seed_inactive_pool:
-        print("\nSeeding inactive trajectory pool from TIG mainnet…")
-        seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
+    # Only seed once the config is verified — seeding a server that's still on
+    # bare defaults loads pool entries for challenges nobody is running, and
+    # masks the real failure. If config failed, skip and let the user re-run.
+    if config_ok:
+        if seed_inactive_pool:
+            print("\nSeeding inactive trajectory pool from TIG mainnet…")
+            seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
+
+        # Load any host-authored seed algorithms (initial_algorithms/<ch>/seeds/)
+        # into the seed pool so standard-tier / exploiter agents start from working
+        # code instead of the stub.
+        authored_seeds = read_authored_seeds()
+        if authored_seeds:
+            print()
+            seed_pool_from_authored(server_url, admin_key, authored_seeds)
 
     print("\nWriting local files…")
     template_files(
@@ -1433,12 +1830,24 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     )
 
     print("\n" + "=" * 48)
-    print(f"{type_label} SWARM IS LIVE")
+    if config_ok:
+        print(f"{type_label} SWARM IS LIVE")
+    else:
+        print(f"{type_label} SWARM DEPLOYED — CONFIG NOT APPLIED")
     print("=" * 48)
     print(f"\n  Dashboard:  {server_url}/")
     print(f"  Swarm type:  {type_label}")
     print(f"  Active challenge:  {active_challenge}")
-    print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
+    if config_ok:
+        print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
+    else:
+        print(
+            f"  WARNING: the server is still on its DEFAULT config "
+            f"(satisfiability / cpu), NOT {active_challenge} / {type_label.lower()}.\n"
+            f"  Contributors would run the wrong challenge. Re-run "
+            f"`python setup.py create` (it resumes) to push the config once the\n"
+            f"  server is reachable, before onboarding anyone."
+        )
     print("\n  Onboard each contributor with:\n")
     print("    python setup.py invite [<username>]")
     print("    # prints their username + per-contributor swarm_password.")
@@ -1458,7 +1867,10 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print("  edit the agent entry then run `python scripts/run_fleet.py` to participate.")
     print("\n  Manage the service in Railway: https://railway.com/dashboard")
     print()
-    return 0
+    # Non-zero exit when the config never verified so the failure is loud (CI,
+    # scripts, and the operator all see it) instead of a half-initialised swarm
+    # masquerading as ready.
+    return 0 if config_ok else 1
 
 
 def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:
@@ -1564,6 +1976,12 @@ def run_switch(challenge: str) -> int:
         refreshed["tracks"] = sub.get("tracks", {})
         refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
+    # Carry the stagnation knobs into the host's cache too (switch doesn't
+    # fetch /api/swarm_config, so source them from swarm.admin.json). Keeps
+    # the host's own driver able to time tacit-knowledge distillation.
+    for knob in ("stagnation_threshold", "stagnation_limit"):
+        if admin.get(knob) is not None:
+            refreshed[knob] = admin[knob]
     write_swarm_cache(refreshed)
 
     prior_challenge = cache.get("active_challenge")
@@ -1635,6 +2053,11 @@ def run_sync() -> int:
         refreshed["tracks"] = sub.get("tracks", {})
         refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
+    # Mirror the client-relevant stagnation knobs so the driver can time
+    # tacit-knowledge distillation (see _CACHE_FIELDS).
+    for knob in ("stagnation_threshold", "stagnation_limit"):
+        if live.get(knob) is not None:
+            refreshed[knob] = live[knob]
     write_swarm_cache(refreshed)
 
     # Don't early-return when CHALLENGE.md is missing: a fresh fleet worktree

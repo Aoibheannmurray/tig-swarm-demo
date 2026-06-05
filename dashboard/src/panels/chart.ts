@@ -2,6 +2,7 @@ import { max, min } from "d3-array";
 import { scaleLinear } from "d3-scale";
 import { select } from "d3-selection";
 import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
+import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform, type D3ZoomEvent } from "d3-zoom";
 import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
 import { isBetter } from "../lib/swarmConfig";
@@ -48,7 +49,14 @@ export class ChartPanel implements Panel {
   private tabLabelEl!: HTMLElement;
   private tabPrevEl!: HTMLElement;
   private tabNextEl!: HTMLElement;
+  private zoomResetEl!: HTMLElement;
   private redrawScheduled = false;
+
+  // X-axis pan/zoom. The transform is applied to the x-scale on every redraw
+  // (drag = scroll along a long run, wheel = zoom into a span). Reset to
+  // identity on tab/challenge switch so a fresh dataset always starts fit.
+  private zoomBehavior!: ZoomBehavior<SVGSVGElement, unknown>;
+  private xZoomTransform: ZoomTransform = zoomIdentity;
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -58,6 +66,7 @@ export class ChartPanel implements Panel {
           <button class="chart-tab-btn" id="chart-tab-prev" type="button">&lsaquo;</button>
           <span class="chart-tab-label" id="chart-tab-label">GLOBAL</span>
           <button class="chart-tab-btn" id="chart-tab-next" type="button">&rsaquo;</button>
+          <button class="chart-zoom-reset" id="chart-zoom-reset" type="button" title="Reset zoom (or double-click the chart)" style="display:none">⟲ reset zoom</button>
         </div>
         <svg id="chart-svg"></svg>
       </div>
@@ -69,6 +78,9 @@ export class ChartPanel implements Panel {
 
     this.tabPrevEl.addEventListener("click", () => this.cycleTab(-1));
     this.tabNextEl.addEventListener("click", () => this.cycleTab(1));
+
+    this.zoomResetEl = document.getElementById("chart-zoom-reset")!;
+    this.zoomResetEl.addEventListener("click", () => this.resetZoom());
 
     // Measure the SVG itself, not the parent panel — the SVG is `flex: 1`
     // so the browser has already sized it to fit the remaining space after
@@ -86,6 +98,23 @@ export class ChartPanel implements Panel {
       .attr("height", this.height);
 
     this.g = this.svg.append("g");
+
+    // X-axis pan/zoom. scaleExtent floor of 1 means you can't zoom out past
+    // "fit" (no empty gutters); ceiling lets long runs be expanded ~64× to
+    // read a dense segment. We apply the resulting transform to the x-scale in
+    // redraw rather than transforming the SVG group, so y-scale, axis labels
+    // and stroke widths stay unscaled.
+    this.zoomBehavior = zoom<SVGSVGElement, unknown>()
+      .scaleExtent([1, 64])
+      .on("zoom", (e: D3ZoomEvent<SVGSVGElement, unknown>) => {
+        this.xZoomTransform = e.transform;
+        this.zoomResetEl.style.display = e.transform.k > 1.001 ? "" : "none";
+        this.redraw();
+      });
+    this.svg.call(this.zoomBehavior);
+    // Replace d3-zoom's default double-click-to-zoom-in with reset-to-fit.
+    this.svg.on("dblclick.zoom", null);
+    this.svg.on("dblclick", () => this.resetZoom());
 
     // Resolve API base URL the same way other panels do.
     const params = new URLSearchParams(window.location.search);
@@ -133,6 +162,7 @@ export class ChartPanel implements Panel {
       if (this.currentTab().type === "global") this.redraw();
       return;
     }
+    this.resetZoomSilently();
     const first = new Date(entries[0].created_at).getTime();
     this.globalStartTime = first;
     const filtered: DataPoint[] = [];
@@ -159,6 +189,7 @@ export class ChartPanel implements Panel {
       this.progressStore.clear();
       this.tabs = [{ type: "global" }];
       this.currentTabIndex = 0;
+      this.resetZoomSilently();
       this.renderTabLabel();
       this.g.selectAll("*").remove();
       return;
@@ -183,6 +214,7 @@ export class ChartPanel implements Panel {
   private cycleTab(delta: number) {
     if (this.tabs.length === 0) return;
     this.currentTabIndex = (this.currentTabIndex + delta + this.tabs.length) % this.tabs.length;
+    this.resetZoomSilently();
     this.renderTabLabel();
     const tab = this.currentTab();
     if (tab.type === "agent") {
@@ -332,6 +364,7 @@ export class ChartPanel implements Panel {
     this.g.selectAll("*").remove();
 
     const { m, w, h, fs } = this.computeLayout();
+    this.configureZoomExtent();
 
     if (this.globalData.length < 1) {
       // Empty-state placeholder so an unstarted challenge doesn't look
@@ -352,9 +385,11 @@ export class ChartPanel implements Panel {
 
     const latestData = max(this.globalData, (d) => d.time)!;
     const xPad = Math.max(latestData * 0.15, 5000);
-    const xScale = scaleLinear()
+    const baseXScale = scaleLinear()
       .domain([0, latestData + xPad])
       .range([0, w]);
+    // Apply the current pan/zoom to the x-axis only.
+    const xScale = this.xZoomTransform.rescaleX(baseXScale);
 
     const yDomain = this.getGlobalYDomain();
     if (!yDomain) return;
@@ -365,6 +400,10 @@ export class ChartPanel implements Panel {
 
     const chartG = this.g.append("g")
       .attr("transform", `translate(${m.left},${m.top})`);
+    // Data marks go in a clipped sub-group so panning/zooming never draws them
+    // over the axes or into the margins; gridlines and axis labels stay in
+    // chartG (unclipped).
+    const plotG = this.appendClippedPlot(chartG, w, h);
 
     const yTicks = yScale.ticks(5);
     yTicks.forEach((tick) => {
@@ -383,7 +422,7 @@ export class ChartPanel implements Panel {
       const y0 = yScale(d.score);
       const color = getAgentColor(d.agentId || d.agentName || "unknown");
 
-      chartG.append("rect")
+      plotG.append("rect")
         .attr("x", x0)
         .attr("y", y0)
         .attr("width", Math.max(0, nextX - x0))
@@ -391,7 +430,7 @@ export class ChartPanel implements Panel {
         .attr("fill", color)
         .attr("opacity", 0.1);
 
-      chartG.append("line")
+      plotG.append("line")
         .attr("x1", x0).attr("x2", nextX)
         .attr("y1", y0).attr("y2", y0)
         .attr("stroke", color)
@@ -401,7 +440,7 @@ export class ChartPanel implements Panel {
       if (i < this.globalData.length - 1) {
         const nextY = yScale(this.globalData[i + 1].score);
         const nextColor = getAgentColor(this.globalData[i + 1].agentId || this.globalData[i + 1].agentName || "unknown");
-        chartG.append("line")
+        plotG.append("line")
           .attr("x1", nextX).attr("x2", nextX)
           .attr("y1", y0).attr("y2", nextY)
           .attr("stroke", nextColor)
@@ -420,7 +459,7 @@ export class ChartPanel implements Panel {
       const y = yScale(d.score);
       const color = getAgentColor(d.agentId || d.agentName || "unknown");
 
-      chartG.append("line")
+      plotG.append("line")
         .attr("x1", x).attr("x2", x)
         .attr("y1", 0).attr("y2", h)
         .attr("stroke", color)
@@ -428,7 +467,7 @@ export class ChartPanel implements Panel {
         .attr("stroke-dasharray", "3 3")
         .attr("stroke-opacity", 0.5);
 
-      chartG.append("path")
+      plotG.append("path")
         .attr("d", symbol(symbolDiamond, 24)())
         .attr("transform", `translate(${x},${y})`)
         .attr("fill", color)
@@ -437,7 +476,10 @@ export class ChartPanel implements Panel {
       const agentKey = d.agentId || d.agentName || null;
       const winnerChanged = agentKey !== null && agentKey !== prevAgentKey;
       const isLastPoint = i === lastIdx;
-      if (d.agentName && (winnerChanged || isLastPoint)) {
+      // Labels render unclipped (they may overflow the right margin, as before)
+      // but are culled when panned outside the plot so they don't float in the
+      // y-axis gutter.
+      if (d.agentName && (winnerChanged || isLastPoint) && x >= 0 && x <= w) {
         chartG.append("text")
           .attr("x", x + 6)
           .attr("y", y - 8)
@@ -462,7 +504,8 @@ export class ChartPanel implements Panel {
     });
 
     const xTicks = xScale.ticks(6);
-    const fmtElapsed = makeElapsedFormatter(latestData + xPad);
+    const [vis0, vis1] = xScale.domain();
+    const fmtElapsed = makeElapsedFormatter(Math.max(1, vis1 - vis0));
     xTicks.forEach((tick) => {
       chartG.append("text")
         .attr("x", xScale(tick))
@@ -480,6 +523,7 @@ export class ChartPanel implements Panel {
 
     const progress = this.progressStore.get(agentId);
     const { m, w, h, fs } = this.computeLayout();
+    this.configureZoomExtent();
 
     const chartG = this.g.append("g")
       .attr("transform", `translate(${m.left},${m.top})`);
@@ -504,9 +548,10 @@ export class ChartPanel implements Panel {
     // very few horizontal pixels; iteration index lets every agent's line
     // span the full chart width regardless of when they registered.
     const xDomainEnd = Math.max(exps.length - 1, 1);
-    const xScale = scaleLinear()
+    const baseXScale = scaleLinear()
       .domain([0, xDomainEnd])
       .range([0, w]);
+    const xScale = this.xZoomTransform.rescaleX(baseXScale);
 
     // Y: anchor on the GLOBAL chart's domain when available so per-agent
     // tabs roughly share a visual scale, but always extend it to include
@@ -537,6 +582,8 @@ export class ChartPanel implements Panel {
         .attr("stroke-width", 0.5);
     });
 
+    const plotG = this.appendClippedPlot(chartG, w, h);
+
     // Step plot: each attempt's score is held until the next attempt.
     // X is the iteration index, so each step is exactly one unit wide.
     for (let i = 0; i < exps.length; i++) {
@@ -547,7 +594,7 @@ export class ChartPanel implements Panel {
       const xEnd = next ? xScale(i + 1) : x0;
 
       if (xEnd > x0) {
-        chartG.append("line")
+        plotG.append("line")
           .attr("x1", x0).attr("x2", xEnd)
           .attr("y1", y0).attr("y2", y0)
           .attr("stroke", color)
@@ -557,7 +604,7 @@ export class ChartPanel implements Panel {
 
       if (next) {
         const yNext = yScale(next.score);
-        chartG.append("line")
+        plotG.append("line")
           .attr("x1", xEnd).attr("x2", xEnd)
           .attr("y1", y0).attr("y2", yNext)
           .attr("stroke", color)
@@ -573,31 +620,31 @@ export class ChartPanel implements Panel {
       if (event === "trajectory_deactivated") {
         // Cross — trajectory went into the inactive pool after this point.
         const r = 5;
-        chartG.append("line")
+        plotG.append("line")
           .attr("x1", x0 - r).attr("x2", x0 + r)
           .attr("y1", y0 - r).attr("y2", y0 + r)
           .attr("stroke", color).attr("stroke-width", 1.6).attr("opacity", 0.95);
-        chartG.append("line")
+        plotG.append("line")
           .attr("x1", x0 - r).attr("x2", x0 + r)
           .attr("y1", y0 + r).attr("y2", y0 - r)
           .attr("stroke", color).attr("stroke-width", 1.6).attr("opacity", 0.95);
       } else if (event === "tacit_knowledge") {
         // Star — agent was nudged with a tacit-knowledge hint on the prior
         // /api/state call.
-        chartG.append("path")
+        plotG.append("path")
           .attr("d", symbol(symbolStar, 60)())
           .attr("transform", `translate(${x0},${y0})`)
           .attr("fill", color).attr("opacity", 0.95)
           .attr("stroke", color).attr("stroke-width", 0.5);
       } else if (event === "inspiration") {
         // Square — agent was given another agent's code as inspiration.
-        chartG.append("path")
+        plotG.append("path")
           .attr("d", symbol(symbolSquare, 50)())
           .attr("transform", `translate(${x0},${y0})`)
           .attr("fill", color).attr("opacity", 0.95)
           .attr("stroke", color).attr("stroke-width", 0.5);
       } else {
-        chartG.append("circle")
+        plotG.append("circle")
           .attr("cx", x0)
           .attr("cy", y0)
           .attr("r", 2.5)
@@ -620,18 +667,23 @@ export class ChartPanel implements Panel {
         .text(formatScore(tick));
     });
 
-    // Iteration-index axis: integer ticks, no time formatting.
-    const xTickStep = Math.max(1, Math.ceil(xDomainEnd / 6));
-    for (let t = 0; t <= xDomainEnd; t += xTickStep) {
+    // Iteration-index axis: integer ticks within the (possibly zoomed) visible
+    // window, no time formatting. Dedupe so a zoomed-in span doesn't repeat the
+    // same rounded index.
+    const seenTicks = new Set<number>();
+    xScale.ticks(6).forEach((t) => {
+      const idx = Math.round(t);
+      if (idx < 0 || idx > xDomainEnd || seenTicks.has(idx)) return;
+      seenTicks.add(idx);
       chartG.append("text")
-        .attr("x", xScale(t))
+        .attr("x", xScale(idx))
         .attr("y", h + fs + 6)
         .attr("fill", AXIS_TEXT())
         .attr("font-size", `${fs}px`)
         .attr("font-family", "var(--mono)")
         .attr("text-anchor", "middle")
-        .text(`#${t}`);
-    }
+        .text(`#${idx}`);
+    });
   }
 
   private drawAgentEventLegend(
@@ -698,6 +750,39 @@ export class ChartPanel implements Panel {
     // rendered below the visible chart.
     const pad = Math.max(Math.abs(scoreMax - scoreMin) * 0.15, 1);
     return [scoreMin - pad, scoreMax + pad];
+  }
+
+  // Build a sub-group clipped to the [0,w]×[0,h] plot rect. Data marks go here
+  // so pan/zoom never paints them over the axes or into the margins.
+  private appendClippedPlot(chartG: any, w: number, h: number): any {
+    chartG.append("clipPath").attr("id", "chart-plot-clip")
+      .append("rect").attr("x", 0).attr("y", 0).attr("width", w).attr("height", h);
+    return chartG.append("g").attr("clip-path", "url(#chart-plot-clip)");
+  }
+
+  // Bound the zoom gesture to the current SVG box so you can't pan/zoom out
+  // into empty space (paired with the scaleExtent floor of 1).
+  private configureZoomExtent() {
+    if (!this.zoomBehavior) return;
+    this.zoomBehavior
+      .extent([[0, 0], [this.width, this.height]])
+      .translateExtent([[0, 0], [this.width, this.height]]);
+  }
+
+  // User-triggered reset (button / double-click): fires a zoom event so the
+  // chart redraws back at fit.
+  private resetZoom() {
+    if (!this.zoomBehavior) return;
+    this.zoomBehavior.transform(this.svg, zoomIdentity);
+  }
+
+  // Silent reset on tab/challenge switch — clears the transform without firing
+  // a zoom event, since those code paths already redraw.
+  private resetZoomSilently() {
+    this.xZoomTransform = zoomIdentity;
+    const node = this.svg?.node?.() as any;
+    if (node) node.__zoom = zoomIdentity;
+    if (this.zoomResetEl) this.zoomResetEl.style.display = "none";
   }
 }
 

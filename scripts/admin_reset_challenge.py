@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Clear the leaderboard for a single challenge.
 
-Drops `agent_bests` and `best_history` rows for the named challenge so the
+Drops `trajectory_bests` and `best_history` rows for the named challenge so the
 next feasible publish becomes the new global best. Preserves `experiments`,
 `hypotheses`, and `trajectories` — research history is intact.
 

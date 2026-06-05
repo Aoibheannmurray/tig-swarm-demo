@@ -23,7 +23,7 @@ const PAL_PURPLE     = "#8B6B8C";
 const REPO_URL = "https://github.com/tig-foundation/prometheus-early-beta.git";
 
 const STEPS: { cmd: string }[] = [
-  { cmd: `git clone ${REPO_URL} && cd prometheus-early-beta && python run.py` },
+  { cmd: `git clone ${REPO_URL} && cd prometheus-early-beta && python3 run.py` },
 ];
 
 export function initWelcome() {

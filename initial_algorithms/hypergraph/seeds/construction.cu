@@ -30,3 +30,19 @@
 //        curand_init(((uint64_t *)(seed))[0], 0, 0, &state);
 //        ...
 //    }
+
+// Balanced round-robin partition assignment, one thread per node:
+// partition[i] = i % num_parts. This is the most size-balanced partition
+// possible (part sizes differ by at most one), so it satisfies max_part_size
+// whenever any balanced partition does. Edge-cut quality is poor by design —
+// the refiner's job is to reduce the cut (move nodes between parts, greedy
+// bipartition, multilevel coarsening) while keeping the balance constraint.
+extern "C" __global__ void round_robin_partition(
+    int* __restrict__ partition,
+    const int num_nodes,
+    const int num_parts
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_nodes) return;
+    partition[i] = (num_parts > 0) ? (i % num_parts) : 0;
+}

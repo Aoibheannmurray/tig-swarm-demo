@@ -1,4 +1,7 @@
 import aiosqlite
+import base64
+import gzip
+import json
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,7 +23,11 @@ CREATE TABLE IF NOT EXISTS agents (
     llm_type TEXT,
     -- Per-agent session token, generated at register. Required as
     -- X-Agent-Token on every non-register participant-write call.
-    token TEXT
+    token TEXT,
+    -- Model tier auto-classified at register (see server/tiers.py). Drives
+    -- seeding only: 'standard' models get a working seed on a fresh
+    -- trajectory; 'frontier' models keep the stub. Defaults to 'standard'.
+    tier TEXT DEFAULT 'standard'
 );
 
 CREATE TABLE IF NOT EXISTS hypotheses (
@@ -39,10 +46,17 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
-CREATE TABLE IF NOT EXISTS agent_bests (
+CREATE TABLE IF NOT EXISTS trajectory_bests (
     agent_id TEXT NOT NULL,
     challenge TEXT NOT NULL,
-    experiment_id TEXT NOT NULL,
+    -- The experiment that produced this best. References experiments.id and
+    -- propagates as-is through the inactive pool on adoption, so on a SHARED
+    -- trajectory it may belong to a different agent than agent_id (whoever
+    -- last actually improved the lineage). NULL when provenance is genuinely
+    -- unknown: a floor inherited from a pre-experiment_id legacy inactive row,
+    -- or an admin-seeded inactive entry that was never run. Never a fabricated
+    -- id — an id here always resolves to a real experiments row.
+    experiment_id TEXT,
     algorithm_code TEXT NOT NULL,
     kernel_code TEXT,
     score REAL NOT NULL,
@@ -68,21 +82,26 @@ CREATE TABLE IF NOT EXISTS experiments (
     kernel_code TEXT,
     score REAL NOT NULL,
     feasible INTEGER DEFAULT 1,
-    -- See agent_bests.challenge_metrics — same opaque per-challenge dict.
+    -- See trajectory_bests.challenge_metrics — same opaque per-challenge dict.
     challenge_metrics TEXT,
     runtime_seconds REAL DEFAULT 0.0,
     notes TEXT DEFAULT '',
     solution_data TEXT,
     track_scores TEXT,
     delta_vs_best_pct REAL,
-    delta_vs_own_best_pct REAL,
-    beats_own_best INTEGER DEFAULT 0,
+    delta_vs_trajectory_best_pct REAL,
+    beats_trajectory_best INTEGER DEFAULT 0,
     trajectory_id TEXT,
     -- "tacit_knowledge" or "inspiration" when the agent fetched /api/state
     -- with that hint right before publishing this iteration; NULL otherwise.
     -- Lets the dashboard mark hint events on per-agent progress plots.
     received_hint TEXT,
     inspiration_source_id TEXT,
+    -- Source agent's trajectory_id at the moment the inspiration hint was
+    -- issued (copied from agent_challenge_state.pending_inspiration_source_
+    -- trajectory). The inspiration matrix reads this directly so it no longer
+    -- depends on the source's current trajectory_bests row surviving.
+    inspiration_source_trajectory_id TEXT,
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
     estimated_cost REAL DEFAULT 0.0,
@@ -126,6 +145,11 @@ CREATE TABLE IF NOT EXISTS inactive_algorithms (
     deposited_at TEXT NOT NULL,
     trajectory_id TEXT,
     program_id TEXT,
+    -- The experiment that earned `score`, carried from the depositing agent's
+    -- trajectory_bests row so an adopting agent inherits real provenance
+    -- instead of a fabricated id. NULL for entries with no underlying run
+    -- (admin-seeded) or deposited before this column existed.
+    experiment_id TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -166,6 +190,11 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
     -- experiments.received_hint absorbs the value).
     pending_hint TEXT,
     pending_inspiration_source TEXT,
+    -- The source agent's trajectory_id captured at hint-out time. Recorded
+    -- here (and copied onto experiments) so the inspiration matrix reads the
+    -- exact source trajectory instead of reconstructing it from the source's
+    -- *current* trajectory_bests row — which is wiped on stagnation reset.
+    pending_inspiration_source_trajectory TEXT,
     total_input_tokens INTEGER DEFAULT 0,
     total_output_tokens INTEGER DEFAULT 0,
     total_estimated_cost REAL DEFAULT 0.0,
@@ -187,6 +216,26 @@ CREATE TABLE IF NOT EXISTS challenge_configs (
     initial_kernel_code TEXT NOT NULL DEFAULT '',
     strategy_tags TEXT NOT NULL DEFAULT '[]'
 );
+
+-- Pool of working starter algorithms handed to standard-tier / exploiter
+-- agents on a fresh trajectory (instead of the bare stub). Two sources:
+-- 'authored' (host-supplied at swarm create) and 'harvested' (a frontier
+-- agent's first feasible result for a strategy_tag). The UNIQUE index below
+-- is the entire size-control story: at most one seed per
+-- (challenge, strategy_tag, source), so first-feasible-per-tag wins and the
+-- pool can't grow unboundedly.
+CREATE TABLE IF NOT EXISTS seed_pool (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenge TEXT NOT NULL,
+    strategy_tag TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'authored',
+    score REAL,
+    feasible INTEGER NOT NULL DEFAULT 1,
+    algorithm_code TEXT NOT NULL,
+    kernel_code TEXT,
+    origin_agent_id TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 # Indexes are split out from the main schema so they can be applied after
@@ -197,11 +246,11 @@ CREATE INDEX IF NOT EXISTS idx_exp_feasible_score ON experiments(feasible, score
 CREATE INDEX IF NOT EXISTS idx_exp_agent ON experiments(agent_id);
 CREATE INDEX IF NOT EXISTS idx_hyp_status ON hypotheses(status);
 CREATE INDEX IF NOT EXISTS idx_hyp_fingerprint ON hypotheses(fingerprint);
-CREATE INDEX IF NOT EXISTS idx_agent_bests_score ON agent_bests(feasible, score);
+CREATE INDEX IF NOT EXISTS idx_trajectory_bests_score ON trajectory_bests(feasible, score);
 CREATE INDEX IF NOT EXISTS idx_msg_created ON messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_hyp_agent_target ON hypotheses(agent_id, target_best_experiment_id);
 CREATE INDEX IF NOT EXISTS idx_hyp_program_id ON hypotheses(program_id);
-CREATE INDEX IF NOT EXISTS idx_agent_bests_challenge ON agent_bests(challenge, feasible, score);
+CREATE INDEX IF NOT EXISTS idx_trajectory_bests_challenge ON trajectory_bests(challenge, feasible, score);
 CREATE INDEX IF NOT EXISTS idx_experiments_challenge ON experiments(challenge, agent_id);
 CREATE INDEX IF NOT EXISTS idx_hyp_challenge_agent ON hypotheses(challenge, agent_id, target_best_experiment_id);
 CREATE INDEX IF NOT EXISTS idx_inactive_challenge ON inactive_algorithms(challenge);
@@ -213,6 +262,10 @@ CREATE INDEX IF NOT EXISTS idx_acs_active ON agent_challenge_state(challenge, la
 -- Covers get_baseline_score: WHERE feasible=1 AND challenge=? ORDER BY created_at ASC LIMIT 1.
 -- Called from periodic_stats per-challenge, /api/state per fetch, /api/iterations per publish.
 CREATE INDEX IF NOT EXISTS idx_exp_baseline ON experiments(challenge, feasible, created_at);
+-- Lookup seeds for a challenge, and enforce one seed per (challenge, tag,
+-- source) so auto-harvest's INSERT OR IGNORE keeps first-feasible-per-tag.
+CREATE INDEX IF NOT EXISTS idx_seed_pool_lookup ON seed_pool(challenge, strategy_tag);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seed_pool_dedup ON seed_pool(challenge, strategy_tag, source);
 """
 
 DEFAULT_CONFIG = {
@@ -243,6 +296,123 @@ async def _add_column(db, table: str, column: str, typedef: str) -> None:
             raise
 
 
+# Owner-intended swarm config, injected as Railway service variables by
+# `setup.py create` *before* the first deploy. The global scalars travel as
+# plain vars; the per-challenge sub-configs (which include the initial
+# algorithm/kernel code and so can be tens of KB) travel as one gzip+base64
+# JSON blob to stay well within Railway's per-variable size limit.
+_ENV_CONFIG_KEYS = (
+    ("ACTIVE_CHALLENGE", "active_challenge"),
+    ("SWARM_TYPE", "swarm_type"),
+    ("SWARM_NAME", "swarm_name"),
+    ("OWNER_NAME", "owner_name"),
+    ("STAGNATION_THRESHOLD", "stagnation_threshold"),
+    ("STAGNATION_LIMIT", "stagnation_limit"),
+    ("HYPOTHESIS_RECALL_THRESHOLD", "hypothesis_recall_threshold"),
+)
+
+
+async def _apply_env_swarm_config(db: aiosqlite.Connection) -> None:
+    """Apply the owner's intended swarm config from environment variables.
+
+    `init_db` seeds the bare `DEFAULT_CONFIG` (active_challenge=satisfiability,
+    swarm_type=cpu, no challenge_configs) with INSERT OR IGNORE and never
+    overwrites it. Historically the *real* config was applied only by the
+    create-time `POST /api/swarm_config`, which races the Railway rollout: the
+    POST can land on a transient container during deploy and be discarded once
+    the persistent /data volume's container becomes authoritative, stranding
+    the swarm on the defaults forever (the volume keeps them across redeploys).
+
+    Applying the config here — from vars `setup.py create` sets before the
+    first deploy — makes the server come up correctly configured with no
+    dependence on a POST landing. The caller runs this once per fresh DB
+    (first-boot sentinel) so it authoritatively overrides the just-seeded
+    DEFAULT_CONFIG without later clobbering owner runtime changes (e.g. a
+    `setup.py switch`). Mirrors how ADMIN_KEY / SWARM_PASSWORD are injected,
+    except those are safe to re-assert every boot and this is seed-once.
+    """
+    for env_name, cfg_key in _ENV_CONFIG_KEYS:
+        val = os.environ.get(env_name)
+        if val:
+            await db.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                (cfg_key, val),
+            )
+
+    blob = os.environ.get("SWARM_CHALLENGES_B64")
+    if not blob:
+        return
+    challenges = json.loads(gzip.decompress(base64.b64decode(blob)).decode())
+    for ch, sub in challenges.items():
+        await upsert_challenge_config(
+            db, ch,
+            tracks=json.dumps(sub["tracks"]) if sub.get("tracks") is not None else None,
+            timeout=sub.get("timeout"),
+            scoring_direction=sub.get("scoring_direction"),
+            initial_algorithm_code=sub.get("initial_algorithm_code"),
+            initial_kernel_code=sub.get("initial_kernel_code"),
+            strategy_tags=json.dumps(sub["strategy_tags"]) if sub.get("strategy_tags") is not None else None,
+        )
+
+
+async def _column_is_notnull(db, table: str, column: str) -> bool:
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    for row in await cursor.fetchall():
+        # PRAGMA table_info columns: (cid, name, type, notnull, dflt_value, pk)
+        if row[1] == column:
+            return bool(row[3])
+    return False
+
+
+async def _relax_trajectory_bests_experiment_id() -> None:
+    """One-time table rebuild dropping the NOT NULL on
+    trajectory_bests.experiment_id, so an adopted floor with no known source
+    experiment can store NULL instead of a fabricated id. SQLite can't drop a
+    column constraint in place, hence the copy-and-swap. Idempotent: a no-op
+    once experiment_id is already nullable (fresh DBs created from SCHEMA, or
+    a DB already migrated). Runs in its own connection AFTER the SCHEMA /
+    SCHEMA_INDEXES pass so the source table definitely exists."""
+    # Deliberately a separate aiosqlite connection from init_db's: this is
+    # wrapped in BEGIN/COMMIT and a DROP TABLE, which we keep isolated.
+    async with aiosqlite.connect(DB_PATH) as db:
+        if not await _column_is_notnull(db, "trajectory_bests", "experiment_id"):
+            return
+        await db.executescript(
+            """
+            BEGIN;
+            CREATE TABLE trajectory_bests_new (
+                agent_id TEXT NOT NULL,
+                challenge TEXT NOT NULL,
+                experiment_id TEXT,
+                algorithm_code TEXT NOT NULL,
+                kernel_code TEXT,
+                score REAL NOT NULL,
+                feasible INTEGER NOT NULL DEFAULT 1,
+                challenge_metrics TEXT,
+                solution_data TEXT,
+                track_scores TEXT,
+                updated_at TEXT NOT NULL,
+                trajectory_id TEXT,
+                PRIMARY KEY (agent_id, challenge),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            );
+            INSERT INTO trajectory_bests_new
+                SELECT agent_id, challenge, experiment_id, algorithm_code,
+                       kernel_code, score, feasible, challenge_metrics,
+                       solution_data, track_scores, updated_at, trajectory_id
+                FROM trajectory_bests;
+            DROP TABLE trajectory_bests;
+            ALTER TABLE trajectory_bests_new RENAME TO trajectory_bests;
+            CREATE INDEX IF NOT EXISTS idx_trajectory_bests_score
+                ON trajectory_bests(feasible, score);
+            CREATE INDEX IF NOT EXISTS idx_trajectory_bests_challenge
+                ON trajectory_bests(challenge, feasible, score);
+            COMMIT;
+            """
+        )
+        await db.commit()
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         # WAL mode is durable across connections — set once at startup, the
@@ -263,6 +433,9 @@ async def init_db() -> None:
         # group agents by owner. Derived from the X-Username header at
         # register time; not modifiable after the fact.
         await _add_column(db, "agents", "contributor_username", "TEXT")
+        # Auto-classified model tier (frontier/standard), drives seeding.
+        # Legacy rows back-fill to 'standard'; read via COALESCE for safety.
+        await _add_column(db, "agents", "tier", "TEXT DEFAULT 'standard'")
         # Migrations for token tracking columns on existing databases.
         await _add_column(db, "experiments", "input_tokens", "INTEGER DEFAULT 0")
         await _add_column(db, "experiments", "output_tokens", "INTEGER DEFAULT 0")
@@ -270,6 +443,21 @@ async def init_db() -> None:
         await _add_column(db, "agent_challenge_state", "total_input_tokens", "INTEGER DEFAULT 0")
         await _add_column(db, "agent_challenge_state", "total_output_tokens", "INTEGER DEFAULT 0")
         await _add_column(db, "agent_challenge_state", "total_estimated_cost", "REAL DEFAULT 0.0")
+        # Set to 1 the first time an agent publishes a benchmarked iteration on
+        # a challenge. Stays 0 for an agent that never produced anything the
+        # benchmark could run — a quiet "never benchmarked" signal (no feed
+        # noise). Surfaced in the dashboard/logs.
+        await _add_column(db, "agent_challenge_state", "ever_benchmarked", "INTEGER DEFAULT 0")
+        # Inspiration-source trajectory capture (see schema comments). Legacy
+        # rows stay NULL; the inspiration matrix falls back to reconstruction
+        # for those and uses this column for everything published afterwards.
+        await _add_column(db, "experiments", "inspiration_source_trajectory_id", "TEXT")
+        await _add_column(db, "agent_challenge_state", "pending_inspiration_source_trajectory", "TEXT")
+        # Real experiment that earned a deposited best, carried through the
+        # inactive pool so adoption inherits true provenance (see
+        # deposit_inactive / the adoption branch in server.py). Legacy rows
+        # back-fill to NULL — their originating experiment_id was never stored.
+        await _add_column(db, "inactive_algorithms", "experiment_id", "TEXT")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -312,6 +500,34 @@ async def init_db() -> None:
             )
         await db.commit()
 
+        # Seed the owner's intended swarm config from deploy-time env vars on
+        # the FIRST boot of a fresh DB only (see `_apply_env_swarm_config`).
+        # First-boot gating matters: the config keys here (active_challenge,
+        # thresholds, …) are owner-tunable at runtime via POST /api/swarm_config
+        # — e.g. `setup.py switch` flips active_challenge — and that runtime
+        # state lives on the persistent /data volume. Re-applying env on every
+        # boot would revert a switch on the next redeploy. A one-time sentinel
+        # gives us "seed a fresh swarm correctly" without "clobber live state".
+        # Defensive: a malformed var must never crash boot (an unreachable
+        # server is an unfixable swarm) — log and carry on.
+        cur = await db.execute(
+            "SELECT 1 FROM config WHERE key = 'env_config_applied'"
+        )
+        if await cur.fetchone() is None:
+            try:
+                await _apply_env_swarm_config(db)
+            except Exception as e:  # noqa: BLE001 — boot must survive any bad var
+                print(f"init_db: could not apply env swarm config: {e!r}")
+            await db.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('env_config_applied', '1')"
+            )
+            await db.commit()
+
+    # Drop the legacy NOT NULL on trajectory_bests.experiment_id so an adopted
+    # floor with unknown provenance can store NULL instead of a fabricated id.
+    # Runs in its own connection after the schema pass above; idempotent.
+    await _relax_trajectory_bests_experiment_id()
+
 
 @asynccontextmanager
 async def connect():
@@ -322,7 +538,7 @@ async def connect():
         of failing immediately with SQLITE_BUSY. Under concurrent publish +
         periodic_stats load this avoids spurious 500s.
       - foreign_keys=ON: SQLite ships with FK enforcement OFF by default; the
-        schema declares FKs (agent_bests.agent_id → agents.id, etc.) so we
+        schema declares FKs (trajectory_bests.agent_id → agents.id, etc.) so we
         actually enforce them.
       - journal_mode=WAL is set once globally in init_db() — it's a database-
         level setting that persists in the file, not per-connection.
@@ -355,10 +571,10 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
     return candidate > prior if direction == "max" else candidate < prior
 
 
-_AGENT_BESTS_COLS = (
+_TRAJECTORY_BESTS_COLS = (
     "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
     "kernel_code, score, feasible, challenge_metrics, solution_data, "
-    "track_scores, updated_at"
+    "track_scores, updated_at, trajectory_id"
 )
 
 
@@ -367,10 +583,10 @@ async def get_global_best(
 ) -> dict | None:
     # Best-scoring feasible experiment for the challenge, across ALL
     # trajectories — active and inactive. Querying `experiments` (not
-    # `agent_bests`) means the peak score from a now-deactivated trajectory
-    # still counts: agent_bests is wiped per-agent on stagnation reset,
+    # `trajectory_bests`) means the peak score from a now-deactivated trajectory
+    # still counts: trajectory_bests is wiped per-agent on stagnation reset,
     # which would otherwise hide historical peaks once their trajectory
-    # ended. Returned shape mirrors the prior agent_bests-based result so
+    # ended. Returned shape mirrors the prior trajectory_bests-based result so
     # callers don't need to change.
     order = _direction_order(direction)
     cursor = await conn.execute(
@@ -386,11 +602,82 @@ async def get_global_best(
     return dict(row) if row else None
 
 
-async def get_agent_best(
+async def get_agent_tier(conn: aiosqlite.Connection, agent_id: str) -> str:
+    """Auto-classified model tier for an agent. Legacy rows with NULL tier
+    (predating the column) read as 'standard'."""
+    cursor = await conn.execute(
+        "SELECT COALESCE(tier, 'standard') AS tier FROM agents WHERE id = ?",
+        (agent_id,),
+    )
+    row = await cursor.fetchone()
+    return row["tier"] if row else "standard"
+
+
+# ── Seed pool helpers ──
+
+
+async def insert_seed(
+    conn: aiosqlite.Connection,
+    challenge: str,
+    strategy_tag: str,
+    algorithm_code: str,
+    *,
+    created_at: str,
+    source: str = "authored",
+    score: float | None = None,
+    feasible: bool = True,
+    kernel_code: str | None = None,
+    origin_agent_id: str | None = None,
+) -> bool:
+    """Insert a seed, deduped by (challenge, strategy_tag, source) via the
+    UNIQUE index. INSERT OR IGNORE means first-write-per-tag wins and later
+    writes are silently dropped. Returns True iff a row was actually added."""
+    cur = await conn.execute(
+        "INSERT OR IGNORE INTO seed_pool "
+        "(challenge, strategy_tag, source, score, feasible, algorithm_code, "
+        " kernel_code, origin_agent_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (challenge, strategy_tag, source, score, 1 if feasible else 0,
+         algorithm_code, kernel_code, origin_agent_id, created_at),
+    )
+    return cur.rowcount > 0
+
+
+async def list_seeds(conn: aiosqlite.Connection, challenge: str) -> list[dict]:
+    """All feasible seeds for a challenge, stable order (by tag then id) so
+    a per-agent hash assignment is deterministic across calls."""
+    cursor = await conn.execute(
+        "SELECT id, strategy_tag, source, score, feasible, algorithm_code, "
+        "kernel_code FROM seed_pool WHERE challenge = ? AND feasible = 1 "
+        "ORDER BY strategy_tag, id",
+        (challenge,),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def least_covered_tag(
+    conn: aiosqlite.Connection, challenge: str, candidate_tags: list[str],
+) -> str | None:
+    """The candidate strategy_tag with the fewest hypotheses tried so far on
+    this challenge (untried tags count as 0). Powers the soft niching
+    suggestion for explorers. Ties break by candidate order. Returns None if
+    no candidates are given."""
+    if not candidate_tags:
+        return None
+    cursor = await conn.execute(
+        "SELECT strategy_tag, COUNT(*) AS c FROM hypotheses "
+        "WHERE challenge = ? GROUP BY strategy_tag",
+        (challenge,),
+    )
+    counts = {r["strategy_tag"]: r["c"] for r in await cursor.fetchall()}
+    return min(candidate_tags, key=lambda t: counts.get(t, 0))
+
+
+async def get_trajectory_best(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> dict | None:
     cursor = await conn.execute(
-        f"SELECT {_AGENT_BESTS_COLS} FROM agent_bests "
+        f"SELECT {_TRAJECTORY_BESTS_COLS} FROM trajectory_bests "
         "WHERE agent_id = ? AND challenge = ?",
         (agent_id, challenge),
     )
@@ -398,7 +685,7 @@ async def get_agent_best(
     return dict(row) if row else None
 
 
-async def upsert_agent_best(
+async def upsert_trajectory_best(
     conn: aiosqlite.Connection,
     agent_id: str,
     challenge: str,
@@ -414,7 +701,7 @@ async def upsert_agent_best(
     kernel_code: str | None = None,
 ) -> None:
     await conn.execute(
-        """INSERT INTO agent_bests
+        """INSERT INTO trajectory_bests
            (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
             challenge_metrics, solution_data, track_scores, updated_at, trajectory_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -435,7 +722,7 @@ async def upsert_agent_best(
     )
 
 
-async def list_agent_bests(
+async def list_trajectory_bests(
     conn: aiosqlite.Connection,
     challenge: str,
     *,
@@ -469,7 +756,7 @@ async def list_agent_bests(
         "SELECT ab.agent_id, ab.challenge, ab.experiment_id as id, ab.experiment_id, "
         "       ab.algorithm_code, ab.kernel_code, ab.score, ab.feasible, "
         "       ab.challenge_metrics, ab.solution_data, ab.updated_at "
-        f"FROM agent_bests ab{join_clause} WHERE " + " AND ".join(where) +
+        f"FROM trajectory_bests ab{join_clause} WHERE " + " AND ".join(where) +
         f" ORDER BY ab.score {order}"
     )
     cursor = await conn.execute(query, params)
@@ -535,12 +822,12 @@ async def compute_leaderboard(
             ab.score as current_score
         FROM agent_challenge_state acs
         JOIN agents a ON a.id = acs.agent_id
-        LEFT JOIN agent_bests ab
+        LEFT JOIN trajectory_bests ab
             ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
         WHERE acs.challenge = ?
           AND acs.experiments_completed > 0
-        -- Sort by best-ever score (not current_score from agent_bests):
-        -- agent_bests is cleared when a trajectory stagnates or the
+        -- Sort by best-ever score (not current_score from trajectory_bests):
+        -- trajectory_bests is cleared when a trajectory stagnates or the
         -- inactivity sweep fires, so current_score goes NULL for agents
         -- whose trajectory has ended even though their historical peak
         -- is still meaningful. best_ever_score on acs is monotonic — it
@@ -830,12 +1117,13 @@ async def deposit_inactive(
     trajectory_id: str | None = None,
     program_id: str | None = None,
     kernel_code: str | None = None,
+    experiment_id: str | None = None,
 ) -> int:
     cursor = await conn.execute(
         "INSERT INTO inactive_algorithms "
-        "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id),
+        "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id),
     )
     return cursor.lastrowid
 
@@ -863,7 +1151,7 @@ async def get_inactive_with_deactivations(
 ) -> list[dict]:
     cursor = await conn.execute(
         "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, ia.score, "
-        "  ia.trajectory_id, ia.program_id, "
+        "  ia.trajectory_id, ia.program_id, ia.experiment_id, "
         "  COALESCE(t.num_deactivations, 1) as num_deactivations "
         "FROM inactive_algorithms ia "
         "LEFT JOIN trajectories t ON ia.trajectory_id = t.id "
@@ -873,11 +1161,11 @@ async def get_inactive_with_deactivations(
     return [dict(row) for row in await cursor.fetchall()]
 
 
-async def clear_agent_best(
+async def clear_trajectory_best(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> None:
     await conn.execute(
-        "DELETE FROM agent_bests WHERE agent_id = ? AND challenge = ?",
+        "DELETE FROM trajectory_bests WHERE agent_id = ? AND challenge = ?",
         (agent_id, challenge),
     )
 
@@ -923,7 +1211,7 @@ async def deactivate_inactive_agent_trajectories(
 
     An agent that crashes or disconnects never hits the stagnation-reset
     path in `publish_iteration`, so their trajectory stays flagged
-    `active` and their best algorithm is locked inside `agent_bests` —
+    `active` and their best algorithm is locked inside `trajectory_bests` —
     invisible to the per-challenge inactive pool that other agents draw
     inspiration from. This sweep handles that: for each (agent,
     challenge) whose `last_active_at` is older than `cutoff_ts` but
@@ -934,7 +1222,7 @@ async def deactivate_inactive_agent_trajectories(
          deactivate while anyone's still working on them).
       2. Deposit the agent's best into `inactive_algorithms` so it can be
          adopted from the pool.
-      3. Clear their `agent_bests` row and null the trajectory pointer on
+      3. Clear their `trajectory_bests` row and null the trajectory pointer on
          their `agent_challenge_state` row, so a returning agent starts
          fresh on next /api/state.
 
@@ -981,15 +1269,16 @@ async def deactivate_inactive_agent_trajectories(
         if other_live is None:
             await deactivate_trajectory(conn, traj_id, timestamp)
 
-        best = await get_agent_best(conn, agent_id, challenge)
+        best = await get_trajectory_best(conn, agent_id, challenge)
         if best is not None:
             await deposit_inactive(
                 conn, agent_id, challenge,
                 best["algorithm_code"], best["score"], timestamp,
                 trajectory_id=traj_id, program_id=program_id,
                 kernel_code=best.get("kernel_code"),
+                experiment_id=best.get("experiment_id"),
             )
-            await clear_agent_best(conn, agent_id, challenge)
+            await clear_trajectory_best(conn, agent_id, challenge)
     return processed
 
 

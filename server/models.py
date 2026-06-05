@@ -42,6 +42,11 @@ class RegisterRequest(BaseModel):
     # (e.g. "claude_code", "gemini_api", "gpt-4o"). Surfaced on the dashboard
     # so projected swarms can see what each contributor is running.
     llm_type: Optional[str] = None
+    # Optional structured provider/model. When supplied, used for tier
+    # auto-classification (server/tiers.py); otherwise the server falls back
+    # to parsing the llm_type label. Both optional for backward compatibility.
+    provider: Optional[str] = None
+    model: Optional[str] = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -83,7 +88,7 @@ class AdminBroadcast(AdminAuth):
 
 class AdminResetChallenge(AdminAuth):
     """Owner-only request to clear the leaderboard for a single challenge:
-    drops `best_history` + `agent_bests` rows for that challenge so the next
+    drops `best_history` + `trajectory_bests` rows for that challenge so the next
     feasible publish becomes the new global best. Preserves `experiments`,
     `hypotheses`, and `agent_challenge_state` so prior research and per-agent
     counters (run counts, trajectories, stagnation) remain intact."""
@@ -109,7 +114,7 @@ class AdminSeedInactive(AdminAuth):
 
     Restricted server-side to {knapsack, satisfiability} — the only
     challenges whose mainnet algorithms ship as a single mod.rs (+ optional
-    kernels.cu), which is what the `agent_bests` / `inactive_algorithms`
+    kernels.cu), which is what the `trajectory_bests` / `inactive_algorithms`
     wire format expects today.
     """
     challenge: "ChallengeName"
@@ -118,6 +123,22 @@ class AdminSeedInactive(AdminAuth):
     # Free-form label for the synthetic agent the pool entry is attributed
     # to (e.g. "tig-foundation"). The server creates the agent on first use.
     source_label: str = "tig-foundation"
+
+
+class AdminSeedPool(AdminAuth):
+    """Owner-only: deposit a host-authored seed algorithm into `seed_pool`.
+
+    Seeds are working starter algorithms handed to standard-tier / exploiter
+    agents on a fresh trajectory (instead of the bare stub). Deduped by
+    (challenge, strategy_tag, source='authored') via the UNIQUE index — one
+    authored seed per (challenge, strategy_tag). Used at swarm-create time to
+    load any `initial_algorithms/<challenge>/seeds/*.rs` files the host wrote.
+    """
+    challenge: "ChallengeName"
+    strategy_tag: str
+    algorithm_code: str
+    kernel_code: Optional[str] = None
+    score: Optional[float] = None
 
 
 # Swarm-wide configuration set by the owner via the setup wizard.
@@ -189,7 +210,7 @@ class IterationResponse(BaseModel):
     experiment_id: str
     hypothesis_id: str
     is_new_best: bool
-    beats_own_best: bool
+    beats_trajectory_best: bool
     rank: int
     runs: int
     improvements: int

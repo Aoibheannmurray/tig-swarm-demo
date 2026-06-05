@@ -39,45 +39,49 @@ def kernel_path(config: dict) -> Path | None:
 # ── Read / write ───────────────────────────────────────────────────
 
 
+# LLM output and user-authored files are always written/read as UTF-8 so a
+# model emitting non-ASCII punctuation (em-dash, →, non-breaking hyphen) can't
+# crash the run on a host whose default encoding is cp125x (Windows). Reads use
+# errors="replace" so a file left half-written by a prior crash still loads.
 def read_optional(path: Path | None) -> str:
     if path and path.exists():
-        return path.read_text()
+        return path.read_text(encoding="utf-8", errors="replace")
     return ""
 
 
 def write_algorithm(code: str, config: dict) -> None:
     p = algo_path(config)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(code)
+    p.write_text(code, encoding="utf-8")
 
 
 def write_kernel(code: str, config: dict) -> None:
     p = kernel_path(config)
     if p:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(code)
+        p.write_text(code, encoding="utf-8")
 
 
 def read_algorithm(config: dict) -> str:
     p = algo_path(config)
-    return p.read_text() if p.exists() else ""
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
 def read_kernel(config: dict) -> str:
     p = kernel_path(config)
     if p and p.exists():
-        return p.read_text()
+        return p.read_text(encoding="utf-8", errors="replace")
     return ""
 
 
 def read_challenge_md() -> str:
     p = ROOT / "CHALLENGE.md"
-    return p.read_text() if p.exists() else ""
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
 def read_tacit_knowledge() -> str:
     p = ROOT / "tacit_knowledge_personal.md"
-    return p.read_text() if p.exists() else ""
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
 def is_stub_code(code: str) -> bool:
@@ -104,7 +108,31 @@ def _strip_fences(text: str) -> str:
 _FENCED_BLOCK_RE = re.compile(r"```(?:[\w+-]*)\s*\n(.*?)\n```", re.DOTALL)
 
 
-def parse_code(text: str) -> str:
+def ensure_super_import(code: str) -> str:
+    """Re-insert the required `use super::*;` anchor if it's missing.
+
+    The swarm puts each algorithm at `src/<challenge>/algorithm/mod.rs`, a
+    submodule of the challenge module, so `use super::*;` (equivalently
+    `use crate::<challenge>::*;`) pulls the Challenge/Solution types into
+    scope. Agents — especially the tooled agentic backend — sometimes rewrite
+    the import block and drop the literal anchor (or spell it the long way),
+    which previously discarded an otherwise-valid candidate. Inserting it is
+    safe: if the parent glob is already imported some other way the worst case
+    is an unused-import warning, never an error.
+    """
+    if not code or "use super::*;" in code:
+        return code
+    lines = code.splitlines(keepends=True)
+    # Insert before the first top-level `use` (which sits after any leading
+    # comments and `#![...]` inner attributes), else at the very top.
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("use "):
+            lines.insert(i, "use super::*;\n")
+            return "".join(lines)
+    return "use super::*;\n" + code
+
+
+def _clean_rust(text: str) -> str:
     # Defensive against chatty LLMs that ignore "no preamble / no fences":
     # if the response wraps the code in ```...```, take the first fenced
     # block's contents; then drop any prose still sitting before the
@@ -118,7 +146,11 @@ def parse_code(text: str) -> str:
     idx = text.find("use super::*;")
     if idx > 0:
         text = text[idx:]
-    return text.strip()
+    return ensure_super_import(text.strip())
+
+
+def parse_code(text: str) -> str:
+    return _clean_rust(text)
 
 
 def parse_gpu_code(text: str) -> tuple[str, str]:
@@ -126,23 +158,59 @@ def parse_gpu_code(text: str) -> tuple[str, str]:
 
     Returns (rust_code, cuda_code). If no separator is found,
     returns the whole text as rust_code and empty cuda_code.
+
+    The Rust half goes through the same chatty-model hardening as the CPU
+    `parse_code` path (`_clean_rust`): smaller models prepend an English
+    preamble and/or wrap the code in a ```rust fence, which the bare
+    `_strip_fences` (only triggered when the WHOLE response is fenced) lets
+    leak into mod.rs — producing `unknown start of token` / `expected ! or
+    ::, found at` compile errors from prose being compiled as Rust.
     """
     text = _strip_fences(text)
     m = _KERNEL_SEPARATOR_RE.search(text)
     if m is None:
-        return text.strip(), ""
-    rust = text[: m.start()].strip()
+        return _clean_rust(text), ""
+    rust = text[: m.start()]
     cuda = text[m.end():].strip()
-    return _strip_fences(rust), _strip_fences(cuda)
+    return _clean_rust(rust), _strip_fences(cuda)
 
 
-def validate_code(code: str) -> str | None:
+# Challenges whose `solve_challenge` + training loop are harness-owned and
+# non-editable: the agent supplies ONLY the optimizer hooks. For these we must
+# NOT require `fn solve_challenge(` (it lives in the locked challenge module),
+# and instead require the three optimizer hooks the harness calls.
+_OPTIMIZER_HOOK_CHALLENGES = {"neuralnet_optimizer"}
+_OPTIMIZER_HOOKS = (
+    "fn optimizer_init_state(",
+    "fn optimizer_query_at_params(",
+    "fn optimizer_step(",
+)
+
+
+def validate_code(code: str, config: dict | None = None) -> str | None:
     """Basic sanity check on LLM-generated code.
 
     Returns None if valid, or an error description."""
     if "use super::*;" not in code:
         return "`use super::*;` is missing — it must remain as the first import."
-    if "fn solve_challenge(" not in code:
+    challenge = (config or {}).get("challenge")
+    if challenge in _OPTIMIZER_HOOK_CHALLENGES:
+        if "fn solve_challenge(" in code:
+            return (
+                "`solve_challenge` is harness-owned for this challenge and must NOT be "
+                "defined here — the benchmark runs the fixed training loop and calls "
+                "your optimizer hooks. Remove your `solve_challenge` and implement only "
+                "`optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`."
+            )
+        missing = [h for h in _OPTIMIZER_HOOKS if h not in code]
+        if missing:
+            names = ", ".join(h[3:-1] for h in missing)  # strip "fn " and "("
+            return (
+                f"Missing required optimizer hook(s): {names}. `solve_challenge` and "
+                "the training loop are harness-owned — implement only the optimizer "
+                "functions, and keep them `pub fn` with their exact signatures."
+            )
+    elif "fn solve_challenge(" not in code:
         return "`fn solve_challenge(` not found — the function signature must not change."
     if is_stub_code(code):
         return (

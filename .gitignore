@@ -10,6 +10,8 @@ __pycache__/
 .c3.local
 c3-artifacts/
 job_*/
+# …but the job_scheduling challenge's seed/algorithm dir is real source, not a job artifact.
+!initial_algorithms/job_scheduling/
 fly.toml
 Procfile
 runtime.txt
@@ -19,6 +21,8 @@ server/static/
 .swarm-cache.json
 swarm.admin.json
 fleet.config.json
+agent.config.json
+swarm.config.json
 worktrees/
 CHALLENGE.md
 data/
@@ -33,3 +37,4 @@ src/*/algorithm/mod.rs
 src/*/algorithm/kernels.cu
 tig-monorepo/
 prompts_log/
+feedback/

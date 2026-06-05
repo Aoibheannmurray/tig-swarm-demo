@@ -5,7 +5,6 @@ use cudarc::{
     runtime::sys::cudaDeviceProp,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use std::sync::Arc;
 use crate::neuralnet_optimizer::*;
 
@@ -23,29 +22,13 @@ pub fn help() {
 
 const THREADS_PER_BLOCK: u32 = 1024;
 
-pub fn solve_challenge(
-    challenge: &Challenge,
-    save_solution: &dyn Fn(&Solution) -> Result<()>,
-    hyperparameters: &Option<Map<String, Value>>,
-    module: Arc<CudaModule>,
-    stream: Arc<CudaStream>,
-    prop: &cudaDeviceProp,
-) -> Result<()> {
-    // boilerplate for training loop
-    // recommend not modifying this function unless you have a good reason
-    training_loop(
-        challenge,
-        save_solution,
-        module,
-        stream,
-        prop,
-        optimizer_init_state,
-        optimizer_query_at_params,
-        optimizer_step,
-    )?;
-
-    Ok(())
-}
+// NOTE: `solve_challenge` and the training loop are harness-owned and NOT part
+// of this file — the benchmark calls a fixed `solve_challenge` that runs the
+// canonical `training_loop` (enforcing the epoch budget and the train/val/test
+// split) and invokes the three optimizer hooks below. Implement ONLY those
+// hooks (plus `Hyperparameters`, `help`, and any helpers/kernels you need).
+// The hooks MUST stay `pub fn` with these exact signatures so the harness can
+// call them.
 
 #[derive(Clone)]
 struct OptimizerState {
@@ -66,7 +49,7 @@ impl OptimizerStateTrait for OptimizerState {
     }
 }
 
-fn optimizer_init_state(
+pub fn optimizer_init_state(
     seed: [u8; 32],
     param_sizes: &[usize],
     stream: Arc<CudaStream>,
@@ -79,7 +62,7 @@ fn optimizer_init_state(
     Err(anyhow!("Not implemented"))
 }
 
-fn optimizer_query_at_params(
+pub fn optimizer_query_at_params(
     optimizer_state: &dyn OptimizerStateTrait,
     model_params: &[CudaSlice<f32>],
     epoch: usize,
@@ -93,7 +76,7 @@ fn optimizer_query_at_params(
     Err(anyhow!("Not implemented"))
 }
 
-fn optimizer_step(
+pub fn optimizer_step(
     optimizer_state: &mut dyn OptimizerStateTrait,
     model_params: &[CudaSlice<f32>],
     gradients: &[CudaSlice<f32>],

@@ -38,7 +38,7 @@ Each swarm hosts every challenge in its hardware class side by side. Contributor
 
 State isolation is enforced at the schema level:
 
-- **`agent_bests`** has a composite primary key `(agent_id, challenge)` — physically per-challenge, no singleton ambiguity.
+- **`trajectory_bests`** has a composite primary key `(agent_id, challenge)` — physically per-challenge, no singleton ambiguity.
 - **`agent_challenge_state`** is a join table holding per-(agent, challenge) counters: `runs_since_improvement`, `improvements`, `current_trajectory_id`, `current_program_id`, `best_ever_score`, etc. Replaces the per-challenge counter columns previously on the `agents` table.
 - **`experiments`, `hypotheses`, `inactive_algorithms`, `trajectories`, `best_history`, `messages`** all carry a `challenge` column; every read filters by it.
 
@@ -77,7 +77,7 @@ Each agent is one contributor running `scripts/run_loop.py` against an LLM provi
 ### Two contributor modes
 
 - **Single-shot completion** (all API providers, plus `claude-code`). `run_loop.py` owns the whole workflow: hypothesis call → code call → write `mod.rs` → benchmark (with compile-fix and runtime-fix retry loops) → publish. The LLM is a stateless completer that returns a code blob; the Python driver does everything else.
-- **Agent mode** (`claude-code-agentic` or `codex-agentic`). `run_loop.py` shells one headless agent call per iteration inside a sandboxed git worktree. The agent reads state, edits the algorithm file in place via its Edit tool, runs `cargo check` itself, and writes `.swarm/hypothesis.json` before stopping. The Python driver still owns server I/O (state, heartbeat, publish) and the official benchmark; the agent's job is bounded to "edit algorithm files + write hypothesis." A background heartbeat thread fires every 60s during the agentic call so a multi-minute iteration doesn't drop the agent from the inspiration pool. Wall-clock-bounded by `--agentic-timeout` (default 900s).
+- **Agent mode** (`claude-code-agentic` or `codex-agentic`). `run_loop.py` shells one headless agent call per iteration inside a sandboxed git worktree. The agent reads state, edits the algorithm file in place via its Edit tool, runs `cargo check` itself, and writes `.swarm/hypothesis.json` before stopping. The Python driver still owns server I/O (state, heartbeat, publish) and the official benchmark; the agent's job is bounded to "edit algorithm files + write hypothesis." A background heartbeat thread fires every 60s during the agentic call so a multi-minute iteration doesn't drop the agent from the inspiration pool. Wall-clock-bounded by `--agentic-timeout` (default 1800s).
 
   The sandbox has two layers in both backends. The hard boundary is always the git worktree (`worktrees/<agent>/`) — the agent's cwd is the worktree, so it physically cannot reach outside (sibling agents, secrets, the main checkout, the user's home dir). The second layer is backend-specific:
   - `claude-code-agentic`: fine-grained `.swarm/sandbox-settings.json` — Edit limited to the algorithm file (and `kernels.cu` if GPU) plus `.swarm/hypothesis.json`; Read scoped to the worktree by cwd; Bash limited to `cargo check/build/fmt/clippy`; WebFetch/WebSearch and any network-touching Bash command denied. The `claude` CLI enforces these per tool call.
@@ -98,7 +98,7 @@ The agent asks the server for the current state, passing its `agent_id`. The ser
 Inspiration is the only channel for cross-pollination between lineages, so the selection rule matters. It is deliberately simple:
 
 - **Trigger.** Inspiration is attached to the `/api/state` response whenever `runs_since_improvement >= stagnation_threshold` (the swarm-config setting, default 2). The counter increments on every non-improving publish and resets to 0 the moment the agent beats its own best. So at the default an agent sees inspiration starting on its *3rd* state fetch after a breakthrough — i.e. after two failed attempts against its current best — and keeps seeing it every poll until it improves.
-- **Candidate pool.** The pool is built from every agent's *current best* (one row per agent, via `db.list_agent_bests`), with two filters: (a) the requesting agent is excluded, and (b) only peers whose `agent_challenge_state.last_active_at` for the *active* challenge is within the last `inactive_minutes` (swarm-config setting, default 20) are eligible. Dormant agents — including agents whose global heartbeat is recent but who have not touched this challenge lately — are skipped entirely.
+- **Candidate pool.** The pool is built from every agent's *current best* (one row per agent, via `db.list_trajectory_bests`), with two filters: (a) the requesting agent is excluded, and (b) only peers whose `agent_challenge_state.last_active_at` for the *active* challenge is within the last `inactive_minutes` (swarm-config setting, default 20) are eligible. Dormant agents — including agents whose global heartbeat is recent but who have not touched this challenge lately — are skipped entirely.
 - **Selection.** Uniform random (`random.choice`) over the filtered pool. **Not** weighted by score, recency, improvement rate, or diversity. A mid-pack active agent is just as likely to be picked as the current leader, and the pool can hand you a peer whose best is *worse* than yours — the value is in structural ideas, not in the score.
 - **Memorylessness.** Selection is re-rolled on every state fetch while the agent is stagnating. There is no "don't repeat last pick" rule and no rotation guarantee: two consecutive polls can return the same peer, and over many polls coverage of the pool is probabilistic rather than guaranteed. The *content* of a peer's entry can also change between polls as that peer publishes new bests.
 - **Empty pool.** If no peer passes the active-and-not-self filter (e.g. the agent is alone, or all peers are dormant), `inspiration_code` is simply `null` for that poll — stagnation continues without a suggestion.
@@ -262,7 +262,7 @@ All endpoints except `/api/agents/register` require an `X-Agent-Token` header (i
 ### `/api/state` response fields
 
 - `best_algorithm_code` — **the agent's own** current best code (or the host-configured initial algorithm on the first run; possibly a stub with `unimplemented!()`). Write this into the active challenge's `src/<challenge>/algorithm/mod.rs` before editing.
-- `my_best_score` — own best score (`null` on first run).
+- `current_trajectory_best` — best score on the agent's **current trajectory**; the floor a new mutation must beat for the code to be kept. May be an *inherited* peak when the trajectory was adopted from the inactive pool (i.e. not a score this agent produced). `null` on a fresh first run. Distinct from the agent's personal best-ever (see `leaderboard` / `best_ever_score`), which only ever reflects scores this agent itself achieved.
 - `my_runs`, `my_improvements`, `my_runs_since_improvement` — personal counters. `my_runs_since_improvement` is the stagnation counter.
 - `best_score` — current global best across all agents.
 - `prior_hypotheses` — present after stagnating past `hypothesis_recall_threshold`. The 20 most recent failed hypotheses tried against *this exact program* (by any agent). Each entry: `title`, `strategy_tag`, `description`, `score`. When present, treat repeat attempts as wasted iterations — pick something structurally different.
@@ -270,7 +270,7 @@ All endpoints except `/api/agents/register` require an `X-Agent-Token` header (i
 - `inspiration_code` — present after stagnating past `stagnation_threshold`. Another active agent's current best code, for *study* — never write it to `mod.rs`.
 - `inspiration_agent_name` — whose code the inspiration came from.
 - `stagnation_hint` — `"tacit_knowledge"` or `"inspiration"` (server picks 50/50). If `"tacit_knowledge"`, the driver should read `tacit_knowledge_personal.md` for a hint; if missing or empty, fall back to `inspiration_code`. If `"inspiration"`, study `inspiration_code` for structural ideas to adapt.
-- `trajectory_reset` — present only when a reset just occurred. `{type: "fresh_start" | "adopted_inactive", prior_score?}`. When present, `my_best_score` is `null` and `best_algorithm_code` is the new starting point — treat it like a first run.
+- `trajectory_reset` — present only when a reset just occurred. `{type: "fresh_start" | "adopted_inactive", prior_score?}`. On `fresh_start`, `current_trajectory_best` is `null`; on `adopted_inactive` it is seeded to the adopted trajectory's peak (`prior_score`), which becomes the floor to beat. Either way `best_algorithm_code` is the new starting point — treat it like a first run.
 - `leaderboard` — agent rankings (best score, runs, improvements, stagnation count).
 
 ### Loop semantics

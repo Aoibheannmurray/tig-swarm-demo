@@ -8,6 +8,7 @@ OpenAI, Google) or any OpenAI-compatible endpoint via --api-base.
 Usage:
     python setup.py
     export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
+    # Windows: set ANTHROPIC_API_KEY=sk-...  (cmd)  /  $env:ANTHROPIC_API_KEY="sk-..."  (PowerShell)
     python scripts/run_loop.py
 
     # Overrides still work:
@@ -89,6 +90,7 @@ from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
 from challenge_files import (
     ChallengeFiles,
+    ensure_super_import,
     is_stub_code,
     read_challenge_md,
     validate_code,
@@ -109,6 +111,7 @@ from prompts import (
     build_code_system_prompt,
     build_code_user_prompt,
     build_compile_fix_prompt,
+    build_compile_fix_system_prompt,
     build_hypothesis_system_prompt,
     build_hypothesis_user_prompt,
     build_redescribe_hypothesis_prompt,
@@ -125,6 +128,15 @@ from c3_compute import run_benchmark_c3
 
 # Backoff after a recoverable iteration-level failure (state fetch, LLM error).
 _ITERATION_BACKOFF_SECS = 5
+
+
+def _normalize_role(value: object) -> str:
+    """Map a config/state `role` value to 'exploiter' or 'explorer' (default).
+
+    Role is contributor-owned (an optional field in fleet.config.json / the
+    worktree's agent.config.json) and re-read every iteration so edits take
+    effect live. Anything unrecognized is an explorer — today's behavior."""
+    return "exploiter" if str(value or "").strip().lower() == "exploiter" else "explorer"
 # Skip the LLM re-describe call when the post-fix code is this similar to
 # the pre-fix code — the fix was almost certainly cosmetic (bounds checks,
 # error wrappers) and not worth a round-trip to confirm "no change".
@@ -168,7 +180,8 @@ def _call_llm_logged(
                 f"- output_tokens: {usage.get('output_tokens', 0)}\n\n"
                 f"## SYSTEM\n\n{system}\n\n"
                 f"## USER\n\n{prompt}\n\n"
-                f"## RESPONSE\n\n{response}\n"
+                f"## RESPONSE\n\n{response}\n",
+                encoding="utf-8",
             )
         except Exception as e:
             print(f"  [LOG] Prompt log write failed: {e}", file=sys.stderr)
@@ -248,8 +261,12 @@ def _generate_code(
     args: argparse.Namespace, model: str, api_key: str,
     state: dict, hypothesis: dict, config: dict,
     challenge_md: str, files: ChallengeFiles,
+    *, role: str = "explorer",
 ) -> tuple[str | None, str | None, int, int]:
     """LLM code generation with retry on validation failure.
+
+    Role only steers the prompt guidance (explorer vs exploiter); it no longer
+    gates the candidate on similarity to the starting code.
 
     Returns (code, kernel, input_tokens, output_tokens).
     """
@@ -261,11 +278,11 @@ def _generate_code(
     for attempt in range(max_attempts):
         if attempt == 0:
             print(f"  [LLM] Generating code via {args.provider}/{model}…")
-            user_prompt = build_code_user_prompt(state, hypothesis, config)
+            user_prompt = build_code_user_prompt(state, hypothesis, config, role=role)
         else:
             print(f"  [LLM] Code retry {attempt}/{max_attempts - 1}: {violation}")
             user_prompt = (
-                build_code_user_prompt(state, hypothesis, config)
+                build_code_user_prompt(state, hypothesis, config, role=role)
                 + f"\n\nYour previous response was rejected: {violation}\n"
                 "Fix the issue and return the complete source."
                 + files.separator_suffix()
@@ -274,7 +291,7 @@ def _generate_code(
             code_response, usage = _call_llm_logged(
                 "code", config,
                 args.provider, model, api_key,
-                build_code_system_prompt(challenge_md, config),
+                build_code_system_prompt(challenge_md, config, role=role),
                 user_prompt,
                 args.api_base,
             )
@@ -290,23 +307,67 @@ def _generate_code(
             print("  [LLM] Empty code response — skipping iteration")
             break
 
-        violation = validate_code(parsed)
+        violation = validate_code(parsed, config)
         if violation:
             print(f"  [LLM] Validation failed: {violation}")
             continue
+
         print(f"  [LLM] Code validated OK")
         return parsed, parsed_kernel, input_tokens, output_tokens
 
     return None, None, input_tokens, output_tokens
 
 
+def _clean_score(x):
+    """Snap floating-point noise near zero to a clean 0.0 for display.
+
+    A baseline-matching solution should score 0, but the shifted-geomean
+    round-trip (and any value the server persisted before that was fixed) can
+    land it at ~-3.7e-09. Anything below the meaningful integer-scaled
+    precision is noise; also normalises -0.0 -> 0.0 so `:.0f` prints "0",
+    never "-0". Passes None through unchanged (score not yet known).
+    """
+    if x is None:
+        return x
+    return 0.0 if abs(x) < 1e-6 else x
+
+
+def _print_bench_result(bench: dict, indent: str = "  ") -> None:
+    """Print the benchmark score with per-track context.
+
+    A failed/infeasible track injects a large fixed penalty into a shifted
+    geometric mean, so one bad track can drag the aggregate negative. Tracks
+    below baseline are flagged inline; what a negative aggregate means is
+    documented once in README.md ("Reading the score") rather than reprinted
+    every iteration. ASCII-only on purpose so the line itself can't trip a
+    non-UTF-8 Windows console.
+    """
+    score = _clean_score(bench.get("score", 0))
+    feasible = bench.get("feasible", False)
+    track_scores = bench.get("track_scores", {})
+    errors = bench.get("errors") or []
+    print(f"{indent}[BENCH] Score: {score:.0f}  Feasible: {feasible}")
+    if track_scores:
+        for tk, ts in track_scores.items():
+            ts = _clean_score(ts)
+            note = "  (below baseline)" if ts < 0 else ""
+            print(f"{indent}        Track {tk}: {ts:.0f}{note}")
+    if errors:
+        print(f"{indent}[BENCH] Errors ({len(errors)}):")
+        for e in errors[:5]:
+            print(f"{indent}        {e}")
+
+
 def _try_compile_fix(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, challenge_md: str,
+    config: dict,
     files: ChallengeFiles,
     build_err: str,
 ) -> tuple[bool, int, int]:
     """Ask the LLM to fix compiler errors, write the result.
+
+    Uses a focused fix prompt (minimal-edit instruction + distilled errors)
+    rather than the full code-generation prompt — see prompts.py.
 
     Returns (success, input_tokens, output_tokens).
     """
@@ -316,7 +377,7 @@ def _try_compile_fix(
         fix_response, usage = _call_llm_logged(
             "compile_fix", config,
             args.provider, model, api_key,
-            build_code_system_prompt(challenge_md, config),
+            build_compile_fix_system_prompt(config),
             fix_prompt,
             args.api_base,
         )
@@ -329,21 +390,29 @@ def _try_compile_fix(
         print("  Empty fix response — giving up")
         return False, usage["input_tokens"], usage["output_tokens"]
 
-    violation = validate_code(fixed)
+    violation = validate_code(fixed, config)
     if violation:
         print(f"  Fix failed validation: {violation}")
         return False, usage["input_tokens"], usage["output_tokens"]
 
-    before_fix, _ = files.read()
+    before_fix, before_kernel = files.read()
+    # Abort ONLY on a byte-identical echo (the model returned the broken code
+    # unchanged). A ratio threshold would mis-fire here: a legitimate one-line
+    # fix in a long file is ~99.7% similar, so `sim >= 0.99` used to reject
+    # exactly the small, correct fixes we want. The similarity is kept purely
+    # as a diagnostic readout.
+    if fixed == before_fix and (fixed_kernel or "") == (before_kernel or ""):
+        print("  Fix returned the broken code unchanged (no-op) — aborting retry.")
+        return False, usage["input_tokens"], usage["output_tokens"]
     sim = difflib.SequenceMatcher(None, before_fix, fixed).ratio()
-    print(f"  Fix similarity to broken code: {sim * 100:.0f}%")
+    print(f"  Fix changed the code (similarity to broken: {sim * 100:.1f}%) — re-benchmarking.")
     files.write(fixed, fixed_kernel)
     return True, usage["input_tokens"], usage["output_tokens"]
 
 
 def _benchmark_with_compile_fix(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, server: str, challenge_md: str,
+    config: dict, server: str,
     files: ChallengeFiles,
 ) -> tuple[dict | None, str, bool, int, int]:
     """Run benchmark, retrying with LLM compile fixes on failure.
@@ -372,7 +441,7 @@ def _benchmark_with_compile_fix(
 
         print(f"  [BENCH] Build retry {attempt + 1}/{max_retries} — asking LLM to fix…")
         ok, it, ot = _try_compile_fix(
-            args, model, api_key, config, challenge_md,
+            args, model, api_key, config,
             files, build_err,
         )
         input_tokens += it
@@ -434,13 +503,16 @@ def _fix_runtime_errors(
             print("  Empty fix response — giving up")
             return restore_and_fail()
 
-        violation = validate_code(fixed)
+        violation = validate_code(fixed, config)
         if violation:
             print(f"  Fix failed validation: {violation}")
             return restore_and_fail()
 
         sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
         print(f"  Fix similarity: {sim * 100:.0f}%")
+        if sim >= 0.99:
+            print("  Fix made no changes (identical to broken code) — restoring previous best.")
+            return restore_and_fail()
         files.write(fixed, fixed_kernel)
         code_changed = True
 
@@ -465,7 +537,7 @@ def _fix_runtime_errors(
                 return restore_and_fail()
 
         bench = bench_result
-        print(f"  Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
+        _print_bench_result(bench)
 
     return bench, code_changed, input_tokens, output_tokens
 
@@ -476,18 +548,27 @@ def _fix_runtime_errors(
 _AGENTIC_HEARTBEAT_INTERVAL_S = 60
 
 
-def _start_heartbeat_thread(server: str, agent_id: str, agent_token: str) -> threading.Event:
+def _start_heartbeat_thread(
+    server: str, agent_id: str, agent_token: str,
+    timeout_s: int | None = None,
+) -> threading.Event:
     """Send a heartbeat every minute while the agentic call is running.
 
     Mode-2 iterations can run 10+ minutes inside a single `claude -p`
     subprocess. Without a background heartbeat the agent would drop from
-    the server's inspiration pool mid-iteration. Returns a stop event the
+    the server's inspiration pool mid-iteration. The same loop also prints
+    a periodic elapsed-time line to the terminal so the silent capture
+    doesn't look like a hang ("is it frozen?"). Returns a stop event the
     caller must set when the agentic call exits.
     """
     stop = threading.Event()
+    started = time.monotonic()
 
     def _beat() -> None:
         while not stop.wait(_AGENTIC_HEARTBEAT_INTERVAL_S):
+            elapsed = int(time.monotonic() - started)
+            budget = f" / {timeout_s}s budget" if timeout_s else ""
+            print(f"  [AGENTIC] …still working ({elapsed}s elapsed{budget})")
             try:
                 send_heartbeat(server, agent_id, agent_token=agent_token)
             except Exception as e:
@@ -514,13 +595,13 @@ def _seed_worktree_files(
     algo_path = workdir / algo_rel
     algo_path.parent.mkdir(parents=True, exist_ok=True)
     if best_code:
-        algo_path.write_text(best_code)
+        algo_path.write_text(best_code, encoding="utf-8")
 
     kernel_rel = config.get("kernel_path")
     if files.is_gpu and kernel_rel and best_kernel:
         kp = workdir / kernel_rel
         kp.parent.mkdir(parents=True, exist_ok=True)
-        kp.write_text(best_kernel)
+        kp.write_text(best_kernel, encoding="utf-8")
 
     agentic_sandbox.seed_worktree_config(workdir)
 
@@ -558,17 +639,18 @@ def _append_tacit_line(line: str) -> None:
     new line back to the source `tacit_knowledge.md` on shutdown."""
     path = ROOT / "tacit_knowledge_personal.md"
     if path.exists():
-        existing = path.read_text()
+        existing = path.read_text(encoding="utf-8", errors="replace")
         if line in existing:
             return  # already present — keep things idempotent within a run
         if not existing.endswith("\n"):
             existing += "\n"
-        path.write_text(existing + line + "\n")
+        path.write_text(existing + line + "\n", encoding="utf-8")
     else:
         path.write_text(
             "# Personal tacit knowledge (worktree copy)\n\n"
             "## Strategies\n\n"
-            + line + "\n"
+            + line + "\n",
+            encoding="utf-8",
         )
 
 
@@ -586,7 +668,7 @@ def _distill_tacit_if_due(
 
     current_code, _ = files.read()
     tacit_path = ROOT / "tacit_knowledge_personal.md"
-    existing_tacit = tacit_path.read_text() if tacit_path.exists() else ""
+    existing_tacit = tacit_path.read_text(encoding="utf-8", errors="replace") if tacit_path.exists() else ""
 
     system_prompt, user_prompt = build_tacit_distillation_prompts(
         state, config, current_code, existing_tacit,
@@ -617,12 +699,12 @@ def _read_worktree_files(
 ) -> tuple[str, str]:
     """Read whatever the agent left on disk in the worktree."""
     algo_path = workdir / config["algorithm_path"]
-    code = algo_path.read_text() if algo_path.exists() else ""
+    code = algo_path.read_text(encoding="utf-8", errors="replace") if algo_path.exists() else ""
     kernel = ""
     if files.is_gpu and config.get("kernel_path"):
         kp = workdir / config["kernel_path"]
         if kp.exists():
-            kernel = kp.read_text()
+            kernel = kp.read_text(encoding="utf-8", errors="replace")
     return code, kernel
 
 
@@ -632,6 +714,7 @@ def _run_agentic_iteration(
     agent_id: str, agent_name: str,
     workdir: Path, backend: agentic_backends.AgenticBackend,
     challenge_md: str, files: ChallengeFiles,
+    *, role: str = "explorer", assigned_tag: str | None = None,
 ) -> tuple[dict, str, str, agentic_backends.AgenticResult]:
     """One tooled-agent iteration. Returns (hypothesis, code, kernel, result).
 
@@ -644,7 +727,7 @@ def _run_agentic_iteration(
     _seed_worktree_files(workdir, state, files, config)
     agentic_sandbox.reset_iteration_state(workdir)
 
-    user_prompt = build_agentic_user_prompt(state, config)
+    user_prompt = build_agentic_user_prompt(state, config, role=role, assigned_tag=assigned_tag)
     print(f"  [AGENTIC] Launching {backend.name} in {workdir} (timeout {args.agentic_timeout}s)…")
     # Heads-up so the contributor's terminal doesn't look frozen. The
     # subprocess is run with capture_output=True (we need the trace for
@@ -652,12 +735,15 @@ def _run_agentic_iteration(
     # backend can run for the full --agentic-timeout before printing anything
     # else. Docker stays idle too: benchmark.py only runs *after* this returns.
     print(
-        f"  [AGENTIC] Output is captured; expect no further log lines until "
-        f"the agent finishes (up to {args.agentic_timeout}s). "
+        f"  [AGENTIC] Output is captured; the agent runs silently (up to "
+        f"{args.agentic_timeout}s) with a heartbeat every "
+        f"{_AGENTIC_HEARTBEAT_INTERVAL_S}s so you can see it's alive. "
         f"Docker stays idle until then."
     )
 
-    stop = _start_heartbeat_thread(server, agent_id, agent_token)
+    stop = _start_heartbeat_thread(
+        server, agent_id, agent_token, timeout_s=args.agentic_timeout,
+    )
     try:
         result = backend.iterate(
             workdir, user_prompt,
@@ -754,10 +840,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--c3-gpu-image", dest="env", help=argparse.SUPPRESS)
     p.add_argument("--max-iterations", type=int, default=0, help="Stop after N iterations (0=unlimited)")
     p.add_argument(
-        "--agentic-timeout", type=int, default=900,
+        "--agentic-timeout", type=int, default=1800,
         help=(
             "Wall-clock timeout in seconds for one agentic iteration "
-            "(claude-code-agentic only). Default 900 (15 min). The claude "
+            "(claude-code-agentic only). Default 1800 (30 min). The claude "
             "CLI has no --max-turns flag, so this is the only ceiling."
         ),
     )
@@ -828,11 +914,15 @@ def main() -> int:
     config = load_config()
     agent_config = load_agent_config()
     # `setup.py sync` (called at the top of every iteration) rebuilds
-    # .swarm-cache.json from a server-field whitelist, so log_prompts can't
-    # live there. Read it from agent.config.json once and re-apply it after
-    # each load_config() inside the loop.
+    # .swarm-cache.json from a server-field whitelist, so these agent-local
+    # flags can't live there. Read them from agent.config.json once and
+    # re-apply them after each load_config() inside the loop.
     log_prompts = bool(agent_config.get("log_prompts"))
     config["log_prompts"] = log_prompts
+    # Opt-in stricter, rule-based Rust prompt for smaller/cheaper models whose
+    # raw output tends not to compile (see _rust_rules_block in prompts.py).
+    detailed_prompts = bool(agent_config.get("detailed_prompts"))
+    config["detailed_prompts"] = detailed_prompts
 
     args.provider = args.provider or agent_config.get("provider") or "anthropic"
     valid_providers = set(DEFAULT_MODELS) | {
@@ -847,6 +937,10 @@ def main() -> int:
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
     args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
+    # Per-agent C3 key from agent.config.json (forwarded by run_fleet from the
+    # agent entry or the fleet-wide default). The --c3-api-key flag still wins;
+    # if both are empty, c3_compute falls back to C3_API_KEY / `c3 login`.
+    args.c3_api_key = args.c3_api_key or agent_config.get("c3_api_key")
     args.env = args.env or agent_config.get("env")
     if args.env is None:
         args.env = agent_config.get("env_image") or agent_config.get("c3_image")
@@ -991,6 +1085,7 @@ def main() -> int:
     sync_challenge()
     config = load_config()
     config["log_prompts"] = log_prompts
+    config["detailed_prompts"] = detailed_prompts
     challenge_md = read_challenge_md()
 
     # Agentic mode (claude-code-agentic): tooled headless Claude Code inside a
@@ -1030,6 +1125,12 @@ def main() -> int:
     print(f"Server: {server}")
     print()
 
+    # Contributor-owned role, re-read from agent.config.json every iteration so
+    # an edit to fleet.config.json (propagated into the worktree by run_fleet)
+    # takes effect on the next loop. Defaults to 'explorer'.
+    role = _normalize_role(agent_config.get("role"))
+    print(f"Role: {role}")
+
     iteration = 0
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
@@ -1045,12 +1146,20 @@ def main() -> int:
         sync_challenge()
         config = load_config()
         config["log_prompts"] = log_prompts
+        config["detailed_prompts"] = detailed_prompts
         challenge_md = read_challenge_md()
         # Pin the iteration's challenge here so chat messages and any other
         # follow-up writes stay attributed to it even if the host runs
         # `setup.py switch` while this iteration is running.
         iter_challenge = config.get("challenge")
         print(f"  [SYNC] Challenge: {iter_challenge or '?'}  GPU: {config.get('is_gpu', False)}")
+
+        # Re-read the contributor-owned role (run_fleet patches fleet.config.json
+        # edits into this worktree's agent.config.json live). Log on change only.
+        live_role = _normalize_role(load_agent_config().get("role"))
+        if live_role != role:
+            print(f"  [ROLE] role changed: {role} -> {live_role}")
+            role = live_role
 
         try:
             swarm_cfg = server_get(f"{server}/api/swarm_config")
@@ -1061,7 +1170,7 @@ def main() -> int:
         # ── Get state ──────────────────────────────────────────
         print("  [STATE] Fetching agent state…")
         try:
-            state = get_state(server, agent_id)
+            state = get_state(server, agent_id, role=role)
         except Exception as e:
             print(f"  [STATE] FAILED: {e}")
             time.sleep(_ITERATION_BACKOFF_SECS)
@@ -1079,8 +1188,8 @@ def main() -> int:
         except Exception as e:
             print(f"  [IDENT] sync skipped: {e}")
 
-        my_score = state.get("my_best_score")
-        global_best = state.get("best_score")
+        my_score = _clean_score(state.get("current_trajectory_best"))
+        global_best = _clean_score(state.get("best_score"))
         stagnation = state.get("my_runs_since_improvement", 0)
         runs = state.get("my_runs", 0)
         improvements = state.get("my_improvements", 0)
@@ -1089,17 +1198,47 @@ def main() -> int:
 
         reset = state.get("trajectory_reset")
         if reset:
-            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')} **")
+            start = reset.get("start")
+            start_str = f" (start: {start})" if start else ""
+            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')}{start_str} **")
             post_message(server, agent_name, agent_id,
                          f"Trajectory reset: {reset.get('type')}",
                          challenge=iter_challenge,
                          agent_token=agent_token)
+
+        # Where the server sourced this iteration's starting code, when it
+        # didn't continue our own best: 'seed' (seed pool), 'peer' (best active
+        # peer adopted), or 'stub' (true cold start). Makes the standard-tier
+        # seeding path observable instead of silent — see server/tiers.py.
+        seed_start = state.get("seed_start")
+        if seed_start:
+            tier = state.get("tier", "?")
+            label = {
+                "seed": "seeded from the seed pool",
+                "peer": "adopted the best active peer's algorithm",
+                "stub": "got the bare stub (cold start — no seed/peer available)",
+            }.get(seed_start, seed_start)
+            print(f"  [STATE] Start source: {label} [tier={tier}]")
+
+        # Soft strategy-tag suggestion from the server (explorers only).
+        assigned_tag = state.get("assigned_strategy_tag")
 
         # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
         best_kernel = state.get("best_kernel_code") or ""
         files = ChallengeFiles(config)
         bootstrap = is_stub_code(best_code)
+
+        # Exploiters refine existing code; they never bootstrap from scratch.
+        # The server seeds standard/exploiter agents with a working algorithm
+        # (or a peer's best); a stub here means the true cold start — no seed
+        # and no feasible peers yet. Idle locally rather than rewriting, and do
+        # NOT post to the feed.
+        if role == "exploiter" and bootstrap:
+            print("  [ROLE] Exploiter awaiting seed (cold start) — skipping iteration, will not bootstrap.")
+            time.sleep(_ITERATION_BACKOFF_SECS)
+            continue
+
         if best_code and not bootstrap:
             files.write(best_code, best_kernel)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
@@ -1121,6 +1260,7 @@ def main() -> int:
             hypothesis, code, new_kernel, _agentic_result = _run_agentic_iteration(
                 args, state, config, server, agent_token, agent_id, agent_name,
                 workdir, backend, challenge_md, files,
+                role=role, assigned_tag=assigned_tag,
             )
             tag = hypothesis.get("strategy_tag", "other")
             title = hypothesis.get("title", "untitled")
@@ -1135,7 +1275,11 @@ def main() -> int:
                 # spam every dashboard viewer once per iteration.
                 continue
 
-            violation = validate_code(code)
+            # The agent often rewrites the import block and drops the required
+            # `use super::*;` anchor (or spells it the long way), which would
+            # otherwise discard the whole run. Re-insert it before validating.
+            code = ensure_super_import(code)
+            violation = validate_code(code, config)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
                 if best_code:
@@ -1162,16 +1306,7 @@ def main() -> int:
                     files.write(best_code, best_kernel)
                 continue
 
-            track_scores = bench.get("track_scores", {})
-            errors = bench.get("errors") or []
-            print(f"  [BENCH] Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
-            if track_scores:
-                for tk, ts in track_scores.items():
-                    print(f"          Track {tk}: {ts:.0f}")
-            if errors:
-                print(f"  [BENCH] Errors ({len(errors)}):")
-                for e in errors[:5]:
-                    print(f"          {e}")
+            _print_bench_result(bench)
         else:
             # ── Mode 1: single-shot LLM completion ─────────────
             # ── LLM hypothesis ─────────────────────────────────
@@ -1190,8 +1325,8 @@ def main() -> int:
                 hyp_response, hyp_usage = _call_llm_logged(
                     "hypothesis", config,
                     args.provider, model, api_key,
-                    build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap),
-                    build_hypothesis_user_prompt(state, config),
+                    build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap, role=role, assigned_tag=assigned_tag),
+                    build_hypothesis_user_prompt(state, config, role=role, assigned_tag=assigned_tag),
                     args.api_base,
                 )
                 iter_input_tokens += hyp_usage["input_tokens"]
@@ -1207,6 +1342,14 @@ def main() -> int:
                 time.sleep(_ITERATION_BACKOFF_SECS)
                 continue
 
+            # An empty completion (the provider returned no text, not an error)
+            # isn't a usable hypothesis — treat it like a transport failure and
+            # retry next iteration rather than proceeding with a default.
+            if not (hyp_response or "").strip():
+                print("  [LLM] HYPOTHESIS FAILED: empty response from model — skipping iteration")
+                time.sleep(_ITERATION_BACKOFF_SECS)
+                continue
+
             hypothesis = parse_hypothesis(hyp_response)
             tag = hypothesis.get("strategy_tag", "?")
             title = hypothesis.get("title", "?")
@@ -1218,7 +1361,7 @@ def main() -> int:
             # ── LLM code generation ────────────────────────────
             code, new_kernel, gen_in, gen_out = _generate_code(
                 args, model, api_key, state, hypothesis, config,
-                challenge_md, files,
+                challenge_md, files, role=role,
             )
             iter_input_tokens += gen_in
             iter_output_tokens += gen_out
@@ -1255,7 +1398,7 @@ def main() -> int:
             send_heartbeat(server, agent_id, agent_token=agent_token)
 
             bench, build_err, code_changed, fix_in, fix_out = _benchmark_with_compile_fix(
-                args, model, api_key, config, server, challenge_md,
+                args, model, api_key, config, server,
                 files,
             )
             iter_input_tokens += fix_in
@@ -1268,16 +1411,7 @@ def main() -> int:
                     files.write(best_code, best_kernel)
                 continue
 
-            track_scores = bench.get("track_scores", {})
-            errors = bench.get("errors") or []
-            print(f"  [BENCH] Score: {bench.get('score', 0):.0f}  Feasible: {bench.get('feasible', False)}")
-            if track_scores:
-                for tk, ts in track_scores.items():
-                    print(f"          Track {tk}: {ts:.0f}")
-            if errors:
-                print(f"  [BENCH] Errors ({len(errors)}):")
-                for e in errors[:5]:
-                    print(f"          {e}")
+            _print_bench_result(bench)
 
             # ── Runtime error retry ────────────────────────────
             runtime_errors = bench.get("errors") or []
@@ -1332,7 +1466,19 @@ def main() -> int:
             "input_tokens": iter_input_tokens,
             "output_tokens": iter_output_tokens,
         })
-        print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
+        if iter_input_tokens == 0 and iter_output_tokens == 0:
+            # claude-code / claude-code-agentic run via the `claude` CLI, which
+            # doesn't surface token counts. Zeros here mean "not reported", not
+            # "the model did nothing" — say so instead of a misleading $0.0000.
+            print(f"  [TOKENS] not reported by {args.provider} provider")
+        elif iter_cost == 0.0:
+            # Tokens were spent but estimate_cost has no price entry for this
+            # model, so it fell through to 0.0. Don't print a misleading
+            # $0.0000 — flag the missing price and still show the token spend.
+            print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  "
+                  f"est=unknown (no price entry for {model!r})")
+        else:
+            print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
         print(f"  [PUBLISH] Publishing results to server…")
         is_new_best = False
         try:
@@ -1351,7 +1497,7 @@ def main() -> int:
         except Exception as e:
             print(f"  [PUBLISH] FAILED: {e}")
 
-        status = "NEW BEST!" if is_new_best else f"score {bench.get('score', 0):.0f}"
+        status = "NEW BEST!" if is_new_best else f"score {_clean_score(bench.get('score', 0)):.0f}"
         feasible_str = "" if bench.get("feasible") else " (INFEASIBLE)"
         post_message(server, agent_name, agent_id,
                      f"[{tag}] {title} → {status}{feasible_str}",

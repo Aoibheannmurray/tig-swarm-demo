@@ -111,28 +111,46 @@ _CLAUDE_MD_RELPATH = "CLAUDE.md"
 _SETTINGS_RELPATH = ".swarm/sandbox-settings.json"
 
 
-def _build_sandbox_settings(config: dict) -> dict:
-    """Permissions for the Claude Code sandbox.
+def _build_sandbox_settings(config: dict, workdir: Path) -> dict:
+    """Permissions for the Claude Code sandbox (see SANDBOX_SPEC.md).
 
-    Allow: Edit on the algorithm file (and CUDA kernels if GPU) + the
-    hypothesis file. Read globally inside the worktree. Bash limited to
-    `cargo check` / `cargo build` so the agent can self-validate
-    compilation but can't shell out to the network or stomp the
-    filesystem.
+    Read (§1): scoped to the active challenge's own directory + root
+    CHALLENGE.md + Cargo.toml. NOT the whole worktree — other challenges,
+    scripts/, server/, .git/, datasets/ and the challenge's README/baselines
+    are excluded. Read-tool scope is independent of what's on disk: cargo
+    still sees the full crate, we only limit what the agent pulls into context.
 
-    Deny: Write (force Edit, no new files), WebFetch/WebSearch, any Bash
-    command that touches the network, git remote state, or filesystem
-    deletion/permissions.
+    Edit (§2): the algorithm file (and CUDA kernels if GPU) + the hypothesis
+    file. Write(**) denied — force Edit, no new files.
+
+    Bash (§4): compile/analyze only, never executing agent code — cargo
+    check/build/fmt/clippy, plus the kernel PTX compile for GPU challenges.
+
+    Deny (§3/§5): WebFetch/WebSearch, ALL git (including read-only log/show —
+    they'd reach the shared object store and bypass the §1 read-scope), any
+    network-touching Bash command, and filesystem mutation/privilege.
+
+    Permission-model facts (verified against claude 2.1.x, see SANDBOX_SPEC.md
+    "Implementation log"):
+      - Path rules use BARE-relative globs (`Read(src/x/**)`). The '/'-anchored
+        "project-root" form (`Read(/src/x/**)`) silently matches nothing.
+      - Reads are DEFAULT-ALLOW: an unlisted path is readable. So scoping is
+        done by explicit denies, NOT by an allowlist — and sibling challenge
+        dirs must be enumerated (there is no negation glob, and we cannot deny
+        `src/**` because deny > allow would then also block the active dir).
     """
+    from posixpath import basename, dirname
+
     algo_relpath = config["algorithm_path"]
     kernel_relpath = config.get("kernel_path")
+    # src/<challenge>/algorithm/mod.rs -> src/<challenge>
+    challenge_dir = dirname(dirname(algo_relpath))
+    src_dir = dirname(challenge_dir) or "src"        # src
+    active = basename(challenge_dir)                 # <challenge>
 
     allow = [
         f"Edit({algo_relpath})",
         f"Edit({_HYPOTHESIS_RELPATH})",
-        "Read(**)",
-        "Glob(**)",
-        "Grep(**)",
         "Bash(cargo check:*)",
         "Bash(cargo build:*)",
         "Bash(cargo fmt:*)",
@@ -140,36 +158,34 @@ def _build_sandbox_settings(config: dict) -> dict:
     ]
     if kernel_relpath:
         allow.append(f"Edit({kernel_relpath})")
+        # §4: compile-check the kernel (cu -> ptx). Runs nvcc via the trusted
+        # build script — compiles, never executes agent code.
+        allow.append("Bash(python3 scripts/build_ptx.py:*)")
+
+    # §1 read-scope (bare-relative). Reads are default-allow, so these allows
+    # are largely documentation of intent; the denies below do the scoping.
+    read_scope = [
+        f"{challenge_dir}/**",
+        "CHALLENGE.md",
+        "Cargo.toml",
+    ]
+    for tool in ("Read", "Glob", "Grep"):
+        allow += [f"{tool}({p})" for p in read_scope]
 
     # Deny anything that could exfiltrate, push to a remote, escalate, or
-    # mutate files outside the algorithm scope. Bash needs an explicit deny
-    # list because allow-only-matching-prefixes still lets unrelated
-    # commands through if the harness defaults to permissive Bash.
+    # mutate files outside the algorithm scope.
     deny = [
         "Write(**)",
         "WebFetch",
         "WebSearch",
+        "Bash(git:*)",   # §5 — ALL git, including read-only (log/show/diff/cat-file)
+        "Bash(gh:*)",
         "Bash(curl:*)",
         "Bash(wget:*)",
         "Bash(nc:*)",
         "Bash(ssh:*)",
         "Bash(scp:*)",
         "Bash(rsync:*)",
-        "Bash(git push:*)",
-        "Bash(git pull:*)",
-        "Bash(git fetch:*)",
-        "Bash(git clone:*)",
-        "Bash(git remote:*)",
-        "Bash(git commit:*)",
-        "Bash(git reset:*)",
-        "Bash(git checkout:*)",
-        "Bash(git branch:*)",
-        "Bash(git tag:*)",
-        "Bash(git rebase:*)",
-        "Bash(git merge:*)",
-        "Bash(git stash:*)",
-        "Bash(git add:*)",
-        "Bash(gh:*)",
         "Bash(rm:*)",
         "Bash(sudo:*)",
         "Bash(chmod:*)",
@@ -179,6 +195,32 @@ def _build_sandbox_settings(config: dict) -> dict:
         "Bash(dd:*)",
         "Bash(mkfs:*)",
     ]
+    # §1 read exclusions (bare-relative). Everything outside the challenge dir,
+    # plus the in-dir carve-outs (README/baselines), plus .git (so the object
+    # store can't be read directly — §5) and secrets.
+    excluded_reads = [
+        ".git/**",
+        "scripts/**",
+        "server/**",
+        "target/**",
+        "datasets/**",
+        "initial_algorithms/**",
+        f"{src_dir}/*.rs",                        # top-level harness (main_*, lib.rs)
+        f"{challenge_dir}/README.md",
+        f"{challenge_dir}/baselines/**",
+        ".env",
+        "**/*.env",
+    ]
+    # Enumerate sibling challenge dirs — reads are default-allow, so each
+    # non-active dir under src/ must be denied explicitly.
+    src_path = workdir / src_dir
+    if src_path.is_dir():
+        for child in sorted(src_path.iterdir()):
+            if child.is_dir() and child.name != active:
+                excluded_reads.append(f"{src_dir}/{child.name}/**")
+    for tool in ("Read", "Glob", "Grep"):
+        deny += [f"{tool}({p})" for p in excluded_reads]
+
     return {"permissions": {"allow": allow, "deny": deny}}
 
 
@@ -195,9 +237,40 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     kernel_relpath = config.get("kernel_path")
     timeout = config.get("timeout", 30)
 
+    from prompts import get_strategy_tags
+    strategy_tags = ", ".join(f"`{t}`" for t in get_strategy_tags(config))
+
     files_section = f"- `{algo_relpath}` — the algorithm file. EDIT this."
     if kernel_relpath:
         files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
+
+    # GPU challenges: the kernel is NOT compiled by cargo (it's compiled to
+    # PTX separately), so give the agent the compile-check command for it.
+    kernel_bash = (
+        f", and `python3 scripts/build_ptx.py {challenge}` to compile-check "
+        f"your CUDA kernel (cargo does NOT compile `.cu` files)"
+        if kernel_relpath else ""
+    )
+
+    # Optimizer-hook challenges (neuralnet_optimizer): the training loop owns
+    # save_solution, and the agent gets the full optimizer-hook contract.
+    opt_hooks = challenge in {"neuralnet_optimizer"}
+    if opt_hooks:
+        from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
+            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
+            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+        )
+    else:
+        opt_contract = ""
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
+            f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
+            f"  `save_solution()` early with your first feasible solution, then keep\n"
+            f"  improving and re-saving. The last saved solution is what gets scored."
+        )
 
     return f"""\
 # Swarm contributor — agentic mode
@@ -222,9 +295,12 @@ communication with the coordination server — your job is bounded.
 {files_section}
 - `.swarm/hypothesis.json` — write your hypothesis here before stopping.
 
-You may **read** anything in the worktree (the challenge module, sibling
-source files, README, ARCHITECTURE.md). You may NOT edit anything outside
-the list above — the sandbox will reject attempts.
+You may **read** only what you need to write the algorithm: this challenge's
+own directory, the root `CHALLENGE.md`, and `Cargo.toml`. Other challenges,
+`scripts/`, `server/`, git history, and this challenge's `README.md` /
+`baselines/` are out of scope — the sandbox rejects reads of them. You may
+NOT edit anything outside the list above either; only the algorithm file (and
+kernel) are scored, so keep your change self-contained in those files.
 
 ## Hypothesis file schema
 
@@ -239,29 +315,29 @@ Write `.swarm/hypothesis.json` with exactly this shape:
 }}
 ```
 
-Strategy tags (pick the closest match): `construction`, `local_search`,
-`metaheuristic`, `constraint_relaxation`, `decomposition`, `hybrid`,
-`data_structure`, `greedy`, `dp`, `branch_and_bound`, `other`.
+Strategy tags (pick the closest match): {strategy_tags}.
 
 ## Tools you have
 
-- `Read`, `Glob`, `Grep` — explore the codebase.
+- `Read`, `Glob`, `Grep` — explore this challenge's directory + `CHALLENGE.md`
+  + `Cargo.toml` (other paths are blocked).
 - `Edit` — modify allowed files.
-- `Bash` — only `cargo check`, `cargo build`, `cargo fmt`, `cargo clippy`.
+- `Bash` — only `cargo check`, `cargo build`, `cargo fmt`, `cargo clippy`{kernel_bash}.
 
 You do NOT have network access, you cannot run `git`, `curl`, `wget`, `rm`,
-or any shell command outside the cargo allowlist. You do NOT publish results
+or any shell command outside the allowlist. You do NOT publish results
 yourself — the driver loop runs the official benchmark after you exit and
 publishes the score paired with your hypothesis.
 
 ## Solver constraints
 
 - `use super::*;` must remain the first import in the Rust file.
-- `fn solve_challenge(` must remain — do not rename the entry point.
-- Per-instance time budget: {timeout} seconds. The solver is killed at this
-  hard deadline. Use a time-based loop (`std::time::Instant`), call
-  `save_solution()` early with your first feasible solution, then keep
-  improving and re-saving. The last saved solution is what gets scored.
+- Keep the harness entry points and their signatures unchanged: for most
+  challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
+  `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
+  hooks (the training loop and `solve_challenge` are harness-owned — do not add
+  or rename them). The harness calls these by name.
+{time_bullet}
 - Do not remove `unsafe` blocks that are already there; do not add new
   `unsafe` unless you understand the invariants.
 
@@ -275,6 +351,7 @@ self-running it wastes time.
 ## Challenge-specific details
 
 {challenge_md}
+{opt_contract}
 """
 
 
@@ -298,7 +375,7 @@ class ClaudeCodeAgent:
         swarm_dir = workdir / ".swarm"
         swarm_dir.mkdir(exist_ok=True)
 
-        settings = _build_sandbox_settings(config)
+        settings = _build_sandbox_settings(config, workdir)
         (workdir / _SETTINGS_RELPATH).write_text(
             json.dumps(settings, indent=2) + "\n"
         )
@@ -384,9 +461,30 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     kernel_relpath = config.get("kernel_path")
     timeout = config.get("timeout", 30)
 
+    from prompts import get_strategy_tags
+    strategy_tags = ", ".join(f"`{t}`" for t in get_strategy_tags(config))
+
     files_section = f"- `{algo_relpath}` — the algorithm file. EDIT this."
     if kernel_relpath:
         files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
+
+    opt_hooks = challenge in {"neuralnet_optimizer"}
+    if opt_hooks:
+        from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
+            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
+            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+        )
+    else:
+        opt_contract = ""
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
+            f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
+            f"  `save_solution()` early with your first feasible solution, then keep\n"
+            f"  improving and re-saving. The last saved solution is what gets scored."
+        )
 
     return f"""\
 # Swarm contributor — Codex agent mode
@@ -431,9 +529,7 @@ Write `.swarm/hypothesis.json` with exactly this shape:
 }}
 ```
 
-Strategy tags (pick the closest match): `construction`, `local_search`,
-`metaheuristic`, `constraint_relaxation`, `decomposition`, `hybrid`,
-`data_structure`, `greedy`, `dp`, `branch_and_bound`, `other`.
+Strategy tags (pick the closest match): {strategy_tags}.
 
 ## Sandbox
 
@@ -447,11 +543,12 @@ Strategy tags (pick the closest match): `construction`, `local_search`,
 ## Solver constraints
 
 - `use super::*;` must remain the first import in the Rust file.
-- `fn solve_challenge(` must remain — do not rename the entry point.
-- Per-instance time budget: {timeout} seconds. The solver is killed at this
-  hard deadline. Use a time-based loop (`std::time::Instant`), call
-  `save_solution()` early with your first feasible solution, then keep
-  improving and re-saving. The last saved solution is what gets scored.
+- Keep the harness entry points and their signatures unchanged: for most
+  challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
+  `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
+  hooks (the training loop and `solve_challenge` are harness-owned — do not add
+  or rename them). The harness calls these by name.
+{time_bullet}
 - Do not remove `unsafe` blocks that are already there; do not add new
   `unsafe` unless you understand the invariants.
 
@@ -464,6 +561,7 @@ you stop — don't run `scripts/benchmark.py` yourself, that wastes time.
 ## Challenge-specific details
 
 {challenge_md}
+{opt_contract}
 """
 
 

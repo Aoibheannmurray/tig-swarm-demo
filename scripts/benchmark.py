@@ -30,8 +30,9 @@ algorithm for that challenge:
 Higher quality is always better. Aggregation is two-step:
 
     1. Per-track score = arithmetic mean of per-instance quality scores
-       in that track. Infeasible instances contribute `-QUALITY_PRECISION`
-       (the worst feasibly-bounded value).
+       in that track. Infeasible instances contribute `-QUALITY_CLAMP`
+       (the worst feasibly-bounded value), so an infeasible run can never
+       outscore a feasible one.
     2. Cross-track score = shifted geometric mean across the per-track
        averages. The shift (+QUALITY_PRECISION × 10 + 1) keeps every
        value strictly positive so the geometric mean is well-defined for
@@ -88,10 +89,20 @@ _INSIDE_DOCKER = Path("/.dockerenv").exists() or os.environ.get("TIG_IN_DOCKER")
 QUALITY_PRECISION = 1_000_000
 QUALITY_CLAMP = 10 * QUALITY_PRECISION
 
-# Per-instance penalty for an infeasible instance. Set to the worst
-# feasible-bounded value rather than -∞ so the per-track mean stays in a
-# sensible range and the shifted geometric mean is well-defined.
-INFEASIBLE_QUALITY = -QUALITY_PRECISION
+# Per-instance penalty for an infeasible instance. Pinned to the bottom of the
+# feasible clamp (-QUALITY_CLAMP) rather than -∞ so the per-track mean stays in
+# a sensible range and the shifted geometric mean is well-defined (shifted to
+# exactly 1, the same floor as an all-worst-feasible track).
+#
+# This MUST be ≤ the worst feasible per-instance quality (-QUALITY_CLAMP). The
+# old value (-QUALITY_PRECISION = -1M) was only 1/10th of the way down, so on
+# challenges whose feasible scores run well below -1M (the neuralnet baseline is
+# ~-2.29M) an infeasible run scored *higher* than a legitimate feasible one.
+# That let an infeasible edit win a "best" comparison and trap a trajectory at
+# the floor for 80+ edits. Server-side `beats_trajectory_best`/`is_new_best` are
+# also feasibility-gated; this is the matching defense-in-depth at the score
+# level so infeasible never outranks feasible anywhere a raw score is compared.
+INFEASIBLE_QUALITY = -QUALITY_CLAMP
 
 # Constant added to each per-track mean before taking the geometric mean.
 # Quality range after clamping is [-10M, +10M]; shift by +10M+1 → strictly
@@ -283,30 +294,37 @@ def run_instance(
     with tempfile.NamedTemporaryFile(suffix=".sol", delete=False) as tmp:
         sol_path = tmp.name
     try:
+        # Wall-clock the solver run only (not the evaluator) so `elapsed`
+        # matches the GPU path's semantics — algorithm run time per nonce.
+        timed_out = False
+        start = time.monotonic()
         try:
             subprocess.run(
                 [solver, challenge, str(instance_path), sol_path],
                 capture_output=True, text=True, timeout=timeout,
             )
         except subprocess.TimeoutExpired:
-            pass  # save_solution may have written a partial; evaluator will judge
+            timed_out = True  # save_solution may have written a partial; evaluator will judge
+        elapsed = time.monotonic() - start
+        timing = {"elapsed": elapsed, "timed_out": timed_out}
         if not os.path.exists(sol_path) or os.path.getsize(sol_path) == 0:
-            return {"instance": instance_id, "track": track_key, "error": "no solution saved", "feasible": False}
+            return {"instance": instance_id, "track": track_key, "error": "no solution saved", "feasible": False, **timing}
         try:
             eval_result = subprocess.run(
                 [evaluator, challenge, str(instance_path), sol_path],
                 capture_output=True, text=True, timeout=max(10, timeout),
             )
         except subprocess.TimeoutExpired:
-            return {"instance": instance_id, "track": track_key, "error": "evaluator timeout", "feasible": False}
+            return {"instance": instance_id, "track": track_key, "error": "evaluator timeout", "feasible": False, **timing}
         score, err = parse_evaluator_score(eval_result)
         if err:
-            return {"instance": instance_id, "track": track_key, "error": err, "feasible": False}
+            return {"instance": instance_id, "track": track_key, "error": err, "feasible": False, **timing}
         result = {
             "instance": instance_id,
             "track": track_key,
             "score": score,
             "feasible": True,
+            **timing,
         }
         extras = _PER_INSTANCE_EXTRAS.get(challenge)
         if extras is not None:
@@ -458,7 +476,47 @@ def _reexec_in_docker(cfg: dict) -> int:
         image,
         "python3", "/app/scripts/benchmark.py",
     ]
-    return subprocess.run(cmd).returncode
+    try:
+        return subprocess.run(cmd).returncode
+    finally:
+        _chown_worktree_back(image, cfg)
+
+
+def _chown_worktree_back(image: str, cfg: dict) -> None:
+    """Give root-owned files the container created back to the invoking user.
+
+    The benchmark container runs as root and writes into the bind-mounted
+    worktree (datasets/, solution files, .swarm/), leaving root-owned files
+    that make `git worktree remove` / `run_fleet.py --clean` fail with
+    permission-denied. We can't simply run the build as `--user` without
+    breaking cargo's root-owned ~/.cargo, so instead we hand ownership back
+    afterwards via a throwaway root container.
+
+    `find -xdev` stops at filesystem boundaries, so the `target/` and cargo
+    registry volume mounts (separate devices) are skipped — only the
+    bind-mounted worktree files get chowned. POSIX-only; on Windows/macOS
+    Docker Desktop maps ownership for the sharing user already.
+    """
+    if not hasattr(os, "getuid"):
+        return  # Windows: no uid concept, Docker Desktop handles ownership
+    uid, gid = os.getuid(), os.getgid()
+    if uid == 0:
+        return  # already root; files are removable as-is
+    suffix = "gpu" if is_gpu_challenge(cfg) else "cpu"
+    cmd = [
+        "docker", "run", "--rm",
+        "-v", f"{ROOT_DIR}:/app",
+        "-v", f"{_cargo_target_volume(cfg)}:/app/target",
+        "-v", f"tig-cargo-registry-{suffix}:/root/.cargo/registry",
+        image,
+        "find", "/app", "-xdev", "-exec", "chown", f"{uid}:{gid}", "{}", "+",
+    ]
+    try:
+        subprocess.run(cmd, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"  [BENCH] could not reclaim worktree ownership: {e}",
+              file=sys.stderr)
 
 
 # ── GPU build & run (native — always called from inside Docker) ──
@@ -1077,14 +1135,74 @@ def _shifted_geomean(values: list[float], shift: float = GEOMEAN_SHIFT) -> float
     if not values:
         return 0.0
     log_sum = sum(math.log(v + shift) for v in values)
-    return math.exp(log_sum / len(values)) - shift
+    result = math.exp(log_sum / len(values)) - shift
+    # exp(log(x)) doesn't round-trip exactly: when every track matches the
+    # baseline (all-zero qualities) this lands at -2**-28 (-3.725e-09) rather
+    # than a clean 0.0, which then renders as a misleading "-0" / a noisy
+    # "My best: -3.7e-09". Qualities are integer-scaled (QUALITY_PRECISION =
+    # 1e6), so nothing finer than ~1e-6 carries meaning; round the sub-ULP
+    # noise off, and `+ 0.0` collapses a resulting -0.0 to +0.0.
+    return round(result, 6) + 0.0
+
+
+def _log_instance_result(r: dict, timeout: int) -> None:
+    """Emit a one-line per-nonce log to stderr as each instance finishes.
+
+    stderr only — stdout carries the JSON payload that becomes benchmark.json.
+    The `(timeout)` marker is the high-value signal: it flags nonces that
+    burned the full budget vs. solvers that converged early.
+    """
+    inst = r.get("instance", "?")
+    elapsed = r.get("elapsed")
+    et = f"{elapsed:6.1f}s" if isinstance(elapsed, (int, float)) else "     ?  "
+    if r.get("feasible"):
+        status = "feasible  "
+        score = r.get("score")
+        tail = f"score={score}" if score is not None else ""
+    else:
+        status = "INFEASIBLE"
+        tail = r.get("error", "")
+    capped = r.get("timed_out") or (
+        isinstance(elapsed, (int, float)) and elapsed >= timeout
+    )
+    cap = " (timeout)" if capped else ""
+    print(f"  [{inst}]  {status}  {et}  {tail}{cap}", file=sys.stderr)
+
+
+def _print_timing_summary(results: list[dict]) -> None:
+    """Per-track wall-clock roll-up to stderr, printed at end of run."""
+    by_track: dict[str, list[float]] = defaultdict(list)
+    for r in results:
+        e = r.get("elapsed")
+        if isinstance(e, (int, float)):
+            by_track[r.get("track", "unknown")].append(float(e))
+    if not by_track:
+        return
+    print("── timing ──────────────", file=sys.stderr)
+    all_times: list[float] = []
+    for track in sorted(by_track):
+        ts = by_track[track]
+        all_times.extend(ts)
+        print(
+            f"  {track}:  n={len(ts)}  min {min(ts):.1f}s  "
+            f"avg {sum(ts) / len(ts):.1f}s  max {max(ts):.1f}s  total {sum(ts):.1f}s",
+            file=sys.stderr,
+        )
+    if len(by_track) > 1:
+        print(
+            f"  all:   n={len(all_times)}  "
+            f"avg {sum(all_times) / len(all_times):.1f}s  total {sum(all_times):.1f}s",
+            file=sys.stderr,
+        )
 
 
 def aggregate(results: list[dict]) -> dict:
     """Group per-instance qualities by track, average each track, then
     combine via shifted geometric mean. Infeasible instances contribute
-    `INFEASIBLE_QUALITY` to their track's average — they're worse than
-    matching the baseline, but bounded so the geomean stays well-defined.
+    `INFEASIBLE_QUALITY` (= -QUALITY_CLAMP) to their track's average — the
+    worst feasibly-bounded value, so an all-infeasible run lands at the very
+    bottom of the feasible range and never outranks a feasible result, while
+    the geomean stays well-defined (shifted to exactly 1).
     """
     by_track: dict[str, list[float]] = defaultdict(list)
     feasible_count = 0
@@ -1161,6 +1279,7 @@ def main() -> int:
 
         for track_key, idx in instance_list:
             r = run_gpu_instance(challenge, track_key, idx, binary, ptx, seed, timeout)
+            _log_instance_result(r, timeout)
             results.append(r)
     else:
         print(f"Building tig binaries for {challenge}…", file=sys.stderr)
@@ -1184,7 +1303,9 @@ def main() -> int:
                 for tk, iid, ipath in instances
             }
             for fut in as_completed(futures):
-                results.append(fut.result())
+                r = fut.result()
+                _log_instance_result(r, timeout)
+                results.append(r)
 
     agg = aggregate(results)
     out: dict = {
@@ -1215,6 +1336,7 @@ def main() -> int:
     if metrics_fn is not None:
         out["challenge_metrics"] = metrics_fn(results)
 
+    _print_timing_summary(results)
     print(json.dumps(out, indent=2))
     return 0
 

@@ -11,6 +11,7 @@ use cudarc::{
     runtime::sys::cudaDeviceProp,
 };
 use rand::{prelude::*, rngs::StdRng};
+use serde_json::{Map, Value};
 use std::{any::Any, sync::Arc};
 
 const THREADS_PER_BLOCK: u32 = 1024;
@@ -30,7 +31,35 @@ impl_base64_serde! {
         bn_biases: Vec<Vec<f32>>,
         bn_running_means: Vec<Vec<f32>>,
         bn_running_vars: Vec<Vec<f32>>,
+        // Downsampled per-epoch training history, carried out of the training
+        // loop so the dashboard can draw the loss curve (DASHBOARD_PLAN.md
+        // Item 5 P1). Fixed length <= LOSS_CURVE_MAX_POINTS keeps the base64
+        // solution payload small. NB: appending these fields changes the
+        // bincode wire format — solutions stored before this change won't
+        // deserialize.
+        train_losses: Vec<f32>,
+        validation_losses: Vec<f32>,
     }
+}
+
+/// Cap on the number of points kept in the serialized loss curve. The
+/// dashboard sparkline is ~400px wide, so this is ample resolution while
+/// keeping the payload tiny even when `max_epochs` is large.
+pub const LOSS_CURVE_MAX_POINTS: usize = 128;
+
+/// Evenly down-sample `v` to at most `max_points`, always preserving the first
+/// and last samples so the curve's start and end loss are exact.
+fn downsample_losses(v: &[f32], max_points: usize) -> Vec<f32> {
+    let n = v.len();
+    if n <= max_points || max_points == 0 {
+        return v.to_vec();
+    }
+    if max_points == 1 {
+        return vec![v[n - 1]];
+    }
+    (0..max_points)
+        .map(|i| v[i * (n - 1) / (max_points - 1)])
+        .collect()
 }
 
 impl Solution {
@@ -43,6 +72,8 @@ impl Solution {
             bn_biases: Vec::new(),
             bn_running_means: Vec::new(),
             bn_running_vars: Vec::new(),
+            train_losses: Vec::new(),
+            validation_losses: Vec::new(),
         }
     }
 }
@@ -244,6 +275,52 @@ impl Challenge {
 
             load_solution(&mut model, solution, stream.clone())?;
 
+            // ── Frozen-layer integrity check ──
+            // The last `num_frozen_layers` linear layers are non-trainable
+            // (MLP::new: `requires_grad = l < layer_cnt - frozen_layers`) and
+            // must stay at the canonical seeded initialization the instance
+            // generated. A submitted Solution that overwrote them — e.g. a
+            // closed-form head fit directly to the (visible) test labels — is
+            // not a valid trained model. Reconstruct the seeded weights and
+            // reject any deviation as infeasible (Err => feasible:false in the
+            // benchmark harness).
+            {
+                let mut reference =
+                    MLP::new(&self.layer_dims(), self.num_frozen_layers, stream.clone())?;
+                reference.init_weights(self.seed, stream.clone(), module.clone())?;
+                let layer_cnt = model.lin.len();
+                let first_frozen = layer_cnt.saturating_sub(self.num_frozen_layers);
+                const FROZEN_TOL: f32 = 1e-4;
+                for l in first_frozen..layer_cnt {
+                    let got_w = stream.memcpy_dtov(&model.lin[l].weight)?;
+                    let ref_w = stream.memcpy_dtov(&reference.lin[l].weight)?;
+                    let got_b = stream.memcpy_dtov(&model.lin[l].bias)?;
+                    let ref_b = stream.memcpy_dtov(&reference.lin[l].bias)?;
+                    stream.synchronize()?;
+                    if got_w.len() != ref_w.len() || got_b.len() != ref_b.len() {
+                        return Err(anyhow::anyhow!(
+                            "frozen layer {} shape mismatch; solution is infeasible",
+                            l
+                        ));
+                    }
+                    let tampered = got_w
+                        .iter()
+                        .zip(ref_w.iter())
+                        .any(|(a, b)| (a - b).abs() > FROZEN_TOL)
+                        || got_b
+                            .iter()
+                            .zip(ref_b.iter())
+                            .any(|(a, b)| (a - b).abs() > FROZEN_TOL);
+                    if tampered {
+                        return Err(anyhow::anyhow!(
+                            "frozen layer {} deviates from the seeded initialization; \
+                             solution is infeasible",
+                            l
+                        ));
+                    }
+                }
+            }
+
             let (output, _) = model.forward(
                 &self.dataset.test_inputs(),
                 false,
@@ -289,6 +366,37 @@ impl Challenge {
         layer_dims.push(self.dataset.output_dims);
         layer_dims
     }
+}
+
+/// Harness-owned solver entry point. **Not editable by agents.**
+///
+/// The GPU benchmark dispatches `challenges::neuralnet_optimizer::solve_challenge`
+/// (this function), not the `algorithm` module's, so the training loop — and with
+/// it the `max_epochs` budget, early-stopping, and the train/validation/test data
+/// split — is enforced by the harness. Agents implement only the optimizer hooks
+/// (`optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`) in
+/// `algorithm`, which must remain `pub fn` so this wrapper can reference them.
+///
+/// `hyperparameters` is currently unused (the benchmark always passes `None`) and
+/// is kept in the signature for parity with the CPU solver / future plumbing.
+pub fn solve_challenge(
+    challenge: &Challenge,
+    save_solution: &dyn Fn(&Solution) -> Result<()>,
+    _hyperparameters: &Option<Map<String, Value>>,
+    module: Arc<CudaModule>,
+    stream: Arc<CudaStream>,
+    prop: &cudaDeviceProp,
+) -> Result<()> {
+    training_loop(
+        challenge,
+        save_solution,
+        module,
+        stream,
+        prop,
+        algorithm::optimizer_init_state,
+        algorithm::optimizer_query_at_params,
+        algorithm::optimizer_step,
+    )
 }
 
 pub trait OptimizerStateTrait: Any + Send + Sync {
@@ -574,7 +682,13 @@ pub fn training_loop(
         if avg_val_loss < lowest_loss - min_loss_delta {
             lowest_loss = avg_val_loss;
             epochs_no_improvement = 0;
-            save_solution(&to_solution(&model, epoch + 1, stream.clone())?)?;
+            save_solution(&to_solution(
+                &model,
+                epoch + 1,
+                &train_losses,
+                &validation_losses,
+                stream.clone(),
+            )?)?;
         } else {
             epochs_no_improvement += 1;
             if epochs_no_improvement >= patience {
@@ -605,7 +719,13 @@ pub fn load_solution(mlp: &mut MLP, solution: &Solution, stream: Arc<CudaStream>
     Ok(())
 }
 
-pub fn to_solution(mlp: &MLP, epochs_used: usize, stream: Arc<CudaStream>) -> Result<Solution> {
+pub fn to_solution(
+    mlp: &MLP,
+    epochs_used: usize,
+    train_losses: &[f32],
+    validation_losses: &[f32],
+    stream: Arc<CudaStream>,
+) -> Result<Solution> {
     stream.synchronize()?;
     let mut weights = Vec::new();
     let mut biases = Vec::new();
@@ -637,5 +757,7 @@ pub fn to_solution(mlp: &MLP, epochs_used: usize, stream: Arc<CudaStream>) -> Re
         bn_biases,
         bn_running_means,
         bn_running_vars,
+        train_losses: downsample_losses(train_losses, LOSS_CURVE_MAX_POINTS),
+        validation_losses: downsample_losses(validation_losses, LOSS_CURVE_MAX_POINTS),
     })
 }

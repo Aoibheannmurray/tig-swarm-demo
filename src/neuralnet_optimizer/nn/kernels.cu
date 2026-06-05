@@ -10,7 +10,13 @@ __device__ float relu(float x) {
 }
 
 extern "C" __global__ void init_linear_layer(
-    unsigned long long seed,
+    // Pointer to the 32-byte seed buffer (NOT a scalar). The host passes a
+    // device pointer (`memcpy_stod(&[u8;32])`); reading the first 8 bytes here
+    // — as generate_rff_params/generate_dataset do — makes weight init
+    // reproducible from the seed. Taking a scalar `unsigned long long` instead
+    // silently seeded curand with the buffer's *address*, so init varied per
+    // allocation and the frozen-layer integrity check could never match.
+    unsigned char* seed,
     int out_features,
     int in_features,
     float* weights, // (out_features, in_features)
@@ -20,7 +26,7 @@ extern "C" __global__ void init_linear_layer(
     if (idx >= out_features * in_features) return;
 
     curandState state;
-    curand_init(seed + idx, 0, 0, &state);
+    curand_init(*((unsigned long long*)seed) + idx, 0, 0, &state);
 
     float fan_in = (float)in_features;
     float fan_out = (float)out_features;

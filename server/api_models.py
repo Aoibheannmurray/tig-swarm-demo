@@ -99,8 +99,8 @@ class StateRecentExperiment(_ResponseBase):
     is_new_best: bool
     improvement_pct: float
     delta_vs_best_pct: Optional[float] = None
-    delta_vs_own_best_pct: Optional[float] = None
-    beats_own_best: bool = False
+    delta_vs_trajectory_best_pct: Optional[float] = None
+    beats_trajectory_best: bool = False
     created_at: str
     notes: Optional[str] = None
 
@@ -162,7 +162,7 @@ class StateResponse(_ResponseBase):
     best_algorithm_code: Optional[str] = None
     best_kernel_code: Optional[str] = None
     best_experiment_id: Optional[str] = None
-    my_best_score: Optional[float] = None
+    current_trajectory_best: Optional[float] = None
     my_runs: Optional[int] = None
     my_improvements: Optional[int] = None
     my_runs_since_improvement: Optional[int] = None
@@ -173,6 +173,11 @@ class StateResponse(_ResponseBase):
     inspiration_agent_name: Optional[str] = None
     stagnation_hint: Optional[str] = None
     trajectory_reset: Optional[dict] = None
+    # Auto-classified model tier ('frontier'/'standard'); drives seeding.
+    tier: Optional[str] = None
+    # Echoed role ('explorer'/'exploiter') and a soft strategy-tag suggestion.
+    role: Optional[str] = None
+    assigned_strategy_tag: Optional[str] = None
 
     # Dashboard view fields
     baseline_score: Optional[float] = None
