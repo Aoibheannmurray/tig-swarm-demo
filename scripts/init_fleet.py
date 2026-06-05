@@ -65,6 +65,10 @@ for _stream in (sys.stdout, sys.stderr):
 # scripts/llm_backends.py; the wizard writes it as an explicit api_base.
 _OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
+# DeepSeek's OpenAI-compatible endpoint. Like OpenRouter, the wizard writes it
+# as provider `openai` with an explicit api_base.
+_DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
+
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the
 # provider list in scripts/run_loop.py. Tuple: (label, default_model,
 # api_key_env or None, short_name_stub, supports_c3, blurb).
@@ -107,6 +111,15 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
      "config as an OpenAI-compatible endpoint (provider `openai` + api_base). "
      "Use publisher/model strings like `qwen/qwen-2.5-coder-32b-instruct` "
      "or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."),
+    ("deepseek",
+     "DeepSeek (OpenAI-compatible)",
+     "deepseek-v4-pro",
+     "DEEPSEEK_API_KEY",
+     "deepseek",
+     True,
+     "DeepSeek — OpenAI-compatible. Written to the config as provider `openai` "
+     "+ api_base. Use model ids like `deepseek-v4-pro`, `deepseek-chat` or "
+     "`deepseek-reasoner`. Needs DEEPSEEK_API_KEY."),
     ("claude-code",
      "Claude CLI — one-shot mode",
      "claude-opus-4-7",
@@ -249,16 +262,21 @@ def _prompt_yes_no(label: str, default: bool) -> bool:
 
 
 _HOST_FIELDS = ("server_url", "username", "swarm_password")
+# Optional extras a contributor may drop into the same paste block. `c3_api_key`
+# lets them include their C3 key alongside the connection triplet instead of
+# typing it at the compute step — handy when an agent is pasting credentials.
+_OPTIONAL_HOST_FIELDS = ("c3_api_key",)
 
 
 def _parse_host_paste(text: str) -> dict[str, str]:
-    """Extract server_url / username / swarm_password from a pasted blob.
+    """Extract connection details from a pasted blob.
 
-    Tolerates the JSON-style snippet that `setup.py invite` produces
+    Pulls the required server_url / username / swarm_password plus the optional
+    c3_api_key. Tolerates the JSON-style snippet that `setup.py invite` produces
     (`"server_url": "https://…",`) as well as bare `key: value` or
     `key=value` forms. Unknown keys and surrounding braces are ignored."""
     found: dict[str, str] = {}
-    for key in _HOST_FIELDS:
+    for key in (*_HOST_FIELDS, *_OPTIONAL_HOST_FIELDS):
         # Quoted JSON form first ("key": "value"), then loose form.
         m = re.search(rf'["\']?{key}["\']?\s*[:=]\s*"([^"]+)"', text)
         if not m:
@@ -284,26 +302,32 @@ def _read_paste_block() -> str:
     return "\n".join(lines)
 
 
+def _mask_secret(value: str) -> str:
+    """Show enough of a secret to recognize it without printing the whole thing."""
+    return value[:6] + "…" + value[-4:] if len(value) > 12 else "set"
+
+
 def _prompt_host_connection(
     defaults: dict | None = None,
-) -> tuple[str, str, str]:
-    """Collect `server_url`, `username`, `swarm_password`. When `defaults`
-    contains all three (re-runs against an existing fleet.config.json),
-    offer to keep them as-is so the user doesn't have to paste / retype.
-    On 'no' (or partial / missing defaults), fall through to the paste-
-    block flow, with whatever defaults we have wired into the per-field
-    prompts as fallbacks."""
+) -> tuple[str, str, str, str | None]:
+    """Collect `server_url`, `username`, `swarm_password`, and an optional
+    `c3_api_key`. When `defaults` contains the three required fields (re-runs
+    against an existing fleet.config.json), offer to keep them as-is so the
+    user doesn't have to paste / retype. On 'no' (or partial / missing
+    defaults), fall through to the paste-block flow, with whatever defaults we
+    have wired into the per-field prompts as fallbacks. The C3 key is optional
+    everywhere — `None` when it's neither pasted nor carried over."""
     defaults = defaults or {}
     have_all = all(
         defaults.get(k) for k in ("server_url", "username", "swarm_password")
     )
     if have_all:
-        pw = defaults["swarm_password"]
-        pw_shown = pw[:6] + "…" + pw[-4:] if len(pw) > 12 else "set"
         print("Existing connection settings:")
         print(f"  server_url     = {defaults['server_url']}")
         print(f"  username       = {defaults['username']}")
-        print(f"  swarm_password = {pw_shown}")
+        print(f"  swarm_password = {_mask_secret(defaults['swarm_password'])}")
+        if defaults.get("c3_api_key"):
+            print(f"  c3_api_key     = {_mask_secret(defaults['c3_api_key'])}")
         print()
         if _prompt_yes_no(
             "Keep these connection settings?", default=True,
@@ -312,12 +336,14 @@ def _prompt_host_connection(
                 defaults["server_url"],
                 defaults["username"],
                 defaults["swarm_password"],
+                defaults.get("c3_api_key") or None,
             )
 
-    print("Paste the three lines your swarm host sent you. Example:")
+    print("Paste the lines your swarm host sent you. Example:")
     print('    "server_url": "https://my-swarm.up.railway.app",')
     print('    "username": "your-name",')
     print('    "swarm_password": "abc123…",')
+    print('    "c3_api_key": "c3_…",   (optional — for C3 cloud GPU compute)')
     print()
     print("When you're done pasting, press Enter for a blank line, then:")
     print("    Mac / Linux:  Ctrl-D")
@@ -333,6 +359,8 @@ def _prompt_host_connection(
         for key in _HOST_FIELDS:
             if key in parsed:
                 print(f"  ✓ {key} = {parsed[key]}")
+        if "c3_api_key" in parsed:
+            print(f"  ✓ c3_api_key = {_mask_secret(parsed['c3_api_key'])}")
 
     server_url = parsed.get("server_url") or _prompt(
         "server_url", default=defaults.get("server_url") or None,
@@ -343,7 +371,8 @@ def _prompt_host_connection(
     swarm_password = parsed.get("swarm_password") or _prompt(
         "swarm_password", default=defaults.get("swarm_password") or None,
     )
-    return server_url, username, swarm_password
+    c3_api_key = parsed.get("c3_api_key") or defaults.get("c3_api_key") or None
+    return server_url, username, swarm_password, c3_api_key
 
 
 # ── Provider selection ────────────────────────────────────────────
@@ -375,14 +404,18 @@ _C3_HARDWARE_CHOICES = [
 _C3_INSTALL_URL = "https://cthree.cloud/install.sh"
 
 
-def _select_compute(supports_c3: bool) -> tuple[str, str | None, str | None]:
+def _select_compute(
+    supports_c3: bool, c3_api_key: str | None = None,
+) -> tuple[str, str | None, str | None]:
     """Pick where each benchmark runs and gather any C3 credentials.
 
     GPU swarm agents default to C3 cloud GPUs; CPU-only or offline setups can
     pick local Docker. Providers that can't run on C3 skip the question and
-    stay local. Returns ``(compute, c3_hardware, c3_api_key)`` — the latter two
-    are ``None`` for local compute or when the user defers C3 auth to the
-    ``C3_API_KEY`` env var / an existing ``c3 login`` session."""
+    stay local. When ``c3_api_key`` is already known (e.g. pasted with the
+    connection details), it's reused instead of re-prompting. Returns
+    ``(compute, c3_hardware, c3_api_key)`` — the latter two are ``None`` for
+    local compute or when the user defers C3 auth to the ``C3_API_KEY`` env var
+    / an existing ``c3 login`` session."""
     if not supports_c3:
         return "local", None, None
 
@@ -412,6 +445,10 @@ def _select_compute(supports_c3: bool) -> tuple[str, str | None, str | None]:
     hardware = _prompt_choice(
         "Which C3 GPU profile?", _C3_HARDWARE_CHOICES, default_idx=0,
     )
+
+    if c3_api_key:
+        print(f"\n  ✓ using the C3 API key you provided ({_mask_secret(c3_api_key)})")
+        return "c3", hardware, c3_api_key
 
     print("\nC3 needs an API key. Create one with `c3 apikey create tig-swarm`,")
     print("or leave this blank to use the C3_API_KEY env var / an existing")
@@ -490,20 +527,25 @@ def run_wizard(force: bool = False) -> int:
 
     print("\nSwarm connection")
     print("─" * 40)
-    server_url, username, swarm_password = _prompt_host_connection(existing)
+    server_url, username, swarm_password, pasted_c3_api_key = (
+        _prompt_host_connection(existing)
+    )
 
     print("\nLLM provider")
     print("─" * 40)
     print("Which LLM should your agents call?")
     provider, default_model, api_key_env, name_stub, supports_c3 = _select_provider()
 
-    # OpenRouter is OpenAI-compatible: write it as provider `openai` with an
-    # explicit api_base so it routes through the OpenAI client against the
-    # OpenRouter gateway (api_key_env stays OPENROUTER_API_KEY).
+    # OpenRouter and DeepSeek are OpenAI-compatible: write them as provider
+    # `openai` with an explicit api_base so they route through the OpenAI client
+    # against the right gateway (api_key_env stays the provider's own env var).
     api_base: str | None = None
     if provider == "openrouter":
         provider = "openai"
         api_base = _OPENROUTER_API_BASE
+    elif provider == "deepseek":
+        provider = "openai"
+        api_base = _DEEPSEEK_API_BASE
 
     if default_model:
         model = _prompt("model (press Enter for default)", default=default_model)
@@ -513,13 +555,27 @@ def run_wizard(force: bool = False) -> int:
     print()
     count = _prompt_int("How many agents to run in parallel?", default=1)
 
+    # Agent name. Auto-generated <adjective>-<noun> names are the default, but
+    # contributors often want a recognisable name (matching the swarm they're
+    # joining). For a single agent the prompt offers the generated name as the
+    # default; for several it takes an optional prefix and numbers them
+    # (foo-1, foo-2, …). Pressing Enter keeps the auto-generated names.
+    generated = _generate_agent_names(count)
+    if count == 1:
+        names = [_prompt("agent name (press Enter for default)", default=generated[0])]
+    else:
+        prefix = _prompt(
+            "agent name prefix (press Enter for auto-generated names)",
+            allow_empty=True,
+        )
+        names = [f"{prefix}-{i}" for i in range(1, count + 1)] if prefix else generated
+
     # Where each benchmark runs. GPU swarm agents default to C3 cloud GPUs;
     # local Docker stays one keystroke away. c3_api_key (when supplied) is a
     # fleet-wide default — run_fleet.py copies it onto every agent that lacks
     # its own.
-    compute, hardware, c3_api_key = _select_compute(supports_c3)
+    compute, hardware, c3_api_key = _select_compute(supports_c3, pasted_c3_api_key)
 
-    names = _generate_agent_names(count)
     config: dict = {
         "server_url": server_url,
         "username": username,

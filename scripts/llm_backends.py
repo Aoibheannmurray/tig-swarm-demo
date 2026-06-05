@@ -19,13 +19,14 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o",
     "google": "gemini-2.5-flash",
     "venice": "zai-org-glm-5",
-    "openrouter": "anthropic/claude-3.5-sonnet",
+    "openrouter": "qwen/qwen3-coder",
 }
 
 VENICE_API_BASE = "https://api.venice.ai/api/v1"
@@ -312,19 +313,41 @@ def call_openai(
 def call_claude_code(
     system: str, prompt: str, model: str | None = None,
 ) -> tuple[str, Usage]:
-    # --tools "" disables all built-in harness tools (Read/Write/Bash/etc.).
-    # Without this, Opus sees Write in scope, treats "return the file" as
-    # "write the file," and produces chatty preamble like "It looks like file
-    # write permissions need to be granted..." which then breaks `cargo build`.
-    cmd = ["claude", "-p", "--system-prompt", system, "--tools", ""]
-    if model:
-        cmd += ["--model", model]
+    # Resolve the CLI the same way the agentic backend does so this one-shot
+    # path works on Windows too. npm installs Claude Code as `claude.cmd`
+    # (there's no bare `claude.exe`), and `subprocess.run(["claude", …])` with
+    # shell=False can't launch a `.cmd` — it raises `[WinError 2] The system
+    # cannot find the file specified` every iteration. `_resolve_cli` honors a
+    # `CLAUDE_CLI` override plus the `.cmd`/`.exe` fallbacks, and
+    # `_wrap_for_windows` routes a `.cmd`/`.bat` through `cmd.exe` so subprocess
+    # can execute it. On macOS/Linux this just returns the absolute `claude`
+    # path, so behavior is unchanged there.
+    from agentic_backends import _resolve_cli, _wrap_for_windows
+
+    claude_bin = _resolve_cli("claude", "CLAUDE_CLI") or "claude"
     # Run from a temp dir so the CLI's CLAUDE.md auto-discovery doesn't pull
     # this repo's docs into every prompt — we supply our own system prompt.
     # We can't use --bare to disable discovery because --bare also disables
     # OAuth and forces ANTHROPIC_API_KEY, defeating the point of the
     # subscription path.
     with tempfile.TemporaryDirectory() as cwd:
+        # Pass the system prompt via a file, not `--system-prompt <arg>`. It
+        # embeds the full CHALLENGE.md and routinely runs ~8-9 KB, which blows
+        # past Windows' cmd.exe command-line limit (8191 chars) once
+        # _wrap_for_windows routes the .cmd through cmd.exe — surfacing as
+        # `claude -p failed (exit 1): Command line too long`. A file path keeps
+        # the command line tiny on every platform. (Named system-prompt.txt,
+        # not CLAUDE.md, so it isn't picked up by auto-discovery.)
+        sys_file = Path(cwd) / "system-prompt.txt"
+        sys_file.write_text(system, encoding="utf-8")
+        # --tools "" disables all built-in harness tools (Read/Write/Bash/etc.).
+        # Without this, Opus sees Write in scope, treats "return the file" as
+        # "write the file," and produces chatty preamble like "It looks like file
+        # write permissions need to be granted..." which then breaks `cargo build`.
+        cmd = [claude_bin, "-p", "--system-prompt-file", str(sys_file), "--tools", ""]
+        if model:
+            cmd += ["--model", model]
+        cmd = _wrap_for_windows(cmd)
         result = subprocess.run(
             cmd, input=prompt, capture_output=True, text=True,
             timeout=_TIMEOUT, cwd=cwd,

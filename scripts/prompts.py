@@ -430,6 +430,15 @@ GENERAL COMPILE HYGIENE:
   a method on a bare literal needs the type pinned: write `2.0_f64.sqrt()` or
   `(n as f64).powi(2)`, never `2.0.sqrt()` (that is `E0689: can't call method on
   ambiguous numeric type`).
+- Reading config from parsed JSON: a `Map<String, Value>` is NOT a `Value`, so
+  do NOT `serde_json::from_value(...)` the whole map (that is a type error) —
+  pull keys individually with a default. `Value::as_f64()` returns an `f64`, so
+  the `.unwrap_or(...)` argument must be an `f64` literal and you cast to `f32`
+  only AFTER `unwrap_or`: `m.get("lr").and_then(|v| v.as_f64()).unwrap_or(0.001)
+  as f32` — passing an `f32` to `.unwrap_or` here is `expected f64, found f32`.
+- Declare `let mut x = ...` whenever you later mutate `x` or call a `&mut`
+  method on it; "cannot borrow as mutable, not declared as mutable" just means a
+  missing `mut`.
 - Any struct YOU define that you `.clone()`, sort, or push into a `BinaryHeap`
   must carry the right derives: `#[derive(Clone)]` (and additionally
   `#[derive(PartialEq, Eq, PartialOrd, Ord)]` for a `BinaryHeap`). Without
@@ -441,11 +450,18 @@ GENERAL COMPILE HYGIENE:
 - Don't introduce new generics, trait bounds, lifetimes, or macros unless the
   starting code already uses them — they are a common source of errors.
 - Reuse the data structures already imported via `use super::*;`; don't invent
-  types that aren't defined.
+  types, constants, or functions that aren't defined. A `crate::...::NAME` path
+  (or a bare name) that isn't actually declared is `E0425: cannot find
+  value/function`. If you need a threshold or hyperparameter, define it as a
+  local `const` in your own file (e.g. `const MIN_LOSS_DELTA: f32 = 1e-4;`)
+  rather than referencing one you assume the module exports.
 - Indexing a `Vec`/slice MOVES the element when it isn't `Copy` — that's
   `E0507: cannot move out of ... behind a shared reference`. Bind by reference
   (`let x = &v[i];`) or `.clone()` it; never `*v[i]` or destructure-by-value out
   of a borrowed container (e.g. `let (_, s) = *states[k].iter().max()...;`).
+- Prefer small, incremental edits over a full-file rewrite: most compile
+  failures come from rewriting the whole file and letting signatures or imports
+  drift. Change the algorithm bodies and leave the boilerplate intact.
 - Keep the change focused: modify the algorithm logic, not the function
   surface, so the result still slots into the existing module."""
 
@@ -463,6 +479,12 @@ CUDA / cudarc API (this repo's fork — use EXACTLY these, not older cudarc name
   `.dev` field.
 - Host -> device (upload a Vec/slice): `let d = stream.memcpy_stod(&host_vec)?;`
   — NOT `htod_copy`, `copy_into_slice`, `htod_sync_copy`, or `stream.dev.*`.
+- Host -> device INTO AN EXISTING buffer (overwrite, no realloc):
+  `stream.memcpy_htod(&host_vec, &mut d_dst)?;` — argument order is HOST slice
+  FIRST, the `&mut` device buffer SECOND. Reversing them (`memcpy_htod(&mut
+  d_dst, &host_vec)`) gives `E0277: HostSlice not implemented for CudaSlice` and
+  `E0308: types differ in mutability`. Use `memcpy_stod` to get a NEW buffer;
+  use `memcpy_htod` only to refill one you already allocated.
 - Device -> host (download to a Vec): `let v: Vec<f32> = stream.memcpy_dtov(&d)?;`
   — NOT `clone_into_vec`, `clone_slice_to_host`, or `dtoh_sync_copy`.
 - Device -> device (copy between two device buffers): `stream.memcpy_dtod(&src,
@@ -472,21 +494,50 @@ CUDA / cudarc API (this repo's fork — use EXACTLY these, not older cudarc name
 - Launch (must be inside `unsafe`):
       let cfg = LaunchConfig { grid_dim: (g,1,1), block_dim: (t,1,1), shared_mem_bytes: 0 };
       unsafe { stream.launch_builder(&f).arg(&d_in).arg(&mut d_out).arg(&n).launch(cfg)? };
+- `LaunchConfig` has EXACTLY three fields — `grid_dim`, `block_dim`,
+  `shared_mem_bytes`. There is no `block` or `shared_mem` field and no
+  `grid_dim(...)`/`block_dim(...)` associated fn; for a 1-D element-wise launch
+  you may instead write `LaunchConfig::for_num_elems(n as u32)`.
 - Kernel `.arg(...)` accepts ONLY: `&CudaSlice<T>`, `&mut CudaSlice<T>`, or `&T`
   for a read-only scalar (e.g. `&(n as i32)`). You may NOT pass `&mut f32` /
   `&mut i32` (a mutable scalar reference) — that is the E0277
   `PushKernelArg<&mut f32>` error. To get a scalar OUT of a kernel, allocate a
   1-element slice `let mut d_x = stream.alloc_zeros::<f32>(1)?;`, pass
   `.arg(&mut d_x)`, then read it back with `stream.memcpy_dtov(&d_x)?[0]`.
+  A `Vec<CudaSlice<T>>` or `&[CudaSlice<T>]` is NOT a valid arg either — that is
+  the E0277 `DeviceRepr is not implemented for Vec<CudaSlice<...>>` error. Pass
+  each `CudaSlice` in its own `.arg(...)`, or keep the data in ONE flat
+  `CudaSlice` rather than a Vec-of-slices.
+- To operate on N parameter tensors, do NOT extract raw device pointers
+  (`device_ptr`, `device_ptr_mut`, `as_device_ptr`, `as_kernel_param`) and pack
+  them into a `Vec<u64>`/pointer array — that is not how this fork passes buffers
+  (those are E0599 / trait-not-in-scope). Instead LOOP over the tensors and
+  launch the elementwise kernel ONCE PER TENSOR, passing each `&CudaSlice`
+  straight to `.arg(...)`, exactly like the SGD seed:
+      for grad in gradients {
+          let mut update = stream.alloc_zeros::<f32>(grad.len())?;
+          let cfg = LaunchConfig::for_num_elems(grad.len() as u32);
+          unsafe { stream.launch_builder(&kernel)
+              .arg(grad).arg(&(grad.len() as u32)).arg(&lr).arg(&mut update).launch(cfg)?; }
+          updates.push(update);
+      }
 - A single `.launch_builder(...)` chain may NOT borrow the same buffer both
   immutably and mutably — `.arg(&state.x[i]).arg(&mut state.x[i])` is the E0502
   "cannot borrow as mutable because it is also borrowed as immutable" error.
   Allocate a separate output buffer and write there, or read the input into a
-  host Vec first; never alias one slice as both an in and an out arg.
+  host Vec first; never alias one slice as both an in and an out arg. The same
+  rule applies to `stream.memcpy_dtod(&v[a], &mut v[b])` when both elements come
+  from the SAME `Vec`/slice — that is also E0502; copy via a temporary buffer
+  (or a host Vec round-trip) instead of borrowing two elements of one Vec at
+  once.
 - Kernel function names in `module.load_function("...")` must match the
   `extern "C" __global__` names in kernels.cu exactly. Every variable the kernel
   reads must be a declared parameter — a bare name like `second_moments` that
-  isn't a parameter is an nvcc "identifier is undefined" error."""
+  isn't a parameter is an nvcc "identifier is undefined" error.
+- A kernel parameter you WRITE to must be a non-const pointer (`float* out`), not
+  `const float*` — assigning to an element of a `const` pointer (`out[idx] = x;`)
+  is the nvcc "expression must be a modifiable lvalue" error. Mark only the
+  read-only inputs `const`."""
 
 
 EVOLUTION_GUIDANCE = """\
@@ -583,6 +634,18 @@ State — define ONE struct that implements the provided `OptimizerStateTrait`
         fn box_clone(&self) -> Box<dyn OptimizerStateTrait> { Box::new(self.clone()) }
     }
 
+`OptimizerStateTrait` requires `Send + Sync`, so every field of `OptimizerState`
+must itself be `Send + Sync`. Do NOT put `RefCell`, `Cell`, or `Rc` in it
+(`RefCell<...> cannot be shared between threads safely` / `Sync is not
+implemented`), and never call `.borrow()`/`.borrow_mut()` on your state. Use
+plain owned fields (`f32`, `usize`, `bool`, `Vec<CudaSlice<f32>>`, …). The
+tempting reason to reach for `RefCell` is that `optimizer_query_at_params` takes
+`&dyn` state (READ-ONLY) — resist it: do ALL state mutation (step counters, slow
+/ momentum / EMA buffers, flags) in `optimizer_step`, which gets `&mut` state.
+If you feel you must update a field during `query`, that is the signal to move
+that update into `optimizer_step` instead. Only reach for `Mutex`/`RwLock` if
+you genuinely must, and never `Rc`/`Cell`.
+
 Recover it inside the hooks with
 `optimizer_state.as_any().downcast_ref::<OptimizerState>().unwrap()` (use
 `as_any_mut().downcast_mut::<OptimizerState>()` in `optimizer_step`).
@@ -602,6 +665,11 @@ Semantics (get these right — they are the usual source of wrong output):
     `model_params` in place (they are copies; in-place writes do nothing and
     are treated as tampering).
   - You never see the test set; the harness computes the scored test loss.
+
+The RETURN TYPE is part of each hook's signature — `optimizer_step` returns
+`Result<Vec<CudaSlice<f32>>>`, NOT `Result<()>`. If the build says `expected fn
+pointer, found fn item`, one of your hooks has the wrong signature (usually the
+return type); fix the hook to match exactly — do not cast or wrap it.
 """
 
 
