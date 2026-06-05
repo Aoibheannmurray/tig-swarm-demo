@@ -121,7 +121,7 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
      "+ api_base. Use model ids like `deepseek-v4-pro`, `deepseek-chat` or "
      "`deepseek-reasoner`. Needs DEEPSEEK_API_KEY."),
     ("claude-code",
-     "Claude CLI — one-shot mode",
+     "Claude CLI — single-shot mode",
      "claude-opus-4-7",
      None,
      "claude-cli",

@@ -67,7 +67,7 @@ def derive_llm_label(provider: str | None, model: str | None) -> str:
     The model name is the most informative bit (`claude-opus-4-7`,
     `gpt-5`, `gemini-2.5-pro`), so we lead with it. For agentic providers
     we append the provider in parens so the dashboard can distinguish
-    e.g. `claude-opus-4-7` (one-shot API) from `claude-opus-4-7 (claude-
+    e.g. `claude-opus-4-7` (single-shot API) from `claude-opus-4-7 (claude-
     code-agentic)`. When the model is unspecified (the CLI is using its
     own default), the provider name alone is the best we can do.
     """

@@ -787,8 +787,8 @@ def parse_args() -> argparse.Namespace:
         ],
         help=(
             "LLM provider (default: agent.config.json, then anthropic). "
-            "`claude-code` = headless one-shot completion via the local CLI; "
-            "`claude-code-agentic` = headless Claude Code agent mode in a "
+            "`claude-code` = headless single-shot completion via the local CLI; "
+            "`claude-code-agentic` = headless Claude Code agentic mode in a "
             "sandboxed worktree with file-edit tools; `codex-agentic` = same "
             "shape via the local `codex exec` CLI. Agentic modes are "
             "subscription-only (auth via the respective CLI's login) and "
@@ -1113,7 +1113,7 @@ def main() -> int:
             sys.exit(
                 f"{backend.cli_name} CLI not found on PATH. Install it, or "
                 f"switch to a non-agentic provider (e.g. --provider claude-code "
-                f"for one-shot mode).{override_hint}"
+                f"for single-shot mode).{override_hint}"
             )
 
     print(f"Provider: {args.provider}  Model: {model}")

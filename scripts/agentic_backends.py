@@ -399,7 +399,7 @@ class ClaudeCodeAgent:
             raise RuntimeError(
                 "claude CLI not found on PATH. Install Claude Code "
                 "(https://docs.claude.com/en/docs/claude-code) or switch to "
-                "--provider claude-code (one-shot mode) or an API provider. "
+                "--provider claude-code (single-shot mode) or an API provider. "
                 "On Windows you can also export CLAUDE_CLI to point at the "
                 "absolute path of your `claude` install."
             )
@@ -487,7 +487,7 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
         )
 
     return f"""\
-# Swarm contributor — Codex agent mode
+# Swarm contributor — Codex agentic mode
 
 You are one autonomous contributor in a swarm trying to improve a Rust solver
 for the **{challenge}** TIG challenge. The driver loop (Python) handles all
