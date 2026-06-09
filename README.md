@@ -22,6 +22,7 @@ python3 setup.py switch energy_arbitrage     # change the active challenge later
 
 Requirements:
 - Python 3
+- Git (each agent runs in its own git worktree)
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/), running (Windows also needs WSL 2)
 - Either an API key for your chosen provider, or a logged-in `claude` / `codex` CLI
 
