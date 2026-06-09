@@ -202,6 +202,11 @@ if ! command -v nvcc >/dev/null 2>&1; then
 fi
 """
 
+    identity_export = ""
+    tig_user_id = str(config.get("tig_user_id") or "").strip()
+    if tig_user_id:
+        identity_export = f"export TIG_USER_ID={_yaml_quote(tig_user_id)}"
+
     runner = f"""\
 #!/bin/bash
 set -euo pipefail
@@ -211,6 +216,7 @@ mkdir -p "${{C3_ARTIFACTS_DIR}}" c3-artifacts
 
 export TIG_IN_DOCKER=1
 export TIG_SWARM_SERVER={_yaml_quote(server)}
+{identity_export}
 export PATH="${{HOME:-/root}}/.cargo/bin:/root/.cargo/bin:${{PATH}}"
 
 needs_apt=0
