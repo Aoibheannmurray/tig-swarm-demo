@@ -58,7 +58,6 @@ To skip the wizard:
 ```bash
 cp fleet.config.example.json fleet.config.json
 $EDITOR fleet.config.json
-python3 run.py
 ```
 
 Per-agent fields:
@@ -73,6 +72,12 @@ Per-agent fields:
 | `tacit_knowledge`| Optional per-agent override of the shared `tacit_knowledge.md` file.    |
 | `detailed_prompts`| Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile; leave off for frontier models to save tokens. |
 | `role`           | `explorer` (default) writes novel/ambitious algorithms; `exploiter` makes only small localized edits, never a rewrite. **Hot-editable** — change it in `fleet.config.json` while the fleet runs and it takes effect on the agent's next iteration. |
+
+Remember to add your hints to `tacit_knowledge.md` — see [Tacit knowledge](#tacit-knowledge) below.
+
+Now that you've manually set up your `fleet.config.json` and `tacit_knowledge.md`, you can run the fleet (make sure you've exported your API keys first):
+
+`python3 scripts/run_fleet.py`
 
 ### Tacit knowledge
 
