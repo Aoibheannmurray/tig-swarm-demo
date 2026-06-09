@@ -1,6 +1,6 @@
 import type { Panel, WSMessage, LeaderboardEntry } from "../types";
 import { getAgentColor } from "../lib/colors";
-import { formatScore } from "../lib/format";
+import { formatScore, shortenModel } from "../lib/format";
 
 function escapeHTML(s: string): string {
   return s
@@ -156,14 +156,17 @@ export class LeaderboardPanel implements Panel {
       const bestText = formatScore(entry.best_ever_score);
       const scoreImproved = improved && (this.sortKey === "current_score" || this.sortKey === "best_ever_score");
 
-      const llmText = entry.llm_type ? escapeHTML(entry.llm_type) : "";
+      // Show the shortened model name in the cell; keep the full provider-
+      // prefixed id in the tooltip so the exact model is still recoverable.
+      const llmFull = entry.llm_type ? escapeHTML(entry.llm_type) : "";
+      const llmText = entry.llm_type ? escapeHTML(shortenModel(entry.llm_type)) : "";
       row.innerHTML = `
         <span class="lb-rank">${rank}</span>
         <span class="lb-name">
           <span class="lb-dot" style="background:${color}"></span>
           ${entry.agent_name}
         </span>
-        <span class="lb-model" title="${llmText}">${llmText}</span>
+        <span class="lb-model" title="${llmFull}">${llmText}</span>
         <span class="lb-col-sm">${entry.runs}</span>
         <span class="lb-col-sm">${entry.improvements}</span>
         <span class="lb-col-sm${entry.runs_since_improvement >= 2 ? " lb-stag--alert" : ""}">${entry.runs_since_improvement}</span>
