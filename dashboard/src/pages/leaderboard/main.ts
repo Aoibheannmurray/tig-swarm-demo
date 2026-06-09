@@ -35,7 +35,9 @@ panelEl.innerHTML = `
     <div class="page-body leaderboard-page" id="panel-leaderboard-body"></div>
   </div>
 `;
-const leaderboardPanel = new LeaderboardPanel();
+// Dedicated page: no row cap — show every participating agent (the list
+// scrolls). The dashboard tile keeps the default cap.
+const leaderboardPanel = new LeaderboardPanel({ maxRows: Infinity });
 leaderboardPanel.init(document.getElementById("panel-leaderboard-body")!);
 
 function handleMessage(msg: WSMessage) {

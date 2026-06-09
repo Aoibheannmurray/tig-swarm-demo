@@ -20,10 +20,12 @@ type SortKey =
   | "inspiration_count";
 type SortDir = "asc" | "desc";
 
-// How many agents the leaderboard renders. The server returns every agent
-// with a published experiment; we cap the rendered rows and let the list
-// scroll (see .leaderboard-list CSS) rather than grow the page unbounded.
-const MAX_ROWS = 50;
+// Default cap on rendered rows. The server returns every agent with a
+// published experiment; the compact dashboard *tile* caps the rendered rows
+// and lets the list scroll (see .leaderboard-list CSS) rather than grow
+// unbounded. The dedicated full page overrides this with Infinity to show
+// every participating agent (see constructor opts).
+const DEFAULT_MAX_ROWS = 50;
 
 const DEFAULT_DIR: Record<SortKey, SortDir> = {
   current_score: "desc",
@@ -41,6 +43,13 @@ export class LeaderboardPanel implements Panel {
   private currentEntries: LeaderboardEntry[] = [];
   private sortKey: SortKey = "best_ever_score";
   private sortDir: SortDir = "desc";
+  private maxRows: number;
+
+  // maxRows defaults to DEFAULT_MAX_ROWS (the tile). Pass { maxRows: Infinity }
+  // on the dedicated page to render every participating agent.
+  constructor(opts?: { maxRows?: number }) {
+    this.maxRows = opts?.maxRows ?? DEFAULT_MAX_ROWS;
+  }
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -132,7 +141,7 @@ export class LeaderboardPanel implements Panel {
       prevValues.set(id, v === "" || v === undefined ? null : Number(v));
     });
 
-    const sorted = this.sortEntries(this.currentEntries).slice(0, MAX_ROWS);
+    const sorted = this.sortEntries(this.currentEntries).slice(0, this.maxRows);
 
     this.list.innerHTML = "";
     sorted.forEach((entry, i) => {
