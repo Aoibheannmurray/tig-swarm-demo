@@ -108,6 +108,7 @@ export class TrajectoriesPanel {
               <a class="ideas-nav-link" href="/diversity.html">Diversity</a>
               <a class="ideas-nav-link" href="/benchmark.html">Benchmark</a>
               <span class="ideas-nav-active">Trajectories</span>
+              <a class="ideas-nav-link" href="/leaderboard.html">Leaderboard</a>
             </div>
           </div>
           <div class="traj-counters" id="traj-counters">

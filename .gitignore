@@ -38,3 +38,8 @@ src/*/algorithm/kernels.cu
 tig-monorepo/
 prompts_log/
 feedback/
+
+# Local planning/scratch docs, not part of the shared repo
+multi_agent_docker_plan.md
+DASHBOARD_PLAN.md
+SANDBOX_SPEC.md

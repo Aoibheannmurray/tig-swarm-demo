@@ -1119,6 +1119,25 @@ async def deposit_inactive(
     kernel_code: str | None = None,
     experiment_id: str | None = None,
 ) -> int:
+    # Keep one-and-done weak attempts out of the inactive trajectory pool.
+    # An agent that publishes a single algorithm scoring below zero and then
+    # stagnates or goes offline would otherwise deposit that lone bad result
+    # here, where other agents adopt it on a fresh reset — polluting the pool
+    # with a trajectory that never proved itself. Require either a real
+    # iterated line (>1 edit) or a non-negative score before a trajectory can
+    # seed others. Centralised here so BOTH deposit paths (online stagnation
+    # reset and offline-agent cleanup) are covered. Returns -1 to signal the
+    # deposit was skipped; callers ignore the row id.
+    #
+    # Note: on challenges whose feasible scores are themselves negative (e.g.
+    # neuralnet), this also drops single-edit feasible results — accepted
+    # tradeoff per the chosen `score < 0` definition of "bad".
+    if trajectory_id is not None and score is not None and score < 0:
+        traj = await (await conn.execute(
+            "SELECT num_edits FROM trajectories WHERE id = ?", (trajectory_id,),
+        )).fetchone()
+        if traj is not None and traj["num_edits"] is not None and traj["num_edits"] <= 1:
+            return -1
     cursor = await conn.execute(
         "INSERT INTO inactive_algorithms "
         "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id) "
@@ -1270,14 +1289,21 @@ async def deactivate_inactive_agent_trajectories(
             await deactivate_trajectory(conn, traj_id, timestamp)
 
         best = await get_trajectory_best(conn, agent_id, challenge)
+        # Mirror the online stagnation-reset gate (server.py): only deposit a
+        # feasible best. An infeasible entry would hand broken code to whoever
+        # adopts it and spread the infeasible-floor trap. trajectory_bests is
+        # normally feasible-only, but legacy rows / the adopted floor mean we
+        # can't assume it. deposit_inactive applies the extra single-edit /
+        # negative-score guard on top.
         if best is not None:
-            await deposit_inactive(
-                conn, agent_id, challenge,
-                best["algorithm_code"], best["score"], timestamp,
-                trajectory_id=traj_id, program_id=program_id,
-                kernel_code=best.get("kernel_code"),
-                experiment_id=best.get("experiment_id"),
-            )
+            if best.get("feasible"):
+                await deposit_inactive(
+                    conn, agent_id, challenge,
+                    best["algorithm_code"], best["score"], timestamp,
+                    trajectory_id=traj_id, program_id=program_id,
+                    kernel_code=best.get("kernel_code"),
+                    experiment_id=best.get("experiment_id"),
+                )
             await clear_trajectory_best(conn, agent_id, challenge)
     return processed
 

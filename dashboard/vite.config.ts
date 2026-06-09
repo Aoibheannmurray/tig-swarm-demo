@@ -10,6 +10,7 @@ export default defineConfig({
         diversity: "diversity.html",
         benchmark: "benchmark.html",
         trajectories: "trajectories.html",
+        leaderboard: "leaderboard.html",
       },
     },
   },

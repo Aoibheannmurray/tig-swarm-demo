@@ -1,5 +1,29 @@
 import { describe, it, expect } from "vitest";
-import { formatScore } from "./format";
+import { formatScore, shortenModel } from "./format";
+
+describe("shortenModel", () => {
+  it("keeps the final segment of a provider-prefixed id", () => {
+    expect(shortenModel("qwen/qwen3-coder")).toBe("qwen3-coder");
+    expect(shortenModel("deepseek/deepseek-chat")).toBe("deepseek-chat");
+    expect(shortenModel("anthropic/claude-opus-4-8")).toBe("claude-opus-4-8");
+  });
+
+  it("leaves a bare model id (no slash) unchanged", () => {
+    expect(shortenModel("claude-opus-4-8")).toBe("claude-opus-4-8");
+  });
+
+  it("handles empty / nullish input", () => {
+    expect(shortenModel("")).toBe("");
+    expect(shortenModel(null)).toBe("");
+    expect(shortenModel(undefined)).toBe("");
+  });
+
+  it("ignores a stray trailing slash and surrounding whitespace", () => {
+    expect(shortenModel("qwen/")).toBe("qwen");
+    expect(shortenModel("  openai/gpt-5  ")).toBe("gpt-5");
+    expect(shortenModel("a/b/c")).toBe("c");
+  });
+});
 
 describe("formatScore", () => {
   it("renders null / NaN as an em dash", () => {

@@ -22,6 +22,7 @@ python3 setup.py switch energy_arbitrage     # change the active challenge later
 
 Requirements:
 - Python 3
+- Git (each agent runs in its own git worktree)
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/), running (Windows also needs WSL 2)
 - Either an API key for your chosen provider, or a logged-in `claude` / `codex` CLI
 
@@ -58,7 +59,6 @@ To skip the wizard:
 ```bash
 cp fleet.config.example.json fleet.config.json
 $EDITOR fleet.config.json
-python3 run.py
 ```
 
 Per-agent fields:
@@ -73,6 +73,12 @@ Per-agent fields:
 | `tacit_knowledge`| Optional per-agent override of the shared `tacit_knowledge.md` file.    |
 | `detailed_prompts`| Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile; leave off for frontier models to save tokens. |
 | `role`           | `explorer` (default) writes novel/ambitious algorithms; `exploiter` makes only small localized edits, never a rewrite. **Hot-editable** — change it in `fleet.config.json` while the fleet runs and it takes effect on the agent's next iteration. |
+
+Remember to add your hints to `tacit_knowledge.md` — see [Tacit knowledge](#tacit-knowledge) below.
+
+Now that you've manually set up your `fleet.config.json` and `tacit_knowledge.md`, you can run the fleet (make sure you've exported your API keys first):
+
+`python3 scripts/run_fleet.py`
 
 ### Tacit knowledge
 
@@ -132,7 +138,7 @@ table above); OpenRouter's catalog is public so no key is needed there. The
 CLI providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) have no
 models endpoint — they accept any model ID their CLI knows.
 
-`claude-code` is one-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 15 min per iteration; don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
+`claude-code` is single-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 15 min per iteration; don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
 
 ## Reading the score
 
@@ -170,6 +176,7 @@ when your host lacks the hardware — set `"compute": "c3"` on an agent in
 First install the `c3` CLI (from `https://cthree.cloud/install.sh`) and
 authenticate, via either:
 
+- `curl -fsSL https://cthree.cloud/install.sh | sh` to update your version of `c3` 
 - `c3 login` (uses your existing session), or
 - `c3 apikey create tig-swarm` then export `C3_API_KEY=...`, or
 - put the key in `fleet.config.json` — a top-level `"c3_api_key"` applies to

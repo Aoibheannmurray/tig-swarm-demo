@@ -953,19 +953,6 @@ def _gather_via_paste(
     print(f"  {verb} {tk_path.relative_to(ROOT)}")
 
 
-def _gather_via_upload(tk_path: Path) -> None:
-    src = input("Path to your tacit-knowledge file: ").strip()
-    if not src:
-        print("  no path given; leaving existing file in place")
-        return
-    src_path = Path(src).expanduser()
-    if not src_path.is_file():
-        print(f"  not a file: {src_path}; leaving existing file in place")
-        return
-    tk_path.write_text(src_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
-    print(f"  copied {src_path} -> {tk_path.relative_to(ROOT)}")
-
-
 def _open_in_editor(tk_path: Path) -> None:
     """Hand the file off to the contributor's $EDITOR (or $VISUAL) for
     direct editing. Falls back to a sensible platform default. Whatever
@@ -999,20 +986,18 @@ def gather_tacit_knowledge(
     appropriate menu.
 
     Create flow (no real content yet):
-      1. Upload from an existing file (path; copied verbatim — replaces).
-      2. Guided capture — answer six short prompts (recommended).
-      3. Paste a single block — power-user escape hatch.
-      4. Skip — don't add any tacit knowledge yet.
+      1. Guided capture — answer six short prompts (recommended).
+      2. Paste a single block — power-user escape hatch.
+      3. Skip — don't add any tacit knowledge yet.
 
     Edit flow (file already has user content):
       1. Add more via guided capture (recommended; appends).
       2. Add more via paste (appends).
       3. Open the file in your $EDITOR for direct hand-editing.
-      4. Replace entirely from another file (path).
-      5. Cancel — leave the file as-is.
+      4. Cancel — leave the file as-is.
 
     With append=True (default), guided/paste modes append to existing
-    content. Upload and editor modes always overwrite (explicit replace).
+    content. The editor mode edits the file in place.
     """
     is_edit = _has_user_content(tk_path)
 
@@ -1026,28 +1011,23 @@ def gather_tacit_knowledge(
         print("  1. Add more via guided capture (recommended; appends)")
         print("  2. Add more via paste (appends)")
         print("  3. Open the file in your $EDITOR")
-        print("  4. Replace entirely from another file (give a path)")
-        print("  5. Cancel — leave the file as-is\n")
-        valid = ("1", "2", "3", "4", "5")
+        print("  4. Cancel — leave the file as-is\n")
+        valid = ("1", "2", "3", "4")
         default = "1"
-        prompt = "Choice 1/2/3/4/5 [1]: "
+        prompt = "Choice 1/2/3/4 [1]: "
     else:
         print(
             "\n── Tacit knowledge (optional) ──\n"
-            "Give your local agent private strategy hints. These are read\n"
-            f"when the agent stagnates ({stagnation_threshold}+ iterations without improvement) —\n"
-            "at which point the server picks 50/50 between consulting this file and\n"
-            "the swarm's `inspiration_code` for the iteration's hint. The file is\n"
-            "gitignored and never sent to the server.\n"
+            "Give your local agent private strategy hints for when it gets\n"
+            "stuck. This file is gitignored and never sent to the server.\n"
         )
         print("How would you like to provide them?")
-        print("  1. Upload from an existing tacit-knowledge file (give a path)")
-        print("  2. Guided capture — answer a few short prompts (recommended)")
-        print("  3. Paste a single block of free-form text")
-        print("  4. Skip — don't add any tacit knowledge yet\n")
-        valid = ("1", "2", "3", "4")
-        default = "2"
-        prompt = "Choice 1/2/3/4 [2]: "
+        print("  1. Guided capture — answer a few short prompts (recommended)")
+        print("  2. Paste a single block of free-form text")
+        print("  3. Skip — don't add any tacit knowledge yet\n")
+        valid = ("1", "2", "3")
+        default = "1"
+        prompt = "Choice 1/2/3 [1]: "
 
     while True:
         try:
@@ -1068,9 +1048,7 @@ def gather_tacit_knowledge(
             _gather_via_paste(tk_path, stagnation_threshold, append=append)
         elif choice == "3":
             _open_in_editor(tk_path)
-        elif choice == "4":
-            _gather_via_upload(tk_path)
-        else:  # "5"
+        else:  # "4"
             try:
                 shown = tk_path.relative_to(ROOT)
             except ValueError:
@@ -1078,12 +1056,10 @@ def gather_tacit_knowledge(
             print(f"  no change (edit {shown} any time)")
     else:
         if choice == "1":
-            _gather_via_upload(tk_path)
-        elif choice == "2":
             _gather_via_guided(tk_path, stagnation_threshold, append=append)
-        elif choice == "3":
+        elif choice == "2":
             _gather_via_paste(tk_path, stagnation_threshold, append=append)
-        else:  # "4"
+        else:  # "3"
             try:
                 shown = tk_path.relative_to(ROOT)
             except ValueError:

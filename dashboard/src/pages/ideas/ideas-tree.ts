@@ -57,6 +57,7 @@ export class IdeasTree {
             <a href="/diversity.html" class="ideas-nav-link">Diversity</a>
             <a href="/benchmark.html" class="ideas-nav-link">Benchmark</a>
             <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
+            <a href="/leaderboard.html" class="ideas-nav-link">Leaderboard</a>
           </div>
         </div>
 

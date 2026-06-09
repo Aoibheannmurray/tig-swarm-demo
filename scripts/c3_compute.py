@@ -30,6 +30,19 @@ _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 # ── Helpers ────────────────────────────────────────────────────────
 
 
+def _write_container_file(path: Path, text: str) -> None:
+    """Write a file that will be uploaded to and executed in the Linux C3
+    container, forcing LF line endings regardless of the host OS.
+
+    ``Path.write_text`` opens in text mode, so on Windows it would translate
+    ``\\n`` -> ``\\r\\n``. A CRLF runner script then breaks bash inside the
+    container (e.g. ``set -euo pipefail\\r`` -> "invalid option name"). Passing
+    ``newline="\\n"`` disables that translation, so the same bytes are produced
+    on Linux, macOS, and Windows.
+    """
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def _yaml_quote(value: str) -> str:
     # JSON strings are valid YAML scalars and handle quotes/backslashes safely.
     return json.dumps(value)
@@ -109,7 +122,7 @@ def _write_current_source_files(stage: Path, config: dict) -> None:
     if algorithm_code:
         algorithm_path = stage / algorithm_rel
         algorithm_path.parent.mkdir(parents=True, exist_ok=True)
-        algorithm_path.write_text(algorithm_code, encoding="utf-8")
+        _write_container_file(algorithm_path, algorithm_code)
 
     kernel_rel = config.get("kernel_path")
     if kernel_rel:
@@ -117,7 +130,7 @@ def _write_current_source_files(stage: Path, config: dict) -> None:
         if kernel_code:
             kernel_path = stage / kernel_rel
             kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text(kernel_code, encoding="utf-8")
+            _write_container_file(kernel_path, kernel_code)
 
 
 def _create_workspace(stage: Path, config: dict, server: str) -> dict:
@@ -147,8 +160,9 @@ def _create_workspace(stage: Path, config: dict, server: str) -> dict:
     for script in (ROOT / "scripts").glob("*.py"):
         _copy_required(script, scripts_stage / script.name)
 
-    (stage / ".swarm-cache.json").write_text(
-        json.dumps(staged_config, indent=2, sort_keys=True) + "\n"
+    _write_container_file(
+        stage / ".swarm-cache.json",
+        json.dumps(staged_config, indent=2, sort_keys=True) + "\n",
     )
     return staged_config
 
@@ -177,7 +191,7 @@ docker:
 output:
   - ./c3-artifacts
 """
-    (stage / ".c3").write_text(c3_config, encoding="utf-8")
+    _write_container_file(stage / ".c3", c3_config)
 
     gpu_check = ""
     if bool(config.get("is_gpu")):
@@ -234,7 +248,7 @@ cp "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" c3-artifacts/benchmark.stderr 2>/dev
 exit "$status"
 """
     script_path = stage / script_name
-    script_path.write_text(runner, encoding="utf-8")
+    _write_container_file(script_path, runner)
     script_path.chmod(0o755)
     return script_name
 

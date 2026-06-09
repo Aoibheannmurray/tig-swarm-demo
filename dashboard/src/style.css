@@ -1364,10 +1364,15 @@ html, body {
 }
 
 .lb-model {
-  width: 72px;
+  /* Wider than the agent-name column now: the Model id is the important
+     identifier and was truncating to "claude-opu…". The name column is
+     flex:1 so this fixed bump pulls width back from it. Combined with the
+     shortenModel() prefix strip, full names like "claude-opus-4-8" fit
+     with headroom. */
+  width: 160px;
   flex-shrink: 0;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1441,6 +1446,46 @@ html, body {
   display: inline-block;
   min-width: 8px;
   font-size: 9px;
+}
+
+/* ── Dedicated leaderboard page (.leaderboard-page) ──
+   Scoped overrides only — the shared .lb-* rules above keep the cramped
+   dashboard *tile* compact. The full page has room: bigger type, wider
+   columns, and the table block is capped at a comfortable width and centred
+   so the flex:1 agent-name column can't stretch past ~a third of the page
+   (it was eating half). */
+.leaderboard-page .leaderboard-header,
+.leaderboard-page .leaderboard-list {
+  max-width: 1400px;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+.leaderboard-page .leaderboard-header {
+  font-size: 11px;
+  padding: 8px 12px;
+}
+.leaderboard-page .leaderboard-row {
+  font-size: 15px;
+  padding: 9px 12px;
+}
+.leaderboard-page .lb-rank {
+  width: 44px;
+  font-size: 14px;
+}
+.leaderboard-page .lb-model {
+  /* Wide enough for the longest full id incl. mode suffix, e.g.
+     "claude-opus-4-7 (claude-code-agentic)" (~37 mono chars at 13px). */
+  width: 310px;
+  font-size: 13px;
+}
+.leaderboard-page .lb-col-sm {
+  width: 58px;
+  font-size: 13px;
+}
+.leaderboard-page .lb-score {
+  width: 96px;
+  font-size: 14px;
 }
 
 /* ── Animations ── */
