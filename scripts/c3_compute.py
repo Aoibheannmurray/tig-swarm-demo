@@ -202,6 +202,11 @@ if ! command -v nvcc >/dev/null 2>&1; then
 fi
 """
 
+    identity_export = ""
+    tig_user_id = str(config.get("tig_user_id") or "").strip()
+    if tig_user_id:
+        identity_export = f"export TIG_USER_ID={_yaml_quote(tig_user_id)}"
+
     runner = f"""\
 #!/bin/bash
 set -euo pipefail
@@ -211,6 +216,7 @@ mkdir -p "${{C3_ARTIFACTS_DIR}}" c3-artifacts
 
 export TIG_IN_DOCKER=1
 export TIG_SWARM_SERVER={_yaml_quote(server)}
+{identity_export}
 export PATH="${{HOME:-/root}}/.cargo/bin:/root/.cargo/bin:${{PATH}}"
 
 needs_apt=0
@@ -294,6 +300,8 @@ def _read_job_status(job_id: str, env: dict, cwd: Path) -> str | None:
         ["c3", "squeue", "--json"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=cwd,
         env=env,
     )
@@ -314,6 +322,8 @@ def _read_job_status(job_id: str, env: dict, cwd: Path) -> str | None:
         ["c3", "squeue", "-n", "50"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=cwd,
         env=env,
     )
@@ -352,6 +362,8 @@ def _read_logs(job_id: str, env: dict, cwd: Path) -> str:
         ["c3", "logs", job_id],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=cwd,
         env=env,
     )
@@ -363,6 +375,8 @@ def _check_c3_auth(env: dict) -> str:
         ["c3", "whoami"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=ROOT,
         env=env,
     )
@@ -382,6 +396,8 @@ def _pull_artifacts(job_id: str, env: dict, cwd: Path) -> str:
         ["c3", "pull", job_id],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=cwd,
         env=env,
     )
@@ -392,6 +408,8 @@ def _pull_artifacts(job_id: str, env: dict, cwd: Path) -> str:
         ["c3", "squeue", "pull", job_id],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=cwd,
         env=env,
     )
@@ -477,7 +495,7 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
 
     print(f"    [C3] Staging project for {challenge} with image {image}...")
 
-    with tempfile.TemporaryDirectory(prefix="tig-c3-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="tig-c3-", ignore_cleanup_errors=True) as tmp:
         stage = Path(tmp)
         try:
             _create_workspace(stage, cfg, server)
@@ -497,6 +515,8 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=stage,
             env=env,
         )

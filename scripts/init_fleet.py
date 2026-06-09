@@ -383,7 +383,7 @@ def _select_provider() -> tuple[str, str, str | None, str, bool]:
 # this is just the common shortlist with `l40` as the default to match the
 # run_loop.py / c3_compute.py default.
 _C3_HARDWARE_CHOICES = [
-    ("l40", "NVIDIA L40 (default)"),
+    ("l40", "NVIDIA L40"),
     ("h100", "NVIDIA H100"),
 ]
 
@@ -423,6 +423,12 @@ def _select_compute(supports_c3: bool) -> tuple[str, str | None]:
             f"{_C3_INSTALL_URL}\n  before launching the fleet (the config is "
             "still written either way)."
         )
+    else:
+        print(
+            "\n  C3 needs you to be logged in (`c3 login`) with an API key "
+            "created\n  (`c3 apikey create tig-swarm`). The next prompt "
+            "handles the key."
+        )
 
     hardware = _prompt_choice(
         "Which C3 GPU profile?", _C3_HARDWARE_CHOICES, default_idx=0,
@@ -432,10 +438,20 @@ def _select_compute(supports_c3: bool) -> tuple[str, str | None]:
 
 def _prompt_c3_api_key(existing_key: str | None = None) -> str | None:
     """Collect the C3 API key in its own wizard section. Only called when the
-    user picked C3 compute. When ``existing_key`` is set (a re-run carrying a
-    key forward from fleet.config.json), offer to keep it. Optional — returns
-    ``None`` when left blank so C3 falls back to the ``C3_API_KEY`` env var or
-    an existing ``c3 login`` session."""
+    user picked C3 compute.
+
+    Preference order, smoothest first:
+
+      1. ``existing_key`` (a re-run carrying a key forward from
+         fleet.config.json) — offer to keep it.
+      2. An exported ``C3_API_KEY`` — detected here (cheap env read, no
+         subprocess) and used automatically, so there's nothing to paste. We
+         return ``None`` in this case so the key stays in the environment
+         rather than being copied into fleet.config.json.
+      3. A pasted key — stored in fleet.config.json.
+
+    Returns ``None`` when nothing is pasted, so C3 falls back to the
+    ``C3_API_KEY`` env var or an existing ``c3 login`` session at launch."""
     print("\nC3 API key")
     print("─" * 40)
     if existing_key and _prompt_yes_no(
@@ -444,10 +460,24 @@ def _prompt_c3_api_key(existing_key: str | None = None) -> str | None:
     ):
         return existing_key
 
-    print("C3 needs an API key. Create one with `c3 apikey create tig-swarm`,")
-    print("or leave this blank to use the C3_API_KEY env var / an existing")
-    print("`c3 login` session.")
-    return _prompt("c3 API key", allow_empty=True).strip() or None
+    env_key = os.environ.get("C3_API_KEY", "").strip()
+    if env_key:
+        print(f"  ✓ Found C3_API_KEY in your environment ({_mask_secret(env_key)}).")
+        print("    Your agents will use it automatically — nothing to paste.")
+        return None
+
+    print("No C3_API_KEY found in your environment. Recommended: create a key")
+    print("and export it before launching —")
+    if os.name == "nt":
+        print("    c3 apikey create tig-swarm")
+        print('    set C3_API_KEY=<your-key>   (cmd)   or'
+              '   $env:C3_API_KEY="<your-key>"   (PowerShell)')
+    else:
+        print("    c3 apikey create tig-swarm")
+        print("    export C3_API_KEY=<your-key>")
+    print("Or paste the key here to store it in fleet.config.json. Leave blank")
+    print("to use `c3 login` / set C3_API_KEY later, then re-run the wizard.")
+    return _prompt("c3 API key (press Enter to skip)", allow_empty=True).strip() or None
 
 
 # ── Main flow ─────────────────────────────────────────────────────
@@ -503,8 +533,17 @@ def _build_agent(
 def run_wizard(force: bool = False) -> int:
     print("\nfleet.config.json wizard")
     print("─" * 40)
-    print("Answer a few questions to generate fleet.config.json.")
-    print("Press Ctrl-C at any time to abort.\n")
+    print("Answer a few questions to generate fleet.config.json, then the")
+    print("fleet launches. Press Enter at any prompt to accept the default")
+    print("shown in [brackets]; press Ctrl-C to abort.")
+    print()
+    print("This is a GPU swarm — benchmarks run on C3 cloud GPUs. Before you")
+    print("start, you should already have:")
+    print("  • run `c3 login` and `c3 apikey create tig-swarm`")
+    print("  • exported C3_API_KEY and your provider API key in this shell")
+    print("Forgot one? Finish the wizard anyway, export the key, then re-run —")
+    print("your previous answers come back as the defaults, so you can press")
+    print("Enter straight through.\n")
 
     # Read the existing config (if any) BEFORE _confirm_overwrite so we
     # can carry forward the swarm-connection triplet without forcing the
@@ -625,58 +664,12 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-_DOCKER_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
-
-# Building the benchmark image plus the cargo/Docker build cache comfortably
-# wants this much free space. Below it, builds fail late with confusing
-# "no space left on device" errors — so warn up front rather than hard-fail.
-_MIN_FREE_GB = 15
-
-
-def _preflight_docker() -> None:
-    """Fail before the wizard if Docker isn't installed, and warn on low disk.
-
-    Benchmarks always run in a local Docker container (see
-    scripts/benchmark.py). benchmark.py's _ensure_docker_daemon() already
-    auto-launches Docker Desktop / OrbStack at fleet time if the daemon
-    is stopped, so we only catch the one case it can't recover from:
-    `docker` not on PATH at all. Without this, a contributor only finds
-    out Docker is missing after picking a provider, exporting an API
-    key, and hitting an opaque FileNotFoundError on iteration 1.
-    """
-    if shutil.which("docker") is None:
-        sys.exit(
-            "Docker is required to run benchmarks but `docker` was not found "
-            "on PATH.\n"
-            f"Install Docker Desktop from {_DOCKER_INSTALL_URL}, then try again."
-        )
-    _warn_low_disk()
-
-
-def _warn_low_disk() -> None:
-    """Non-fatal heads-up when the repo drive is low on space. The Docker
-    image + build cache need ~15 GB; on Windows especially this has bitten
-    contributors with a late, opaque 'no space left on device' mid-build."""
-    try:
-        free_gb = shutil.disk_usage(ROOT).free / 1e9
-    except OSError:
-        return  # can't stat the drive — don't block the wizard
-    if free_gb < _MIN_FREE_GB:
-        print(
-            f"  warning: only {free_gb:.1f} GB free on the repo drive — the "
-            f"Docker image and build cache want ~{_MIN_FREE_GB} GB. Builds may "
-            "fail with 'no space left on device'. Free up space (e.g. "
-            "`docker system prune`) before launching the fleet.\n"
-        )
-
-
 def main() -> int:
     if not EXAMPLE_PATH.exists():
         sys.exit(
             f"{EXAMPLE_PATH.name} not found at {EXAMPLE_PATH}. "
             "Are you running this from the repo root?"
         )
-    _preflight_docker()
     args = parse_args()
     try:
         return run_wizard(force=args.force)

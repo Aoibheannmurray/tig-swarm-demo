@@ -215,6 +215,29 @@ def write_agent_config(config: dict) -> None:
     AGENT_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
 
 
+def _one_line_identity_part(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _compose_tig_user_id(username: str, agent_id: str) -> str:
+    username = _one_line_identity_part(username)
+    agent_id = _one_line_identity_part(agent_id)
+    if username and agent_id:
+        return f"{username} (agent {agent_id})"
+    if username:
+        return username
+    if agent_id:
+        return f"agent {agent_id}"
+    return "unknown"
+
+
+def _attach_benchmark_identity(config: dict, username: str, agent_id: str) -> str:
+    tig_user_id = _compose_tig_user_id(username, agent_id)
+    config["tig_user_id"] = tig_user_id
+    os.environ["TIG_USER_ID"] = tig_user_id
+    return tig_user_id
+
+
 def sync_challenge() -> None:
     result = subprocess.run(
         [sys.executable, str(ROOT / "setup.py"), "sync"],
@@ -1074,6 +1097,8 @@ def main() -> int:
         "agent_token": agent_token,
     })
     write_agent_config(updated_agent_config)
+    tig_user_id = _compose_tig_user_id(username, agent_id)
+    os.environ["TIG_USER_ID"] = tig_user_id
 
     # Refresh .swarm-cache.json + CHALLENGE.md against the live server before
     # the start-up banner prints `Challenge: ...`. Without this, a worktree
@@ -1086,6 +1111,7 @@ def main() -> int:
     config = load_config()
     config["log_prompts"] = log_prompts
     config["detailed_prompts"] = detailed_prompts
+    _attach_benchmark_identity(config, username, agent_id)
     challenge_md = read_challenge_md()
 
     # Agentic mode (claude-code-agentic): tooled headless Claude Code inside a
@@ -1147,6 +1173,7 @@ def main() -> int:
         config = load_config()
         config["log_prompts"] = log_prompts
         config["detailed_prompts"] = detailed_prompts
+        _attach_benchmark_identity(config, username, agent_id)
         challenge_md = read_challenge_md()
         # Pin the iteration's challenge here so chat messages and any other
         # follow-up writes stay attributed to it even if the host runs

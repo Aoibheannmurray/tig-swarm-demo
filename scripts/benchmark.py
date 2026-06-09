@@ -70,6 +70,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import urllib.error
 import urllib.request
 import math
@@ -1235,6 +1236,54 @@ def aggregate(results: list[dict]) -> dict:
     }
 
 
+def _read_json_or_none(path: Path) -> dict | None:
+    """Best-effort JSON read — never raises, returns None on any problem."""
+    try:
+        if path.exists():
+            return json.loads(path.read_text())
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _resolve_user_id() -> str:
+    """Compose a stable, human-reportable user identity for this run.
+
+    "User" here is the contributor account (`username`) plus the per-agent id
+    (`agent_id`) so a problematic run can be traced back to both the person and
+    the specific agent. Both live in agent.config.json (run_loop reads them
+    from there); `username` also lives in fleet.config.json. Config files are
+    available in every run context — the worktree is bind-mounted into the
+    local docker run and copied into the C3 stage — so no env threading is
+    needed, but TIG_USER_ID env still wins if a caller pre-composed one.
+
+    Degrades gracefully: "username (agent <id>)" → "username" → "agent <id>"
+    → "unknown".
+    """
+    pre = os.environ.get("TIG_USER_ID")
+    if pre:
+        return pre
+
+    agent_cfg = _read_json_or_none(ROOT_DIR / "agent.config.json") or {}
+    fleet_cfg = _read_json_or_none(ROOT_DIR / "fleet.config.json") or {}
+
+    username = (
+        os.environ.get("TIG_USERNAME")
+        or agent_cfg.get("username")
+        or fleet_cfg.get("username")
+        or ""
+    ).strip()
+    agent_id = (os.environ.get("TIG_AGENT_ID") or agent_cfg.get("agent_id") or "").strip()
+
+    if username and agent_id:
+        return f"{username} (agent {agent_id})"
+    if username:
+        return username
+    if agent_id:
+        return f"agent {agent_id}"
+    return "unknown"
+
+
 def main() -> int:
     print("Loading swarm config…", file=sys.stderr)
     cfg = load_swarm_config()
@@ -1249,6 +1298,14 @@ def main() -> int:
 
     if not _INSIDE_DOCKER:
         return _reexec_in_docker(cfg)
+
+    # Run identity — printed once, here, inside the container before any build
+    # or compute begins. Gives the user / TIG / the compute provider a stable
+    # reference to correlate a problematic run (failure, timeout, runaway
+    # compute) against their logs. The benchmark id is fresh per run.
+    benchmark_id = uuid.uuid4().hex[:10]
+    print(f"User ID: {_resolve_user_id()}", file=sys.stderr)
+    print(f"Benchmark ID: {benchmark_id}", file=sys.stderr)
 
     challenge = cfg["challenge"]
     timeout = int(cfg.get("timeout", 30))

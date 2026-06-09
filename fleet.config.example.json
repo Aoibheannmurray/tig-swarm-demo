@@ -7,7 +7,7 @@
     {
       "name": "my-claude-agent",
       "provider": "anthropic",
-      "model": "claude-sonnet-4-7",
+      "model": "claude-opus-4-7",
       "api_key_env": "ANTHROPIC_API_KEY",
       "compute": "c3",
       "hardware": "l40"

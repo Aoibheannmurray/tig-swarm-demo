@@ -112,8 +112,6 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
 
 
 def main() -> int:
-    init_fleet._preflight_docker()
-
     fleet_path = ROOT / "fleet.config.json"
     if not fleet_path.exists():
         print("No fleet.config.json found — running setup wizard.\n")
