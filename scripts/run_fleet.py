@@ -773,6 +773,12 @@ def main() -> int:
         return cmd_list(agents)
     if args.clean:
         return cmd_clean(agents)
+    # Manual launch path (config edited by hand, no wizard): mirror run.py's
+    # upfront Docker check so a missing daemon fails with a clear message here
+    # instead of an opaque error deep inside the first worktree's benchmark.
+    # Launch only — --list / --clean don't touch Docker, so they skip it.
+    import init_fleet
+    init_fleet._preflight_docker()
     return cmd_run(
         agents, args.only, server_url, username, swarm_password, fleet_tacit,
     )

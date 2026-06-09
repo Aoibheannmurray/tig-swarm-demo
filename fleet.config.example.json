@@ -5,7 +5,7 @@
   "c3_api_key": "paste-your-c3-api-key-here",
   "agents": [
     {
-      "name": "claude-1",
+      "name": "my-claude-agent",
       "provider": "anthropic",
       "model": "claude-sonnet-4-7",
       "api_key_env": "ANTHROPIC_API_KEY",
@@ -13,7 +13,7 @@
       "hardware": "l40"
     },
     {
-      "name": "gpt-1",
+      "name": "my-gpt-agent",
       "provider": "openai",
       "model": "gpt-5",
       "api_key_env": "OPENAI_API_KEY",
@@ -21,14 +21,14 @@
       "hardware": "l40"
     },
     {
-      "name": "claude-agentic-1",
+      "name": "mr-claude-agentic",
       "provider": "claude-code-agentic",
       "model": "claude-opus-4-7",
       "compute": "c3",
       "hardware": "l40"
     },
     {
-      "name": "openrouter-1",
+      "name": "ms-openrouter",
       "provider": "openai",
       "model": "qwen/qwen3-coder",
       "api_key_env": "OPENROUTER_API_KEY",
@@ -37,7 +37,7 @@
       "hardware": "l40"
     },
     {
-      "name": "deepseek-1",
+      "name": "my-deepseek-bot",
       "provider": "openai",
       "model": "deepseek-v4-pro",
       "api_key_env": "DEEPSEEK_API_KEY",

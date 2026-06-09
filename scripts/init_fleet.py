@@ -648,8 +648,7 @@ def _preflight_docker() -> None:
         sys.exit(
             "Docker is required to run benchmarks but `docker` was not found "
             "on PATH.\n"
-            f"Install Docker Desktop from {_DOCKER_INSTALL_URL}, then re-run "
-            "`python scripts/init_fleet.py`."
+            f"Install Docker Desktop from {_DOCKER_INSTALL_URL}, then try again."
         )
     _warn_low_disk()
 
