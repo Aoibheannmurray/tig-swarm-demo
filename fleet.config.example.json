@@ -1,49 +1,31 @@
 {
-  "server_url": "https://my-swarm.up.railway.app",
-  "username": "your-username-from-the-host",
-  "swarm_password": "paste-the-derived-password-the-host-shared",
+  "server_url": "paste-the-server-url-the-host-shared",
+  "username": "paste-your-username-from-the-host",
+  "swarm_password": "paste-your-password-the-host-shared",
+  "c3_api_key": "paste-your-c3-api-key-here",
   "agents": [
     {
       "name": "claude-1",
       "provider": "anthropic",
-      "model": "claude-sonnet-4-6",
+      "model": "claude-sonnet-4-7",
       "api_key_env": "ANTHROPIC_API_KEY",
-      "role": "explorer"
-    },
-    {
-      "name": "claude-2",
-      "provider": "anthropic",
-      "model": "claude-opus-4-7",
-      "api_key_env": "ANTHROPIC_API_KEY"
+      "compute": "c3",
+      "hardware": "l40"
     },
     {
       "name": "gpt-1",
       "provider": "openai",
       "model": "gpt-5",
-      "api_key_env": "OPENAI_API_KEY"
-    },
-    {
-      "name": "gemini-1",
-      "provider": "google",
-      "model": "gemini-2.5-pro",
-      "api_key_env": "GOOGLE_API_KEY",
-      "tacit_knowledge": "tacit_knowledge_gemini.md"
+      "api_key_env": "OPENAI_API_KEY",
+      "compute": "c3",
+      "hardware": "l40"
     },
     {
       "name": "claude-agentic-1",
       "provider": "claude-code-agentic",
-      "model": "claude-opus-4-7"
-    },
-    {
-      "name": "codex-agentic-1",
-      "provider": "codex-agentic"
-    },
-    {
-      "name": "venice-1",
-      "provider": "venice",
-      "model": "zai-org-glm-5",
-      "api_key_env": "VENICE_API_KEY",
-      "role": "exploiter"
+      "model": "claude-opus-4-7",
+      "compute": "c3",
+      "hardware": "l40"
     },
     {
       "name": "openrouter-1",
@@ -51,15 +33,17 @@
       "model": "qwen/qwen3-coder",
       "api_key_env": "OPENROUTER_API_KEY",
       "api_base": "https://openrouter.ai/api/v1",
-      "compute": "local",
-      "detailed_prompts": true
+      "compute": "c3",
+      "hardware": "l40"
     },
     {
       "name": "deepseek-1",
       "provider": "openai",
       "model": "deepseek-v4-pro",
       "api_key_env": "DEEPSEEK_API_KEY",
-      "api_base": "https://api.deepseek.com/v1"
+      "api_base": "https://api.deepseek.com/v1",
+      "compute": "c3",
+      "hardware": "l40"
     }
   ]
 }
