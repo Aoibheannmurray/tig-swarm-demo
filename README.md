@@ -38,16 +38,18 @@ python3 run.py
 
 It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
 
-Set the API key your provider needs before launching:
+Export your keys before launching — your provider key (skip if you use a `claude` / `codex` CLI login) and `C3_API_KEY` for the GPU compute:
 
 ```bash
 # macOS / Linux
 export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+export C3_API_KEY=c3_...            # from `c3 apikey create tig-swarm`
 ```
 
 ```powershell
 # Windows PowerShell  (cmd.exe: use  set ANTHROPIC_API_KEY=sk-...  with no quotes)
 $env:ANTHROPIC_API_KEY="sk-..."     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+$env:C3_API_KEY="c3_..."            # from `c3 apikey create tig-swarm`
 ```
 
 `Ctrl-C` terminates the whole fleet. Each agent runs in its own git worktree under `worktrees/<name>/`; identities persist across restarts.
@@ -168,10 +170,11 @@ Secrets stay in environment variables.
 
 ## Remote benchmarking with C3
 
-By default benchmarks run locally in Docker. To run them on
-[C3](https://cthree.cloud) cloud compute instead — useful for GPU challenges or
-when your host lacks the hardware — set `"compute": "c3"` on an agent in
-`fleet.config.json`, then launch as usual with `python run.py`.
+This swarm benchmarks on [C3](https://cthree.cloud) cloud GPUs by default — the
+`run.py` wizard and `fleet.config.example.json` both set `"compute": "c3"`, so
+you don't need a local GPU. To benchmark locally in Docker instead, set
+`"compute": "local"` on an agent in `fleet.config.json`, then launch as usual
+with `python run.py`. 
 
 First install the `c3` CLI (from `https://cthree.cloud/install.sh`) and
 authenticate, via either:
@@ -182,6 +185,39 @@ authenticate, via either:
 - put the key in `fleet.config.json` — a top-level `"c3_api_key"` applies to
   every agent, and a per-agent `"c3_api_key"` overrides it for that agent.
   An agent with no key set anywhere falls back to `C3_API_KEY` / `c3 login`.
+
+<details>
+<summary><strong>Windows: installing the <code>c3</code> CLI</strong> (the install script above is macOS/Linux only)</summary>
+
+The equivalent of `curl -fsSL https://cthree.cloud/install.sh | sh`, in PowerShell:
+
+```powershell
+# 1. Create an install folder
+$dir = "$env:LOCALAPPDATA\Programs\c3"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+# 2. Download the Windows binary as c3.exe
+curl.exe -fsSL "https://cthree.cloud/releases/latest/c3-windows-amd64.exe" -o "$dir\c3.exe"
+
+# 3. Add the folder to your User PATH (permanent) if not already there
+$userPath = [System.Environment]::GetEnvironmentVariable("Path","User")
+if (($userPath -split ';') -notcontains $dir) {
+  [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User")
+}
+
+# 4. Make it available in the CURRENT window too (no restart needed)
+$env:Path = "$env:Path;$dir"
+
+# 5. Verify
+c3 --version
+```
+
+- **PATH:** step 3 adds it permanently for your user account; step 4 makes it work in the window you're in right now. Other already-open terminals won't see `c3` until you open a new window.
+- **Command name:** it's `c3` (the binary is `c3.exe`) — no `.sh` and no `sh` required on Windows.
+- **Arch:** this uses the `amd64` build (correct for most machines, `PROCESSOR_ARCHITECTURE = AMD64`). On an ARM Windows PC, swap the URL to `c3-windows-arm64.exe`.
+- **Updating later:** re-run steps 1–2 to overwrite `c3.exe` with the latest release.
+
+</details>
 
 Then add the C3 keys to the agent:
 
@@ -202,7 +238,7 @@ Then add the C3 keys to the agent:
 
 | key            | purpose                                                              |
 |----------------|---------------------------------------------------------------------|
-| `compute`      | `"c3"` to run on C3, `"local"` (default) for local Docker.          |
+| `compute`      | `"c3"` for C3 cloud GPU (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`. |
 | `c3_hardware`  | C3 GPU profile (default: `l40`).                                    |
 | `c3_time`      | Per-job walltime (default: `02:00:00`).                             |
 | `c3_provider`  | Optional C3 backend passed as `c3 deploy -p ...`.                  |
