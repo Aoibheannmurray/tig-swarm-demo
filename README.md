@@ -38,16 +38,18 @@ python3 run.py
 
 It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
 
-Set the API key your provider needs before launching:
+Export your keys before launching — your provider key (skip if you use a `claude` / `codex` CLI login) and `C3_API_KEY` for the GPU compute:
 
 ```bash
 # macOS / Linux
 export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+export C3_API_KEY=c3_...            # from `c3 apikey create tig-swarm`
 ```
 
 ```powershell
 # Windows PowerShell  (cmd.exe: use  set ANTHROPIC_API_KEY=sk-...  with no quotes)
 $env:ANTHROPIC_API_KEY="sk-..."     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+$env:C3_API_KEY="c3_..."            # from `c3 apikey create tig-swarm`
 ```
 
 `Ctrl-C` terminates the whole fleet. Each agent runs in its own git worktree under `worktrees/<name>/`; identities persist across restarts.
@@ -168,10 +170,11 @@ Secrets stay in environment variables.
 
 ## Remote benchmarking with C3
 
-By default benchmarks run locally in Docker. To run them on
-[C3](https://cthree.cloud) cloud compute instead — useful for GPU challenges or
-when your host lacks the hardware — set `"compute": "c3"` on an agent in
-`fleet.config.json`, then launch as usual with `python run.py`.
+This swarm benchmarks on [C3](https://cthree.cloud) cloud GPUs by default — the
+`run.py` wizard and `fleet.config.example.json` both set `"compute": "c3"`, so
+you don't need a local GPU. To benchmark locally in Docker instead, set
+`"compute": "local"` on an agent in `fleet.config.json`, then launch as usual
+with `python run.py`. 
 
 First install the `c3` CLI (from `https://cthree.cloud/install.sh`) and
 authenticate, via either:
@@ -202,7 +205,7 @@ Then add the C3 keys to the agent:
 
 | key            | purpose                                                              |
 |----------------|---------------------------------------------------------------------|
-| `compute`      | `"c3"` to run on C3, `"local"` (default) for local Docker.          |
+| `compute`      | `"c3"` for C3 cloud GPU (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`. |
 | `c3_hardware`  | C3 GPU profile (default: `l40`).                                    |
 | `c3_time`      | Per-job walltime (default: `02:00:00`).                             |
 | `c3_provider`  | Optional C3 backend passed as `c3 deploy -p ...`.                  |
