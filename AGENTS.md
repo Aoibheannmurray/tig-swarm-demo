@@ -5,7 +5,7 @@ contributor set up their machine to join an existing TIG swarm. The user has
 probably pasted a short snippet like:
 
 ```
-git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git && cd tig-swarm-demo && python3 run.py
+git clone https://github.com/tig-foundation/prometheus-early-beta && cd prometheus-early-beta && python3 run.py
 server_url:     https://…railway.app
 username:       <their-handle>
 swarm_password: <hex string from the swarm host>
