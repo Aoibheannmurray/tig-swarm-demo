@@ -186,6 +186,39 @@ authenticate, via either:
   every agent, and a per-agent `"c3_api_key"` overrides it for that agent.
   An agent with no key set anywhere falls back to `C3_API_KEY` / `c3 login`.
 
+<details>
+<summary><strong>Windows: installing the <code>c3</code> CLI</strong> (the install script above is macOS/Linux only)</summary>
+
+The equivalent of `curl -fsSL https://cthree.cloud/install.sh | sh`, in PowerShell:
+
+```powershell
+# 1. Create an install folder
+$dir = "$env:LOCALAPPDATA\Programs\c3"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+# 2. Download the Windows binary as c3.exe
+curl.exe -fsSL "https://cthree.cloud/releases/latest/c3-windows-amd64.exe" -o "$dir\c3.exe"
+
+# 3. Add the folder to your User PATH (permanent) if not already there
+$userPath = [System.Environment]::GetEnvironmentVariable("Path","User")
+if (($userPath -split ';') -notcontains $dir) {
+  [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User")
+}
+
+# 4. Make it available in the CURRENT window too (no restart needed)
+$env:Path = "$env:Path;$dir"
+
+# 5. Verify
+c3 --version
+```
+
+- **PATH:** step 3 adds it permanently for your user account; step 4 makes it work in the window you're in right now. Other already-open terminals won't see `c3` until you open a new window.
+- **Command name:** it's `c3` (the binary is `c3.exe`) — no `.sh` and no `sh` required on Windows.
+- **Arch:** this uses the `amd64` build (correct for most machines, `PROCESSOR_ARCHITECTURE = AMD64`). On an ARM Windows PC, swap the URL to `c3-windows-arm64.exe`.
+- **Updating later:** re-run steps 1–2 to overwrite `c3.exe` with the latest release.
+
+</details>
+
 Then add the C3 keys to the agent:
 
 ```jsonc
