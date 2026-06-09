@@ -1447,6 +1447,44 @@ html, body {
   font-size: 9px;
 }
 
+/* ── Dedicated leaderboard page (.leaderboard-page) ──
+   Scoped overrides only — the shared .lb-* rules above keep the cramped
+   dashboard *tile* compact. The full page has room: bigger type, wider
+   columns, and the table block is capped at a comfortable width and centred
+   so the flex:1 agent-name column can't stretch past ~a third of the page
+   (it was eating half). */
+.leaderboard-page .leaderboard-header,
+.leaderboard-page .leaderboard-list {
+  max-width: 1100px;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+.leaderboard-page .leaderboard-header {
+  font-size: 11px;
+  padding: 8px 12px;
+}
+.leaderboard-page .leaderboard-row {
+  font-size: 15px;
+  padding: 9px 12px;
+}
+.leaderboard-page .lb-rank {
+  width: 44px;
+  font-size: 14px;
+}
+.leaderboard-page .lb-model {
+  width: 180px;
+  font-size: 13px;
+}
+.leaderboard-page .lb-col-sm {
+  width: 58px;
+  font-size: 13px;
+}
+.leaderboard-page .lb-score {
+  width: 96px;
+  font-size: 14px;
+}
+
 /* ── Animations ── */
 @keyframes blink {
   0%, 100% { opacity: 1; }

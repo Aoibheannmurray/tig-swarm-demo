@@ -32,7 +32,7 @@ panelEl.innerHTML = `
         <span class="ideas-nav-active">Leaderboard</span>
       </div>
     </div>
-    <div class="page-body" id="panel-leaderboard-body"></div>
+    <div class="page-body leaderboard-page" id="panel-leaderboard-body"></div>
   </div>
 `;
 const leaderboardPanel = new LeaderboardPanel();
