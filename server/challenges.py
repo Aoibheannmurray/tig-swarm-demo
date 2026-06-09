@@ -140,10 +140,10 @@ CHALLENGES: dict[str, ChallengeDef] = {
         scoring_direction="max",
         track_keys=(
             "n_hidden=4",
-            "n_hidden=6",
-            "n_hidden=8",
+            "n_hidden=7",
             "n_hidden=10",
-            "n_hidden=12",
+            "n_hidden=14",
+            "n_hidden=18",
         ),
         strategy_tags=(
             "adaptive_optimizer", "momentum", "lr_schedule", "regularization",
