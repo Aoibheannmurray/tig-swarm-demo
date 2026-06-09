@@ -1456,7 +1456,7 @@ html, body {
    (it was eating half). */
 .leaderboard-page .leaderboard-header,
 .leaderboard-page .leaderboard-list {
-  max-width: 1100px;
+  max-width: 1400px;
   width: 100%;
   margin-left: auto;
   margin-right: auto;
@@ -1474,7 +1474,9 @@ html, body {
   font-size: 14px;
 }
 .leaderboard-page .lb-model {
-  width: 180px;
+  /* Wide enough for the longest full id incl. mode suffix, e.g.
+     "claude-opus-4-7 (claude-code-agentic)" (~37 mono chars at 13px). */
+  width: 310px;
   font-size: 13px;
 }
 .leaderboard-page .lb-col-sm {
