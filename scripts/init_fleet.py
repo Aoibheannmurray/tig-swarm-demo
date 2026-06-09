@@ -625,58 +625,12 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-_DOCKER_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
-
-# Building the benchmark image plus the cargo/Docker build cache comfortably
-# wants this much free space. Below it, builds fail late with confusing
-# "no space left on device" errors — so warn up front rather than hard-fail.
-_MIN_FREE_GB = 15
-
-
-def _preflight_docker() -> None:
-    """Fail before the wizard if Docker isn't installed, and warn on low disk.
-
-    Benchmarks always run in a local Docker container (see
-    scripts/benchmark.py). benchmark.py's _ensure_docker_daemon() already
-    auto-launches Docker Desktop / OrbStack at fleet time if the daemon
-    is stopped, so we only catch the one case it can't recover from:
-    `docker` not on PATH at all. Without this, a contributor only finds
-    out Docker is missing after picking a provider, exporting an API
-    key, and hitting an opaque FileNotFoundError on iteration 1.
-    """
-    if shutil.which("docker") is None:
-        sys.exit(
-            "Docker is required to run benchmarks but `docker` was not found "
-            "on PATH.\n"
-            f"Install Docker Desktop from {_DOCKER_INSTALL_URL}, then try again."
-        )
-    _warn_low_disk()
-
-
-def _warn_low_disk() -> None:
-    """Non-fatal heads-up when the repo drive is low on space. The Docker
-    image + build cache need ~15 GB; on Windows especially this has bitten
-    contributors with a late, opaque 'no space left on device' mid-build."""
-    try:
-        free_gb = shutil.disk_usage(ROOT).free / 1e9
-    except OSError:
-        return  # can't stat the drive — don't block the wizard
-    if free_gb < _MIN_FREE_GB:
-        print(
-            f"  warning: only {free_gb:.1f} GB free on the repo drive — the "
-            f"Docker image and build cache want ~{_MIN_FREE_GB} GB. Builds may "
-            "fail with 'no space left on device'. Free up space (e.g. "
-            "`docker system prune`) before launching the fleet.\n"
-        )
-
-
 def main() -> int:
     if not EXAMPLE_PATH.exists():
         sys.exit(
             f"{EXAMPLE_PATH.name} not found at {EXAMPLE_PATH}. "
             "Are you running this from the repo root?"
         )
-    _preflight_docker()
     args = parse_args()
     try:
         return run_wizard(force=args.force)
