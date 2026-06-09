@@ -313,7 +313,7 @@ def call_openai(
 def call_claude_code(
     system: str, prompt: str, model: str | None = None,
 ) -> tuple[str, Usage]:
-    # Resolve the CLI the same way the agentic backend does so this one-shot
+    # Resolve the CLI the same way the agentic backend does so this single-shot
     # path works on Windows too. npm installs Claude Code as `claude.cmd`
     # (there's no bare `claude.exe`), and `subprocess.run(["claude", …])` with
     # shell=False can't launch a `.cmd` — it raises `[WinError 2] The system
