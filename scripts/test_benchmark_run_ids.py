@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import benchmark
+import c3_compute
 
 
 def _with_root(tmp, **files):
@@ -79,6 +80,26 @@ def test_benchmark_id_is_fresh_10_char_hex():
     print("PASS test_benchmark_id_is_fresh_10_char_hex")
 
 
+def test_c3_runner_exports_precomposed_user_id():
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp)
+        script = c3_compute._write_c3_project(
+            stage,
+            {
+                "challenge": "knapsack",
+                "c3_hardware": "l40",
+                "tig_user_id": "aoibheann (agent 69e67db9ffb3)",
+            },
+            "https://example.invalid",
+            "00:10:00",
+            "rust:1-bookworm",
+        )
+        runner = (stage / script).read_text()
+        assert 'export TIG_USER_ID="aoibheann (agent 69e67db9ffb3)"' in runner
+        assert "agent.config.json" not in runner
+    print("PASS test_c3_runner_exports_precomposed_user_id")
+
+
 def _main():
     test_env_override_wins()
     test_username_and_agent_id_compose()
@@ -86,6 +107,7 @@ def _main():
     test_agent_id_only()
     test_unknown_when_no_identity()
     test_benchmark_id_is_fresh_10_char_hex()
+    test_c3_runner_exports_precomposed_user_id()
     print("\nAll benchmark run-id tests passed.")
 
 
