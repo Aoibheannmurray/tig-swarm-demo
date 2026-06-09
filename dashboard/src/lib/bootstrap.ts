@@ -1,7 +1,7 @@
 // Shared entry-point boilerplate. Every page's main.ts uses these two helpers
 // instead of inlining ~17 lines of duplicated URL parsing + keyboard wiring.
 
-export type PageId = "main" | "ideas" | "diversity" | "benchmark" | "trajectories";
+export type PageId = "main" | "ideas" | "diversity" | "benchmark" | "trajectories" | "leaderboard";
 
 const PAGES: Record<PageId, { key: string; href: string }> = {
   main:         { key: "1", href: "/" },
@@ -9,6 +9,7 @@ const PAGES: Record<PageId, { key: string; href: string }> = {
   diversity:    { key: "3", href: "/diversity.html" },
   benchmark:    { key: "4", href: "/benchmark.html" },
   trajectories: { key: "5", href: "/trajectories.html" },
+  leaderboard:  { key: "6", href: "/leaderboard.html" },
 };
 
 // Resolves ?ws= and ?api= URL params, deriving whichever is missing.

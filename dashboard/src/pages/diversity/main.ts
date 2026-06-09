@@ -29,6 +29,7 @@ panelEl.innerHTML = `
         <span class="ideas-nav-active">Diversity</span>
         <a href="/benchmark.html" class="ideas-nav-link">Benchmark</a>
         <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
+        <a href="/leaderboard.html" class="ideas-nav-link">Leaderboard</a>
       </div>
     </div>
     <div class="page-body diversity-page-body">

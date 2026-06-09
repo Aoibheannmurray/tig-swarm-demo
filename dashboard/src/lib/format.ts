@@ -22,6 +22,19 @@ const SCORE_TIERS: { max: number; divisor: number; decimals: number; suffix: str
   { max: Infinity, divisor: 1e9, decimals: 2, suffix: "B" },
 ];
 
+// Provider-prefixed model ids (e.g. "qwen/qwen3-coder", "deepseek/deepseek-chat")
+// only need their final segment in the leaderboard — the provider prefix is
+// redundant noise that pushes the useful name out of the cell. Keep everything
+// after the last "/": "qwen/qwen3-coder" → "qwen3-coder", "claude-opus-4-8"
+// (no slash) → unchanged. Empty trailing segments (a stray trailing "/") are
+// skipped so we never render a blank.
+export function shortenModel(model: string | null | undefined): string {
+  if (!model) return "";
+  const trimmed = model.trim();
+  const parts = trimmed.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : trimmed;
+}
+
 export function formatScore(score: number | null | undefined): string {
   if (score == null || Number.isNaN(score)) return "—";
   const abs = Math.abs(score);
