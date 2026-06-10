@@ -1,5 +1,5 @@
 import { max, min } from "d3-array";
-import { scaleLinear } from "d3-scale";
+import { scaleLinear, scaleSymlog } from "d3-scale";
 import { select } from "d3-selection";
 import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
 import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform, type D3ZoomEvent } from "d3-zoom";
@@ -50,13 +50,23 @@ export class ChartPanel implements Panel {
   private tabPrevEl!: HTMLElement;
   private tabNextEl!: HTMLElement;
   private zoomResetEl!: HTMLElement;
+  private yScaleToggleEl!: HTMLElement;
   private redrawScheduled = false;
 
-  // X-axis pan/zoom. The transform is applied to the x-scale on every redraw
-  // (drag = scroll along a long run, wheel = zoom into a span). Reset to
-  // identity on tab/challenge switch so a fresh dataset always starts fit.
+  // Y-axis scale. "log" is a symlog scale (log-like away from zero, linear
+  // through it) because scores can be negative — neuralnet divergence runs
+  // sit at -2M while the best band is +500k, and a plain scaleLog inverts
+  // the domain on all-negative challenges (that bug shipped once already).
+  // Persisted so a host watching the benchmark page keeps their choice.
+  private yScaleMode: "linear" | "log" =
+    (localStorage.getItem("chartYScaleMode") as "linear" | "log") || "log";
+
+  // Pan/zoom. The transform is applied to BOTH scales on every redraw
+  // (drag = scroll, wheel = zoom into a span — including the dense band
+  // near the top where late improvements cluster). Reset to identity on
+  // tab/challenge switch so a fresh dataset always starts fit.
   private zoomBehavior!: ZoomBehavior<SVGSVGElement, unknown>;
-  private xZoomTransform: ZoomTransform = zoomIdentity;
+  private zoomTransform: ZoomTransform = zoomIdentity;
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -66,6 +76,7 @@ export class ChartPanel implements Panel {
           <button class="chart-tab-btn" id="chart-tab-prev" type="button">&lsaquo;</button>
           <span class="chart-tab-label" id="chart-tab-label">GLOBAL</span>
           <button class="chart-tab-btn" id="chart-tab-next" type="button">&rsaquo;</button>
+          <button class="chart-zoom-reset" id="chart-yscale-toggle" type="button" title="Toggle y-axis scale (log handles negative scores)"></button>
           <button class="chart-zoom-reset" id="chart-zoom-reset" type="button" title="Reset zoom (or double-click the chart)" style="display:none">⟲ reset zoom</button>
         </div>
         <svg id="chart-svg"></svg>
@@ -81,6 +92,15 @@ export class ChartPanel implements Panel {
 
     this.zoomResetEl = document.getElementById("chart-zoom-reset")!;
     this.zoomResetEl.addEventListener("click", () => this.resetZoom());
+
+    this.yScaleToggleEl = document.getElementById("chart-yscale-toggle")!;
+    this.renderYScaleToggle();
+    this.yScaleToggleEl.addEventListener("click", () => {
+      this.yScaleMode = this.yScaleMode === "log" ? "linear" : "log";
+      localStorage.setItem("chartYScaleMode", this.yScaleMode);
+      this.renderYScaleToggle();
+      this.redraw();
+    });
 
     // Measure the SVG itself, not the parent panel — the SVG is `flex: 1`
     // so the browser has already sized it to fit the remaining space after
@@ -99,15 +119,15 @@ export class ChartPanel implements Panel {
 
     this.g = this.svg.append("g");
 
-    // X-axis pan/zoom. scaleExtent floor of 1 means you can't zoom out past
+    // Pan/zoom. scaleExtent floor of 1 means you can't zoom out past
     // "fit" (no empty gutters); ceiling lets long runs be expanded ~64× to
-    // read a dense segment. We apply the resulting transform to the x-scale in
-    // redraw rather than transforming the SVG group, so y-scale, axis labels
-    // and stroke widths stay unscaled.
+    // read a dense segment. We apply the resulting transform to both scales
+    // in redraw rather than transforming the SVG group, so axis labels and
+    // stroke widths stay unscaled.
     this.zoomBehavior = zoom<SVGSVGElement, unknown>()
       .scaleExtent([1, 64])
       .on("zoom", (e: D3ZoomEvent<SVGSVGElement, unknown>) => {
-        this.xZoomTransform = e.transform;
+        this.zoomTransform = e.transform;
         this.zoomResetEl.style.display = e.transform.k > 1.001 ? "" : "none";
         this.redraw();
       });
@@ -388,15 +408,13 @@ export class ChartPanel implements Panel {
     const baseXScale = scaleLinear()
       .domain([0, latestData + xPad])
       .range([0, w]);
-    // Apply the current pan/zoom to the x-axis only.
-    const xScale = this.xZoomTransform.rescaleX(baseXScale);
+    // Apply the current pan/zoom to both axes.
+    const xScale = this.zoomTransform.rescaleX(baseXScale);
 
     const yDomain = this.getGlobalYDomain();
     if (!yDomain) return;
 
-    const yScale = scaleLinear()
-      .domain(yDomain)
-      .range([h, 0]);
+    const yScale = this.zoomTransform.rescaleY(this.makeYScale(yDomain, h));
 
     const chartG = this.g.append("g")
       .attr("transform", `translate(${m.left},${m.top})`);
@@ -405,7 +423,7 @@ export class ChartPanel implements Panel {
     // chartG (unclipped).
     const plotG = this.appendClippedPlot(chartG, w, h);
 
-    const yTicks = yScale.ticks(5);
+    const yTicks = this.yTicksFor(yScale, h);
     yTicks.forEach((tick) => {
       chartG.append("line")
         .attr("x1", 0).attr("x2", w)
@@ -551,7 +569,7 @@ export class ChartPanel implements Panel {
     const baseXScale = scaleLinear()
       .domain([0, xDomainEnd])
       .range([0, w]);
-    const xScale = this.xZoomTransform.rescaleX(baseXScale);
+    const xScale = this.zoomTransform.rescaleX(baseXScale);
 
     // Y: anchor on the GLOBAL chart's domain when available so per-agent
     // tabs roughly share a visual scale, but always extend it to include
@@ -562,18 +580,16 @@ export class ChartPanel implements Panel {
     const globalYDomain = this.getGlobalYDomain();
     const minScore = min(exps, (d) => d.score)!;
     const maxScore = max(exps, (d) => d.score)!;
-    const fallbackPad = Math.max(Math.abs(maxScore - minScore) * 0.15, 1);
+    const agentDomain = this.padYDomain(minScore, maxScore);
     const yDomain: [number, number] = globalYDomain
       ? [
-          Math.min(globalYDomain[0], minScore - fallbackPad),
-          Math.max(globalYDomain[1], maxScore + fallbackPad),
+          Math.min(globalYDomain[0], agentDomain[0]),
+          Math.max(globalYDomain[1], agentDomain[1]),
         ]
-      : [minScore - fallbackPad, maxScore + fallbackPad];
-    const yScale = scaleLinear()
-      .domain(yDomain)
-      .range([h, 0]);
+      : agentDomain;
+    const yScale = this.zoomTransform.rescaleY(this.makeYScale(yDomain, h));
 
-    const yTicks = yScale.ticks(5);
+    const yTicks = this.yTicksFor(yScale, h);
     yTicks.forEach((tick) => {
       chartG.append("line")
         .attr("x1", 0).attr("x2", w)
@@ -742,14 +758,73 @@ export class ChartPanel implements Panel {
     const scoreMin = min(this.globalData, (d) => d.score);
     const scoreMax = max(this.globalData, (d) => d.score);
     if (scoreMin == null || scoreMax == null) return null;
+    return this.padYDomain(scoreMin, scoreMax);
+  }
 
-    // Pad both sides symmetrically. Previously yMin was clamped to >= 1
-    // because the y-axis used scaleLog, but now that we always use
-    // scaleLinear that floor inverts the domain whenever all scores are
-    // negative (e.g. job_scheduling at -4k..-2k) — every point ends up
-    // rendered below the visible chart.
+  // Pad the y-domain in the active scale's own space. Linear mode pads
+  // symmetrically in score units (never clamp the floor to >= 1 — that
+  // inverts the domain on all-negative challenges like job_scheduling at
+  // -4k..-2k, a bug that shipped once already). Log mode pads in symlog
+  // space instead: a linear pad below a positive floor (e.g. 48k - 15%
+  // of a 550k range) flips the floor negative, and on a symlog axis that
+  // wastes half the chart on an empty sign change.
+  private padYDomain(scoreMin: number, scoreMax: number): [number, number] {
+    if (this.yScaleMode === "log") {
+      const c = symlogConstant(scoreMin, scoreMax);
+      const t = (v: number) => Math.sign(v) * Math.log1p(Math.abs(v) / c);
+      const ti = (u: number) => Math.sign(u) * c * Math.expm1(Math.abs(u));
+      const lo = t(scoreMin);
+      const hi = t(scoreMax);
+      const pad = Math.max((hi - lo) * 0.05, 0.05);
+      return [ti(lo - pad), ti(hi + pad)];
+    }
     const pad = Math.max(Math.abs(scoreMax - scoreMin) * 0.15, 1);
     return [scoreMin - pad, scoreMax + pad];
+  }
+
+  // Y-scale for the active mode. "log" is symlog so negative scores (and a
+  // domain crossing zero) render without the scaleLog domain-inversion trap.
+  // The constant anchors where the scale transitions from linear to log-like;
+  // tying it to the data's magnitude keeps the axis from wasting space on
+  // |score| decades the data never visits (with the d3 default of 1, a
+  // -2M..+600k domain spends ~60% of its pixels on the empty |v| < 10k band).
+  private makeYScale(domain: [number, number], h: number): any {
+    if (this.yScaleMode === "log") {
+      return scaleSymlog()
+        .domain(domain)
+        .range([h, 0])
+        .constant(symlogConstant(domain[0], domain[1]));
+    }
+    return scaleLinear().domain(domain).range([h, 0]);
+  }
+
+  // Gridline/label positions for the active mode. d3's symlog ticks() are
+  // linearly spaced VALUES, which bunch into one end of a log-like axis —
+  // so in log mode we instead take evenly spaced PIXEL rows and snap each
+  // to a nice number. The snap precision comes from the gap to the
+  // neighboring row, NOT from the value's own magnitude: when zoomed deep
+  // into a narrow band (e.g. 589k..593k) magnitude-based snapping collapses
+  // every row to the same 500k and the axis goes blank.
+  private yTicksFor(yScale: any, h: number): number[] {
+    if (this.yScaleMode === "linear") return yScale.ticks(5);
+    const ticks = new Set<number>();
+    const n = 5;
+    for (let i = 0; i <= n; i++) {
+      const v = yScale.invert((h * i) / n);
+      const neighbor = yScale.invert((h * (i === n ? i - 1 : i + 1)) / n);
+      ticks.add(snapToStep(v, Math.abs(neighbor - v)));
+    }
+    // Snapping can land a tick just outside the visible domain; cull so
+    // gridlines never draw into the margins.
+    return [...ticks].filter((v) => {
+      const y = yScale(v);
+      return y >= -0.5 && y <= h + 0.5;
+    });
+  }
+
+  private renderYScaleToggle() {
+    this.yScaleToggleEl.textContent =
+      this.yScaleMode === "log" ? "y: log" : "y: linear";
   }
 
   // Build a sub-group clipped to the [0,w]×[0,h] plot rect. Data marks go here
@@ -779,11 +854,29 @@ export class ChartPanel implements Panel {
   // Silent reset on tab/challenge switch — clears the transform without firing
   // a zoom event, since those code paths already redraw.
   private resetZoomSilently() {
-    this.xZoomTransform = zoomIdentity;
+    this.zoomTransform = zoomIdentity;
     const node = this.svg?.node?.() as any;
     if (node) node.__zoom = zoomIdentity;
     if (this.zoomResetEl) this.zoomResetEl.style.display = "none";
   }
+}
+
+// Symlog linear→log transition point for a score domain: 1/10,000th of the
+// largest magnitude (floored at 10). Everything with |score| below this sits
+// in the scale's linear region; everything above spreads across log decades.
+function symlogConstant(lo: number, hi: number): number {
+  return Math.max(Math.abs(lo), Math.abs(hi), 1e5) / 1e4;
+}
+
+// Round a value onto a 1/2/5 × 10^k grid sized from `step` — the distance
+// to the neighboring tick row — so adjacent log-mode ticks stay distinct at
+// any zoom depth while still landing on round numbers.
+function snapToStep(v: number, step: number): number {
+  if (!Number.isFinite(step) || step <= 0) return v;
+  const unit = Math.pow(10, Math.floor(Math.log10(step)));
+  const m = step / unit;
+  const grid = m >= 5 ? 5 * unit : m >= 2 ? 2 * unit : unit;
+  return Math.round(v / grid) * grid;
 }
 
 function pickEventKind(
