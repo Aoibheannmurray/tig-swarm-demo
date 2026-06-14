@@ -1,17 +1,16 @@
-"""Regression tests for the single-edit / negative-score inactive-pool gate.
+"""Regression tests for the negative-score inactive-pool gate.
 
-Runs standalone (`python test_inactive_pool_single_edit_gate.py` from the server
+Runs standalone (`python test_inactive_pool_negative_gate.py` from the server
 dir) and is pytest-compatible. Each test builds an isolated temp DB by pointing
 DATA_DIR at a fresh directory *before* importing the server modules.
 
-The problem: an agent makes ONE algorithm that scores below zero, then fails to
-make another edit and goes offline. Its trajectory best would be deposited into
-the inactive trajectory pool (`inactive_algorithms`), where other agents adopt
-it on a fresh reset — polluting the pool with a one-and-done weak attempt.
+The problem: the inactive trajectory pool (`inactive_algorithms`) is what
+other agents adopt from on a fresh reset. A trajectory whose best score is
+negative — whether a one-and-done weak attempt or an iterated line that never
+climbed above zero — hands known-bad code to whoever draws it.
 
-The gate (db.deposit_inactive): block the deposit when the trajectory has <= 1
-edit AND its score is negative. Trajectories that iterated (>1 edit) or whose
-single shot scored >= 0 still deposit. Covered here.
+The gate (db.deposit_inactive): block any deposit whose score is negative,
+regardless of edit count. Non-negative scores still deposit. Covered here.
 """
 
 import asyncio
@@ -88,34 +87,57 @@ async def test_single_edit_positive_is_kept():
     print("PASS test_single_edit_positive_is_kept")
 
 
-async def test_multi_edit_negative_is_kept():
-    """>1 edit + negative score → deposited (a real iterated line, kept)."""
+async def test_multi_edit_negative_is_blocked():
+    """>1 edit + negative score → not deposited (iterating doesn't redeem a dead end)."""
     db = _fresh_modules()
     await db.init_db()
     await _make_trajectory(db, "t1", num_edits=4)
     rowid = await _deposit(db, "t1", -2_200_000.0)
-    assert rowid != -1, "iterated trajectory was wrongly blocked"
-    assert await _pool_size(db) == 1
-    print("PASS test_multi_edit_negative_is_kept")
+    assert rowid == -1, f"expected skip sentinel, got {rowid}"
+    assert await _pool_size(db) == 0, "multi-edit negative trajectory polluted the pool"
+    print("PASS test_multi_edit_negative_is_blocked")
 
 
-async def test_zero_edit_negative_is_blocked():
-    """0 edits + negative score → not deposited (edge of the <= 1 boundary)."""
+async def test_multi_edit_positive_is_kept():
+    """>1 edit + non-negative score → deposited."""
     db = _fresh_modules()
     await db.init_db()
-    await _make_trajectory(db, "t1", num_edits=0)
-    rowid = await _deposit(db, "t1", -1.0)
+    await _make_trajectory(db, "t1", num_edits=4)
+    rowid = await _deposit(db, "t1", 1_000.0)
+    assert rowid != -1, "iterated positive trajectory was wrongly blocked"
+    assert await _pool_size(db) == 1
+    print("PASS test_multi_edit_positive_is_kept")
+
+
+async def test_negative_without_trajectory_is_blocked():
+    """Negative score with no trajectory_id (e.g. admin seed) → not deposited."""
+    db = _fresh_modules()
+    await db.init_db()
+    rowid = await _deposit(db, None, -1.0)
     assert rowid == -1, f"expected skip sentinel, got {rowid}"
     assert await _pool_size(db) == 0
-    print("PASS test_zero_edit_negative_is_blocked")
+    print("PASS test_negative_without_trajectory_is_blocked")
+
+
+async def test_zero_score_is_kept():
+    """Score of exactly 0 → deposited (gate is strictly negative)."""
+    db = _fresh_modules()
+    await db.init_db()
+    await _make_trajectory(db, "t1", num_edits=1)
+    rowid = await _deposit(db, "t1", 0.0)
+    assert rowid != -1, "zero-score trajectory was wrongly blocked"
+    assert await _pool_size(db) == 1
+    print("PASS test_zero_score_is_kept")
 
 
 async def _main():
     await test_single_edit_negative_is_blocked()
     await test_single_edit_positive_is_kept()
-    await test_multi_edit_negative_is_kept()
-    await test_zero_edit_negative_is_blocked()
-    print("\nAll inactive-pool single-edit-gate tests passed.")
+    await test_multi_edit_negative_is_blocked()
+    await test_multi_edit_positive_is_kept()
+    await test_negative_without_trajectory_is_blocked()
+    await test_zero_score_is_kept()
+    print("\nAll inactive-pool negative-gate tests passed.")
 
 
 if __name__ == "__main__":
