@@ -41,7 +41,11 @@ logger = logging.getLogger("swarm")
 # is missing or unparseable. Add new tunables here so call sites stay
 # consistent — never inline an `int(config.get(KEY, "N"))` again.
 SWARM_DEFAULTS: dict[str, int] = {
-    "inactive_minutes": 20,
+    # 60, not 20: agentic / C3-benchmark iterations legitimately run 45+ min
+    # of wall-clock per cycle. A shorter window lets the periodic_stats sweep
+    # reap an actively-working agent's trajectory mid-iteration, so every
+    # publish lands on a fresh trajectory and trivially "beats" an empty best.
+    "inactive_minutes": 60,
     "stagnation_threshold": 2,
     "stagnation_limit": 5,
     "hypothesis_recall_threshold": 3,
