@@ -75,6 +75,18 @@ class IterationCreate(BaseModel):
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     estimated_cost: Optional[float] = None
+    # Winning hyperparameter config when this iteration was tuned (the `score`
+    # is then the tuned score); None means the algorithm was scored at its
+    # in-code defaults. When tuned this is a per-track map
+    # {track_key: {param: value}} (a winner per track); see
+    # docs/hyperparameter-search-plan.md.
+    hyperparameters: Optional[dict] = None
+    # The candidate's no-hyperparameters (default-config) score on the test
+    # seed. Equals `score` for untuned iterations; for tuned ones it is the
+    # pre-tuning score. The HPO gate's band compares default-vs-default, so the
+    # server stores this and serves it back via improvement_scores. None for
+    # legacy clients — the server falls back to `score`.
+    default_score: Optional[float] = None
 
 
 class AdminAuth(BaseModel):

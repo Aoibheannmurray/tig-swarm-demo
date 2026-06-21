@@ -458,6 +458,16 @@ async def init_db() -> None:
         # deposit_inactive / the adoption branch in server.py). Legacy rows
         # back-fill to NULL — their originating experiment_id was never stored.
         await _add_column(db, "inactive_algorithms", "experiment_id", "TEXT")
+        # Winning hyperparameter config (JSON) for a trajectory best that was
+        # tuned by the hyperparameter search. NULL for legacy rows and for
+        # bests scored at their in-code defaults. See
+        # docs/hyperparameter-search-plan.md.
+        await _add_column(db, "trajectory_bests", "hyperparameters", "TEXT")
+        # The no-hyperparameters (default-config) score for this experiment. The
+        # HPO gate's band is default-vs-default, so improvement scores are read
+        # from here (COALESCE to `score` for legacy rows / untuned iterations).
+        # See docs/hyperparameter-search-plan.md.
+        await _add_column(db, "experiments", "default_score", "REAL")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -574,7 +584,7 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
 _TRAJECTORY_BESTS_COLS = (
     "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
     "kernel_code, score, feasible, challenge_metrics, solution_data, "
-    "track_scores, updated_at, trajectory_id"
+    "track_scores, updated_at, trajectory_id, hyperparameters"
 )
 
 
@@ -685,6 +695,43 @@ async def get_trajectory_best(
     return dict(row) if row else None
 
 
+async def get_recent_improvement_scores(
+    conn: aiosqlite.Connection, trajectory_id: str | None, limit: int
+) -> list[float]:
+    """The last `limit` feasible improvement scores on a trajectory, ascending.
+
+    An "improvement" is an experiment that beat the trajectory best when it ran
+    (`beats_trajectory_best = 1`), so the scores are monotonically increasing.
+    Keyed by `trajectory_id`, which is preserved when a trajectory is adopted
+    out of the inactive pool — so an adopted trajectory inherits its real
+    improvement history (and survives process restarts). Returns [] when the
+    trajectory is unknown or has no recorded improvements.
+
+    Powers the hyperparameter-search gate (see docs/hyperparameter-search-plan.md):
+    the count is `len(...)` and the band floor is `result[-min_improvements]`.
+
+    The scores are each improvement's *default* (no-hyperparameters) score, so the
+    band is default-vs-default: an ancestor that tuned never raises the bar for its
+    descendants. Falls back to the published `score` for legacy rows where
+    `default_score` was never recorded (untuned rows, where the two are equal).
+    Note these default scores are not strictly monotonic (only the published
+    scores are), but the band only needs the value from `min_improvements` ago.
+    """
+    if not trajectory_id:
+        return []
+    cursor = await conn.execute(
+        """SELECT COALESCE(default_score, score) FROM experiments
+           WHERE trajectory_id = ? AND beats_trajectory_best = 1 AND feasible = 1
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?""",
+        (trajectory_id, limit),
+    )
+    rows = await cursor.fetchall()
+    # Fetched newest-first; reverse to oldest-first so [-min_improvements] is the
+    # band floor and the list reads as the recent improvement sequence.
+    return [float(r[0]) for r in reversed(rows)]
+
+
 async def upsert_trajectory_best(
     conn: aiosqlite.Connection,
     agent_id: str,
@@ -699,12 +746,14 @@ async def upsert_trajectory_best(
     trajectory_id: str | None = None,
     track_scores: str | None = None,
     kernel_code: str | None = None,
+    hyperparameters: str | None = None,
 ) -> None:
     await conn.execute(
         """INSERT INTO trajectory_bests
            (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
-            challenge_metrics, solution_data, track_scores, updated_at, trajectory_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            challenge_metrics, solution_data, track_scores, updated_at, trajectory_id,
+            hyperparameters)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
@@ -715,10 +764,12 @@ async def upsert_trajectory_best(
              solution_data = excluded.solution_data,
              track_scores = excluded.track_scores,
              updated_at = excluded.updated_at,
-             trajectory_id = excluded.trajectory_id""",
+             trajectory_id = excluded.trajectory_id,
+             hyperparameters = excluded.hyperparameters""",
         (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score,
          1 if feasible else 0, challenge_metrics,
-         solution_data, track_scores, updated_at, trajectory_id),
+         solution_data, track_scores, updated_at, trajectory_id,
+         hyperparameters),
     )
 
 
