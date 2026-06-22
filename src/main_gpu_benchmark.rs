@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{arg, value_parser, Command};
+use serde_json::{Map, Value};
 use std::sync::Mutex;
 use std::time::Instant;
 use tig_challenges as challenges;
@@ -30,6 +31,10 @@ fn cli() -> Command {
         )
         .arg(
             arg!(--ptx <PTX> "Path to compiled .ptx file")
+                .value_parser(value_parser!(String)),
+        )
+        .arg(
+            arg!(--hyperparameters [HYPERPARAMETERS] "JSON string for solver hyperparameters")
                 .value_parser(value_parser!(String)),
         )
 }
@@ -345,6 +350,7 @@ fn run_instance(
     index: usize,
     timeout_secs: u64,
     ptx_path: &str,
+    hyperparameters: &Option<Map<String, Value>>,
 ) -> Result<()> {
     let instance_seed = blake3::hash(
         format!("{}-{}-{}-{}", challenge_name, track_id, seed, index).as_bytes(),
@@ -391,7 +397,7 @@ fn run_instance(
                     challenges::$c::solve_challenge(
                         &instance,
                         &save_solution,
-                        &None,
+                        hyperparameters,
                         module.clone(),
                         stream.clone(),
                         &prop,
@@ -473,5 +479,10 @@ fn main() -> Result<()> {
     let index = *matches.get_one::<usize>("index").unwrap();
     let timeout = *matches.get_one::<u64>("timeout").unwrap();
     let ptx = matches.get_one::<String>("ptx").unwrap();
-    run_instance(challenge, track, seed, index, timeout, ptx)
+    let hyperparameters = matches
+        .get_one::<String>("hyperparameters")
+        .map(|s| serde_json::from_str(s))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("Invalid --hyperparameters JSON: {}", e))?;
+    run_instance(challenge, track, seed, index, timeout, ptx, &hyperparameters)
 }

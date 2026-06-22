@@ -22,6 +22,10 @@ WORKTREES_DIR = ROOT / "worktrees"
 # synthesized hypothesis so the iteration still publishes.
 HYPOTHESIS_RELPATH = ".swarm/hypothesis.json"
 
+# Where the agent writes the hyperparameter-search spec during an extraction
+# pass (Fix 1 in docs/hyperparameter-search-plan.md). Read back by the loop.
+HYPERPARAMS_RELPATH = ".swarm/hyperparameters.json"
+
 # Worktree branch namespace for agentic runs that aren't part of a fleet.
 # Fleet runs use the fleet/<name> namespace (see run_fleet.py); agentic
 # single-contributor runs use agentic/<short-id> so the two don't collide.
@@ -134,6 +138,32 @@ def reset_iteration_state(workdir: Path) -> None:
 
 
 _STRATEGY_TAG_FALLBACK = "other"
+
+
+def reset_hyperparameter_spec(workdir: Path) -> None:
+    """Clear a stale hyperparameter spec before an extraction pass, so a leftover
+    file from a previous candidate can't be mistaken for this one's output."""
+    swarm_dir = workdir / ".swarm"
+    swarm_dir.mkdir(exist_ok=True)
+    spec = workdir / HYPERPARAMS_RELPATH
+    if spec.exists():
+        spec.unlink()
+
+
+def read_hyperparameter_spec(workdir: Path) -> dict | None:
+    """Read .swarm/hyperparameters.json written by an agentic extraction pass.
+
+    Returns the parsed dict ({hyperparameters, suggested_configs}), or None if
+    missing/malformed. Schema validation is the caller's job.
+    """
+    spec = workdir / HYPERPARAMS_RELPATH
+    if not spec.exists():
+        return None
+    try:
+        data = json.loads(spec.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read_agent_hypothesis(workdir: Path) -> dict | None:

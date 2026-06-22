@@ -93,7 +93,10 @@ class AgenticBackend(Protocol):
     name: str
     cli_name: str  # binary the loop precheck should look for (e.g. "claude", "codex")
 
-    def prepare(self, workdir: Path, challenge_md: str, config: dict) -> None: ...
+    def prepare(
+        self, workdir: Path, challenge_md: str, config: dict,
+        *, extraction: bool = False,
+    ) -> None: ...
 
     def iterate(
         self, workdir: Path, user_prompt: str,
@@ -107,11 +110,12 @@ class AgenticBackend(Protocol):
 # Files the agent is allowed to mutate in the worktree. Anything else is
 # read-only via Read/Glob/Grep (which the harness scopes to cwd by default).
 _HYPOTHESIS_RELPATH = ".swarm/hypothesis.json"
+_HYPERPARAMS_RELPATH = ".swarm/hyperparameters.json"
 _CLAUDE_MD_RELPATH = "CLAUDE.md"
 _SETTINGS_RELPATH = ".swarm/sandbox-settings.json"
 
 
-def _build_sandbox_settings(config: dict, workdir: Path) -> dict:
+def _build_sandbox_settings(config: dict, workdir: Path, *, extraction: bool = False) -> dict:
     """Permissions for the Claude Code sandbox (see SANDBOX_SPEC.md).
 
     Read (§1): scoped to the active challenge's own directory + root
@@ -156,6 +160,11 @@ def _build_sandbox_settings(config: dict, workdir: Path) -> dict:
         "Bash(cargo fmt:*)",
         "Bash(cargo clippy:*)",
     ]
+    # Hyperparameter-extraction pass (Fix 1): also let the agent write the spec
+    # file. Edit (not Write) keeps it consistent with how the hypothesis file is
+    # handled — Write(**) stays denied, so no other new files can be created.
+    if extraction:
+        allow.append(f"Edit({_HYPERPARAMS_RELPATH})")
     if kernel_relpath:
         allow.append(f"Edit({kernel_relpath})")
         # §4: compile-check the kernel (cu -> ptx). Runs nvcc via the trusted
@@ -365,17 +374,21 @@ class ClaudeCodeAgent:
     def resolve_cli(self) -> str | None:
         return _resolve_cli(self.cli_name, self.cli_env_override)
 
-    def prepare(self, workdir: Path, challenge_md: str, config: dict) -> None:
+    def prepare(
+        self, workdir: Path, challenge_md: str, config: dict,
+        *, extraction: bool = False,
+    ) -> None:
         """Write CLAUDE.md + sandbox-settings.json into the worktree.
 
         Idempotent — safe to call every iteration. CLAUDE.md is small and
         the challenge may have switched between iterations, so we rewrite
-        rather than try to cache.
+        rather than try to cache. `extraction=True` widens the sandbox to let
+        the agent write the hyperparameter spec file (Fix 1).
         """
         swarm_dir = workdir / ".swarm"
         swarm_dir.mkdir(exist_ok=True)
 
-        settings = _build_sandbox_settings(config, workdir)
+        settings = _build_sandbox_settings(config, workdir, extraction=extraction)
         (workdir / _SETTINGS_RELPATH).write_text(
             json.dumps(settings, indent=2) + "\n"
         )
@@ -575,8 +588,16 @@ class CodexAgent:
     def resolve_cli(self) -> str | None:
         return _resolve_cli(self.cli_name, self.cli_env_override)
 
-    def prepare(self, workdir: Path, challenge_md: str, config: dict) -> None:
-        """Write AGENTS.md into the worktree. Codex auto-discovers it."""
+    def prepare(
+        self, workdir: Path, challenge_md: str, config: dict,
+        *, extraction: bool = False,
+    ) -> None:
+        """Write AGENTS.md into the worktree. Codex auto-discovers it.
+
+        `extraction` is accepted for interface parity; Codex runs under a
+        workspace-write sandbox (no per-file allowlist), so it can already write
+        the hyperparameter spec file without widening.
+        """
         (workdir / ".swarm").mkdir(exist_ok=True)
         (workdir / _AGENTS_MD_RELPATH).write_text(
             _build_agents_md(challenge_md, config)

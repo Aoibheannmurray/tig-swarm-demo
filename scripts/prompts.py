@@ -5,6 +5,9 @@ All build_*_prompt functions live here, plus hypothesis parsing.
 
 from __future__ import annotations
 
+import json
+import re
+
 from challenge_files import is_stub_code, read_tacit_knowledge
 
 
@@ -22,6 +25,17 @@ from challenge_files import is_stub_code, read_tacit_knowledge
 #   Uniform output format at the cost of one extra LLM call per
 #   trajectory reset.
 DRIVER_DISTILL_FOR_AGENTIC = False
+
+
+def _tacit_write_enabled(config: dict) -> bool:
+    """Per-agent kill switch for tacit-knowledge writing (mirrors
+    `run_loop.tacit_write_enabled`). Defaults to True when `tacit_write`
+    is absent. Accepts JSON booleans and the string forms
+    "false"/"0"/"no"/"off" (case-insensitive)."""
+    value = config.get("tacit_write", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
 
 
 # ── Strategy tags ──────────────────────────────────────────────────
@@ -813,6 +827,228 @@ def build_code_user_prompt(
     return "\n".join(parts)
 
 
+# ── Hyperparameter extraction prompts (Phase 3) ────────────────────
+#
+# A separate LLM call, made only when a candidate passes the tuning gate (see
+# docs/hyperparameter-search-plan.md). It reads the *final, compiled* mutated
+# algorithm and (1) decides which constants become tunable hyperparameters with
+# a search range, (2) suggests a few concrete configs, and (3) rewrites mod.rs
+# to read each hyperparameter from the `Map` with the in-code value as default,
+# so an empty Map reproduces the default-score behaviour exactly.
+#
+# Response layout (mirrors the repo's "// --- kernels.cu ---" separator
+# convention): a JSON spec, the separator line below, then the full Rust source.
+HYPERPARAM_VARIANT_SEP = "// --- variant mod.rs ---"
+
+
+def build_hyperparameter_system_prompt(challenge_md: str, config: dict) -> str:
+    challenge = config.get("challenge", "unknown")
+    rust_rules = _rust_rules_block(config)
+    return f"""\
+You are tuning a Rust algorithm for the "{challenge}" challenge. The algorithm
+has already been written; your job is NOT to change its logic, but to expose its
+most impactful magic-number constants as searchable hyperparameters so a
+hyperparameter search can find a good configuration.
+
+Do TWO things:
+
+1. Choose 2-5 constants that are genuinely worth tuning (a learning rate, a
+   temperature, a restart count, a threshold, a population size, …). Prefer
+   FEWER — a smaller search space is searched better. For each, give a sensible
+   search `range` that brackets plausibly-good values, a `scale` ("log" for
+   multiplicative quantities like learning rates / temperatures, "linear"
+   otherwise), a `type` ("float", "int", or "categorical"), and the `default`
+   equal to the constant's CURRENT in-code value.
+
+2. Rewrite mod.rs so each chosen hyperparameter is read from the
+   `hyperparameters: &Option<Map<String, Value>>` argument, falling back to the
+   current in-code value when the key is absent. This rewrite MUST be
+   behaviour-preserving: with an empty or `None` map the algorithm must behave
+   EXACTLY as it does now (same defaults). Change nothing else about the logic.
+
+OUTPUT FORMAT (strict):
+First, a single JSON object (you may wrap it in a ```json fence) of the form:
+{{
+  "hyperparameters": [
+    {{"name": "learning_rate", "type": "float", "range": [0.0001, 0.1], "scale": "log", "default": 0.01}},
+    {{"name": "n_restarts", "type": "int", "range": [1, 16], "scale": "linear", "default": 4}}
+  ],
+  "suggested_configs": [
+    {{"learning_rate": 0.01, "n_restarts": 4}},
+    {{"learning_rate": 0.03, "n_restarts": 8}}
+  ]
+}}
+Every key used in a suggested config MUST be a declared hyperparameter `name`,
+and every declared hyperparameter MUST appear in every suggested config.
+
+Then, on its own line, exactly this separator:
+{HYPERPARAM_VARIANT_SEP}
+
+Then the COMPLETE rewritten mod.rs as raw Rust (no markdown fences). It must
+start with `use super::*;` and compile.{rust_rules}"""
+
+
+def build_hyperparameter_user_prompt(
+    algorithm_code: str, config: dict,
+    parent_hyperparameters: dict | None = None,
+    num_suggested_configs: int = 5,
+) -> str:
+    parts: list[str] = []
+    parts.append(f"Current algorithm (mod.rs):\n```rust\n{algorithm_code}\n```")
+    if parent_hyperparameters:
+        parts.append(
+            "\nThe parent algorithm in this trajectory was tuned. Its winning "
+            "configuration is a map from track key to that track's best config "
+            "(different tracks may have favoured different values):\n"
+            f"```json\n{json.dumps(parent_hyperparameters, indent=2)}\n```\n"
+            "Use it to inform your choice of hyperparameters, ranges, and "
+            "suggested configs where the code is similar — paying attention to "
+            "how the winning values varied across tracks — but only expose "
+            "constants that actually exist in the algorithm above."
+        )
+    parts.append(
+        f"\nPropose the hyperparameters and exactly {num_suggested_configs} "
+        "suggested configs, then the separator, then the rewritten mod.rs."
+    )
+    return "\n".join(parts)
+
+
+_HYPERPARAM_SPEC_RELPATH = ".swarm/hyperparameters.json"
+
+
+def build_hyperparameter_agentic_prompt(
+    config: dict,
+    parent_hyperparameters: dict | None = None,
+    num_suggested_configs: int = 5,
+) -> str:
+    """Extraction task for the agentic backends (Fix 1).
+
+    Unlike the API path (one structured completion parsed by
+    `parse_hyperparameter_response`), the agent edits the algorithm file in its
+    worktree directly and drops the spec as a JSON file we read back.
+    """
+    algo_path = config.get("algorithm_path", "the algorithm file")
+    parent_block = ""
+    if parent_hyperparameters:
+        parent_block = (
+            "\nThe parent algorithm in this trajectory was tuned; its winning "
+            "configuration is a per-track map (track key -> that track's best "
+            f"config):\n{json.dumps(parent_hyperparameters)}\n"
+            "Use it to inform your choices where the code is similar.\n"
+        )
+    return f"""\
+This is a hyperparameter-extraction task, NOT a new optimization. Do not change \
+the algorithm's logic.
+
+Edit `{algo_path}` so its most impactful magic-number constants become tunable \
+hyperparameters read from the `hyperparameters: &Option<Map<String, Value>>` \
+argument, each falling back to its CURRENT in-code value when the key is absent. \
+The rewrite MUST be behaviour-preserving: with an empty or None map the \
+algorithm must behave EXACTLY as it does now.
+
+Choose 2-5 constants worth tuning (a learning rate, temperature, restart count, \
+threshold, population size, …) — prefer fewer; a smaller search space is \
+searched better.
+{parent_block}
+Then write the search specification to `{_HYPERPARAM_SPEC_RELPATH}` as JSON:
+{{
+  "hyperparameters": [
+    {{"name": "learning_rate", "type": "float", "range": [0.0001, 0.1], "scale": "log", "default": 0.01}},
+    {{"name": "n_restarts", "type": "int", "range": [1, 16], "scale": "linear", "default": 4}}
+  ],
+  "suggested_configs": [
+    {{"learning_rate": 0.01, "n_restarts": 4}}
+  ]
+}}
+Use "scale": "log" for multiplicative quantities (learning rates, temperatures), \
+"linear" otherwise; "type" is "float", "int", or "categorical" (categorical uses \
+"choices": [...] instead of "range"). Provide exactly {num_suggested_configs} \
+suggested configs. Every key in a suggested config MUST be a declared \
+hyperparameter name, and every declared hyperparameter MUST appear in every \
+suggested config, with `default` equal to the constant's current in-code value.
+
+Finally, run `cargo check` to confirm the edited file compiles. Do not edit any \
+file other than `{algo_path}` and `{_HYPERPARAM_SPEC_RELPATH}`."""
+
+
+def _strip_code_fence(text: str, lang: str = "") -> str:
+    """Strip a leading/trailing markdown code fence if present."""
+    text = text.strip()
+    fence = re.match(r"^```[a-zA-Z]*\n(.*)\n```$", text, re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+    return text
+
+
+def _validate_hyperparameter_spec(spec: dict) -> str:
+    """Return an error string if the spec is malformed, else ""."""
+    hps = spec.get("hyperparameters")
+    if not isinstance(hps, list) or not hps:
+        return "spec.hyperparameters must be a non-empty list"
+    names: set[str] = set()
+    for hp in hps:
+        if not isinstance(hp, dict) or "name" not in hp:
+            return "each hyperparameter needs a 'name'"
+        name = hp["name"]
+        names.add(name)
+        ptype = hp.get("type", "float")
+        if ptype == "categorical":
+            if not isinstance(hp.get("choices"), list) or not hp["choices"]:
+                return f"categorical {name!r} needs a non-empty 'choices' list"
+        else:
+            rng = hp.get("range")
+            if not (isinstance(rng, list) and len(rng) == 2):
+                return f"{name!r} needs a [min, max] 'range'"
+            if hp.get("scale") == "log" and rng[0] <= 0:
+                return f"log-scaled {name!r} needs a positive range minimum"
+    configs = spec.get("suggested_configs")
+    if not isinstance(configs, list):
+        return "spec.suggested_configs must be a list"
+    for cfg in configs:
+        if not isinstance(cfg, dict):
+            return "each suggested config must be an object"
+        for key in cfg:
+            if key not in names:
+                return f"suggested config uses unknown hyperparameter {key!r}"
+    return ""
+
+
+def parse_hyperparameter_response(response: str) -> dict:
+    """Parse the extraction response into spec + variant code.
+
+    Returns {ok, error, hyperparameters, suggested_configs, variant_code}.
+    """
+    fail = {
+        "ok": False, "hyperparameters": [], "suggested_configs": [],
+        "variant_code": "",
+    }
+    if HYPERPARAM_VARIANT_SEP not in response:
+        return {**fail, "error": f"missing separator {HYPERPARAM_VARIANT_SEP!r}"}
+    json_part, _, code_part = response.partition(HYPERPARAM_VARIANT_SEP)
+    json_text = _strip_code_fence(json_part)
+    # The JSON may have prose around it; grab the outermost {...}.
+    brace = re.search(r"\{.*\}", json_text, re.DOTALL)
+    if not brace:
+        return {**fail, "error": "no JSON object found before the separator"}
+    try:
+        spec = json.loads(brace.group(0))
+    except json.JSONDecodeError as e:
+        return {**fail, "error": f"invalid JSON spec: {e}"}
+    err = _validate_hyperparameter_spec(spec)
+    if err:
+        return {**fail, "error": err}
+    variant_code = _strip_code_fence(code_part, "rust")
+    if "use super::*;" not in variant_code:
+        return {**fail, "error": "variant mod.rs missing `use super::*;`"}
+    return {
+        "ok": True,
+        "error": "",
+        "hyperparameters": spec["hyperparameters"],
+        "suggested_configs": spec.get("suggested_configs", []),
+        "variant_code": variant_code,
+    }
+
+
 # ── Error recovery prompts ─────────────────────────────────────────
 
 
@@ -1170,7 +1406,8 @@ def build_agentic_user_prompt(
 
     stagnation_limit = int(config.get("stagnation_limit") or 0)
     in_band_distill = (
-        not DRIVER_DISTILL_FOR_AGENTIC
+        _tacit_write_enabled(config)
+        and not DRIVER_DISTILL_FOR_AGENTIC
         and stagnation_limit >= 3
         and stagnation == stagnation_limit - 1
     )
