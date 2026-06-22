@@ -16,7 +16,6 @@ scripts/llm_backends.py
 scripts/admin_reset_challenge.py
 scripts/dump_trajectories.py
 
-ARCHITECTURE.md
 README.md
 AGENTS.md.template
 Cargo.lock
