@@ -458,6 +458,16 @@ async def init_db() -> None:
         # deposit_inactive / the adoption branch in server.py). Legacy rows
         # back-fill to NULL — their originating experiment_id was never stored.
         await _add_column(db, "inactive_algorithms", "experiment_id", "TEXT")
+        # Winning hyperparameter config (JSON) for a trajectory best that was
+        # tuned by the hyperparameter search. NULL for legacy rows and for
+        # bests scored at their in-code defaults. See
+        # docs/hyperparameter-search-plan.md.
+        await _add_column(db, "trajectory_bests", "hyperparameters", "TEXT")
+        # The no-hyperparameters (default-config) score for this experiment. The
+        # HPO gate's band is default-vs-default, so improvement scores are read
+        # from here (COALESCE to `score` for legacy rows / untuned iterations).
+        # See docs/hyperparameter-search-plan.md.
+        await _add_column(db, "experiments", "default_score", "REAL")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -574,7 +584,7 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
 _TRAJECTORY_BESTS_COLS = (
     "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
     "kernel_code, score, feasible, challenge_metrics, solution_data, "
-    "track_scores, updated_at, trajectory_id"
+    "track_scores, updated_at, trajectory_id, hyperparameters"
 )
 
 
@@ -685,6 +695,43 @@ async def get_trajectory_best(
     return dict(row) if row else None
 
 
+async def get_recent_improvement_scores(
+    conn: aiosqlite.Connection, trajectory_id: str | None, limit: int
+) -> list[float]:
+    """The last `limit` feasible improvement scores on a trajectory, ascending.
+
+    An "improvement" is an experiment that beat the trajectory best when it ran
+    (`beats_trajectory_best = 1`), so the scores are monotonically increasing.
+    Keyed by `trajectory_id`, which is preserved when a trajectory is adopted
+    out of the inactive pool — so an adopted trajectory inherits its real
+    improvement history (and survives process restarts). Returns [] when the
+    trajectory is unknown or has no recorded improvements.
+
+    Powers the hyperparameter-search gate (see docs/hyperparameter-search-plan.md):
+    the count is `len(...)` and the band floor is `result[-min_improvements]`.
+
+    The scores are each improvement's *default* (no-hyperparameters) score, so the
+    band is default-vs-default: an ancestor that tuned never raises the bar for its
+    descendants. Falls back to the published `score` for legacy rows where
+    `default_score` was never recorded (untuned rows, where the two are equal).
+    Note these default scores are not strictly monotonic (only the published
+    scores are), but the band only needs the value from `min_improvements` ago.
+    """
+    if not trajectory_id:
+        return []
+    cursor = await conn.execute(
+        """SELECT COALESCE(default_score, score) FROM experiments
+           WHERE trajectory_id = ? AND beats_trajectory_best = 1 AND feasible = 1
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?""",
+        (trajectory_id, limit),
+    )
+    rows = await cursor.fetchall()
+    # Fetched newest-first; reverse to oldest-first so [-min_improvements] is the
+    # band floor and the list reads as the recent improvement sequence.
+    return [float(r[0]) for r in reversed(rows)]
+
+
 async def upsert_trajectory_best(
     conn: aiosqlite.Connection,
     agent_id: str,
@@ -699,12 +746,14 @@ async def upsert_trajectory_best(
     trajectory_id: str | None = None,
     track_scores: str | None = None,
     kernel_code: str | None = None,
+    hyperparameters: str | None = None,
 ) -> None:
     await conn.execute(
         """INSERT INTO trajectory_bests
            (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
-            challenge_metrics, solution_data, track_scores, updated_at, trajectory_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            challenge_metrics, solution_data, track_scores, updated_at, trajectory_id,
+            hyperparameters)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
@@ -715,10 +764,12 @@ async def upsert_trajectory_best(
              solution_data = excluded.solution_data,
              track_scores = excluded.track_scores,
              updated_at = excluded.updated_at,
-             trajectory_id = excluded.trajectory_id""",
+             trajectory_id = excluded.trajectory_id,
+             hyperparameters = excluded.hyperparameters""",
         (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score,
          1 if feasible else 0, challenge_metrics,
-         solution_data, track_scores, updated_at, trajectory_id),
+         solution_data, track_scores, updated_at, trajectory_id,
+         hyperparameters),
     )
 
 
@@ -797,6 +848,14 @@ async def compute_leaderboard(
     # only ever fetched /api/state for this challenge gets a row in
     # agent_challenge_state via ensure_agent_challenge_state, but with
     # zero experiments — those would otherwise show up as ghosts.
+    #
+    # tacit/inspiration counts are derived from experiments.received_hint
+    # (hints actually CONSUMED by a published iteration), not from the
+    # acs.tacit_knowledge_count / acs.inspiration_count columns. Those
+    # columns are bumped at hint-OFFER time on every /api/state fetch
+    # while stagnated, so a client stuck in a fetch→fail→retry loop
+    # inflates them without ever running an iteration (observed: 703
+    # offers vs 6 consumed). They remain as raw offer telemetry only.
     order = _direction_order(direction)
     # CORRECTNESS INVARIANT: `active` is sourced from acs.last_active_at,
     # NOT from a.last_heartbeat. An agent currently working on VRP is alive
@@ -814,8 +873,8 @@ async def compute_leaderboard(
             acs.last_active_at as last_active_at,
             acs.best_ever_score as best_ever_score,
             acs.num_trajectories as num_trajectories,
-            acs.tacit_knowledge_count as tacit_knowledge_count,
-            acs.inspiration_count as inspiration_count,
+            COALESCE(hints.tacit_knowledge_count, 0) as tacit_knowledge_count,
+            COALESCE(hints.inspiration_count, 0) as inspiration_count,
             acs.total_input_tokens as total_input_tokens,
             acs.total_output_tokens as total_output_tokens,
             acs.total_estimated_cost as total_estimated_cost,
@@ -824,6 +883,16 @@ async def compute_leaderboard(
         JOIN agents a ON a.id = acs.agent_id
         LEFT JOIN trajectory_bests ab
             ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
+        LEFT JOIN (
+            SELECT agent_id,
+                   SUM(CASE WHEN received_hint = 'tacit_knowledge' THEN 1 ELSE 0 END)
+                       AS tacit_knowledge_count,
+                   SUM(CASE WHEN received_hint = 'inspiration' THEN 1 ELSE 0 END)
+                       AS inspiration_count
+            FROM experiments
+            WHERE challenge = ?
+            GROUP BY agent_id
+        ) hints ON hints.agent_id = a.id
         WHERE acs.challenge = ?
           AND acs.experiments_completed > 0
         -- Sort by best-ever score (not current_score from trajectory_bests):
@@ -835,7 +904,7 @@ async def compute_leaderboard(
         -- they've ever held on this challenge.
         ORDER BY best_ever_score IS NULL, best_ever_score {order}, a.name ASC
         """,
-        (challenge, challenge),
+        (challenge, challenge, challenge),
     )
     rows = await cursor.fetchall()
     return [
@@ -1119,25 +1188,20 @@ async def deposit_inactive(
     kernel_code: str | None = None,
     experiment_id: str | None = None,
 ) -> int:
-    # Keep one-and-done weak attempts out of the inactive trajectory pool.
-    # An agent that publishes a single algorithm scoring below zero and then
-    # stagnates or goes offline would otherwise deposit that lone bad result
-    # here, where other agents adopt it on a fresh reset — polluting the pool
-    # with a trajectory that never proved itself. Require either a real
-    # iterated line (>1 edit) or a non-negative score before a trajectory can
-    # seed others. Centralised here so BOTH deposit paths (online stagnation
-    # reset and offline-agent cleanup) are covered. Returns -1 to signal the
-    # deposit was skipped; callers ignore the row id.
+    # Keep negative-scoring attempts out of the inactive trajectory pool.
+    # The pool is what other agents adopt from on a fresh reset, so a
+    # negative deposit hands known-bad code to whoever draws it — polluting
+    # the pool regardless of how many edits the trajectory accumulated
+    # (an iterated line that never climbed above zero is still a dead end).
+    # Centralised here so BOTH deposit paths (online stagnation reset and
+    # offline-agent cleanup) are covered. Returns -1 to signal the deposit
+    # was skipped; callers ignore the row id.
     #
     # Note: on challenges whose feasible scores are themselves negative (e.g.
-    # neuralnet), this also drops single-edit feasible results — accepted
-    # tradeoff per the chosen `score < 0` definition of "bad".
-    if trajectory_id is not None and score is not None and score < 0:
-        traj = await (await conn.execute(
-            "SELECT num_edits FROM trajectories WHERE id = ?", (trajectory_id,),
-        )).fetchone()
-        if traj is not None and traj["num_edits"] is not None and traj["num_edits"] <= 1:
-            return -1
+    # neuralnet divergence), this also drops feasible-but-negative results —
+    # accepted tradeoff per the chosen `score < 0` definition of "bad".
+    if score is not None and score < 0:
+        return -1
     cursor = await conn.execute(
         "INSERT INTO inactive_algorithms "
         "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id) "
@@ -1293,8 +1357,8 @@ async def deactivate_inactive_agent_trajectories(
         # feasible best. An infeasible entry would hand broken code to whoever
         # adopts it and spread the infeasible-floor trap. trajectory_bests is
         # normally feasible-only, but legacy rows / the adopted floor mean we
-        # can't assume it. deposit_inactive applies the extra single-edit /
-        # negative-score guard on top.
+        # can't assume it. deposit_inactive applies the extra negative-score
+        # guard on top.
         if best is not None:
             if best.get("feasible"):
                 await deposit_inactive(

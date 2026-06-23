@@ -124,6 +124,7 @@ from prompts import (
 import prompts as _prompts
 import agentic_backends
 import agentic_sandbox
+import hpo
 from c3_compute import run_benchmark_c3
 
 # Backoff after a recoverable iteration-level failure (state fetch, LLM error).
@@ -152,6 +153,17 @@ _REDESCRIBE_SIMILARITY_THRESHOLD = 0.95
 # `build_agentic_user_prompt`) and the driver-side gate below stay in
 # sync automatically.
 _AGENTIC_PROVIDERS = ("claude-code-agentic", "codex-agentic")
+
+
+def tacit_write_enabled(config: dict) -> bool:
+    """Per-agent kill switch for tacit-knowledge writing. Defaults to True
+    (write enabled) when `tacit_write` is absent, so existing configs keep
+    their current behavior. Accepts JSON booleans as well as the string
+    forms "false"/"0"/"no"/"off" (case-insensitive) for env-style configs."""
+    value = config.get("tacit_write", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
 
 _PROMPT_LOG_DIR = ROOT / "prompts_log"
 
@@ -252,11 +264,19 @@ def sync_challenge() -> None:
 # ── Benchmark dispatch ─────────────────────────────────────────────
 
 
-def _run_benchmark_local() -> tuple[dict | None, str]:
+def _run_benchmark_local(
+    seed: str | None = None, hyperparameters: str | None = None
+) -> tuple[dict | None, str]:
+    env = os.environ.copy()
+    if seed is not None:
+        env["TIG_BENCH_SEED"] = seed
+    if hyperparameters is not None:
+        env["TIG_HYPERPARAMETERS"] = hyperparameters
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "benchmark.py")],
         capture_output=True, text=True, cwd=ROOT,
         encoding="utf-8", errors="replace",
+        env=env,
     )
     if result.returncode != 0:
         err = result.stderr or result.stdout or "Benchmark failed"
@@ -269,11 +289,23 @@ def _run_benchmark_local() -> tuple[dict | None, str]:
         return None, "Benchmark output was not valid JSON"
 
 
-def run_benchmark(args: argparse.Namespace, config: dict, server: str) -> tuple[dict | None, str]:
+def run_benchmark(
+    args: argparse.Namespace, config: dict, server: str,
+    seed: str | None = None, hyperparameters: str | None = None,
+) -> tuple[dict | None, str]:
+    """Run a benchmark on the configured compute provider.
+
+    `seed` overrides the instance seed (the hyperparameter search uses a
+    non-test seed). `hyperparameters` is a JSON string forwarded to the solver
+    as --hyperparameters; None means the solver uses its in-code defaults (the
+    "default score").
+    """
     if args.compute == "local":
-        return _run_benchmark_local()
+        return _run_benchmark_local(seed, hyperparameters)
     if args.compute == "c3":
-        return run_benchmark_c3(args, config, server)
+        return run_benchmark_c3(
+            args, config, server, seed=seed, hyperparameters=hyperparameters
+        )
     return None, f"Unknown compute provider: {args.compute}"
 
 
@@ -437,8 +469,12 @@ def _benchmark_with_compile_fix(
     args: argparse.Namespace, model: str, api_key: str,
     config: dict, server: str,
     files: ChallengeFiles,
+    seed: str | None = None, hyperparameters: str | None = None,
 ) -> tuple[dict | None, str, bool, int, int]:
     """Run benchmark, retrying with LLM compile fixes on failure.
+
+    `seed` / `hyperparameters` are forwarded to run_benchmark (used by the
+    hyperparameter search to build + smoke-test a variant on the non-test seed).
 
     Returns (bench, build_err, code_changed, input_tokens, output_tokens).
     """
@@ -448,7 +484,7 @@ def _benchmark_with_compile_fix(
     code_changed = False
 
     for attempt in range(1 + max_retries):
-        bench, build_err = run_benchmark(args, config, server)
+        bench, build_err = run_benchmark(args, config, server, seed=seed, hyperparameters=hyperparameters)
         if bench is not None:
             return bench, "", code_changed, input_tokens, output_tokens
 
@@ -474,6 +510,240 @@ def _benchmark_with_compile_fix(
         code_changed = True
 
     return None, build_err, code_changed, input_tokens, output_tokens
+
+
+def _hpo_gate_open(
+    config: dict, default_bench: dict, improvement_scores: list[float],
+) -> bool:
+    """Should this candidate be hyperparameter-tuned? (see the plan doc)
+
+    Gate: the trajectory has had >= min_improvements improvements AND the
+    candidate's default score is within the band (>= the min_improvements-th-
+    previous best improvement) AND the candidate is feasible. Both CPU and GPU
+    solver paths accept --hyperparameters, so GPU challenges tune too.
+    """
+    min_improvements = int(config.get("hpo_min_improvements", 4))
+    score = default_bench.get("score")
+    if score is None or not default_bench.get("feasible", False):
+        return False
+    if len(improvement_scores) < min_improvements:
+        return False
+    band_floor = improvement_scores[-min_improvements]
+    if score < band_floor:
+        print(f"  [HPO] gate closed: default score {score:.0f} below band floor "
+              f"{band_floor:.0f} (last {min_improvements} improvements)")
+        return False
+    return True
+
+
+def _extract_hyperparameters_api(
+    args: argparse.Namespace, model: str, api_key: str,
+    config: dict, challenge_md: str, algorithm_code: str,
+    parent_hyperparameters: dict | None, num_suggested: int,
+) -> tuple[dict | None, int, int]:
+    """Extraction via a single structured completion (API / CLI providers).
+
+    Returns (parsed | None, input_tokens, output_tokens) where parsed is the
+    `parse_hyperparameter_response` dict (hyperparameters / suggested_configs /
+    variant_code).
+    """
+    try:
+        response, usage = _call_llm_logged(
+            "hyperparameter_extract", config,
+            args.provider, model, api_key,
+            _prompts.build_hyperparameter_system_prompt(challenge_md, config),
+            _prompts.build_hyperparameter_user_prompt(
+                algorithm_code, config, parent_hyperparameters, num_suggested,
+            ),
+            args.api_base,
+        )
+    except Exception as e:
+        print(f"  [HPO] extraction LLM call failed: {e}")
+        return None, 0, 0
+    parsed = _prompts.parse_hyperparameter_response(response)
+    if not parsed["ok"]:
+        print(f"  [HPO] extraction parse failed: {parsed['error']}")
+        return None, usage["input_tokens"], usage["output_tokens"]
+    return parsed, usage["input_tokens"], usage["output_tokens"]
+
+
+def _extract_hyperparameters_agentic(
+    args: argparse.Namespace,
+    backend: "agentic_backends.AgenticBackend | None", workdir: "Path | None",
+    files: ChallengeFiles, config: dict, challenge_md: str,
+    parent_hyperparameters: dict | None, num_suggested: int,
+) -> tuple[dict | None, int, int]:
+    """Extraction via a second agentic pass (Fix 1).
+
+    The agent edits the worktree's algorithm file in place and writes the spec to
+    `.swarm/hyperparameters.json`; we read both back. Token usage isn't reported
+    by the CLI backends, so the counts are 0. Returns (parsed | None, 0, 0) with
+    parsed shaped like `parse_hyperparameter_response`.
+    """
+    if backend is None or workdir is None:
+        print("  [HPO] agentic extraction unavailable (no backend/worktree)")
+        return None, 0, 0
+    # Seed the worktree with the EXACT algorithm that produced default_bench
+    # (the main checkout) before the agent edits it. The worktree copy can be
+    # stale — e.g. a runtime-error fix this iteration was applied to the main
+    # checkout, not the worktree — so without this the variant would be built
+    # from pre-fix code.
+    main_code, main_kernel = files.read()
+    algo_path = workdir / config["algorithm_path"]
+    algo_path.parent.mkdir(parents=True, exist_ok=True)
+    algo_path.write_text(main_code, encoding="utf-8")
+    if files.is_gpu and config.get("kernel_path") and main_kernel:
+        kp = workdir / config["kernel_path"]
+        kp.parent.mkdir(parents=True, exist_ok=True)
+        kp.write_text(main_kernel, encoding="utf-8")
+    agentic_sandbox.reset_hyperparameter_spec(workdir)
+    backend.prepare(workdir, challenge_md, config, extraction=True)
+    prompt = _prompts.build_hyperparameter_agentic_prompt(
+        config, parent_hyperparameters, num_suggested,
+    )
+    print(f"  [HPO] launching {backend.name} for extraction (timeout {args.agentic_timeout}s)…")
+    try:
+        result = backend.iterate(
+            workdir, prompt, model=args.model, timeout_s=args.agentic_timeout,
+        )
+    except Exception as e:
+        print(f"  [HPO] agentic extraction failed: {e}")
+        return None, 0, 0
+    if result.timed_out:
+        print("  [HPO] agentic extraction timed out — skipping tune")
+        return None, 0, 0
+    spec = agentic_sandbox.read_hyperparameter_spec(workdir)
+    if spec is None:
+        print("  [HPO] no .swarm/hyperparameters.json written — skipping tune")
+        return None, 0, 0
+    err = _prompts._validate_hyperparameter_spec(spec)
+    if err:
+        print(f"  [HPO] agentic spec invalid: {err} — skipping tune")
+        return None, 0, 0
+    variant_code, _variant_kernel = _read_worktree_files(workdir, files, config)
+    if not variant_code or "use super::*;" not in variant_code:
+        print("  [HPO] worktree variant missing/invalid — skipping tune")
+        return None, 0, 0
+    return {
+        "ok": True, "error": "",
+        "hyperparameters": spec["hyperparameters"],
+        "suggested_configs": spec.get("suggested_configs", []),
+        "variant_code": variant_code,
+    }, 0, 0
+
+
+def _maybe_tune_hyperparameters(
+    args: argparse.Namespace, model: str, api_key: str,
+    config: dict, server: str,
+    files: ChallengeFiles, challenge_md: str,
+    default_bench: dict, improvement_scores: list[float],
+    parent_hyperparameters: dict | None,
+    backend: "agentic_backends.AgenticBackend | None" = None,
+    workdir: "Path | None" = None,
+) -> tuple[dict, dict | None, int, int]:
+    """Run a gated hyperparameter search for the just-benchmarked candidate.
+
+    Returns (bench, winning_configs, input_tokens, output_tokens), where
+    winning_configs is a per-track map {track_key: config} (a winner per track):
+      - if the gate is closed or anything fails, returns the unchanged
+        default_bench with winning_configs=None and the original algorithm left
+        on disk, so publish proceeds exactly as before;
+      - if tuning beats the default on the test seed, returns the tuned bench
+        (test seed) and the per-track config map, with the hyperparameter-enabled
+        variant left on disk for publish to read.
+    """
+    in_tok = 0
+    out_tok = 0
+    if not _hpo_gate_open(config, default_bench, improvement_scores):
+        return default_bench, None, in_tok, out_tok
+
+    num_suggested = int(config.get("hpo_num_suggested_configs", 5))
+    n = int(config.get("hpo_search_budget", 13))
+    hpo_seed = str(config.get("hpo_seed", "hpo"))
+    default_score = default_bench.get("score")
+    print(f"  [HPO] gate open — tuning (N={n}, suggested={num_suggested}, seed='{hpo_seed}')")
+
+    original_code, original_kernel = files.read()
+
+    # 1. Extraction: which constants become hyperparameters (with ranges +
+    #    suggested configs) and a behaviour-preserving variant of mod.rs.
+    #    Agentic providers do this as a second agent pass (Fix 1); everyone else
+    #    via a single structured completion.
+    if args.provider in _AGENTIC_PROVIDERS:
+        parsed, ei, eo = _extract_hyperparameters_agentic(
+            args, backend, workdir, files, config, challenge_md,
+            parent_hyperparameters, num_suggested,
+        )
+    else:
+        parsed, ei, eo = _extract_hyperparameters_api(
+            args, model, api_key, config, challenge_md,
+            original_code, parent_hyperparameters, num_suggested,
+        )
+    in_tok += ei
+    out_tok += eo
+    if parsed is None:
+        print("  [HPO] extraction produced nothing usable — skipping tune")
+        return default_bench, None, in_tok, out_tok
+    print(f"  [HPO] hyperparameters: {[h['name'] for h in parsed['hyperparameters']]}")
+
+    # 2. Write the variant and build/smoke-test it on the HPO seed (default
+    #    config), with LLM compile-fix retries.
+    files.write(parsed["variant_code"], original_kernel)
+    if validate_code(parsed["variant_code"], config):
+        print("  [HPO] variant failed validation — restoring, skipping tune")
+        files.write(original_code, original_kernel)
+        return default_bench, None, in_tok, out_tok
+    compile_bench, build_err, _changed, ci, co = _benchmark_with_compile_fix(
+        args, model, api_key, config, server, files,
+        seed=hpo_seed, hyperparameters="{}",
+    )
+    in_tok += ci
+    out_tok += co
+    if compile_bench is None:
+        print(f"  [HPO] variant build failed: {build_err[:200]} — restoring, skipping tune")
+        files.write(original_code, original_kernel)
+        return default_bench, None, in_tok, out_tok
+
+    # 3. Random search on the (non-test) HPO seed.
+    def benchmark_fn(seed: str, hp_json: str) -> tuple[dict | None, str]:
+        return run_benchmark(args, config, server, seed=seed, hyperparameters=hp_json)
+
+    result = hpo.search(
+        benchmark_fn, parsed["hyperparameters"], parsed["suggested_configs"],
+        n=n, num_suggested=num_suggested, hpo_seed=hpo_seed, log=print,
+    )
+    winning = result["winning_configs"]  # {track_key: config} — a winner per track
+    if not winning:
+        print("  [HPO] search produced no per-track winners — keeping default")
+        files.write(original_code, original_kernel)
+        return default_bench, None, in_tok, out_tok
+
+    # 4. Score the per-track winners on the TEST seed (each track's instances run
+    #    under that track's winning config — benchmark.py selects per track from
+    #    the map). Keep them only if the aggregate tuned score strictly beats the
+    #    default there: search ran on a different seed, so the "default is in the
+    #    set" guarantee doesn't transfer. The keep/revert is one global decision
+    #    over the whole per-track map (not per track), preserving
+    #    tuned_score >= default_score with a single bit of test-seed selection.
+    tuned_bench, terr = run_benchmark(
+        args, config, server, hyperparameters=json.dumps(winning),
+    )
+    if tuned_bench is None:
+        print(f"  [HPO] final test-seed benchmark failed: {terr[:200]} — restoring, using default")
+        files.write(original_code, original_kernel)
+        return default_bench, None, in_tok, out_tok
+
+    tuned_score = tuned_bench.get("score")
+    tuned_feasible = bool(tuned_bench.get("feasible", False))
+    if tuned_score is None or not tuned_feasible or tuned_score <= default_score:
+        print(f"  [HPO] tuned score {tuned_score} did not beat default {default_score:.0f} "
+              "on the test seed — keeping default")
+        files.write(original_code, original_kernel)
+        return default_bench, None, in_tok, out_tok
+
+    print(f"  [HPO] tuned score {tuned_score:.0f} beats default {default_score:.0f} "
+          f"— publishing variant + per-track configs {json.dumps(winning)}")
+    return tuned_bench, winning, in_tok, out_tok
 
 
 def _fix_runtime_errors(
@@ -642,7 +912,11 @@ def _should_distill_tacit(
 
     For agentic providers we currently rely on the in-band prompt in
     `build_agentic_user_prompt` instead, unless
-    prompts.DRIVER_DISTILL_FOR_AGENTIC is flipped on."""
+    prompts.DRIVER_DISTILL_FOR_AGENTIC is flipped on.
+
+    Gated by the per-agent `tacit_write` config flag (default True)."""
+    if not tacit_write_enabled(config):
+        return False
     if is_new_best:
         return False
     limit = int(config.get("stagnation_limit") or 0)
@@ -1157,6 +1431,10 @@ def main() -> int:
     role = _normalize_role(agent_config.get("role"))
     print(f"Role: {role}")
 
+    # The hyperparameter-search gate's inputs (improvement history + parent
+    # config) come from /api/state each iteration — keyed by trajectory_id, so
+    # they survive restarts and adoption out of the inactive pool. See
+    # docs/hyperparameter-search-plan.md.
     iteration = 0
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
@@ -1183,10 +1461,19 @@ def main() -> int:
 
         # Re-read the contributor-owned role (run_fleet patches fleet.config.json
         # edits into this worktree's agent.config.json live). Log on change only.
-        live_role = _normalize_role(load_agent_config().get("role"))
+        _agent_cfg = load_agent_config()
+        live_role = _normalize_role(_agent_cfg.get("role"))
         if live_role != role:
             print(f"  [ROLE] role changed: {role} -> {live_role}")
             role = live_role
+
+        # Surface host-tunable HPO knobs (materialized into agent.config.json
+        # from fleet.config.json) onto `config`, which the gate/search read.
+        # Absent keys fall back to the defaults baked into _maybe_tune_hyperparameters.
+        for _hpo_key in ("hpo_min_improvements", "hpo_num_suggested_configs",
+                         "hpo_search_budget", "hpo_seed"):
+            if _hpo_key in _agent_cfg:
+                config[_hpo_key] = _agent_cfg[_hpo_key]
 
         try:
             swarm_cfg = server_get(f"{server}/api/swarm_config")
@@ -1488,6 +1775,25 @@ def main() -> int:
                 except Exception as e:
                     print(f"  Re-describe failed: {e} — using original hypothesis", file=sys.stderr)
 
+        # ── Hyperparameter search (gated) ──────────────────────
+        # `bench` here is the default-config score (test seed). If the gate is
+        # open and tuning beats the default on the test seed, `bench` becomes
+        # the tuned score and the variant + winning config are published.
+        # Capture the default (no-hyperparameters) score first: it's what the
+        # server stores to keep the HPO band default-vs-default. It equals the
+        # published score for untuned iterations and the pre-tuning score for
+        # tuned ones.
+        default_score = bench.get("score")
+        bench, winning_hyperparameters, hpo_in, hpo_out = _maybe_tune_hyperparameters(
+            args, model, api_key, config, server,
+            files, challenge_md, bench,
+            state.get("improvement_scores") or [],
+            state.get("best_hyperparameters"),
+            backend=backend, workdir=workdir,
+        )
+        iter_input_tokens += hpo_in
+        iter_output_tokens += hpo_out
+
         # ── Publish ────────────────────────────────────────────
         iter_cost = estimate_cost(model, {
             "input_tokens": iter_input_tokens,
@@ -1515,6 +1821,8 @@ def main() -> int:
                 output_tokens=iter_output_tokens,
                 estimated_cost=iter_cost,
                 agent_token=agent_token,
+                hyperparameters=winning_hyperparameters,
+                default_score=default_score,
             )
             is_new_best = result.get("is_new_best", False)
             if is_new_best:
@@ -1523,6 +1831,10 @@ def main() -> int:
                 print(f"  [PUBLISH] Recorded (not a new best)")
         except Exception as e:
             print(f"  [PUBLISH] FAILED: {e}")
+
+        # The HPO gate's improvement history is recorded server-side (this
+        # publish sets beats_trajectory_best) and re-read from /api/state next
+        # iteration — no local accumulation needed.
 
         status = "NEW BEST!" if is_new_best else f"score {_clean_score(bench.get('score', 0)):.0f}"
         feasible_str = "" if bench.get("feasible") else " (INFEASIBLE)"

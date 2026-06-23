@@ -236,6 +236,8 @@ def publish_results(
     *, input_tokens: int = 0, output_tokens: int = 0,
     estimated_cost: float = 0.0,
     agent_token: str | None = None,
+    hyperparameters: dict | None = None,
+    default_score: float | None = None,
 ) -> dict:
     code = read_algorithm(config)
     kernel_code = read_optional(kernel_path(config))
@@ -257,6 +259,17 @@ def publish_results(
     }
     if kernel_code:
         payload["kernel_code"] = kernel_code
+    # The winning hyperparameter config when this iteration was tuned (the
+    # score above is the tuned score), else None — the algorithm scored at its
+    # in-code defaults. Lets the dashboard / a resuming process recover the
+    # config the published score was achieved with.
+    if hyperparameters is not None:
+        payload["hyperparameters"] = hyperparameters
+    # The no-hyperparameters score; lets the server keep the HPO band
+    # default-vs-default (it differs from `score` only when this iteration was
+    # tuned). Omitted => server falls back to `score`.
+    if default_score is not None:
+        payload["default_score"] = default_score
     if bench.get("challenge_metrics") is not None:
         payload["challenge_metrics"] = bench["challenge_metrics"]
     # Publish carries the full algorithm source + bench artifacts and is the

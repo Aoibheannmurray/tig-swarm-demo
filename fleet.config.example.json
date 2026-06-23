@@ -3,6 +3,9 @@
   "username": "paste-your-username-from-the-host",
   "swarm_password": "paste-your-password-the-host-shared",
   "c3_api_key": "paste-your-c3-api-key-here",
+  "hpo_min_improvements": 4,
+  "hpo_num_suggested_configs": 5,
+  "hpo_search_budget": 13,
   "agents": [
     {
       "name": "my-claude-agent",
@@ -25,7 +28,8 @@
       "provider": "claude-code-agentic",
       "model": "claude-opus-4-7",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "l40",
+      "tacit_write": false
     },
     {
       "name": "ms-openrouter",

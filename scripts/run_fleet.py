@@ -83,10 +83,26 @@ _AGENT_CONFIG_KEYS = (
     "log_prompts",
     # Opt-in stricter Rust prompt for smaller/cheaper models (prompts.py).
     "detailed_prompts",
+    # Per-agent kill switch for tacit-knowledge writing (default True). Set
+    # false to stop this agent appending `- LLM:` lessons to its
+    # tacit_knowledge_personal.md (driver-side and in-band paths both gated).
+    "tacit_write",
     # Contributor-owned behavior role (explorer/exploiter). Materialized at
     # spawn AND re-synced live by the monitor loop so editing it in
     # fleet.config.json takes effect on the agent's next iteration.
     "role",
+    # Hyperparameter-search knobs (host-tunable; see
+    # docs/hyperparameter-search-plan.md). Set them once at the top level of
+    # fleet.config.json and every agent inherits them as fleet-wide defaults.
+    "hpo_min_improvements", "hpo_num_suggested_configs", "hpo_search_budget",
+    "hpo_seed",
+)
+
+# Top-level fleet keys that become fleet-wide defaults inherited by every agent
+# (via setdefault, so a per-agent override still wins).
+_FLEET_WIDE_DEFAULT_KEYS = (
+    "hpo_min_improvements", "hpo_num_suggested_configs", "hpo_search_budget",
+    "hpo_seed",
 )
 
 # Fleet-entry fields the monitor loop re-syncs into a running worktree's
@@ -185,6 +201,13 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
     if fleet_c3_api_key:
         for entry in agents:
             entry.setdefault("c3_api_key", fleet_c3_api_key)
+
+    # Fleet-wide hyperparameter-search defaults: a top-level key is inherited by
+    # every agent that doesn't set its own. setdefault keeps per-agent overrides.
+    for key in _FLEET_WIDE_DEFAULT_KEYS:
+        if key in data:
+            for entry in agents:
+                entry.setdefault(key, data[key])
 
     return server_url, username, swarm_password, agents, fleet_tacit
 

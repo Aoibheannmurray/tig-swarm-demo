@@ -41,7 +41,11 @@ logger = logging.getLogger("swarm")
 # is missing or unparseable. Add new tunables here so call sites stay
 # consistent — never inline an `int(config.get(KEY, "N"))` again.
 SWARM_DEFAULTS: dict[str, int] = {
-    "inactive_minutes": 20,
+    # 60, not 20: agentic / C3-benchmark iterations legitimately run 45+ min
+    # of wall-clock per cycle. A shorter window lets the periodic_stats sweep
+    # reap an actively-working agent's trajectory mid-iteration, so every
+    # publish lands on a fresh trajectory and trivially "beats" an empty best.
+    "inactive_minutes": 60,
     "stagnation_threshold": 2,
     "stagnation_limit": 5,
     "hypothesis_recall_threshold": 3,
@@ -351,6 +355,11 @@ async def get_agent_name(conn, agent_id: str) -> str:
 # for a healthy connection but short enough that a stuck one doesn't dam
 # the event stream during a busy publish burst.
 _WS_SEND_TIMEOUT_S = 2.0
+
+# How many recent trajectory improvement scores to return in /api/state for the
+# hyperparameter-search gate. Must comfortably exceed any host-set
+# hpo_min_improvements (the band floor is result[-min_improvements]).
+_IMPROVEMENT_HISTORY_LIMIT = 16
 
 
 class ConnectionManager:
@@ -1044,6 +1053,25 @@ async def get_state(
             # to detect a local rename (swarm.config.json contributor_name
             # diverging from server's agents.name) and POST /rename.
             self_agent_name = await get_agent_name(conn, agent_id)
+            # Winning hyperparameter config of the current trajectory best (when
+            # it was tuned), surfaced so the loop / dashboard can recover the
+            # config the best score was achieved with. None when scored at
+            # in-code defaults or on a freshly reset/seeded trajectory.
+            traj_best_hyperparameters = None
+            if not trajectory_reset and traj_best and traj_best.get("hyperparameters"):
+                try:
+                    traj_best_hyperparameters = json.loads(traj_best["hyperparameters"])
+                except (json.JSONDecodeError, TypeError):
+                    traj_best_hyperparameters = None
+            # Recent improvement scores for the active trajectory, keyed by its
+            # (adoption-preserved) trajectory_id, so the HPO gate survives
+            # restarts and adoption out of the inactive pool. Fresh starts get a
+            # new id with no experiments → []; adopted trajectories inherit the
+            # original id's real history.
+            active_trajectory_id = (acs or {}).get("current_trajectory_id")
+            improvement_scores = await db.get_recent_improvement_scores(
+                conn, active_trajectory_id, _IMPROVEMENT_HISTORY_LIMIT
+            )
             resp = {
                 "challenge": challenge,
                 "is_gpu": is_gpu,
@@ -1051,6 +1079,8 @@ async def get_state(
                 "best_score": global_best_score,
                 "best_algorithm_code": traj_best_code,
                 "best_experiment_id": traj_best_experiment_id,
+                "best_hyperparameters": traj_best_hyperparameters,
+                "improvement_scores": improvement_scores,
                 "current_trajectory_best": current_trajectory_best,
                 "my_runs": (acs or {}).get("experiments_completed") if acs else 0,
                 "my_improvements": (acs or {}).get("improvements") if acs else 0,
@@ -1307,15 +1337,18 @@ async def create_iteration(req: IterationCreate):
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
-                score, feasible,
+                score, default_score, feasible,
                 challenge_metrics, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_trajectory_best_pct, beats_trajectory_best,
                 trajectory_id, received_hint, inspiration_source_id,
                 inspiration_source_trajectory_id,
                 input_tokens, output_tokens, estimated_cost, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
              req.score,
+             # default_score falls back to the published score for untuned
+             # iterations (where they are equal) and legacy clients that omit it.
+             req.default_score if req.default_score is not None else req.score,
              1 if req.feasible else 0, challenge_metrics_json,
              req.notes, solution_data_json, track_scores_json,
              delta_vs_best_pct, delta_vs_trajectory_best_pct,
@@ -1376,6 +1409,9 @@ async def create_iteration(req: IterationCreate):
                 updated_at=timestamp, trajectory_id=trajectory_id,
                 track_scores=track_scores_json,
                 kernel_code=req.kernel_code,
+                hyperparameters=(
+                    json.dumps(req.hyperparameters) if req.hyperparameters else None
+                ),
             )
         else:
             await db.increment_agent_challenge_counters(

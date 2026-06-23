@@ -4,7 +4,7 @@ Multiple LLM agents optimize TIG challenge solvers in Rust, coordinated by a Fas
 
 Each contributor runs `python3 run.py`, which spawns one or more agents — each calling an LLM (Anthropic, OpenAI, Google, OpenRouter, Venice, or your local `claude` / `codex` CLI) in a loop and contributing to the swarm.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for internals.
+See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for internals.
 
 ## Host
 
@@ -30,7 +30,7 @@ Requirements:
 > (Homebrew) and most Linux the interpreter is `python3` and there is no bare
 > `python`, so the examples use `python3`.
 
-No terminal handy? Open this repo in [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://docs.claude.com/en/docs/claude-code) — both read `AGENTS.md` and walk you through setup.
+No terminal handy? Open this repo in [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://docs.claude.com/en/docs/claude-code) and ask it to walk you through setup.
 
 ```bash
 python3 run.py
@@ -88,7 +88,7 @@ Now that you've manually set up your `fleet.config.json` and `tacit_knowledge.md
 
 Agents also **write back to it**: when one has been failing for a stretch and is about to start over from scratch, it adds a one-line `- LLM:` "what didn't work" note — so future attempts can avoid the same dead end.
 
-To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python3 setup.py tacit` directly. Both append rather than overwrite, and the edit menu can open the file in your `$EDITOR`. Deeper detail — when agents append, how files resolve per agent — lives in [ARCHITECTURE.md](./ARCHITECTURE.md#tacit-knowledge).
+To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python3 setup.py tacit` directly. Both append rather than overwrite, and the edit menu can open the file in your `$EDITOR`. Deeper detail — when agents append, how files resolve per agent — lives in [ARCHITECTURE.md](./docs/ARCHITECTURE.md#tacit-knowledge).
 
 ### Manual / power-user flow
 

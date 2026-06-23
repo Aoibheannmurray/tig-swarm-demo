@@ -1,3 +1,15 @@
 {
-  "model": "opus"
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Skill(update-config)",
+      "Edit",
+      "Write",
+      "MultiEdit",
+      "NotebookEdit",
+      "Bash",
+      "WebSearch"
+    ],
+    "defaultMode": "acceptEdits"
+  }
 }

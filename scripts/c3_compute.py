@@ -173,6 +173,8 @@ def _write_c3_project(
     server: str,
     c3_time: str,
     image: str,
+    seed: str | None = None,
+    hyperparameters: str | None = None,
 ) -> str:
     run_id = uuid.uuid4().hex[:10]
     challenge = config.get("challenge", "unknown")
@@ -207,6 +209,15 @@ fi
     if tig_user_id:
         identity_export = f"export TIG_USER_ID={_yaml_quote(tig_user_id)}"
 
+    # Hyperparameter-search hooks (see benchmark.py): forwarded into the c3 job
+    # env so a remote benchmark tunes/scores with the right seed and solver
+    # hyperparameters.
+    hpo_exports = ""
+    if seed is not None:
+        hpo_exports += f"\nexport TIG_BENCH_SEED={_yaml_quote(seed)}"
+    if hyperparameters is not None:
+        hpo_exports += f"\nexport TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}"
+
     runner = f"""\
 #!/bin/bash
 set -euo pipefail
@@ -216,7 +227,7 @@ mkdir -p "${{C3_ARTIFACTS_DIR}}" c3-artifacts
 
 export TIG_IN_DOCKER=1
 export TIG_SWARM_SERVER={_yaml_quote(server)}
-{identity_export}
+{identity_export}{hpo_exports}
 export PATH="${{HOME:-/root}}/.cargo/bin:/root/.cargo/bin:${{PATH}}"
 
 needs_apt=0
@@ -469,7 +480,10 @@ def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
 # ── Run benchmark on C3 ───────────────────────────────────────────
 
 
-def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tuple[dict | None, str]:
+def run_benchmark_c3(
+    args: argparse.Namespace, config: dict, server: str,
+    seed: str | None = None, hyperparameters: str | None = None,
+) -> tuple[dict | None, str]:
     if shutil.which("c3") is None:
         return None, "[C3] c3 CLI not found. Install from https://cthree.cloud/install.sh"
 
@@ -499,7 +513,10 @@ def run_benchmark_c3(args: argparse.Namespace, config: dict, server: str) -> tup
         stage = Path(tmp)
         try:
             _create_workspace(stage, cfg, server)
-            _write_c3_project(stage, cfg, server, args.c3_time, image)
+            _write_c3_project(
+                stage, cfg, server, args.c3_time, image,
+                seed=seed, hyperparameters=hyperparameters,
+            )
         except Exception as exc:
             return None, f"[C3] Failed to create staged project: {exc}"
 

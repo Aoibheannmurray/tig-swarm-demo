@@ -226,7 +226,7 @@ def build(challenge: str) -> tuple[str, str, str]:
 
 
 def materialize_instances(
-    challenge: str, tracks: dict, generator_bin: str
+    challenge: str, tracks: dict, generator_bin: str, seed: str | None = None
 ) -> list[tuple[str, str, Path]]:
     """Generate instances per the active swarm config, cached on disk.
 
@@ -236,11 +236,19 @@ def materialize_instances(
     is skipped when the cache already has at least `count` files for the
     track — re-running the wizard with smaller counts won't regenerate.
 
+    `seed` overrides the seed read from `tracks` (used by the hyperparameter
+    search to materialise a fresh, non-test instance pool). Non-`"test"` seeds
+    are cached under `datasets/<challenge>/generated/<seed>/<track_key>/` so a
+    search never overwrites the scored `"test"` instances.
+
     Returns a list of `(track_key, instance_filename, instance_path)`.
     """
-    seed = str(tracks.get("seed", "test"))
+    if seed is None:
+        seed = str(tracks.get("seed", "test"))
     out: list[tuple[str, str, Path]] = []
     base = ROOT_DIR / "datasets" / challenge / "generated"
+    if seed != "test":
+        base = base / seed
     for track_key, count in tracks.items():
         if track_key == "seed" or not isinstance(count, int) or count <= 0:
             continue
@@ -291,6 +299,7 @@ def parse_evaluator_score(eval_result: subprocess.CompletedProcess) -> tuple[flo
 def run_instance(
     challenge: str, track_key: str, instance_id: str, instance_path: Path,
     solver: str, evaluator: str, timeout: int,
+    hyperparameters: str | None = None,
 ) -> dict:
     with tempfile.NamedTemporaryFile(suffix=".sol", delete=False) as tmp:
         sol_path = tmp.name
@@ -298,10 +307,13 @@ def run_instance(
         # Wall-clock the solver run only (not the evaluator) so `elapsed`
         # matches the GPU path's semantics — algorithm run time per nonce.
         timed_out = False
+        solver_cmd = [solver, challenge, str(instance_path), sol_path]
+        if hyperparameters:
+            solver_cmd += ["--hyperparameters", hyperparameters]
         start = time.monotonic()
         try:
             subprocess.run(
-                [solver, challenge, str(instance_path), sol_path],
+                solver_cmd,
                 capture_output=True, text=True, timeout=timeout,
             )
         except subprocess.TimeoutExpired:
@@ -465,6 +477,14 @@ def _reexec_in_docker(cfg: dict) -> int:
     server = os.environ.get("TIG_SWARM_SERVER")
     if server:
         env_flags += ["-e", f"TIG_SWARM_SERVER={server}"]
+    # Forward hyperparameter-search hooks across the Docker boundary so a
+    # benchmark launched by the agent loop tunes/scores with the right
+    # seed and solver hyperparameters (subprocess args, not a shell, so the
+    # JSON value needs no quoting).
+    for _var in ("TIG_BENCH_SEED", "TIG_HYPERPARAMETERS"):
+        _val = os.environ.get(_var)
+        if _val is not None:
+            env_flags += ["-e", f"{_var}={_val}"]
 
     suffix = "gpu" if is_gpu_challenge(cfg) else "cpu"
     cmd = [
@@ -554,13 +574,17 @@ def build_gpu(challenge: str) -> tuple[str, str]:
 def run_gpu_instance(
     challenge: str, track_key: str, instance_index: int,
     binary: str, ptx: str, seed: str, timeout: int,
+    hyperparameters: str | None = None,
 ) -> dict:
     """Run one GPU instance. Returns same shape as run_instance()."""
+    cmd = [binary, challenge, track_key,
+           "--seed", seed, "--index", str(instance_index),
+           "--timeout", str(timeout), "--ptx", ptx]
+    if hyperparameters:
+        cmd += ["--hyperparameters", hyperparameters]
     try:
         result = subprocess.run(
-            [binary, challenge, track_key,
-             "--seed", seed, "--index", str(instance_index),
-             "--timeout", str(timeout), "--ptx", ptx],
+            cmd,
             capture_output=True, text=True,
             timeout=timeout + 30,
         )
@@ -1284,6 +1308,42 @@ def _resolve_user_id() -> str:
     return "unknown"
 
 
+def _is_per_track_hyperparameters(parsed: object) -> bool:
+    """True if `parsed` is a per-track map {track_key: {param: value}} rather than
+    a flat {param: value} config.
+
+    Disambiguation is by value type: a flat config's values are scalars
+    (int/float/str/bool — see hpo.sample_config), while a per-track map's values
+    are all dicts. An empty dict is treated as flat (the default config).
+    """
+    return (
+        isinstance(parsed, dict)
+        and len(parsed) > 0
+        and all(isinstance(v, dict) for v in parsed.values())
+    )
+
+
+def _track_hyperparameters(raw: str | None, track_key: str) -> str | None:
+    """Resolve the --hyperparameters JSON string to pass for one track.
+
+    `raw` (the TIG_HYPERPARAMETERS value) is either a flat config applied to
+    every track, or a per-track map {track_key: config}. The hyperparameter
+    search runs flat configs uniformly; the final tuned-score benchmark passes a
+    per-track map (a winner per track — see docs/hyperparameter-search-plan.md).
+    For a per-track map this selects the track's own config (a missing track =>
+    the default config {}). Flat configs and unparseable strings pass through.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return raw  # let the solver surface the parse error
+    if _is_per_track_hyperparameters(parsed):
+        return json.dumps(parsed.get(track_key, {}))
+    return raw
+
+
 def main() -> int:
     print("Loading swarm config…", file=sys.stderr)
     cfg = load_swarm_config()
@@ -1314,7 +1374,26 @@ def main() -> int:
     # with downstream callers that still read it.
     _direction = cfg.get("scoring_direction", "max")  # noqa: F841
     tracks = cfg.get("tracks") or {}
-    seed = str(tracks.get("seed", "test"))
+    # Hyperparameter-search hooks, set by the agent loop and forwarded across
+    # the Docker boundary by _reexec_in_docker:
+    #   TIG_BENCH_SEED       — override the instance seed. The search runs on a
+    #                          non-test seed so tuning never touches the scored
+    #                          ("test"-seeded) instances; the winning config is
+    #                          then re-scored on the test seed.
+    #   TIG_HYPERPARAMETERS  — JSON string passed to the solver as
+    #                          --hyperparameters. Absent => solver uses its
+    #                          in-code defaults (today's behaviour, the
+    #                          "default score"). Either a flat {param: value}
+    #                          config applied to every track, or a per-track map
+    #                          {track_key: {param: value}} (a winner per track,
+    #                          selected per instance by _track_hyperparameters).
+    seed_override = os.environ.get("TIG_BENCH_SEED")
+    seed = seed_override or str(tracks.get("seed", "test"))
+    hyperparameters = os.environ.get("TIG_HYPERPARAMETERS") or None
+    if seed_override:
+        print(f"  [BENCH] seed override: {seed}", file=sys.stderr)
+    if hyperparameters:
+        print(f"  [BENCH] hyperparameters: {hyperparameters}", file=sys.stderr)
 
     results: list[dict] = []
 
@@ -1335,7 +1414,8 @@ def main() -> int:
         print(f"  {len(instance_list)} GPU instance(s) total (sequential)", file=sys.stderr)
 
         for track_key, idx in instance_list:
-            r = run_gpu_instance(challenge, track_key, idx, binary, ptx, seed, timeout)
+            r = run_gpu_instance(challenge, track_key, idx, binary, ptx, seed, timeout,
+                                 _track_hyperparameters(hyperparameters, track_key))
             _log_instance_result(r, timeout)
             results.append(r)
     else:
@@ -1343,7 +1423,7 @@ def main() -> int:
         solver, evaluator, generator = build(challenge)
 
         print(f"Materialising instances under datasets/{challenge}/generated/…", file=sys.stderr)
-        instances = materialize_instances(challenge, tracks, generator)
+        instances = materialize_instances(challenge, tracks, generator, seed)
         if not instances:
             print(
                 "error: no instances to run. Run `python setup.py` to configure this clone, "
@@ -1356,7 +1436,8 @@ def main() -> int:
         workers = min(len(instances), min(4, os.cpu_count() or 1))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(run_instance, challenge, tk, iid, ipath, solver, evaluator, timeout): iid
+                pool.submit(run_instance, challenge, tk, iid, ipath, solver, evaluator, timeout,
+                            _track_hyperparameters(hyperparameters, tk)): iid
                 for tk, iid, ipath in instances
             }
             for fut in as_completed(futures):

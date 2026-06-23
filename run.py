@@ -44,7 +44,7 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
     can't drive the interactive wizard (the guided capture asks six
     questions and the edit menu opens $EDITOR), so the right pattern
     there is for the assistant to write `tacit_knowledge.md` directly via
-    its file-write tools before launching `run.py`. See AGENTS.md.
+    its file-write tools before launching `run.py`.
 
     First-run interactive experience (no source file has real content
     yet): skip the y/N preamble and go straight to the create wizard —
