@@ -91,6 +91,10 @@ _AGENT_CONFIG_KEYS = (
     # spawn AND re-synced live by the monitor loop so editing it in
     # fleet.config.json takes effect on the agent's next iteration.
     "role",
+    # API-mode edit strategy for SINGLE-FILE algorithms: "full" (default,
+    # whole-file replacement) or "search_replace" (soft SEARCH/REPLACE blocks).
+    # Multi-file algorithms and exploiters always use search/replace regardless.
+    "edit_mode",
     # Hyperparameter-search knobs (host-tunable; see
     # docs/hyperparameter-search-plan.md). Set them once at the top level of
     # fleet.config.json and every agent inherits them as fleet-wide defaults.

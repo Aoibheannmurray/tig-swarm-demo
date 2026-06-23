@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from challenge_files import read_algorithm, read_optional, kernel_path
+from challenge_files import read_algorithm, read_optional, kernel_path, read_files
 
 # Network-level errors that we'll log-and-swallow on fire-and-forget calls
 # like heartbeats/messages. Programmer errors (KeyError, TypeError, etc.)
@@ -238,6 +238,7 @@ def publish_results(
     agent_token: str | None = None,
     hyperparameters: dict | None = None,
     default_score: float | None = None,
+    role: str | None = None,
 ) -> dict:
     code = read_algorithm(config)
     kernel_code = read_optional(kernel_path(config))
@@ -257,8 +258,21 @@ def publish_results(
         "output_tokens": output_tokens,
         "estimated_cost": estimated_cost,
     }
+    # Tag the hypothesis with the agent's role (explorer/exploiter) at publish
+    # time so the server/dashboard can attribute work by role. Omitted => server
+    # treats it as unset.
+    if role:
+        payload["role"] = role
     if kernel_code:
         payload["kernel_code"] = kernel_code
+    # Full multi-file algorithm as a {relpath: content} map so multi-file
+    # algorithms round-trip intact (seed pool / adoption / inspiration). Only
+    # send it when it carries more than the single entry file — a single-file
+    # algorithm is fully represented by `algorithm_code` above, so omitting the
+    # map keeps the payload small and old servers happy.
+    file_map = read_files(config)
+    if len(file_map) > 1:
+        payload["algorithm_files"] = file_map
     # The winning hyperparameter config when this iteration was tuned (the
     # score above is the tuned score), else None — the algorithm scored at its
     # in-code defaults. Lets the dashboard / a resuming process recover the

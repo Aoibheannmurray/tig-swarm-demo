@@ -88,6 +88,7 @@ def _read_json(path: Path) -> dict:
 
 from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
+import challenge_files
 from challenge_files import (
     ChallengeFiles,
     ensure_super_import,
@@ -117,6 +118,9 @@ from prompts import (
     build_redescribe_hypothesis_prompt,
     build_redescribe_system_prompt,
     build_runtime_fix_prompt,
+    build_search_replace_repair_prompt,
+    build_search_replace_system_prompt,
+    build_search_replace_user_prompt,
     build_tacit_distillation_prompts,
     parse_hypothesis,
     parse_tacit_distillation,
@@ -124,6 +128,7 @@ from prompts import (
 import prompts as _prompts
 import agentic_backends
 import agentic_sandbox
+import search_replace
 import hpo
 from c3_compute import run_benchmark_c3
 
@@ -312,6 +317,109 @@ def run_benchmark(
 # ── Extracted iteration helpers ────────────────────────────────────
 
 
+def _use_search_replace(role: str, file_map: dict, config: dict) -> bool:
+    """Whether this API-mode iteration should edit via search/replace rather
+    than full-file replacement. True when any of:
+      - exploiter role (exploiters always make localized search/replace edits),
+      - the algorithm spans multiple files (whole-file rewrites are wasteful /
+        often impossible within token limits),
+      - the agent opted in via `edit_mode: search_replace` in its config.
+    Single-file explorers default to full-file replacement (edit_mode 'full').
+
+    Never used when there's nothing concrete to edit (empty / stub algorithm):
+    a bootstrap must full-write a complete implementation, not patch a stub.
+    """
+    if not isinstance(file_map, dict) or not file_map:
+        return False
+    # A lone stub file can't be search/replaced — that's a bootstrap.
+    if len(file_map) == 1 and is_stub_code(next(iter(file_map.values()))):
+        return False
+    if role == "exploiter":
+        return True
+    if len(file_map) > 1:
+        return True
+    return str(config.get("edit_mode") or "").strip().lower() == "search_replace"
+
+
+# Bounded LLM repair rounds for search/replace blocks that don't match. After
+# these, any still-unmatched blocks are skipped (the compile-fix loop catches
+# anything that breaks the build).
+_SR_REPAIR_ROUNDS = 2
+
+
+def _generate_code_search_replace(
+    args: argparse.Namespace, model: str, api_key: str,
+    state: dict, hypothesis: dict, config: dict,
+    challenge_md: str, files: ChallengeFiles,
+    *, role: str,
+) -> tuple[str | None, str | None, int, int]:
+    """Mutate the algorithm with soft SEARCH/REPLACE edits.
+
+    Reads the current files-map from disk (seeded with the best at loop top),
+    asks the model for blocks, applies them (fuzzy match), runs a bounded repair
+    pass on misses, skips whatever still won't match, then writes the edited map
+    back to disk. Returns (entry_code, kernel, input_tokens, output_tokens).
+    """
+    input_tokens = output_tokens = 0
+    file_map = files.read_files()
+    if not file_map:
+        print("  [SR] No files on disk to edit — skipping")
+        return None, None, 0, 0
+
+    system = build_search_replace_system_prompt(challenge_md, config, role=role)
+    user = build_search_replace_user_prompt(file_map, hypothesis, config, role=role)
+    print(f"  [SR] Generating search/replace edits via {args.provider}/{model}…")
+
+    applied_any = False
+    for round_i in range(_SR_REPAIR_ROUNDS + 1):
+        try:
+            response, usage = _call_llm_logged(
+                "code", config, args.provider, model, api_key, system, user, args.api_base,
+            )
+            input_tokens += usage["input_tokens"]
+            output_tokens += usage["output_tokens"]
+        except Exception as e:
+            print(f"  [SR] generation failed: {e}")
+            break
+
+        blocks = search_replace.parse_blocks(response)
+        if not blocks:
+            print("  [SR] model returned no search/replace blocks")
+            break
+
+        file_map, misses = search_replace.apply_blocks(file_map, blocks)
+        applied = len(blocks) - len(misses)
+        applied_any = applied_any or applied > 0
+        print(f"  [SR] applied {applied}/{len(blocks)} blocks"
+              + (f", {len(misses)} unmatched" if misses else ""))
+        if not misses:
+            break
+        if round_i < _SR_REPAIR_ROUNDS:
+            print(f"  [SR] repair round {round_i + 1}/{_SR_REPAIR_ROUNDS}…")
+            user = build_search_replace_repair_prompt(
+                file_map, search_replace.format_misses(misses), config
+            )
+        else:
+            print(f"  [SR] skipping {len(misses)} still-unmatched block(s)")
+
+    if not applied_any:
+        print("  [SR] no edits applied — skipping iteration")
+        return None, None, input_tokens, output_tokens
+
+    entry_code = ensure_super_import(file_map.get(files.entry_name, ""))
+    file_map[files.entry_name] = entry_code
+    violation = validate_code(entry_code, config)
+    if violation:
+        print(f"  [SR] validation failed after edits: {violation} — skipping")
+        return None, None, input_tokens, output_tokens
+
+    files.write_files(file_map)
+    kernel_name = Path(config["kernel_path"]).name if config.get("kernel_path") else ""
+    kernel = file_map.get(kernel_name, "") if kernel_name else ""
+    print(f"  [SR] wrote {len(file_map)} file(s)")
+    return entry_code, kernel, input_tokens, output_tokens
+
+
 def _generate_code(
     args: argparse.Namespace, model: str, api_key: str,
     state: dict, hypothesis: dict, config: dict,
@@ -321,10 +429,18 @@ def _generate_code(
     """LLM code generation with retry on validation failure.
 
     Role only steers the prompt guidance (explorer vs exploiter); it no longer
-    gates the candidate on similarity to the starting code.
+    gates the candidate on similarity to the starting code. Exploiters,
+    multi-file algorithms, and `edit_mode: search_replace` agents go through the
+    soft search/replace path; everyone else does full-file replacement.
 
     Returns (code, kernel, input_tokens, output_tokens).
     """
+    if _use_search_replace(role, files.read_files(), config):
+        return _generate_code_search_replace(
+            args, model, api_key, state, hypothesis, config,
+            challenge_md, files, role=role,
+        )
+
     input_tokens = 0
     output_tokens = 0
     max_attempts = 3
@@ -514,13 +630,17 @@ def _benchmark_with_compile_fix(
 
 def _hpo_gate_open(
     config: dict, default_bench: dict, improvement_scores: list[float],
+    has_tuned: bool,
 ) -> bool:
     """Should this candidate be hyperparameter-tuned? (see the plan doc)
 
-    Gate: the trajectory has had >= min_improvements improvements AND the
-    candidate's default score is within the band (>= the min_improvements-th-
-    previous best improvement) AND the candidate is feasible. Both CPU and GPU
-    solver paths accept --hyperparameters, so GPU challenges tune too.
+    Available to BOTH roles. The candidate must be feasible and the trajectory
+    must have had >= min_improvements improvements. Then:
+      - the FIRST time a mature trajectory is eligible (`has_tuned` is False),
+        the gate opens automatically — the band check is skipped that once;
+      - thereafter it falls back to the band: the candidate's default score must
+        be >= the min_improvements-th-previous improvement's default score.
+    Both CPU and GPU solver paths accept --hyperparameters, so GPU tunes too.
     """
     min_improvements = int(config.get("hpo_min_improvements", 4))
     score = default_bench.get("score")
@@ -528,6 +648,10 @@ def _hpo_gate_open(
         return False
     if len(improvement_scores) < min_improvements:
         return False
+    if not has_tuned:
+        print(f"  [HPO] gate open: first tune for this trajectory "
+              f"({len(improvement_scores)} improvements) — band check waived")
+        return True
     band_floor = improvement_scores[-min_improvements]
     if score < band_floor:
         print(f"  [HPO] gate closed: default score {score:.0f} below band floor "
@@ -638,6 +762,7 @@ def _maybe_tune_hyperparameters(
     files: ChallengeFiles, challenge_md: str,
     default_bench: dict, improvement_scores: list[float],
     parent_hyperparameters: dict | None,
+    has_tuned: bool = False,
     backend: "agentic_backends.AgenticBackend | None" = None,
     workdir: "Path | None" = None,
 ) -> tuple[dict, dict | None, int, int]:
@@ -654,7 +779,7 @@ def _maybe_tune_hyperparameters(
     """
     in_tok = 0
     out_tok = 0
-    if not _hpo_gate_open(config, default_bench, improvement_scores):
+    if not _hpo_gate_open(config, default_bench, improvement_scores, has_tuned):
         return default_bench, None, in_tok, out_tok
 
     num_suggested = int(config.get("hpo_num_suggested_configs", 5))
@@ -718,13 +843,16 @@ def _maybe_tune_hyperparameters(
         files.write(original_code, original_kernel)
         return default_bench, None, in_tok, out_tok
 
-    # 4. Score the per-track winners on the TEST seed (each track's instances run
-    #    under that track's winning config — benchmark.py selects per track from
-    #    the map). Keep them only if the aggregate tuned score strictly beats the
-    #    default there: search ran on a different seed, so the "default is in the
-    #    set" guarantee doesn't transfer. The keep/revert is one global decision
-    #    over the whole per-track map (not per track), preserving
-    #    tuned_score >= default_score with a single bit of test-seed selection.
+    # 4. Adopt the per-track winning map as the trajectory's new default
+    #    hyperparameters and score the variant on the TEST seed under that map
+    #    (benchmark.py selects each track's config per instance). The tuned score
+    #    is published UNCONDITIONALLY — no "must beat the default" revert. The
+    #    only safety is feasibility: an infeasible/missing tuned result can't be
+    #    published (it would tank the trajectory), so we fall back to the default
+    #    in that case. Because the default config {} is in every track's search
+    #    set, each track's winner is >= default on the HPO seed; a tuned score
+    #    below the untuned default can only arise from the test-vs-HPO seed
+    #    mismatch, and per the design we accept that.
     tuned_bench, terr = run_benchmark(
         args, config, server, hyperparameters=json.dumps(winning),
     )
@@ -735,14 +863,16 @@ def _maybe_tune_hyperparameters(
 
     tuned_score = tuned_bench.get("score")
     tuned_feasible = bool(tuned_bench.get("feasible", False))
-    if tuned_score is None or not tuned_feasible or tuned_score <= default_score:
-        print(f"  [HPO] tuned score {tuned_score} did not beat default {default_score:.0f} "
-              "on the test seed — keeping default")
+    if tuned_score is None or not tuned_feasible:
+        print(f"  [HPO] tuned result infeasible/missing on the test seed "
+              "— restoring, using default")
         files.write(original_code, original_kernel)
         return default_bench, None, in_tok, out_tok
 
-    print(f"  [HPO] tuned score {tuned_score:.0f} beats default {default_score:.0f} "
-          f"— publishing variant + per-track configs {json.dumps(winning)}")
+    delta = tuned_score - default_score
+    print(f"  [HPO] tuned score {tuned_score:.0f} (default {default_score:.0f}, "
+          f"{'+' if delta >= 0 else ''}{delta:.0f}) — publishing variant + per-track "
+          f"configs {json.dumps(winning)}")
     return tuned_bench, winning, in_tok, out_tok
 
 
@@ -882,19 +1012,23 @@ def _seed_worktree_files(
     there before the agent runs. Same for kernels.cu on GPU challenges.
     Also copies .swarm-cache.json across (benchmark.py reads it).
     """
-    best_code = state.get("best_algorithm_code") or ""
-    best_kernel = state.get("best_kernel_code") or ""
-    algo_rel = config["algorithm_path"]
-    algo_path = workdir / algo_rel
-    algo_path.parent.mkdir(parents=True, exist_ok=True)
-    if best_code:
-        algo_path.write_text(best_code, encoding="utf-8")
-
-    kernel_rel = config.get("kernel_path")
-    if files.is_gpu and kernel_rel and best_kernel:
-        kp = workdir / kernel_rel
-        kp.parent.mkdir(parents=True, exist_ok=True)
-        kp.write_text(best_kernel, encoding="utf-8")
+    # Prefer the multi-file map; fall back to the legacy single-file (+kernel)
+    # fields so a server/state that predates files-map still seeds correctly.
+    file_map = _state_files_map(state, config)
+    if file_map:
+        challenge_files.write_files(file_map, config, base=workdir)
+    else:
+        best_code = state.get("best_algorithm_code") or ""
+        algo_path = workdir / config["algorithm_path"]
+        algo_path.parent.mkdir(parents=True, exist_ok=True)
+        if best_code:
+            algo_path.write_text(best_code, encoding="utf-8")
+        kernel_rel = config.get("kernel_path")
+        best_kernel = state.get("best_kernel_code") or ""
+        if files.is_gpu and kernel_rel and best_kernel:
+            kp = workdir / kernel_rel
+            kp.parent.mkdir(parents=True, exist_ok=True)
+            kp.write_text(best_kernel, encoding="utf-8")
 
     agentic_sandbox.seed_worktree_config(workdir)
 
@@ -994,7 +1128,8 @@ def _distill_tacit_if_due(
 def _read_worktree_files(
     workdir: Path, files: ChallengeFiles, config: dict,
 ) -> tuple[str, str]:
-    """Read whatever the agent left on disk in the worktree."""
+    """Read whatever the agent left on disk in the worktree (entry file +
+    optional kernel). For multi-file algorithms use `_read_worktree_map`."""
     algo_path = workdir / config["algorithm_path"]
     code = algo_path.read_text(encoding="utf-8", errors="replace") if algo_path.exists() else ""
     kernel = ""
@@ -1003,6 +1138,30 @@ def _read_worktree_files(
         if kp.exists():
             kernel = kp.read_text(encoding="utf-8", errors="replace")
     return code, kernel
+
+
+def _read_worktree_map(workdir: Path, config: dict) -> dict[str, str]:
+    """Read the full {relpath: content} algorithm map the agent left on disk."""
+    return challenge_files.read_files(config, base=workdir)
+
+
+def _state_files_map(state: dict, config: dict) -> dict[str, str]:
+    """The algorithm files-map from server state, with single-file fallback.
+
+    Prefers `best_algorithm_files` (the multi-file map). Falls back to the
+    legacy single-file (`best_algorithm_code`) + optional kernel
+    (`best_kernel_code`) so older server state still works."""
+    fm = state.get("best_algorithm_files")
+    if isinstance(fm, dict) and fm:
+        return dict(fm)
+    out: dict[str, str] = {}
+    code = state.get("best_algorithm_code") or ""
+    if code:
+        out[challenge_files.entry_name(config)] = code
+    kernel = state.get("best_kernel_code") or ""
+    if kernel and config.get("kernel_path"):
+        out[Path(config["kernel_path"]).name] = kernel
+    return out
 
 
 def _run_agentic_iteration(
@@ -1540,6 +1699,9 @@ def main() -> int:
         # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
         best_kernel = state.get("best_kernel_code") or ""
+        # Full multi-file best (single-file collapses to {entry: best_code});
+        # used to seed the main checkout so multi-file algorithms land intact.
+        best_file_map = _state_files_map(state, config)
         files = ChallengeFiles(config)
         bootstrap = is_stub_code(best_code)
 
@@ -1554,7 +1716,9 @@ def main() -> int:
             continue
 
         if best_code and not bootstrap:
-            files.write(best_code, best_kernel)
+            # write_files prunes stale source files so a multi-file best lands
+            # intact; for a single-file best the map is just {entry: best_code}.
+            files.write_files(best_file_map)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
             if files.is_gpu and not best_kernel:
                 print(f"  [FILES] No kernel code from server — using local kernels.cu")
@@ -1600,12 +1764,19 @@ def main() -> int:
                     files.write(best_code, best_kernel)
                 continue
 
-            # Copy the worktree's edited code into the main checkout so the
-            # official benchmark sees it. No compile-fix retry: the agent
+            # Copy the worktree's edited files into the main checkout so the
+            # official benchmark sees them. No compile-fix retry: the agent
             # ran `cargo check` itself before stopping. If the official
             # build still fails (e.g. feature-flag mismatch the agent
             # missed), we restore and continue without escalating.
-            files.write(code, new_kernel)
+            # Read the FULL worktree map (multi-file aware), then apply the
+            # validated/`use super::*;`-fixed entry file over it before writing.
+            agent_map = _read_worktree_map(workdir, config)
+            if agent_map:
+                agent_map[files.entry_name] = code
+                files.write_files(agent_map)
+            else:
+                files.write(code, new_kernel)
             print(f"  [FILES] {files.describe_write(code, new_kernel)}")
 
             compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
@@ -1789,6 +1960,7 @@ def main() -> int:
             files, challenge_md, bench,
             state.get("improvement_scores") or [],
             state.get("best_hyperparameters"),
+            has_tuned=bool(state.get("has_tuned")),
             backend=backend, workdir=workdir,
         )
         iter_input_tokens += hpo_in
@@ -1823,6 +1995,7 @@ def main() -> int:
                 agent_token=agent_token,
                 hyperparameters=winning_hyperparameters,
                 default_score=default_score,
+                role=role,
             )
             is_new_best = result.get("is_new_best", False)
             if is_new_best:

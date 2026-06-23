@@ -525,8 +525,14 @@ def _build_agent(
     # says nothing about capability. Frontier models are left without the flag
     # (they don't need the verbosity). Contributors can override either way by
     # editing the flag in fleet.config.json.
-    if tiers.classify_tier(provider, model) == "standard":
+    tier = tiers.classify_tier(provider, model)
+    if tier == "standard":
         entry["detailed_prompts"] = True
+    # Default role from tier: frontier → explorer (ambitious rewrites, fills the
+    # seed pool), standard → exploiter (localized search/replace edits + HPO).
+    # Role is contributor-owned and hot-reloads, so editing `role` in
+    # fleet.config.json overrides this for either tier at any time.
+    entry["role"] = tiers.role_for_tier(tier)
     return entry
 
 

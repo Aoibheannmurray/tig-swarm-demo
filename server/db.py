@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     parent_hypothesis_id TEXT,
     program_id TEXT,
     target_best_experiment_id TEXT,
+    role TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
@@ -262,10 +263,10 @@ CREATE INDEX IF NOT EXISTS idx_acs_active ON agent_challenge_state(challenge, la
 -- Covers get_baseline_score: WHERE feasible=1 AND challenge=? ORDER BY created_at ASC LIMIT 1.
 -- Called from periodic_stats per-challenge, /api/state per fetch, /api/iterations per publish.
 CREATE INDEX IF NOT EXISTS idx_exp_baseline ON experiments(challenge, feasible, created_at);
--- Lookup seeds for a challenge, and enforce one seed per (challenge, tag,
--- source) so auto-harvest's INSERT OR IGNORE keeps first-feasible-per-tag.
+-- Lookup seeds for a challenge. Diversity is now driven by code-similarity
+-- admission (server/seed_diversity.py), NOT a per-(tag, source) unique index —
+-- the old idx_seed_pool_dedup is dropped in the init_db migrations.
 CREATE INDEX IF NOT EXISTS idx_seed_pool_lookup ON seed_pool(challenge, strategy_tag);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_seed_pool_dedup ON seed_pool(challenge, strategy_tag, source);
 """
 
 DEFAULT_CONFIG = {
@@ -468,6 +469,29 @@ async def init_db() -> None:
         # from here (COALESCE to `score` for legacy rows / untuned iterations).
         # See docs/hyperparameter-search-plan.md.
         await _add_column(db, "experiments", "default_score", "REAL")
+        # Publishing agent's role ("explorer"/"exploiter") at iteration time, for
+        # attribution. NULL for legacy rows / clients that don't send it.
+        await _add_column(db, "hypotheses", "role", "TEXT")
+        # Multi-file algorithm bundle: a JSON {relpath: content} map (keys
+        # relative to the algorithm dir, `mod.rs` is the entry). NULL for
+        # single-file rows, where `algorithm_code` is the whole algorithm. When
+        # set it is the source of truth; `algorithm_code` keeps the entry file
+        # for back-compat. Carried through every place a stored algorithm can be
+        # handed to another agent (best, experiment, seed pool, inactive pool).
+        await _add_column(db, "experiments", "algorithm_files", "TEXT")
+        await _add_column(db, "trajectory_bests", "algorithm_files", "TEXT")
+        await _add_column(db, "seed_pool", "algorithm_files", "TEXT")
+        await _add_column(db, "inactive_algorithms", "algorithm_files", "TEXT")
+        # Per-iteration winning hyperparameter map (JSON) when this experiment
+        # was tuned, else NULL. Lets the HPO gate ask "has this trajectory tuned
+        # before?" (the first eligible candidate auto-fires; later ones respect
+        # the improvement band). See docs/hyperparameter-search-plan.md.
+        await _add_column(db, "experiments", "hyperparameters", "TEXT")
+        # Seed-pool diversity moved from a per-(tag, source) UNIQUE index to
+        # code-similarity admission (server/seed_diversity.py). Drop the old
+        # unique index so multiple seeds can share a strategy_tag and admission
+        # is decided by similarity/LOC/cap, not first-feasible-per-tag.
+        await db.execute("DROP INDEX IF EXISTS idx_seed_pool_dedup")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -583,7 +607,7 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
 
 _TRAJECTORY_BESTS_COLS = (
     "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
-    "kernel_code, score, feasible, challenge_metrics, solution_data, "
+    "kernel_code, algorithm_files, score, feasible, challenge_metrics, solution_data, "
     "track_scores, updated_at, trajectory_id, hyperparameters"
 )
 
@@ -601,7 +625,7 @@ async def get_global_best(
     order = _direction_order(direction)
     cursor = await conn.execute(
         "SELECT id as experiment_id, id, agent_id, challenge, "
-        "algorithm_code, kernel_code, score, feasible, challenge_metrics, "
+        "algorithm_code, kernel_code, algorithm_files, score, feasible, challenge_metrics, "
         "solution_data, track_scores, created_at as updated_at, "
         "trajectory_id "
         "FROM experiments WHERE feasible = 1 AND challenge = ? "
@@ -638,6 +662,7 @@ async def insert_seed(
     feasible: bool = True,
     kernel_code: str | None = None,
     origin_agent_id: str | None = None,
+    algorithm_files: str | None = None,
 ) -> bool:
     """Insert a seed, deduped by (challenge, strategy_tag, source) via the
     UNIQUE index. INSERT OR IGNORE means first-write-per-tag wins and later
@@ -645,10 +670,10 @@ async def insert_seed(
     cur = await conn.execute(
         "INSERT OR IGNORE INTO seed_pool "
         "(challenge, strategy_tag, source, score, feasible, algorithm_code, "
-        " kernel_code, origin_agent_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " kernel_code, algorithm_files, origin_agent_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (challenge, strategy_tag, source, score, 1 if feasible else 0,
-         algorithm_code, kernel_code, origin_agent_id, created_at),
+         algorithm_code, kernel_code, algorithm_files, origin_agent_id, created_at),
     )
     return cur.rowcount > 0
 
@@ -658,11 +683,16 @@ async def list_seeds(conn: aiosqlite.Connection, challenge: str) -> list[dict]:
     a per-agent hash assignment is deterministic across calls."""
     cursor = await conn.execute(
         "SELECT id, strategy_tag, source, score, feasible, algorithm_code, "
-        "kernel_code FROM seed_pool WHERE challenge = ? AND feasible = 1 "
+        "kernel_code, algorithm_files FROM seed_pool WHERE challenge = ? AND feasible = 1 "
         "ORDER BY strategy_tag, id",
         (challenge,),
     )
     return [dict(r) for r in await cursor.fetchall()]
+
+
+async def evict_seed(conn: aiosqlite.Connection, seed_id: int) -> None:
+    """Remove one seed by id (used by similarity-based redundancy eviction)."""
+    await conn.execute("DELETE FROM seed_pool WHERE id = ?", (seed_id,))
 
 
 async def least_covered_tag(
@@ -732,6 +762,24 @@ async def get_recent_improvement_scores(
     return [float(r[0]) for r in reversed(rows)]
 
 
+async def trajectory_has_tuned(
+    conn: aiosqlite.Connection, trajectory_id: str | None
+) -> bool:
+    """True if any experiment on this trajectory was hyperparameter-tuned (has a
+    non-NULL `hyperparameters` map). The HPO gate auto-fires the FIRST time a
+    mature trajectory is eligible (this returns False), then defers to the
+    improvement band thereafter. Keyed by trajectory_id so it survives adoption
+    and process restarts. See docs/hyperparameter-search-plan.md."""
+    if not trajectory_id:
+        return False
+    cursor = await conn.execute(
+        "SELECT 1 FROM experiments "
+        "WHERE trajectory_id = ? AND hyperparameters IS NOT NULL LIMIT 1",
+        (trajectory_id,),
+    )
+    return (await cursor.fetchone()) is not None
+
+
 async def upsert_trajectory_best(
     conn: aiosqlite.Connection,
     agent_id: str,
@@ -747,17 +795,20 @@ async def upsert_trajectory_best(
     track_scores: str | None = None,
     kernel_code: str | None = None,
     hyperparameters: str | None = None,
+    algorithm_files: str | None = None,
 ) -> None:
     await conn.execute(
         """INSERT INTO trajectory_bests
-           (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
+           (agent_id, challenge, experiment_id, algorithm_code, kernel_code, algorithm_files,
+            score, feasible,
             challenge_metrics, solution_data, track_scores, updated_at, trajectory_id,
             hyperparameters)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
              kernel_code = excluded.kernel_code,
+             algorithm_files = excluded.algorithm_files,
              score = excluded.score,
              feasible = excluded.feasible,
              challenge_metrics = excluded.challenge_metrics,
@@ -766,8 +817,8 @@ async def upsert_trajectory_best(
              updated_at = excluded.updated_at,
              trajectory_id = excluded.trajectory_id,
              hyperparameters = excluded.hyperparameters""",
-        (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score,
-         1 if feasible else 0, challenge_metrics,
+        (agent_id, challenge, experiment_id, algorithm_code, kernel_code, algorithm_files,
+         score, 1 if feasible else 0, challenge_metrics,
          solution_data, track_scores, updated_at, trajectory_id,
          hyperparameters),
     )
@@ -1187,6 +1238,7 @@ async def deposit_inactive(
     program_id: str | None = None,
     kernel_code: str | None = None,
     experiment_id: str | None = None,
+    algorithm_files: str | None = None,
 ) -> int:
     # Keep negative-scoring attempts out of the inactive trajectory pool.
     # The pool is what other agents adopt from on a fresh reset, so a
@@ -1204,9 +1256,9 @@ async def deposit_inactive(
         return -1
     cursor = await conn.execute(
         "INSERT INTO inactive_algorithms "
-        "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id),
+        "  (agent_id, challenge, algorithm_code, kernel_code, algorithm_files, score, deposited_at, trajectory_id, program_id, experiment_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, challenge, algorithm_code, kernel_code, algorithm_files, score, deposited_at, trajectory_id, program_id, experiment_id),
     )
     return cursor.lastrowid
 
@@ -1233,7 +1285,8 @@ async def get_inactive_with_deactivations(
     conn: aiosqlite.Connection, challenge: str
 ) -> list[dict]:
     cursor = await conn.execute(
-        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, ia.score, "
+        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, "
+        "  ia.algorithm_files, ia.score, "
         "  ia.trajectory_id, ia.program_id, ia.experiment_id, "
         "  COALESCE(t.num_deactivations, 1) as num_deactivations "
         "FROM inactive_algorithms ia "

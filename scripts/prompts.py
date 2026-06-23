@@ -827,6 +827,91 @@ def build_code_user_prompt(
     return "\n".join(parts)
 
 
+# ── Search/replace (soft edit) prompts ─────────────────────────────
+#
+# Used in API (non-agentic) mode for multi-file algorithms, exploiters, and any
+# agent with `edit_mode: search_replace`. Instead of returning whole files the
+# model emits targeted SEARCH/REPLACE blocks (parsed by scripts/search_replace).
+# Far cheaper on output tokens; the apply step is whitespace-tolerant.
+
+SEARCH_REPLACE_FORMAT = """\
+OUTPUT FORMAT (strict) — emit ONLY search/replace blocks, no prose, no fences:
+
+<<<<<<< SEARCH <relpath>
+<exact lines copied from the current file to find>
+=======
+<the replacement lines>
+>>>>>>> REPLACE
+
+Rules:
+- `<relpath>` is the file to edit (e.g. `mod.rs`, `helpers.rs`). Always include it.
+- The SEARCH text must be copied verbatim from the file shown below and be large
+  enough to match EXACTLY ONE place — include a few surrounding lines for context
+  if a snippet would otherwise be ambiguous.
+- Emit one block per distinct edit; you may emit several blocks.
+- Change ONLY what your hypothesis requires; leave everything else untouched.
+- Keep `use super::*;` intact and do not change the `solve_challenge` signature
+  (or, for optimizer-hook challenges, the hook signatures)."""
+
+
+def _format_files_for_prompt(files: dict) -> str:
+    parts = []
+    for path in sorted(files):
+        lang = "cuda" if path.endswith((".cu", ".cuh")) else "rust"
+        parts.append(f"### {path}\n```{lang}\n{files[path]}\n```")
+    return "\n\n".join(parts)
+
+
+def build_search_replace_system_prompt(
+    challenge_md: str, config: dict, *, role: str = "explorer",
+) -> str:
+    challenge = config.get("challenge", "unknown")
+    timeout = config.get("timeout", 30)
+    role_steer = ("\n\n" + _role_guidance(role)) if role == "exploiter" else ""
+    rust_rules = _rust_rules_block(config)
+    opt_contract = OPTIMIZER_HOOK_CONTRACT if _is_optimizer_hook_challenge(config) else ""
+    return f"""\
+You are optimizing a Rust algorithm for the "{challenge}" challenge by making
+targeted edits to its source files.
+
+{challenge_md}
+
+Per-instance time budget: {timeout} seconds.{role_steer}
+
+{SEARCH_REPLACE_FORMAT}{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
+
+
+def build_search_replace_user_prompt(
+    files: dict, hypothesis: dict, config: dict, *, role: str = "explorer",
+) -> str:
+    title = hypothesis.get("title", "")
+    description = hypothesis.get("description", "")
+    parts = [
+        "Current algorithm source files:\n",
+        _format_files_for_prompt(files),
+        f"\nApply this change as search/replace blocks:\n{title}\n{description}",
+    ]
+    if role == "exploiter":
+        parts.append(
+            "\nMake ONE small, localized change — the fewest blocks that "
+            "implement the hypothesis. Do not restructure the code."
+        )
+    return "\n".join(parts)
+
+
+def build_search_replace_repair_prompt(
+    files: dict, misses_text: str, config: dict,
+) -> str:
+    return (
+        "Some of your search/replace blocks did not match the current files and "
+        "were skipped. Re-emit ONLY the failed edits, copying the SEARCH text "
+        "EXACTLY from the files below (enough lines to be unique).\n\n"
+        "Failed blocks:\n" + misses_text +
+        "\n\nCurrent files:\n" + _format_files_for_prompt(files) +
+        "\n\n" + SEARCH_REPLACE_FORMAT
+    )
+
+
 # ── Hyperparameter extraction prompts (Phase 3) ────────────────────
 #
 # A separate LLM call, made only when a candidate passes the tuning gate (see

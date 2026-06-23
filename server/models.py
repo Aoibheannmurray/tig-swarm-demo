@@ -65,6 +65,11 @@ class IterationCreate(BaseModel):
     strategy_tag: str = "other"
     algorithm_code: str = ""
     kernel_code: Optional[str] = None
+    # Full multi-file algorithm as a {relpath: content} map (keys relative to the
+    # algorithm dir; `mod.rs` is the entry). None/absent for single-file clients,
+    # where `algorithm_code` is the whole algorithm. When present it is the
+    # source of truth and `algorithm_code` holds the entry file for back-compat.
+    algorithm_files: Optional[dict] = None
     score: float
     feasible: bool = True
     notes: str = ""
@@ -75,6 +80,9 @@ class IterationCreate(BaseModel):
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     estimated_cost: Optional[float] = None
+    # The publishing agent's role at iteration time: "explorer" or "exploiter"
+    # (None for legacy clients). Stored on the hypothesis row for attribution.
+    role: Optional[str] = None
     # Winning hyperparameter config when this iteration was tuned (the `score`
     # is then the tuned score); None means the algorithm was scored at its
     # in-code defaults. When tuned this is a per-track map

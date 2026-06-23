@@ -36,6 +36,27 @@ def kernel_path(config: dict) -> Path | None:
     return ROOT / kp if kp else None
 
 
+def algorithm_dir(config: dict, base: Path = ROOT) -> Path:
+    """Directory that holds the algorithm's source files. The entry file
+    (`mod.rs`) lives here; multi-file algorithms add sibling `.rs` files (and,
+    on GPU, `kernels.cu`) under it. `base` lets callers root the dir somewhere
+    other than the repo root (e.g. an agent worktree)."""
+    ap = config.get("algorithm_path")
+    if not ap:
+        sys.exit(".swarm-cache.json missing `algorithm_path` — run `setup.py sync`.")
+    return (base / ap).parent
+
+
+def entry_name(config: dict) -> str:
+    """Filename of the entry file (normally `mod.rs`)."""
+    return algo_path(config).name
+
+
+# Source files that make up an algorithm bundle. Anything else in the dir
+# (build artifacts, stray files) is ignored by the files-map.
+_ALGO_FILE_SUFFIXES = (".rs", ".cu", ".cuh")
+
+
 # ── Read / write ───────────────────────────────────────────────────
 
 
@@ -72,6 +93,63 @@ def read_kernel(config: dict) -> str:
     if p and p.exists():
         return p.read_text(encoding="utf-8", errors="replace")
     return ""
+
+
+# ── Multi-file (files-map) read / write ────────────────────────────
+#
+# An algorithm is represented as a {relpath: content} map keyed by paths
+# RELATIVE to the algorithm directory (POSIX separators). A single-file
+# algorithm is just {"mod.rs": <code>}. The entry file (mod.rs) declares any
+# submodules (`mod helpers;`). This subsumes the GPU kernel: kernels.cu shows
+# up as a normal entry in the map.
+
+
+def read_files(config: dict, base: Path = ROOT) -> dict[str, str]:
+    """All algorithm source files on disk as a {relpath: content} map.
+
+    Walks the algorithm directory for source files (`.rs`/`.cu`/`.cuh`). Falls
+    back to the single-file path if the directory layout isn't present yet.
+    `base` roots the lookup (defaults to the repo root; pass a worktree)."""
+    d = algorithm_dir(config, base)
+    files: dict[str, str] = {}
+    if d.exists() and d.is_dir():
+        for p in sorted(d.rglob("*")):
+            if p.is_file() and p.suffix in _ALGO_FILE_SUFFIXES:
+                rel = p.relative_to(d).as_posix()
+                files[rel] = p.read_text(encoding="utf-8", errors="replace")
+    if not files:
+        # No directory yet — fall back to the single entry file if it exists.
+        entry = d / entry_name(config)
+        if entry.exists():
+            files[entry_name(config)] = entry.read_text(
+                encoding="utf-8", errors="replace")
+    return files
+
+
+def write_files(files: dict[str, str], config: dict, base: Path = ROOT) -> None:
+    """Write a {relpath: content} map into the algorithm directory, then prune
+    any stale source files no longer in the map.
+
+    Pruning keeps multi-file rewrites from leaving orphaned `.rs` modules that
+    break the build. It only runs when the map is non-empty and contains the
+    entry file, so a bad/empty map can never wipe the algorithm."""
+    if not files:
+        return
+    d = algorithm_dir(config, base)
+    keys = set(files.keys())
+    for rel, content in files.items():
+        # Keep all writes inside the algorithm dir (defend against `..`).
+        dest = (d / rel).resolve()
+        if not str(dest).startswith(str(d.resolve())):
+            raise ValueError(f"refusing to write outside algorithm dir: {rel}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+    if entry_name(config) in keys and d.exists():
+        for p in d.rglob("*"):
+            if p.is_file() and p.suffix in _ALGO_FILE_SUFFIXES:
+                rel = p.relative_to(d).as_posix()
+                if rel not in keys:
+                    p.unlink()
 
 
 def read_challenge_md() -> str:
@@ -244,6 +322,21 @@ class ChallengeFiles:
         code = read_algorithm(self._config)
         kernel = read_kernel(self._config) if self.is_gpu else ""
         return code, kernel
+
+    # ── Multi-file accessors ──
+    @property
+    def entry_name(self) -> str:
+        return entry_name(self._config)
+
+    def read_files(self) -> dict[str, str]:
+        """All algorithm source files as a {relpath: content} map."""
+        return read_files(self._config)
+
+    def write_files(self, files: dict[str, str]) -> None:
+        write_files(files, self._config)
+
+    def is_multifile(self) -> bool:
+        return len(self.read_files()) > 1
 
     def separator_suffix(self) -> str:
         if self.is_gpu:
