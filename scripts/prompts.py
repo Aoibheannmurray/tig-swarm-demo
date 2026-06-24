@@ -916,14 +916,16 @@ def build_search_replace_repair_prompt(
 #
 # A separate LLM call, made only when a candidate passes the tuning gate (see
 # docs/hyperparameter-search-plan.md). It reads the *final, compiled* mutated
-# algorithm and (1) decides which constants become tunable hyperparameters with
-# a search range, (2) suggests a few concrete configs, and (3) rewrites mod.rs
-# to read each hyperparameter from the `Map` with the in-code value as default,
-# so an empty Map reproduces the default-score behaviour exactly.
+# algorithm (ALL its files) and (1) decides which constants become tunable
+# hyperparameters with a search range, (2) suggests a few concrete configs, and
+# (3) makes each chosen constant read from the `Map` argument with the in-code
+# value as default, so an empty Map reproduces the default-score behaviour
+# exactly. The rewrite is expressed as SEARCH/REPLACE edits (multi-file aware),
+# or omitted entirely when the algorithm already applies the Map to a config.
 #
-# Response layout (mirrors the repo's "// --- kernels.cu ---" separator
-# convention): a JSON spec, the separator line below, then the full Rust source.
-HYPERPARAM_VARIANT_SEP = "// --- variant mod.rs ---"
+# Response layout: a JSON spec, then (only if code edits are needed) the
+# separator line below, then SEARCH/REPLACE blocks.
+HYPERPARAM_EDITS_SEP = "// --- hyperparameter edits ---"
 
 
 def build_hyperparameter_system_prompt(challenge_md: str, config: dict) -> str:
@@ -931,9 +933,9 @@ def build_hyperparameter_system_prompt(challenge_md: str, config: dict) -> str:
     rust_rules = _rust_rules_block(config)
     return f"""\
 You are tuning a Rust algorithm for the "{challenge}" challenge. The algorithm
-has already been written; your job is NOT to change its logic, but to expose its
-most impactful magic-number constants as searchable hyperparameters so a
-hyperparameter search can find a good configuration.
+has already been written (possibly across several files); your job is NOT to
+change its logic, but to expose its most impactful magic-number constants as
+searchable hyperparameters so a search can find a good configuration.
 
 Do TWO things:
 
@@ -945,14 +947,30 @@ Do TWO things:
    otherwise), a `type` ("float", "int", or "categorical"), and the `default`
    equal to the constant's CURRENT in-code value.
 
-2. Rewrite mod.rs so each chosen hyperparameter is read from the
-   `hyperparameters: &Option<Map<String, Value>>` argument, falling back to the
-   current in-code value when the key is absent. This rewrite MUST be
-   behaviour-preserving: with an empty or `None` map the algorithm must behave
-   EXACTLY as it does now (same defaults). Change nothing else about the logic.
+2. Make each chosen hyperparameter read from the
+   `hyperparameters: &Option<Map<String, Value>>` argument, falling back to its
+   current in-code value when the key is absent. This MUST be behaviour-
+   preserving: an empty or `None` map must reproduce today's behaviour EXACTLY.
+
+   SCOPE RULE — the Map is a function ARGUMENT, in scope ONLY at the entry
+   (`solve_challenge`, or the optimizer hooks). You CANNOT read it from a
+   module-level `const`/`static` or from a helper that isn't given it. So:
+   - If the algorithm ALREADY threads the Map into a config/params object
+     (e.g. `Config::initialize(hyperparameters, …)` that merges Map keys onto a
+     struct), and your chosen names are existing FIELDS of that object, emit NO
+     code edits at all — the spec alone suffices (the existing merge applies
+     them). Make every hyperparameter `name` exactly such a field name.
+   - Otherwise, edit the code so the values enter AT THE ENTRY and reach their
+     use site: read each from the Map into a local at the top of the entry and
+     thread it down (e.g. override a config object's fields right after it is
+     constructed), or — for a constant read directly across modules — set a
+     process-global `OnceLock<…>` at the top of the entry from the Map and read
+     it via an accessor whose fallback equals the old constant. (Exactly one
+     instance runs per process, so a process-global set once at the entry is
+     safe.) Keep edits minimal and behaviour-preserving.
 
 OUTPUT FORMAT (strict):
-First, a single JSON object (you may wrap it in a ```json fence) of the form:
+First, a single JSON object (you may wrap it in a ```json fence):
 {{
   "hyperparameters": [
     {{"name": "learning_rate", "type": "float", "range": [0.0001, 0.1], "scale": "log", "default": 0.01}},
@@ -966,20 +984,32 @@ First, a single JSON object (you may wrap it in a ```json fence) of the form:
 Every key used in a suggested config MUST be a declared hyperparameter `name`,
 and every declared hyperparameter MUST appear in every suggested config.
 
-Then, on its own line, exactly this separator:
-{HYPERPARAM_VARIANT_SEP}
+THEN:
+- If the spec alone is enough (the algorithm already applies the Map to those
+  fields), output NOTHING after the JSON.
+- Otherwise, on its own line emit exactly this separator:
+{HYPERPARAM_EDITS_SEP}
+  followed by one or more SEARCH/REPLACE blocks (across any files) in this
+  format — the SEARCH text must be copied verbatim from the files shown and
+  match exactly one place:
 
-Then the COMPLETE rewritten mod.rs as raw Rust (no markdown fences). It must
-start with `use super::*;` and compile.{rust_rules}"""
+<<<<<<< SEARCH <relpath>
+<original lines>
+=======
+<replacement lines>
+>>>>>>> REPLACE
+
+Do not output whole files or markdown fences after the separator — only blocks.{rust_rules}"""
 
 
 def build_hyperparameter_user_prompt(
-    algorithm_code: str, config: dict,
+    files: dict, config: dict,
     parent_hyperparameters: dict | None = None,
     num_suggested_configs: int = 5,
 ) -> str:
     parts: list[str] = []
-    parts.append(f"Current algorithm (mod.rs):\n```rust\n{algorithm_code}\n```")
+    parts.append("Current algorithm source files:\n")
+    parts.append(_format_files_for_prompt(files))
     if parent_hyperparameters:
         parts.append(
             "\nThe parent algorithm in this trajectory was tuned. Its winning "
@@ -993,7 +1023,9 @@ def build_hyperparameter_user_prompt(
         )
     parts.append(
         f"\nPropose the hyperparameters and exactly {num_suggested_configs} "
-        "suggested configs, then the separator, then the rewritten mod.rs."
+        "suggested configs as JSON. If the algorithm already applies the Map to "
+        "your chosen fields, output JSON only; otherwise add the separator and "
+        "SEARCH/REPLACE blocks."
     )
     return "\n".join(parts)
 
@@ -1013,6 +1045,7 @@ def build_hyperparameter_agentic_prompt(
     worktree directly and drops the spec as a JSON file we read back.
     """
     algo_path = config.get("algorithm_path", "the algorithm file")
+    algo_dir = algo_path.rsplit("/", 1)[0] if "/" in algo_path else "the algorithm directory"
     parent_block = ""
     if parent_hyperparameters:
         parent_block = (
@@ -1025,11 +1058,22 @@ def build_hyperparameter_agentic_prompt(
 This is a hyperparameter-extraction task, NOT a new optimization. Do not change \
 the algorithm's logic.
 
-Edit `{algo_path}` so its most impactful magic-number constants become tunable \
+Edit the algorithm's source (files under `{algo_dir}`; the entry is \
+`{algo_path}`) so its most impactful magic-number constants become tunable \
 hyperparameters read from the `hyperparameters: &Option<Map<String, Value>>` \
 argument, each falling back to its CURRENT in-code value when the key is absent. \
 The rewrite MUST be behaviour-preserving: with an empty or None map the \
 algorithm must behave EXACTLY as it does now.
+
+SCOPE RULE: the Map is a function argument, in scope ONLY at the entry \
+(`solve_challenge` / the optimizer hooks) — you cannot read it from a \
+module-level const. If the algorithm already threads the Map into a config (e.g. \
+`Config::initialize(hyperparameters, …)`) and your chosen names are existing \
+fields of that config, you need NO code edits — just write the spec. Otherwise \
+inject at the entry and thread the values to their use sites (override a config \
+object's fields after construction, or set a process-global `OnceLock` at the \
+entry and read it via an accessor whose fallback equals the old const; one \
+instance runs per process, so that is safe).
 
 Choose 2-5 constants worth tuning (a learning rate, temperature, restart count, \
 threshold, population size, …) — prefer fewer; a smaller search space is \
@@ -1052,8 +1096,8 @@ suggested configs. Every key in a suggested config MUST be a declared \
 hyperparameter name, and every declared hyperparameter MUST appear in every \
 suggested config, with `default` equal to the constant's current in-code value.
 
-Finally, run `cargo check` to confirm the edited file compiles. Do not edit any \
-file other than `{algo_path}` and `{_HYPERPARAM_SPEC_RELPATH}`."""
+Finally, run `cargo check` to confirm the edited code compiles. Only edit source \
+files under `{algo_dir}` and write `{_HYPERPARAM_SPEC_RELPATH}`."""
 
 
 def _strip_code_fence(text: str, lang: str = "") -> str:
@@ -1099,22 +1143,26 @@ def _validate_hyperparameter_spec(spec: dict) -> str:
 
 
 def parse_hyperparameter_response(response: str) -> dict:
-    """Parse the extraction response into spec + variant code.
+    """Parse the extraction response into a spec + search/replace edit text.
 
-    Returns {ok, error, hyperparameters, suggested_configs, variant_code}.
+    Returns {ok, error, hyperparameters, suggested_configs, edits_text}, where
+    `edits_text` is the SEARCH/REPLACE block text after the separator (parsed by
+    scripts/search_replace), or "" for the spec-only case (Case 0 — the
+    algorithm already applies the Map to the chosen config fields).
     """
     fail = {
         "ok": False, "hyperparameters": [], "suggested_configs": [],
-        "variant_code": "",
+        "edits_text": "",
     }
-    if HYPERPARAM_VARIANT_SEP not in response:
-        return {**fail, "error": f"missing separator {HYPERPARAM_VARIANT_SEP!r}"}
-    json_part, _, code_part = response.partition(HYPERPARAM_VARIANT_SEP)
+    if HYPERPARAM_EDITS_SEP in response:
+        json_part, _, edits_text = response.partition(HYPERPARAM_EDITS_SEP)
+    else:
+        json_part, edits_text = response, ""  # spec-only (no code edits)
     json_text = _strip_code_fence(json_part)
     # The JSON may have prose around it; grab the outermost {...}.
     brace = re.search(r"\{.*\}", json_text, re.DOTALL)
     if not brace:
-        return {**fail, "error": "no JSON object found before the separator"}
+        return {**fail, "error": "no JSON spec object found"}
     try:
         spec = json.loads(brace.group(0))
     except json.JSONDecodeError as e:
@@ -1122,15 +1170,12 @@ def parse_hyperparameter_response(response: str) -> dict:
     err = _validate_hyperparameter_spec(spec)
     if err:
         return {**fail, "error": err}
-    variant_code = _strip_code_fence(code_part, "rust")
-    if "use super::*;" not in variant_code:
-        return {**fail, "error": "variant mod.rs missing `use super::*;`"}
     return {
         "ok": True,
         "error": "",
         "hyperparameters": spec["hyperparameters"],
         "suggested_configs": spec.get("suggested_configs", []),
-        "variant_code": variant_code,
+        "edits_text": edits_text.strip(),
     }
 
 

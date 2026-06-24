@@ -662,14 +662,15 @@ def _hpo_gate_open(
 
 def _extract_hyperparameters_api(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, challenge_md: str, algorithm_code: str,
+    config: dict, challenge_md: str, file_map: dict,
     parent_hyperparameters: dict | None, num_suggested: int,
 ) -> tuple[dict | None, int, int]:
     """Extraction via a single structured completion (API / CLI providers).
 
-    Returns (parsed | None, input_tokens, output_tokens) where parsed is the
-    `parse_hyperparameter_response` dict (hyperparameters / suggested_configs /
-    variant_code).
+    Reads ALL algorithm files, asks for a spec + (optional) SEARCH/REPLACE edits,
+    and applies the edits over the files-map. Returns (parsed | None, in, out)
+    where parsed has hyperparameters / suggested_configs / algorithm_files (the
+    edited map; == input map for the spec-only Case 0).
     """
     try:
         response, usage = _call_llm_logged(
@@ -677,7 +678,7 @@ def _extract_hyperparameters_api(
             args.provider, model, api_key,
             _prompts.build_hyperparameter_system_prompt(challenge_md, config),
             _prompts.build_hyperparameter_user_prompt(
-                algorithm_code, config, parent_hyperparameters, num_suggested,
+                file_map, config, parent_hyperparameters, num_suggested,
             ),
             args.api_base,
         )
@@ -688,7 +689,30 @@ def _extract_hyperparameters_api(
     if not parsed["ok"]:
         print(f"  [HPO] extraction parse failed: {parsed['error']}")
         return None, usage["input_tokens"], usage["output_tokens"]
-    return parsed, usage["input_tokens"], usage["output_tokens"]
+
+    new_map = dict(file_map)
+    edits_text = parsed.get("edits_text", "")
+    if edits_text:
+        blocks = search_replace.parse_blocks(edits_text)
+        if not blocks:
+            print("  [HPO] extraction emitted edits but no parseable blocks — skipping")
+            return None, usage["input_tokens"], usage["output_tokens"]
+        new_map, misses = search_replace.apply_blocks(new_map, blocks)
+        if misses:
+            # A partial apply can break the empty-Map==default invariant, so a
+            # miss is fatal for the tune (the build/score guard would otherwise
+            # accept a half-rewritten variant).
+            print(f"  [HPO] {len(misses)} extraction edit(s) did not match — skipping tune")
+            return None, usage["input_tokens"], usage["output_tokens"]
+    else:
+        print("  [HPO] spec-only extraction (no code edits — config already Map-aware)")
+
+    return {
+        "ok": True, "error": "",
+        "hyperparameters": parsed["hyperparameters"],
+        "suggested_configs": parsed["suggested_configs"],
+        "algorithm_files": new_map,
+    }, usage["input_tokens"], usage["output_tokens"]
 
 
 def _extract_hyperparameters_agentic(
@@ -708,18 +732,11 @@ def _extract_hyperparameters_agentic(
         print("  [HPO] agentic extraction unavailable (no backend/worktree)")
         return None, 0, 0
     # Seed the worktree with the EXACT algorithm that produced default_bench
-    # (the main checkout) before the agent edits it. The worktree copy can be
-    # stale — e.g. a runtime-error fix this iteration was applied to the main
-    # checkout, not the worktree — so without this the variant would be built
-    # from pre-fix code.
-    main_code, main_kernel = files.read()
-    algo_path = workdir / config["algorithm_path"]
-    algo_path.parent.mkdir(parents=True, exist_ok=True)
-    algo_path.write_text(main_code, encoding="utf-8")
-    if files.is_gpu and config.get("kernel_path") and main_kernel:
-        kp = workdir / config["kernel_path"]
-        kp.parent.mkdir(parents=True, exist_ok=True)
-        kp.write_text(main_kernel, encoding="utf-8")
+    # (the main checkout) before the agent edits it — ALL files, multi-file
+    # aware. The worktree copy can be stale (e.g. a runtime-error fix this
+    # iteration was applied to the main checkout, not the worktree), so without
+    # this the variant would be built from pre-fix code.
+    challenge_files.write_files(files.read_files(), config, base=workdir)
     agentic_sandbox.reset_hyperparameter_spec(workdir)
     backend.prepare(workdir, challenge_md, config, extraction=True)
     prompt = _prompts.build_hyperparameter_agentic_prompt(
@@ -744,15 +761,16 @@ def _extract_hyperparameters_agentic(
     if err:
         print(f"  [HPO] agentic spec invalid: {err} — skipping tune")
         return None, 0, 0
-    variant_code, _variant_kernel = _read_worktree_files(workdir, files, config)
-    if not variant_code or "use super::*;" not in variant_code:
+    new_map = _read_worktree_map(workdir, config)
+    entry = new_map.get(challenge_files.entry_name(config), "")
+    if not entry or "use super::*;" not in entry:
         print("  [HPO] worktree variant missing/invalid — skipping tune")
         return None, 0, 0
     return {
         "ok": True, "error": "",
         "hyperparameters": spec["hyperparameters"],
         "suggested_configs": spec.get("suggested_configs", []),
-        "variant_code": variant_code,
+        "algorithm_files": new_map,
     }, 0, 0
 
 
@@ -788,12 +806,14 @@ def _maybe_tune_hyperparameters(
     default_score = default_bench.get("score")
     print(f"  [HPO] gate open — tuning (N={n}, suggested={num_suggested}, seed='{hpo_seed}')")
 
-    original_code, original_kernel = files.read()
+    # Snapshot ALL algorithm files so any failure path restores the exact
+    # pre-tuning state (multi-file aware).
+    original_map = files.read_files()
 
     # 1. Extraction: which constants become hyperparameters (with ranges +
-    #    suggested configs) and a behaviour-preserving variant of mod.rs.
-    #    Agentic providers do this as a second agent pass (Fix 1); everyone else
-    #    via a single structured completion.
+    #    suggested configs) and a behaviour-preserving variant (the full
+    #    files-map, multi-file aware). Agentic providers do this as a second
+    #    agent pass (Fix 1); everyone else via a single structured completion.
     if args.provider in _AGENTIC_PROVIDERS:
         parsed, ei, eo = _extract_hyperparameters_agentic(
             args, backend, workdir, files, config, challenge_md,
@@ -802,7 +822,7 @@ def _maybe_tune_hyperparameters(
     else:
         parsed, ei, eo = _extract_hyperparameters_api(
             args, model, api_key, config, challenge_md,
-            original_code, parent_hyperparameters, num_suggested,
+            original_map, parent_hyperparameters, num_suggested,
         )
     in_tok += ei
     out_tok += eo
@@ -811,12 +831,14 @@ def _maybe_tune_hyperparameters(
         return default_bench, None, in_tok, out_tok
     print(f"  [HPO] hyperparameters: {[h['name'] for h in parsed['hyperparameters']]}")
 
-    # 2. Write the variant and build/smoke-test it on the HPO seed (default
-    #    config), with LLM compile-fix retries.
-    files.write(parsed["variant_code"], original_kernel)
-    if validate_code(parsed["variant_code"], config):
+    # 2. Write the variant (full map) and build/smoke-test it on the HPO seed
+    #    (default config), with LLM compile-fix retries.
+    variant_map = parsed["algorithm_files"]
+    files.write_files(variant_map)
+    entry_code = variant_map.get(files.entry_name, "")
+    if validate_code(entry_code, config):
         print("  [HPO] variant failed validation — restoring, skipping tune")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
     compile_bench, build_err, _changed, ci, co = _benchmark_with_compile_fix(
         args, model, api_key, config, server, files,
@@ -826,7 +848,7 @@ def _maybe_tune_hyperparameters(
     out_tok += co
     if compile_bench is None:
         print(f"  [HPO] variant build failed: {build_err[:200]} — restoring, skipping tune")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
 
     # 3. Random search on the (non-test) HPO seed.
@@ -840,7 +862,7 @@ def _maybe_tune_hyperparameters(
     winning = result["winning_configs"]  # {track_key: config} — a winner per track
     if not winning:
         print("  [HPO] search produced no per-track winners — keeping default")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
 
     # 4. Adopt the per-track winning map as the trajectory's new default
@@ -858,7 +880,7 @@ def _maybe_tune_hyperparameters(
     )
     if tuned_bench is None:
         print(f"  [HPO] final test-seed benchmark failed: {terr[:200]} — restoring, using default")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
 
     tuned_score = tuned_bench.get("score")
@@ -866,7 +888,7 @@ def _maybe_tune_hyperparameters(
     if tuned_score is None or not tuned_feasible:
         print(f"  [HPO] tuned result infeasible/missing on the test seed "
               "— restoring, using default")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
 
     delta = tuned_score - default_score

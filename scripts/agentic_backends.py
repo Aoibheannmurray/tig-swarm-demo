@@ -147,6 +147,8 @@ def _build_sandbox_settings(config: dict, workdir: Path, *, extraction: bool = F
 
     algo_relpath = config["algorithm_path"]
     kernel_relpath = config.get("kernel_path")
+    # src/<challenge>/algorithm/mod.rs -> src/<challenge>/algorithm
+    algo_dir = dirname(algo_relpath)
     # src/<challenge>/algorithm/mod.rs -> src/<challenge>
     challenge_dir = dirname(dirname(algo_relpath))
     src_dir = dirname(challenge_dir) or "src"        # src
@@ -154,6 +156,10 @@ def _build_sandbox_settings(config: dict, workdir: Path, *, extraction: bool = F
 
     allow = [
         f"Edit({algo_relpath})",
+        # Multi-file algorithms keep sidecar sources (helpers.rs, config.rs, …)
+        # in the algorithm dir; let the agent edit any of them. Write(**) stays
+        # denied below, so no NEW files can be created — edits only.
+        f"Edit({algo_dir}/**)",
         f"Edit({_HYPOTHESIS_RELPATH})",
         "Bash(cargo check:*)",
         "Bash(cargo build:*)",
