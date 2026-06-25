@@ -411,8 +411,9 @@ def seed_inactive_pool_from_mainnet(
     sys.path.insert(0, str(ROOT / "scripts"))
     try:
         from download_algorithm import fetch_algorithm, DownloadError
+        from challenge_files import reshape_mainnet_for_swarm
     except Exception as e:
-        print(f"  could not import download_algorithm.py: {e}; skipping seed.")
+        print(f"  could not import seeding helpers: {e}; skipping seed.")
         return
 
     targets = sorted(challenges)
@@ -449,6 +450,19 @@ def seed_inactive_pool_from_mainnet(
                 f"(files={sorted(files)}); skipping seed."
             )
             continue
+
+        # Reshape the bundle into the swarm's expected layout (e.g. strip the
+        # harness-owned solve_challenge/training_loop on optimizer-hook
+        # challenges) and validate it. On failure, print an ERROR and skip so
+        # the host notices rather than seeding code the swarm will reject.
+        code_files, reshape_err = reshape_mainnet_for_swarm(ch, code_files)
+        if reshape_err:
+            print(
+                f"  ERROR {ch}: mainnet '{algo_name}' does not fit the swarm "
+                f"format and could not be converted ({reshape_err}); skipping seed."
+            )
+            continue
+
         cu_files = sorted(p for p in code_files if p.endswith((".cu", ".cuh")))
         # `kernel_code` is single-kernel back-compat only; with multiple kernels
         # the map is the source of truth and we leave the scalar None.
