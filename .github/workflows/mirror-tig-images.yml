@@ -1,0 +1,75 @@
+# Production image pipeline for the TIG-docker benchmark backend.
+#
+# Mirrors every challenge's TIG `dev` image (ghcr.io, where C3 cannot pull from)
+# to Docker Hub (where C3 can), keyed off the pinned version in tig_pin.json.
+# The C3 path (scripts/c3_compute.py) pulls `docker.io/<user>/tig-dev-<challenge>`
+# and uploads the source (cold-compile per job). This must run before the custom
+# benchmarking path can be retired (so every challenge is C3-pullable).
+#
+# Uses `crane copy` for a registry-to-registry copy — no local disk pull, so the
+# 4–9 GB images don't need to fit on the runner. Copies the full multi-arch
+# manifest list (C3 selects amd64).
+#
+# Setup (one-time, by a repo/Docker Hub admin):
+#   - Docker Hub access token (Read/Write).
+#   - Repo secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN.
+#   The Docker Hub namespace must match what the swarm pulls
+#   (cfg["tig_dockerhub"] / env TIG_DOCKERHUB, default the username).
+#
+# Run: on a manual dispatch, or automatically when the version pin changes.
+
+name: Mirror TIG images to Docker Hub
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "tig_pin.json"
+      - ".github/workflows/mirror-tig-images.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        challenge:
+          - satisfiability
+          - vehicle_routing
+          - knapsack
+          - job_scheduling
+          - energy_arbitrage
+          - vector_search
+          - hypergraph
+          - neuralnet_optimizer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned TIG version
+        id: pin
+        run: |
+          ver=$(python3 -c "import json; print(json.load(open('tig_pin.json'))['tig_version'])")
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Pinned TIG version: $ver"
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Log in to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" \
+            | crane auth login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Mirror ${{ matrix.challenge }} dev image
+        env:
+          VER: ${{ steps.pin.outputs.version }}
+          NS: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          SRC="ghcr.io/tig-foundation/tig-monorepo/${{ matrix.challenge }}/dev:${VER}"
+          DST="docker.io/${NS}/tig-dev-${{ matrix.challenge }}:${VER}"
+          echo "Mirroring $SRC -> $DST"
+          crane copy "$SRC" "$DST"
+          echo "Mirrored: $DST"

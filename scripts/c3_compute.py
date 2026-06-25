@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -21,10 +22,20 @@ from pathlib import Path
 from typing import Iterable
 
 from challenge_files import ROOT, read_optional
+# TIG-docker backend helpers (shared with the local path in benchmark.py).
+from benchmark import (
+    _tig_adapter as _bm_tig_adapter,
+    _tig_backend as _bm_tig_backend,
+    _tig_version as _bm_tig_version,
+    DEFAULT_MAX_FUEL_BUDGET as _BM_DEFAULT_FUEL,
+)
 
 _POLL_INTERVAL_SECS = 15
 _DEFAULT_CPU_IMAGE = "rust:1-bookworm"
 _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
+# Pinned TIG monorepo source (re-added into the uploaded workspace; the dev image
+# strips it). Default sibling dir; override with cfg["tig_monorepo_path"].
+_TIG_MONOREPO = ROOT.parent / "tig-monorepo"
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -480,6 +491,208 @@ def _load_benchmark_json(stage: Path) -> tuple[dict | None, str]:
 # ── Run benchmark on C3 ───────────────────────────────────────────
 
 
+# ── TIG-docker backend on C3 ──────────────────────────────────────
+# Mirrors the local run_tig_benchmark (benchmark.py): the C3 job's image IS the
+# TIG image (no docker-in-docker), the runner runs tig_bench_driver.py directly,
+# and the host adapts combined.json -> benchmark.json. Reuses the deploy/poll/
+# pull helpers below.
+
+_NN_BOILERPLATE = """
+// Injected by the swarm: TIG boilerplate solve_challenge (calls training_loop
+// with the agent's hooks). training_loop is patched to blind the seed.
+pub fn solve_challenge(
+    challenge: &Challenge,
+    save_solution: &dyn Fn(&Solution) -> anyhow::Result<()>,
+    _hyperparameters: &Option<serde_json::Map<String, serde_json::Value>>,
+    module: Arc<CudaModule>,
+    stream: Arc<CudaStream>,
+    prop: &cudaDeviceProp,
+) -> anyhow::Result<()> {
+    training_loop(
+        challenge, save_solution, module, stream, prop,
+        optimizer_init_state, optimizer_query_at_params, optimizer_step,
+    )?;
+    Ok(())
+}
+"""
+
+
+def _tig_c3_image(cfg: dict) -> str:
+    if cfg.get("tig_c3_image"):
+        return cfg["tig_c3_image"]
+    ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB", "danieltiagoadams")
+    return f"docker.io/{ns}/tig-dev-{cfg['challenge']}:{_bm_tig_version()}"
+
+
+def _create_tig_workspace(stage: Path, cfg: dict) -> None:
+    challenge = cfg["challenge"]
+    monorepo = Path(cfg.get("tig_monorepo_path") or _TIG_MONOREPO)
+    if not (monorepo / "tig-algorithms").exists():
+        raise FileNotFoundError(f"pinned TIG monorepo source not found at {monorepo}")
+    src = stage / "tig-source"
+    src.mkdir(parents=True, exist_ok=True)
+    # Use tar to copy the source: it preserves symlinks (the monorepo has
+    # self-referential symlinks under tig-benchmarker that shutil.copytree
+    # follows into a loop) and excludes build artifacts. Matches the build script.
+    subprocess.run(
+        f"tar -C {shlex.quote(str(monorepo))} --exclude=./target --exclude=./.git -cf - . "
+        f"| tar -C {shlex.quote(str(src))} -xf -",
+        shell=True, check=True,
+    )
+    _copy_required(ROOT / "scripts" / "tig_bench_driver.py", stage / "tig_bench_driver.py")
+    _copy_required(ROOT / "scripts" / "modified_test_algorithm", stage / "modified_test_algorithm")
+    algo_rel = cfg.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
+    _copy_required((ROOT / algo_rel).parent, stage / "algorithm")
+    if challenge == "neuralnet_optimizer":
+        _write_container_file(stage / "boilerplate.rs", _NN_BOILERPLATE)
+
+
+def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str:
+    challenge = cfg["challenge"]
+    tracks = {
+        k: v for k, v in (cfg.get("tracks") or {}).items()
+        if k != "seed" and isinstance(v, int) and v > 0
+    }
+    fuel = int(cfg.get("max_fuel_budget", _BM_DEFAULT_FUEL))
+    is_nn = challenge == "neuralnet_optimizer"
+
+    # neuralnet anti-cheat: blind the seed handed to optimizer_init_state.
+    patch = ""
+    if is_nn:
+        patch = (
+            "python3 - <<'PYEOF'\n"
+            "p = 'tig-source/tig-challenges/src/neuralnet_optimizer/mod.rs'\n"
+            "t = open(p).read()\n"
+            "old = \"    let mut optimizer_state = optimizer_init_state(\\n        challenge.seed.clone(),\"\n"
+            "new = (\"    let optimizer_seed = { use rand::{RngCore, SeedableRng}; \"\n"
+            "       \"let mut sd = rand::rngs::StdRng::from_seed(challenge.seed); \"\n"
+            "       \"let mut b = [0u8; 32]; sd.fill_bytes(&mut b); b };\\n\"\n"
+            "       \"    let mut optimizer_state = optimizer_init_state(\\n        optimizer_seed,\")\n"
+            "assert old in t, 'blinding anchor not found'\n"
+            "open(p, 'w').write(t.replace(old, new, 1))\n"
+            "print('[run] blinded optimizer seed')\n"
+            "PYEOF\n"
+        )
+    assemble = ('cat algorithm/mod.rs boilerplate.rs > "$SLOT/mod.rs"'
+                if is_nn else 'cp algorithm/mod.rs "$SLOT/mod.rs"')
+    hp_export = ""
+    if hyperparameters is not None:
+        hp_export = f"export TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}\n"
+
+    return f"""#!/bin/bash
+set -euo pipefail
+cd "${{C3_JOB_WORKDIR:-/workspace}}"
+OUT="${{C3_ARTIFACTS_DIR:-./c3-artifacts}}"; mkdir -p "$OUT" c3-artifacts
+export CHALLENGE={challenge}
+cp modified_test_algorithm /usr/local/bin/tig-scripts/modified_test_algorithm
+chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
+{patch}SLOT=tig-source/tig-algorithms/src/{challenge}/swarm_algo
+mkdir -p "$SLOT"
+{assemble}
+cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
+grep -q "pub mod swarm_algo;" tig-source/tig-algorithms/src/{challenge}/mod.rs || echo "pub mod swarm_algo;" >> tig-source/tig-algorithms/src/{challenge}/mod.rs
+export TIG_WORKDIR="$PWD/tig-source"
+export TIG_TRACKS={_yaml_quote(json.dumps(tracks))}
+export TIG_SEED={_yaml_quote(seed)}
+export TIG_FUEL={fuel}
+{hp_export}python3 tig_bench_driver.py > "$OUT/combined.json" 2> "$OUT/driver.stderr" || echo "driver rc=$?" >> "$OUT/driver.stderr"
+cp "$OUT/combined.json" c3-artifacts/ 2>/dev/null || true
+cp "$OUT/driver.stderr" c3-artifacts/ 2>/dev/null || true
+"""
+
+
+def _write_tig_c3_project(stage: Path, cfg: dict, c3_time: str, image: str,
+                          seed: str, hyperparameters: str | None) -> str:
+    challenge = cfg.get("challenge", "unknown")
+    run_id = uuid.uuid4().hex[:10]
+    script_name = f"run-tig-{run_id}.sh"
+    c3_config = f"""project: tig-swarm-benchmark
+script: {_yaml_quote(script_name)}
+gpu: {_yaml_quote(cfg.get("c3_hardware", "l40"))}
+time: {_yaml_quote(c3_time)}
+job_name: {_yaml_quote(f"tig-{challenge}-{run_id}")}
+
+docker:
+  image: {_yaml_quote(image)}
+
+output:
+  - ./c3-artifacts
+"""
+    _write_container_file(stage / ".c3", c3_config)
+    script_path = stage / script_name
+    _write_container_file(script_path, _tig_runner_script(cfg, seed, hyperparameters))
+    script_path.chmod(0o755)
+    return script_name
+
+
+def _load_tig_combined(stage: Path) -> tuple[dict | None, str]:
+    candidates = list(stage.rglob("combined.json"))
+    if not candidates:
+        return None, "combined.json not found in pulled artifacts"
+    try:
+        return json.loads(candidates[0].read_text()), ""
+    except Exception as e:
+        return None, f"combined.json not parseable: {e}"
+
+
+def _run_tig_benchmark_c3(
+    args: argparse.Namespace, cfg: dict, server: str, env: dict,
+    seed: str | None, hyperparameters: str | None,
+) -> tuple[dict | None, str]:
+    challenge = cfg.get("challenge", "unknown")
+    image = _tig_c3_image(cfg)
+    cfg = dict(cfg)
+    cfg["env"] = image
+    if seed is None:
+        seed = str((cfg.get("tracks") or {}).get("seed", "test"))
+
+    print(f"    [C3] (TIG backend) staging {challenge} with image {image}...")
+    with tempfile.TemporaryDirectory(prefix="tig-c3-tig-", ignore_cleanup_errors=True) as tmp:
+        stage = Path(tmp)
+        try:
+            _create_tig_workspace(stage, cfg)
+            _write_tig_c3_project(stage, cfg, args.c3_time, image, seed, hyperparameters)
+        except Exception as exc:
+            return None, f"[C3] Failed to create TIG project: {exc}"
+
+        cmd = ["c3", "deploy"]
+        provider = _arg_value(args, "c3_provider")
+        if provider:
+            cmd.extend(["-p", provider])
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace", cwd=stage, env=env,
+        )
+        lines: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            lines.append(line)
+            print(f"    [C3]   {line}")
+        proc.wait()
+        combined = "\n".join(lines)
+        if proc.returncode != 0:
+            return None, f"[C3] c3 deploy failed ({proc.returncode}):\n{combined[-4000:]}"
+
+        job_id = _parse_c3_id(combined)
+        if not job_id:
+            return None, f"[C3] Could not parse job ID:\n{combined[-2000:]}"
+
+        walltime_secs = _parse_walltime(args.c3_time)
+        print(f"    [C3] TIG job {job_id} — polling for completion...")
+        status = _poll_c3_job(job_id, env, stage, walltime_secs)
+        _pull_artifacts(job_id, env, stage)
+        if status != "completed":
+            logs_out = _read_logs(job_id, env, stage)
+            return None, f"[C3] TIG job {job_id} {status}\n{logs_out[-3000:]}"
+
+        comb, perr = _load_tig_combined(stage)
+        if comb is None:
+            logs_out = _read_logs(job_id, env, stage)
+            return None, f"[C3] TIG job completed but {perr}\n{logs_out[-3000:]}"
+        return _bm_tig_adapter(comb, cfg), ""
+
+
 def run_benchmark_c3(
     args: argparse.Namespace, config: dict, server: str,
     seed: str | None = None, hyperparameters: str | None = None,
@@ -506,6 +719,10 @@ def run_benchmark_c3(
     auth_err = _check_c3_auth(env)
     if auth_err:
         return None, auth_err
+
+    # TIG-docker backend: TIG image + driver, adapt combined.json -> benchmark.json.
+    if _bm_tig_backend(cfg):
+        return _run_tig_benchmark_c3(args, cfg, server, env, seed, hyperparameters)
 
     print(f"    [C3] Staging project for {challenge} with image {image}...")
 

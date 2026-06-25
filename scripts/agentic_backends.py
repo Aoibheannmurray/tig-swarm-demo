@@ -340,7 +340,8 @@ publishes the score paired with your hypothesis.
 
 ## Solver constraints
 
-- `use super::*;` must remain the first import in the Rust file.
+- The existing `use` imports at the top of the starting file must remain
+  (e.g. `use tig_challenges::<challenge>::*;`).
 - Keep the harness entry points and their signatures unchanged: for most
   challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
   `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
@@ -555,7 +556,8 @@ Strategy tags (pick the closest match): {strategy_tags}.
 
 ## Solver constraints
 
-- `use super::*;` must remain the first import in the Rust file.
+- The existing `use` imports at the top of the starting file must remain
+  (e.g. `use tig_challenges::<challenge>::*;`).
 - Keep the harness entry points and their signatures unchanged: for most
   challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
   `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`

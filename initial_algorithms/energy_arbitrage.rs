@@ -6,9 +6,13 @@
 // follows the same pattern with energy_arbitrage-specific `Challenge` /
 // `Solution` types.
 
-use super::*;
+use tig_challenges::energy_arbitrage::*;
 use anyhow::Result;
 use serde_json::{Map, Value};
+
+pub fn help() {
+    println!("No help information provided.");
+}
 
 pub fn solve_challenge(
     _challenge: &Challenge,

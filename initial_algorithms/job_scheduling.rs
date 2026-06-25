@@ -6,9 +6,13 @@
 // follows the same pattern with job_scheduling-specific `Challenge` /
 // `Solution` types.
 
-use super::*;
+use tig_challenges::job_scheduling::*;
 use anyhow::Result;
 use serde_json::{Map, Value};
+
+pub fn help() {
+    println!("No help information provided.");
+}
 
 pub fn solve_challenge(
     _challenge: &Challenge,

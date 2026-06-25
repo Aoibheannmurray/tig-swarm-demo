@@ -8,7 +8,7 @@ use cudarc::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use crate::vector_search::*;
+use tig_challenges::vector_search::*;
 
 #[derive(Serialize, Deserialize)]
 pub struct Hyperparameters {
@@ -29,7 +29,7 @@ pub fn solve_challenge(
     module: Arc<CudaModule>,
     stream: Arc<CudaStream>,
     prop: &cudaDeviceProp,
-) -> anyhow::Result<Option<Solution>> {
+) -> Result<()> {
     // If you need random numbers, recommend using SmallRng with challenge.seed:
     //      use rand::{rngs::SmallRng, Rng, SeedableRng};
     //      let mut rng = SmallRng::from_seed(challenge.seed);

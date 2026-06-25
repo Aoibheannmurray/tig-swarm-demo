@@ -5,9 +5,14 @@
 // for the broader docs; this file follows the same pattern with knapsack-specific
 // `Challenge` / `Solution` types.
 
-use super::*;
+use tig_challenges::knapsack::*;
 use anyhow::Result;
 use serde_json::{Map, Value};
+
+// Required by the TIG entry point (`{ALGORITHM}::help()`).
+pub fn help() {
+    println!("No help information provided.");
+}
 
 pub fn solve_challenge(
     _challenge: &Challenge,
