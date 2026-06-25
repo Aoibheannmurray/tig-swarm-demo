@@ -132,14 +132,21 @@ class AdminSeedInactive(AdminAuth):
     path). Used at swarm-create time to seed the pool with the current
     top-earning TIG mainnet algorithm.
 
-    Restricted server-side to {knapsack, satisfiability} — the only
-    challenges whose mainnet algorithms ship as a single mod.rs (+ optional
-    kernels.cu), which is what the `trajectory_bests` / `inactive_algorithms`
-    wire format expects today.
+    Supports every challenge, single- or multi-file. `algorithm_code` always
+    carries the entry file (`mod.rs`) for single-file/back-compat consumers;
+    `algorithm_files` carries the full {relpath: content} map (multiple `.rs`
+    and multiple `.cu` kernels, names preserved) and is the source of truth on
+    adoption when present — `_row_files` / the `adopted_inactive` branch already
+    round-trip it.
     """
     challenge: "ChallengeName"
     algorithm_code: str
     kernel_code: Optional[str] = None
+    # Full multi-file algorithm as a {relpath: content} map (keys relative to
+    # the algorithm dir; `mod.rs` is the entry). None/absent for single-file
+    # seeds, where `algorithm_code` is the whole algorithm. When present it is
+    # the source of truth and `algorithm_code` holds the entry file.
+    algorithm_files: Optional[dict] = None
     # Free-form label for the synthetic agent the pool entry is attributed
     # to (e.g. "tig-foundation"). The server creates the agent on first use.
     source_label: str = "tig-foundation"

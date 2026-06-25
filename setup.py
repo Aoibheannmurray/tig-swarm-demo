@@ -313,12 +313,6 @@ def _arg_enabled(args: argparse.Namespace | None, name: str) -> bool:
     return bool(getattr(args, name, False)) if args is not None else False
 
 
-# Challenges whose mainnet algorithm format (single mod.rs + optional
-# kernels.cu) matches what the swarm's inactive_algorithms pool expects.
-# Server enforces the same set; host-side it gates the wizard prompt so
-# we don't ask about challenges we can't actually seed.
-SEED_INACTIVE_SUPPORTED: set[str] = {"knapsack", "satisfiability"}
-
 _MAINNET_API = "https://mainnet-api.tig.foundation"
 
 
@@ -397,21 +391,20 @@ def _top_mainnet_algorithm(challenge: str) -> tuple[str, int] | None:
 def seed_inactive_pool_from_mainnet(
     server_url: str, admin_key: str, challenges: set[str],
 ) -> None:
-    """For each requested challenge in `SEED_INACTIVE_SUPPORTED`, find the
-    current top-adoption mainnet algorithm, fetch its source in-memory via
+    """For each requested challenge, find the current top-adoption mainnet
+    algorithm, fetch its source in-memory via
     ``download_algorithm.fetch_algorithm`` (deliberately NOT
     ``download_algorithm`` — we never want to mutate the host's
     ``initial_algorithms/`` directory as a side effect of seeding the
     server's inactive pool), and POST it to ``/api/admin/seed_inactive``
     so the swarm's first stagnation-with-adoption event picks it up.
 
-    The inactive pool's wire format carries a single algorithm_code blob
-    (+ optional kernel), so we require the upstream bundle to contain
-    exactly one ``mod.rs`` and at most one ``*.cu`` file. Anything else
-    (README.md, multi-module .rs files) is grounds to skip — the schema
-    can't represent it. Non-code companions (e.g. README.md) on an
-    otherwise-single-file algorithm are silently ignored rather than
-    blocking the seed.
+    Multi-file aware: the full {relpath: content} map (multiple ``.rs``
+    modules and multiple ``.cu`` kernels, names preserved) is sent as
+    ``algorithm_files``, with the entry ``mod.rs`` mirrored into
+    ``algorithm_code`` for single-file consumers. Non-code companions
+    (e.g. README.md) are dropped. A bundle with no ``mod.rs`` entry is
+    skipped.
 
     Best-effort throughout: network failures, unknown algorithms, and
     server errors are warned-and-skipped rather than aborting setup."""
@@ -422,7 +415,7 @@ def seed_inactive_pool_from_mainnet(
         print(f"  could not import download_algorithm.py: {e}; skipping seed.")
         return
 
-    targets = sorted(challenges & SEED_INACTIVE_SUPPORTED)
+    targets = sorted(challenges)
     if not targets:
         return
 
@@ -442,22 +435,30 @@ def seed_inactive_pool_from_mainnet(
             print(f"  {ch}: fetch of {algo_name} failed ({e}); skipping seed.")
             continue
 
-        rs_files = sorted(p for p in files if p.endswith(".rs"))
-        cu_files = sorted(p for p in files if p.endswith(".cu"))
-        if rs_files != ["mod.rs"] or len(cu_files) > 1:
+        # Keep only compilable source; drop README.md and other companions
+        # (mirrors challenge_files._ALGO_FILE_SUFFIXES). The full map — multiple
+        # `.rs` modules and multiple `.cu` kernels, names preserved — rides in
+        # `algorithm_files`; `algorithm_code` carries the entry file.
+        code_files = {
+            p: c for p, c in files.items()
+            if p.endswith((".rs", ".cu", ".cuh"))
+        }
+        if "mod.rs" not in code_files:
             print(
-                f"  {ch}: upstream {algo_name} is multi-module "
-                f"(.rs={rs_files}, .cu={cu_files}) — inactive-pool seeding "
-                f"requires a single mod.rs + at most one .cu; skipping."
+                f"  {ch}: upstream {algo_name} has no mod.rs entry "
+                f"(files={sorted(files)}); skipping seed."
             )
             continue
-        algorithm_code = files["mod.rs"]
-        kernel_code = files[cu_files[0]] if cu_files else None
+        cu_files = sorted(p for p in code_files if p.endswith((".cu", ".cuh")))
+        # `kernel_code` is single-kernel back-compat only; with multiple kernels
+        # the map is the source of truth and we leave the scalar None.
+        kernel_code = code_files[cu_files[0]] if len(cu_files) == 1 else None
 
         payload = {
             "admin_key": admin_key,
             "challenge": ch,
-            "algorithm_code": algorithm_code,
+            "algorithm_code": code_files["mod.rs"],
+            "algorithm_files": code_files,
             "kernel_code": kernel_code,
             "source_label": "tig-foundation",
         }
@@ -1603,12 +1604,12 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         use_defaults = use_defaults_ans.strip().lower() not in ("n", "no")
 
     # Optional: seed the server's inactive_algorithms pool with the current
-    # top-earning TIG mainnet algorithm. Restricted to {knapsack,
-    # satisfiability} because those are the only challenges whose mainnet
-    # algorithm format slots cleanly into the single-file inactive pool.
-    # Resolved here so we honor --yes / --seed-inactive-pool / wizard input,
-    # but the actual fetch + POST is deferred until after the server is up.
-    seedable = SEED_INACTIVE_SUPPORTED & set(challenge_set.keys())
+    # top-earning TIG mainnet algorithm. Covers every challenge in the swarm
+    # (multi-file aware); challenges with no fetchable/compatible mainnet algo
+    # are warned-and-skipped per challenge at seed time. Resolved here so we
+    # honor --yes / --seed-inactive-pool / wizard input, but the actual fetch +
+    # POST is deferred until after the server is up.
+    seedable = set(challenge_set.keys())
     seed_inactive_pool = _arg_enabled(args, "seed_inactive_pool")
     if seedable and not seed_inactive_pool and not yes:
         ans = prompt(
@@ -1618,11 +1619,11 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         )
         seed_inactive_pool = ans.strip().lower() in ("y", "yes")
     if seed_inactive_pool and not seedable:
-        # Host passed the flag on a swarm that doesn't include either
-        # supported challenge — warn rather than silently ignoring.
+        # Host passed the flag on a swarm with no challenges configured —
+        # warn rather than silently ignoring.
         print(
-            "  --seed-inactive-pool requested but neither knapsack nor "
-            "satisfiability is in this swarm; nothing to seed."
+            "  --seed-inactive-pool requested but this swarm has no "
+            "challenges; nothing to seed."
         )
         seed_inactive_pool = False
 
@@ -2078,8 +2079,8 @@ def add_create_setup_args(parser: argparse.ArgumentParser) -> None:
         "--seed-inactive-pool", action="store_true",
         help=(
             "After deploy, seed the server's inactive_algorithms pool with the "
-            "current top-earning TIG mainnet algorithm for knapsack and/or "
-            "satisfiability (only these two challenges are supported)."
+            "current top-earning TIG mainnet algorithm for every challenge in "
+            "the swarm (multi-file aware; incompatible ones are skipped)."
         ),
     )
 

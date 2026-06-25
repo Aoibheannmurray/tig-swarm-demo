@@ -2266,9 +2266,6 @@ async def admin_reset_challenge(req: AdminResetChallenge):
     }
 
 
-SEED_INACTIVE_SUPPORTED = ("knapsack", "satisfiability")
-
-
 @app.post("/api/admin/seed_inactive")
 async def admin_seed_inactive(req: AdminSeedInactive):
     """Insert an externally-sourced algorithm into the inactive_algorithms
@@ -2278,19 +2275,12 @@ async def admin_seed_inactive(req: AdminSeedInactive):
     branch in server.py — at which point it is removed from the pool
     (consume-once semantics).
 
-    Restricted to challenges whose mainnet algorithm format matches the
-    swarm's single-file expectation. The host-side wizard enforces the
-    same set; this is defense-in-depth so a stray curl can't seed an
-    unsupported challenge with a payload that would break adoption."""
+    Supports every challenge, single- or multi-file: `algorithm_code` is the
+    entry file and `algorithm_files` (when present) carries the full map —
+    multiple `.rs` modules and multiple `.cu` kernels, names preserved. The
+    Pydantic `ChallengeName` Literal already rejects unknown challenge names,
+    so no explicit allowlist is needed here."""
     await verify_admin(req)
-    if req.challenge not in SEED_INACTIVE_SUPPORTED:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"seed_inactive is supported for {list(SEED_INACTIVE_SUPPORTED)} "
-                f"only (got {req.challenge!r})"
-            ),
-        )
     if not req.algorithm_code.strip():
         raise HTTPException(status_code=400, detail="algorithm_code is empty")
     timestamp = now()
@@ -2302,6 +2292,7 @@ async def admin_seed_inactive(req: AdminSeedInactive):
             conn, agent_id, req.challenge,
             req.algorithm_code, None, timestamp,
             kernel_code=req.kernel_code,
+            algorithm_files=_files_json(req.algorithm_files),
         )
         await conn.commit()
     return {
