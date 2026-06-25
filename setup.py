@@ -471,10 +471,19 @@ def seed_inactive_pool_from_mainnet(
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 body = json.load(resp)
-            print(
-                f"  {ch}: seeded inactive pool "
-                f"(inactive_id={body.get('inactive_id')}, source={body.get('source')})"
-            )
+            if not body.get("seeded"):
+                print(
+                    f"  {ch}: already seeded ({body.get('reason', 'skipped')}); "
+                    f"leaving the existing pool entry in place."
+                )
+            else:
+                kernels = sorted(p for p in code_files if p.endswith((".cu", ".cuh")))
+                extra = f", kernels={kernels}" if kernels else ""
+                print(
+                    f"  {ch}: seeded inactive pool "
+                    f"(inactive_id={body.get('inactive_id')}, "
+                    f"files={len(code_files)}{extra}, source={body.get('source')})"
+                )
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:200]
             print(f"  {ch}: server rejected seed (HTTP {e.code}: {detail}); skipping.")

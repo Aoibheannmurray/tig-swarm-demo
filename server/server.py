@@ -2288,6 +2288,20 @@ async def admin_seed_inactive(req: AdminSeedInactive):
         agent_id = await db.ensure_synthetic_agent(
             conn, req.source_label, timestamp,
         )
+        # Idempotency guard: if this source already has an unconsumed seed for
+        # the challenge, skip — re-running `setup.py create` must not pile up
+        # duplicate mainnet seeds. Consume-once means an adopted seed leaves no
+        # row, so a later create still re-seeds.
+        existing = await db.count_inactive_from_agent(
+            conn, agent_id, req.challenge,
+        )
+        if existing:
+            return {
+                "seeded": False,
+                "challenge": req.challenge,
+                "reason": "already_seeded",
+                "source": req.source_label,
+            }
         inactive_id = await db.deposit_inactive(
             conn, agent_id, req.challenge,
             req.algorithm_code, None, timestamp,

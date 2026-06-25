@@ -100,10 +100,44 @@ async def test_single_file_seed_has_no_files_map():
     print("PASS test_single_file_seed_has_no_files_map")
 
 
+async def test_already_seeded_guard():
+    """A second seed from the same source for the same challenge is a no-op,
+    but is re-allowed once the prior seed is consumed (removed) from the pool."""
+    db, server = _fresh_modules()
+    await db.init_db()
+
+    async def _deposit_if_absent():
+        async with db.connect() as conn:
+            agent_id = await db.ensure_synthetic_agent(conn, "tig-foundation", TS)
+            existing = await db.count_inactive_from_agent(conn, agent_id, CHALLENGE)
+            if existing:
+                return False
+            await db.deposit_inactive(
+                conn, agent_id, CHALLENGE, FILES["mod.rs"], None, TS,
+                algorithm_files=server._files_json(FILES),
+            )
+            await conn.commit()
+            return True
+
+    assert await _deposit_if_absent() is True, "first seed should deposit"
+    assert await _deposit_if_absent() is False, "duplicate seed should be skipped"
+
+    async with db.connect() as conn:
+        pool = await db.get_inactive_with_deactivations(conn, CHALLENGE)
+        assert len(pool) == 1, f"guard let a duplicate through: {len(pool)} rows"
+        # Consume the seed (as adoption does), then re-seeding is allowed again.
+        await db.remove_inactive(conn, pool[0]["id"])
+        await conn.commit()
+
+    assert await _deposit_if_absent() is True, "re-seed after consume should deposit"
+    print("PASS test_already_seeded_guard")
+
+
 async def _main():
     await test_multifile_roundtrip_through_adoption_read()
     await test_single_file_seed_has_no_files_map()
-    print("\nAll Component 1 multi-file seeding tests passed.")
+    await test_already_seeded_guard()
+    print("\nAll Component 1 + 4 seeding tests passed.")
 
 
 if __name__ == "__main__":

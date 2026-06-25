@@ -738,7 +738,9 @@ async def get_recent_improvement_scores(
     trajectory is unknown or has no recorded improvements.
 
     Powers the hyperparameter-search gate (see docs/hyperparameter-search-plan.md):
-    the count is `len(...)` and the band floor is `result[-min_improvements]`.
+    the count is `len(...)`, the band floor is `result[-min_improvements]`, and
+    the parent (band ceiling) is `result[-1]` — after the first tune the gate
+    fires only when floor < candidate < parent (direction-aware).
 
     The scores are each improvement's *default* (no-hyperparameters) score, so the
     band is default-vs-default: an ancestor that tuned never raises the bar for its
@@ -1267,6 +1269,24 @@ async def remove_inactive(conn: aiosqlite.Connection, inactive_id: int) -> None:
     await conn.execute(
         "DELETE FROM inactive_algorithms WHERE id = ?", (inactive_id,)
     )
+
+
+async def count_inactive_from_agent(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str
+) -> int:
+    """Number of unconsumed inactive-pool rows on `challenge` attributed to
+    `agent_id`. Used by the admin seeder's idempotency guard: a synthetic
+    source agent (e.g. tig-foundation) that still has an unconsumed seed for
+    this challenge shouldn't be re-seeded, so a repeated `setup.py create`
+    doesn't pile up duplicate mainnet seeds in the pool. (Consume-once
+    semantics mean a genuinely-adopted seed leaves no row, so the next create
+    correctly re-seeds.)"""
+    row = await (await conn.execute(
+        "SELECT COUNT(*) AS c FROM inactive_algorithms "
+        "WHERE agent_id = ? AND challenge = ?",
+        (agent_id, challenge),
+    )).fetchone()
+    return row["c"]
 
 
 async def trajectory_counts(
