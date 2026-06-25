@@ -882,6 +882,12 @@ async def get_state(
                     trajectory_reset = {
                         "type": "adopted_inactive",
                         "prior_score": adopted_score,
+                        # Seeds deposited without a benchmark (admin/mainnet
+                        # seeds) have no score, so there's no floor to inherit.
+                        # Tell the agent to benchmark the adopted code unchanged
+                        # FIRST, so the trajectory floor is the seed's real
+                        # score instead of its first (possibly worse) mutation.
+                        "needs_benchmark": adopted_score is None,
                     }
                     if picked.get("trajectory_id"):
                         new_traj_id = picked["trajectory_id"]
@@ -935,13 +941,12 @@ async def get_state(
                         trajectory_id=new_traj_id, kernel_code=new_kernel_code,
                         algorithm_files=_files_json(new_files),
                     )
-                    traj_best = {
-                        "algorithm_code": new_code,
-                        "score": adopted_score,
-                        "experiment_id": adopted_experiment_id,
-                        "kernel_code": new_kernel_code,
-                        "algorithm_files": _files_json(new_files),
-                    }
+                    # Re-read the row we just upserted so traj_best has the full
+                    # canonical shape (solution_data / hyperparameters /
+                    # challenge_metrics included). A hand-built partial dict here
+                    # KeyErrors downstream — e.g. `traj_best["solution_data"]`
+                    # when building the state response.
+                    traj_best = await db.get_trajectory_best(conn, agent_id, challenge)
                     current_trajectory_best = adopted_score
                     traj_best_experiment_id = adopted_experiment_id
                 else:

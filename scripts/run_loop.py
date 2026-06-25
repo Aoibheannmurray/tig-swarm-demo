@@ -638,11 +638,20 @@ def _hpo_gate_open(
     must have had >= min_improvements improvements. Then:
       - the FIRST time a mature trajectory is eligible (`has_tuned` is False),
         the gate opens automatically — the band check is skipped that once;
-      - thereafter it falls back to the band: the candidate's default score must
-        be >= the min_improvements-th-previous improvement's default score.
-    Both CPU and GPU solver paths accept --hyperparameters, so GPU tunes too.
+      - thereafter the candidate's default score must fall strictly inside the
+        tune band: better than the min_improvements-th-previous improvement
+        (`improvement_scores[-min_improvements]`, the floor) AND worse than the
+        parent (`improvement_scores[-1]`, the latest improvement). The point is
+        to spend HPO budget only on "near-miss" candidates — ones that made real
+        progress but haven't beaten the parent — where tuning might push them
+        over. A candidate already at/above the parent is a win on its own; one
+        at/below the floor has regressed too far.
+    "Better"/"worse" respect `scoring_direction` (max: higher is better; min:
+    lower is better), so the band is correct for both. Both CPU and GPU solver
+    paths accept --hyperparameters, so GPU tunes too.
     """
     min_improvements = int(config.get("hpo_min_improvements", 4))
+    direction = str(config.get("scoring_direction", "max"))
     score = default_bench.get("score")
     if score is None or not default_bench.get("feasible", False):
         return False
@@ -652,11 +661,19 @@ def _hpo_gate_open(
         print(f"  [HPO] gate open: first tune for this trajectory "
               f"({len(improvement_scores)} improvements) — band check waived")
         return True
+
+    def _better(a: float, b: float) -> bool:  # a strictly better than b
+        return a < b if direction == "min" else a > b
+
+    parent_score = improvement_scores[-1]
     band_floor = improvement_scores[-min_improvements]
-    if score < band_floor:
-        print(f"  [HPO] gate closed: default score {score:.0f} below band floor "
-              f"{band_floor:.0f} (last {min_improvements} improvements)")
+    if not (_better(score, band_floor) and _better(parent_score, score)):
+        print(f"  [HPO] gate closed: default score {score:.0f} outside tune band "
+              f"(must be better than floor {band_floor:.0f} and worse than parent "
+              f"{parent_score:.0f}; direction={direction})")
         return False
+    print(f"  [HPO] gate open: score {score:.0f} in tune band "
+          f"(floor {band_floor:.0f}, parent {parent_score:.0f}; direction={direction})")
     return True
 
 
@@ -774,6 +791,24 @@ def _extract_hyperparameters_agentic(
     }, 0, 0
 
 
+# ═══ TEMP HPO RESULT LOGGING (testing only — remove this block + its call
+# sites in _maybe_tune_hyperparameters when done) ═══════════════════════════
+def _dump_hpo_record(record: dict) -> None:
+    """Append one HPO run's full results (per-track scores, per-trial + phase
+    timing, tokens, default-vs-tuned outcome) to hpo_results/hpo_runs.jsonl for
+    offline evaluation. Best-effort: never let debug logging break the loop."""
+    try:
+        out_dir = ROOT / "hpo_results"
+        out_dir.mkdir(exist_ok=True)
+        path = out_dir / "hpo_runs.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        print(f"  [HPO] (debug) results appended to {path}")
+    except Exception as e:
+        print(f"  [HPO] (debug) could not write results: {e!r}")
+# ═══ end TEMP HPO RESULT LOGGING ════════════════════════════════════════════
+
+
 def _maybe_tune_hyperparameters(
     args: argparse.Namespace, model: str, api_key: str,
     config: dict, server: str,
@@ -806,6 +841,34 @@ def _maybe_tune_hyperparameters(
     default_score = default_bench.get("score")
     print(f"  [HPO] gate open — tuning (N={n}, suggested={num_suggested}, seed='{hpo_seed}')")
 
+    # ═══ TEMP HPO RESULT LOGGING (testing only — remove with _dump_hpo_record) ═══
+    _t0 = time.monotonic()
+    _rec: dict = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "agent_id": config.get("agent_id"),
+        "agent_name": config.get("agent_name") or config.get("name"),
+        "challenge": config.get("challenge"),
+        "provider": getattr(args, "provider", None),
+        "model": model,
+        "hpo_seed": hpo_seed,
+        "n": n,
+        "num_suggested": num_suggested,
+        "default_score": default_score,
+        "default_feasible": bool(default_bench.get("feasible", False)),
+        "default_track_scores": default_bench.get("track_scores"),
+        "improvement_scores": improvement_scores,
+        "phase_sec": {},
+    }
+
+    def _finish(bench, winning, outcome):
+        _rec["outcome"] = outcome
+        _rec["elapsed_sec"] = round(time.monotonic() - _t0, 2)
+        _rec["hpo_in_tokens"] = in_tok
+        _rec["hpo_out_tokens"] = out_tok
+        _dump_hpo_record(_rec)
+        return bench, winning, in_tok, out_tok
+    # ═══ end TEMP setup ══════════════════════════════════════════════════════
+
     # Snapshot ALL algorithm files so any failure path restores the exact
     # pre-tuning state (multi-file aware).
     original_map = files.read_files()
@@ -814,6 +877,7 @@ def _maybe_tune_hyperparameters(
     #    suggested configs) and a behaviour-preserving variant (the full
     #    files-map, multi-file aware). Agentic providers do this as a second
     #    agent pass (Fix 1); everyone else via a single structured completion.
+    _t_ex = time.monotonic()
     if args.provider in _AGENTIC_PROVIDERS:
         parsed, ei, eo = _extract_hyperparameters_agentic(
             args, backend, workdir, files, config, challenge_md,
@@ -824,12 +888,14 @@ def _maybe_tune_hyperparameters(
             args, model, api_key, config, challenge_md,
             original_map, parent_hyperparameters, num_suggested,
         )
+    _rec["phase_sec"]["extract"] = round(time.monotonic() - _t_ex, 2)  # TEMP
     in_tok += ei
     out_tok += eo
     if parsed is None:
         print("  [HPO] extraction produced nothing usable — skipping tune")
-        return default_bench, None, in_tok, out_tok
+        return _finish(default_bench, None, "extraction_failed")  # TEMP
     print(f"  [HPO] hyperparameters: {[h['name'] for h in parsed['hyperparameters']]}")
+    _rec["hyperparameters"] = parsed["hyperparameters"]  # TEMP (full spec + ranges)
 
     # 2. Write the variant (full map) and build/smoke-test it on the HPO seed
     #    (default config), with LLM compile-fix retries.
@@ -839,31 +905,50 @@ def _maybe_tune_hyperparameters(
     if validate_code(entry_code, config):
         print("  [HPO] variant failed validation — restoring, skipping tune")
         files.write_files(original_map)
-        return default_bench, None, in_tok, out_tok
+        return _finish(default_bench, None, "variant_invalid")  # TEMP
+    _t_build = time.monotonic()
     compile_bench, build_err, _changed, ci, co = _benchmark_with_compile_fix(
         args, model, api_key, config, server, files,
         seed=hpo_seed, hyperparameters="{}",
     )
+    _rec["phase_sec"]["variant_build"] = round(time.monotonic() - _t_build, 2)  # TEMP
     in_tok += ci
     out_tok += co
     if compile_bench is None:
         print(f"  [HPO] variant build failed: {build_err[:200]} — restoring, skipping tune")
         files.write_files(original_map)
-        return default_bench, None, in_tok, out_tok
+        return _finish(default_bench, None, "variant_build_failed")  # TEMP
 
     # 3. Random search on the (non-test) HPO seed.
-    def benchmark_fn(seed: str, hp_json: str) -> tuple[dict | None, str]:
-        return run_benchmark(args, config, server, seed=seed, hyperparameters=hp_json)
+    _trial_sec: list[float] = []  # TEMP: wall-clock per trial benchmark
 
+    def benchmark_fn(seed: str, hp_json: str) -> tuple[dict | None, str]:
+        _ts = time.monotonic()  # TEMP
+        out = run_benchmark(args, config, server, seed=seed, hyperparameters=hp_json)
+        _trial_sec.append(round(time.monotonic() - _ts, 2))  # TEMP
+        return out
+
+    _t_search = time.monotonic()
     result = hpo.search(
         benchmark_fn, parsed["hyperparameters"], parsed["suggested_configs"],
         n=n, num_suggested=num_suggested, hpo_seed=hpo_seed, log=print,
     )
+    _rec["phase_sec"]["search"] = round(time.monotonic() - _t_search, 2)  # TEMP
+    # TEMP: keep every trial's config/score/feasibility/per-track scores + timing.
+    _trials = [dict(t) for t in (result.get("trials") or [])]
+    for _i, _t in enumerate(_trials):
+        if _i < len(_trial_sec):
+            _t["sec"] = _trial_sec[_i]
+    _rec["trials"] = _trials
+    _rec["winning_configs"] = result.get("winning_configs")
+    _rec["winning_config_global"] = result.get("winning_config")
+    _rec["winning_score_hpo_seed"] = result.get("winning_score")
+
     winning = result["winning_configs"]  # {track_key: config} — a winner per track
     if not winning:
         print("  [HPO] search produced no per-track winners — keeping default")
         files.write_files(original_map)
-        return default_bench, None, in_tok, out_tok
+        return _finish(default_bench, None, "no_winners")  # TEMP
 
     # 4. Adopt the per-track winning map as the trajectory's new default
     #    hyperparameters and score the variant on the TEST seed under that map
@@ -875,27 +960,37 @@ def _maybe_tune_hyperparameters(
     #    set, each track's winner is >= default on the HPO seed; a tuned score
     #    below the untuned default can only arise from the test-vs-HPO seed
     #    mismatch, and per the design we accept that.
+    _t_final = time.monotonic()
     tuned_bench, terr = run_benchmark(
         args, config, server, hyperparameters=json.dumps(winning),
     )
+    _rec["phase_sec"]["final_test_bench"] = round(time.monotonic() - _t_final, 2)  # TEMP
     if tuned_bench is None:
         print(f"  [HPO] final test-seed benchmark failed: {terr[:200]} — restoring, using default")
         files.write_files(original_map)
-        return default_bench, None, in_tok, out_tok
+        return _finish(default_bench, None, "final_bench_failed")  # TEMP
 
     tuned_score = tuned_bench.get("score")
     tuned_feasible = bool(tuned_bench.get("feasible", False))
+    # TEMP: record the tuned outcome on the test seed (the published result).
+    _rec["tuned_score"] = tuned_score
+    _rec["tuned_feasible"] = tuned_feasible
+    _rec["tuned_track_scores"] = tuned_bench.get("track_scores")
+    _rec["delta_vs_default"] = (
+        (tuned_score - default_score)
+        if (tuned_score is not None and default_score is not None) else None
+    )
     if tuned_score is None or not tuned_feasible:
         print(f"  [HPO] tuned result infeasible/missing on the test seed "
               "— restoring, using default")
         files.write_files(original_map)
-        return default_bench, None, in_tok, out_tok
+        return _finish(default_bench, None, "tuned_infeasible")  # TEMP
 
     delta = tuned_score - default_score
     print(f"  [HPO] tuned score {tuned_score:.0f} (default {default_score:.0f}, "
           f"{'+' if delta >= 0 else ''}{delta:.0f}) — publishing variant + per-track "
           f"configs {json.dumps(winning)}")
-    return tuned_bench, winning, in_tok, out_tok
+    return _finish(tuned_bench, winning, "published")  # TEMP
 
 
 def _fix_runtime_errors(
@@ -968,7 +1063,7 @@ def _fix_runtime_errors(
         if bench_result is None:
             print(f"  Runtime fix caused compile error — asking LLM to fix ...")
             ok, it, ot = _try_compile_fix(
-                args, model, api_key, config, challenge_md,
+                args, model, api_key, config,
                 files, build_err,
             )
             input_tokens += it
@@ -1744,6 +1839,50 @@ def main() -> int:
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
             if files.is_gpu and not best_kernel:
                 print(f"  [FILES] No kernel code from server — using local kernels.cu")
+
+        # Adopted an unbenchmarked seed (admin/mainnet seed deposited with no
+        # score): benchmark it UNCHANGED first so the trajectory floor is the
+        # seed's true score, not its first mutation. The adopted code is already
+        # on disk (written just above). Publish a no-mutation iteration, then
+        # re-loop so the next pass starts from the now-floored state and mutates
+        # normally. Best-effort: if the seed won't even benchmark, fall through.
+        if (reset and reset.get("type") == "adopted_inactive"
+                and reset.get("needs_benchmark") and best_code and not bootstrap):
+            compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
+            print(f"  [SEED-BENCH] Adopted unbenchmarked seed — scoring it unchanged "
+                  f"on {compute_label} to set the floor before mutating…")
+            send_heartbeat(server, agent_id, agent_token=agent_token)
+            seed_bench, seed_err = run_benchmark(args, config, server)
+            if seed_bench is None:
+                print(f"  [SEED-BENCH] FAILED — {seed_err[:300]}")
+                print(f"  [SEED-BENCH] Could not score the seed; proceeding to a normal iteration.")
+            else:
+                _print_bench_result(seed_bench)
+                seed_hyp = {
+                    "title": "Baseline: adopted mainnet seed",
+                    "description": (
+                        "Benchmarked the adopted inactive-pool seed unchanged to "
+                        "record its true score before mutating."
+                    ),
+                    "strategy_tag": "seed_baseline",
+                }
+                try:
+                    publish_results(
+                        server, agent_id, seed_bench, seed_hyp, config,
+                        agent_token=agent_token, role=role,
+                    )
+                    print(f"  [SEED-BENCH] Floor set at "
+                          f"{_clean_score(seed_bench.get('score', 0)):.0f}; "
+                          f"re-syncing before mutating.")
+                except Exception as e:
+                    print(f"  [SEED-BENCH] publish FAILED: {e}")
+                post_message(server, agent_name, agent_id,
+                             f"[seed_baseline] benchmarked adopted seed → "
+                             f"{_clean_score(seed_bench.get('score', 0)):.0f}",
+                             challenge=seed_bench.get("challenge") or iter_challenge,
+                             agent_token=agent_token)
+                send_heartbeat(server, agent_id, agent_token=agent_token)
+                continue
 
         if bootstrap:
             print("  [FILES] Starting from stub — will ask LLM to write initial implementation")
