@@ -22,7 +22,6 @@
 // Verified on an L40 (C3): compiles, runs, feasible, and beats the baseline
 // (score +44520 on n_queries=10).
 
-use crate::vector_search::*;
 use anyhow::Result;
 use cudarc::{
     driver::{CudaModule, CudaStream, LaunchConfig, PushKernelArg},
@@ -30,8 +29,13 @@ use cudarc::{
 };
 use serde_json::{Map, Value};
 use std::sync::Arc;
+use tig_challenges::vector_search::*;
 
 const THREADS_PER_BLOCK: u32 = 128;
+
+pub fn help() {
+    println!("GPU brute-force vector search seed.");
+}
 
 pub fn solve_challenge(
     challenge: &Challenge,
