@@ -791,24 +791,6 @@ def _extract_hyperparameters_agentic(
     }, 0, 0
 
 
-# ═══ TEMP HPO RESULT LOGGING (testing only — remove this block + its call
-# sites in _maybe_tune_hyperparameters when done) ═══════════════════════════
-def _dump_hpo_record(record: dict) -> None:
-    """Append one HPO run's full results (per-track scores, per-trial + phase
-    timing, tokens, default-vs-tuned outcome) to hpo_results/hpo_runs.jsonl for
-    offline evaluation. Best-effort: never let debug logging break the loop."""
-    try:
-        out_dir = ROOT / "hpo_results"
-        out_dir.mkdir(exist_ok=True)
-        path = out_dir / "hpo_runs.jsonl"
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-        print(f"  [HPO] (debug) results appended to {path}")
-    except Exception as e:
-        print(f"  [HPO] (debug) could not write results: {e!r}")
-# ═══ end TEMP HPO RESULT LOGGING ════════════════════════════════════════════
-
-
 def _maybe_tune_hyperparameters(
     args: argparse.Namespace, model: str, api_key: str,
     config: dict, server: str,
@@ -841,34 +823,6 @@ def _maybe_tune_hyperparameters(
     default_score = default_bench.get("score")
     print(f"  [HPO] gate open — tuning (N={n}, suggested={num_suggested}, seed='{hpo_seed}')")
 
-    # ═══ TEMP HPO RESULT LOGGING (testing only — remove with _dump_hpo_record) ═══
-    _t0 = time.monotonic()
-    _rec: dict = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "agent_id": config.get("agent_id"),
-        "agent_name": config.get("agent_name") or config.get("name"),
-        "challenge": config.get("challenge"),
-        "provider": getattr(args, "provider", None),
-        "model": model,
-        "hpo_seed": hpo_seed,
-        "n": n,
-        "num_suggested": num_suggested,
-        "default_score": default_score,
-        "default_feasible": bool(default_bench.get("feasible", False)),
-        "default_track_scores": default_bench.get("track_scores"),
-        "improvement_scores": improvement_scores,
-        "phase_sec": {},
-    }
-
-    def _finish(bench, winning, outcome):
-        _rec["outcome"] = outcome
-        _rec["elapsed_sec"] = round(time.monotonic() - _t0, 2)
-        _rec["hpo_in_tokens"] = in_tok
-        _rec["hpo_out_tokens"] = out_tok
-        _dump_hpo_record(_rec)
-        return bench, winning, in_tok, out_tok
-    # ═══ end TEMP setup ══════════════════════════════════════════════════════
-
     # Snapshot ALL algorithm files so any failure path restores the exact
     # pre-tuning state (multi-file aware).
     original_map = files.read_files()
@@ -877,7 +831,6 @@ def _maybe_tune_hyperparameters(
     #    suggested configs) and a behaviour-preserving variant (the full
     #    files-map, multi-file aware). Agentic providers do this as a second
     #    agent pass (Fix 1); everyone else via a single structured completion.
-    _t_ex = time.monotonic()
     if args.provider in _AGENTIC_PROVIDERS:
         parsed, ei, eo = _extract_hyperparameters_agentic(
             args, backend, workdir, files, config, challenge_md,
@@ -888,14 +841,12 @@ def _maybe_tune_hyperparameters(
             args, model, api_key, config, challenge_md,
             original_map, parent_hyperparameters, num_suggested,
         )
-    _rec["phase_sec"]["extract"] = round(time.monotonic() - _t_ex, 2)  # TEMP
     in_tok += ei
     out_tok += eo
     if parsed is None:
         print("  [HPO] extraction produced nothing usable — skipping tune")
-        return _finish(default_bench, None, "extraction_failed")  # TEMP
+        return default_bench, None, in_tok, out_tok
     print(f"  [HPO] hyperparameters: {[h['name'] for h in parsed['hyperparameters']]}")
-    _rec["hyperparameters"] = parsed["hyperparameters"]  # TEMP (full spec + ranges)
 
     # 2. Write the variant (full map) and build/smoke-test it on the HPO seed
     #    (default config), with LLM compile-fix retries.
@@ -905,50 +856,32 @@ def _maybe_tune_hyperparameters(
     if validate_code(entry_code, config):
         print("  [HPO] variant failed validation — restoring, skipping tune")
         files.write_files(original_map)
-        return _finish(default_bench, None, "variant_invalid")  # TEMP
-    _t_build = time.monotonic()
+        return default_bench, None, in_tok, out_tok
     compile_bench, build_err, _changed, ci, co = _benchmark_with_compile_fix(
         args, model, api_key, config, server, files,
         seed=hpo_seed, hyperparameters="{}",
     )
-    _rec["phase_sec"]["variant_build"] = round(time.monotonic() - _t_build, 2)  # TEMP
     in_tok += ci
     out_tok += co
     if compile_bench is None:
         print(f"  [HPO] variant build failed: {build_err[:200]} — restoring, skipping tune")
         files.write_files(original_map)
-        return _finish(default_bench, None, "variant_build_failed")  # TEMP
+        return default_bench, None, in_tok, out_tok
 
     # 3. Random search on the (non-test) HPO seed.
-    _trial_sec: list[float] = []  # TEMP: wall-clock per trial benchmark
-
     def benchmark_fn(seed: str, hp_json: str) -> tuple[dict | None, str]:
-        _ts = time.monotonic()  # TEMP
-        out = run_benchmark(args, config, server, seed=seed, hyperparameters=hp_json)
-        _trial_sec.append(round(time.monotonic() - _ts, 2))  # TEMP
-        return out
+        return run_benchmark(args, config, server, seed=seed, hyperparameters=hp_json)
 
-    _t_search = time.monotonic()
     result = hpo.search(
         benchmark_fn, parsed["hyperparameters"], parsed["suggested_configs"],
         n=n, num_suggested=num_suggested, hpo_seed=hpo_seed, log=print,
     )
-    _rec["phase_sec"]["search"] = round(time.monotonic() - _t_search, 2)  # TEMP
-    # TEMP: keep every trial's config/score/feasibility/per-track scores + timing.
-    _trials = [dict(t) for t in (result.get("trials") or [])]
-    for _i, _t in enumerate(_trials):
-        if _i < len(_trial_sec):
-            _t["sec"] = _trial_sec[_i]
-    _rec["trials"] = _trials
-    _rec["winning_configs"] = result.get("winning_configs")
-    _rec["winning_config_global"] = result.get("winning_config")
-    _rec["winning_score_hpo_seed"] = result.get("winning_score")
 
     winning = result["winning_configs"]  # {track_key: config} — a winner per track
     if not winning:
         print("  [HPO] search produced no per-track winners — keeping default")
         files.write_files(original_map)
-        return _finish(default_bench, None, "no_winners")  # TEMP
+        return default_bench, None, in_tok, out_tok
 
     # 4. Adopt the per-track winning map as the trajectory's new default
     #    hyperparameters and score the variant on the TEST seed under that map
@@ -960,37 +893,27 @@ def _maybe_tune_hyperparameters(
     #    set, each track's winner is >= default on the HPO seed; a tuned score
     #    below the untuned default can only arise from the test-vs-HPO seed
     #    mismatch, and per the design we accept that.
-    _t_final = time.monotonic()
     tuned_bench, terr = run_benchmark(
         args, config, server, hyperparameters=json.dumps(winning),
     )
-    _rec["phase_sec"]["final_test_bench"] = round(time.monotonic() - _t_final, 2)  # TEMP
     if tuned_bench is None:
         print(f"  [HPO] final test-seed benchmark failed: {terr[:200]} — restoring, using default")
         files.write_files(original_map)
-        return _finish(default_bench, None, "final_bench_failed")  # TEMP
+        return default_bench, None, in_tok, out_tok
 
     tuned_score = tuned_bench.get("score")
     tuned_feasible = bool(tuned_bench.get("feasible", False))
-    # TEMP: record the tuned outcome on the test seed (the published result).
-    _rec["tuned_score"] = tuned_score
-    _rec["tuned_feasible"] = tuned_feasible
-    _rec["tuned_track_scores"] = tuned_bench.get("track_scores")
-    _rec["delta_vs_default"] = (
-        (tuned_score - default_score)
-        if (tuned_score is not None and default_score is not None) else None
-    )
     if tuned_score is None or not tuned_feasible:
         print(f"  [HPO] tuned result infeasible/missing on the test seed "
               "— restoring, using default")
         files.write_files(original_map)
-        return _finish(default_bench, None, "tuned_infeasible")  # TEMP
+        return default_bench, None, in_tok, out_tok
 
     delta = tuned_score - default_score
     print(f"  [HPO] tuned score {tuned_score:.0f} (default {default_score:.0f}, "
           f"{'+' if delta >= 0 else ''}{delta:.0f}) — publishing variant + per-track "
           f"configs {json.dumps(winning)}")
-    return _finish(tuned_bench, winning, "published")  # TEMP
+    return tuned_bench, winning, in_tok, out_tok
 
 
 def _fix_runtime_errors(
