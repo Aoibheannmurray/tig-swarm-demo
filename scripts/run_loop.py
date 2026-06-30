@@ -15,7 +15,7 @@ Usage:
     python scripts/run_loop.py --provider openai --model gpt-4o
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
-    python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+    python scripts/run_loop.py --provider anthropic --compute c3 --hardware auto
     python scripts/run_loop.py --provider anthropic --compute c3 --env rust:1-bookworm
     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
@@ -1307,7 +1307,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--hardware",
-        help="C3 GPU profile for --compute c3 (default: l40)",
+        help=(
+            "C3 hardware for --compute c3. Use 'auto' to choose "
+            "cpu-d3-4vcpu-16gb for CPU challenges and l40 for GPU "
+            "challenges (default: auto)."
+        ),
     )
     p.add_argument(
         "--c3-api-key",
@@ -1430,7 +1434,7 @@ def main() -> int:
     args.model = args.model or agent_config.get("model")
     args.api_base = args.api_base or agent_config.get("api_base")
     args.compute = args.compute or agent_config.get("compute") or "local"
-    args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
+    args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "auto"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
     args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
     # Per-agent C3 key from agent.config.json (forwarded by run_fleet from the

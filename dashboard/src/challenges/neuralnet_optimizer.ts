@@ -5,13 +5,6 @@ interface NeuralnetData {
   max_epochs: number;
   num_hidden_layers: number;
   total_params: number;
-  noise_floor: number | null;
-  model_loss: number | null;
-  // Optional downsampled per-epoch loss history (P1). Absent on older
-  // benchmark builds — the panel falls back to the architecture/meter
-  // animations when these aren't present.
-  loss_curve?: number[];
-  val_loss_curve?: number[];
 }
 
 type AllNeuralnetData = Record<string, NeuralnetData>;
@@ -25,11 +18,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
   private archDiagramEl!: HTMLElement;
   private vizStackEl!: HTMLElement;
   private bottomBarEl!: HTMLElement;
-  private lossCurveWrapEl!: HTMLElement;
-  private lossCurveSvgEl!: HTMLElement;
-  private lossHeadlineEl!: HTMLElement;
-  private lossSubEl!: HTMLElement;
-  private lossRefsEl!: HTMLElement;
   // Last instance rendered — kept so the architecture diagram can re-fit to the
   // container on resize (its viewBox is sized from the container's pixels).
   private currentData: NeuralnetData | null = null;
@@ -42,23 +30,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
         ${this.navsScaffold()}
         <div class="nn-svg-wrap" id="nn-svg-wrap">
           <div class="nn-viz-stack" id="nn-viz-stack">
-            <div class="nn-side">
-              <div class="nn-loss-curve" id="nn-loss-curve" style="display:none">
-                <div class="nn-loss-head">
-                  <span class="nn-meter-head">TRAINING LOSS</span>
-                  <span class="nn-loss-legend">
-                    <span class="nn-lg nn-lg--train">train</span>
-                    <span class="nn-lg nn-lg--val">val</span>
-                  </span>
-                  <span class="nn-loss-headline" id="nn-loss-headline"></span>
-                </div>
-                <div class="nn-loss-chart">
-                  <div class="nn-loss-curve-svg" id="nn-loss-curve-svg"></div>
-                  <div class="nn-loss-refs" id="nn-loss-refs"></div>
-                </div>
-                <div class="nn-loss-sub" id="nn-loss-sub"></div>
-              </div>
-            </div>
             <div class="nn-arch-diagram" id="nn-arch-diagram"></div>
           </div>
           <div class="solution-empty-state" id="nn-empty-state">
@@ -96,11 +67,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     this.archDiagramEl = document.getElementById("nn-arch-diagram")!;
     this.vizStackEl = document.getElementById("nn-viz-stack")!;
     this.bottomBarEl = document.getElementById("nn-stat-bar")!;
-    this.lossCurveWrapEl = document.getElementById("nn-loss-curve")!;
-    this.lossCurveSvgEl = document.getElementById("nn-loss-curve-svg")!;
-    this.lossHeadlineEl = document.getElementById("nn-loss-headline")!;
-    this.lossSubEl = document.getElementById("nn-loss-sub")!;
-    this.lossRefsEl = document.getElementById("nn-loss-refs")!;
 
     // Re-fit the architecture diagram when its column resizes — its viewBox is
     // sized from the container's pixels, so it must redraw to fill a new size.
@@ -115,11 +81,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     this.layersEl.textContent = "---";
     this.paramsEl.textContent = "---";
     this.archDiagramEl.innerHTML = "";
-    this.lossCurveWrapEl.style.display = "none";
-    this.lossCurveSvgEl.innerHTML = "";
-    this.lossRefsEl.innerHTML = "";
-    this.lossHeadlineEl.textContent = "";
-    this.lossSubEl.textContent = "";
   }
 
   // Empty state hides everything except the centred "challenge not started yet"
@@ -147,113 +108,6 @@ export class NeuralnetPanel extends DisplayPanelBase<AllNeuralnetData> {
     this.paramsEl.textContent = data.total_params.toLocaleString();
 
     this.renderArchDiagram(data);
-    this.renderLossCurve(data);
-  }
-
-  // P1 — training-loss chart with the noise-limit reference folded in.
-  //
-  // The challenge is denoising: labels carry noise of variance σ², so the best
-  // any model can do is recover the true signal, bottoming out at loss = σ²
-  // (the "noise limit" — unbeatable). The score is normalised against a
-  // baseline of 4σ² (= `noise_floor` from the payload, the quality-0 point):
-  //     quality = (4σ² − test_loss) / 4σ²,  maxing at 0.75 when test_loss = σ².
-  // So we draw the train/val curves against the noise limit (σ² = noise_floor/4)
-  // and headline how far the model got toward that σ² ceiling. Renders when we
-  // have either a loss curve or the reference value; the train line draws in.
-  private renderLossCurve(data: NeuralnetData) {
-    const curve = data.loss_curve && data.loss_curve.length >= 2 ? data.loss_curve : null;
-    const val = data.val_loss_curve && data.val_loss_curve.length >= 2 ? data.val_loss_curve : null;
-    const nf = data.noise_floor;        // baseline = 4σ²
-    const ml = data.model_loss;          // final test loss
-    const hasRefs = nf != null && nf > 0;
-    const limit = hasRefs ? nf! / 4 : null;   // σ², the irreducible floor
-
-    if (!curve && !hasRefs) {
-      this.lossCurveWrapEl.style.display = "none";
-      this.lossCurveSvgEl.innerHTML = "";
-      this.lossRefsEl.innerHTML = "";
-      this.lossHeadlineEl.textContent = "";
-      this.lossSubEl.textContent = "";
-      return;
-    }
-    this.lossCurveWrapEl.style.display = "";
-
-    const W = 400;
-    const H = 120;
-    const padX = 4;
-    const padY = 8;
-    // Scale to cover every line we draw — the curves, the noise limit and the
-    // final-loss marker — so nothing clips off the top or bottom.
-    const ys: number[] = [];
-    if (curve) ys.push(...curve);
-    if (val) ys.push(...val);
-    if (limit != null) ys.push(limit);
-    if (ml != null) ys.push(ml);
-    let lo = Math.min(...ys);
-    let hi = Math.max(...ys);
-    const margin = (hi - lo) * 0.06 || 1;
-    lo -= margin;
-    hi += margin;
-    const span = hi - lo || 1;
-    const xOf = (i: number, n: number) =>
-      padX + (n > 1 ? (i / (n - 1)) * (W - 2 * padX) : 0);
-    const yOf = (v: number) => padY + (1 - (v - lo) / span) * (H - 2 * padY);
-    const pathOf = (arr: number[]) =>
-      arr
-        .map((v, i) => `${i ? "L" : "M"}${xOf(i, arr.length).toFixed(1)},${yOf(v).toFixed(1)}`)
-        .join(" ");
-
-    let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
-    // Faint band below the noise limit — the region no model can reach.
-    if (limit != null) {
-      const yL = yOf(limit);
-      svg += `<rect class="nn-loss-floorband" x="0" y="${yL.toFixed(1)}" width="${W}" height="${(H - yL).toFixed(1)}"/>`;
-    }
-    if (limit != null) {
-      const yL = yOf(limit).toFixed(1);
-      svg += `<line class="nn-loss-limit" x1="0" y1="${yL}" x2="${W}" y2="${yL}"/>`;
-    }
-    if (val) {
-      svg += `<path class="nn-loss-line-val" d="${pathOf(val)}" fill="none" stroke-dasharray="3 2"/>`;
-    }
-    if (curve) {
-      svg += `<path class="nn-loss-line" pathLength="1" d="${pathOf(curve)}" fill="none"/>`;
-    }
-    svg += `</svg>`;
-    this.lossCurveSvgEl.innerHTML = svg;
-
-    // HTML overlays — SVG text/circles would shear under
-    // preserveAspectRatio="none". top% maps linearly through the stretched
-    // viewBox, so yOf(v)/H positions an element on that loss value.
-    let refs = "";
-    if (limit != null) {
-      refs += `<span class="nn-ref nn-ref--limit" style="top:${(yOf(limit) / H * 100).toFixed(1)}%">noise limit</span>`;
-    }
-    // Final test-loss marker, sitting on the curve's right edge.
-    if (ml != null) {
-      refs += `<span class="nn-loss-dot" style="top:${(yOf(ml) / H * 100).toFixed(1)}%"></span>`;
-    }
-    this.lossRefsEl.innerHTML = refs;
-
-    // Headline: how far toward the σ² ceiling the model got. quality 0.75
-    // (test_loss == σ², the noise limit) = 100% of optimal; quality <= 0 (no
-    // better than the 4σ² baseline) = below baseline.
-    if (hasRefs && ml != null) {
-      const quality = 1 - ml / nf!;
-      if (quality <= 0) {
-        this.lossHeadlineEl.textContent = "below baseline";
-        this.lossHeadlineEl.className = "nn-loss-headline nn-loss-headline--bad";
-      } else {
-        const pct = Math.min(100, Math.round((quality / 0.75) * 100));
-        this.lossHeadlineEl.textContent = pct >= 99 ? "≈ optimal" : `${pct}% of optimal`;
-        this.lossHeadlineEl.className = "nn-loss-headline";
-      }
-      this.lossSubEl.textContent =
-        `final loss ${ml.toFixed(3)} · noise limit ${limit!.toFixed(3)}`;
-    } else {
-      this.lossHeadlineEl.textContent = "";
-      this.lossSubEl.textContent = "";
-    }
   }
 
   private renderArchDiagram(data: NeuralnetData) {

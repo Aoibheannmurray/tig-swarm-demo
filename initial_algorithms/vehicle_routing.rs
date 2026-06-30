@@ -13,9 +13,13 @@
 // `Challenge` and `Solution` come from the VRP module via `super::*`.
 // See CHALLENGE.md for the type shapes, scoring rules, and tips.
 
-use super::*;
+use tig_challenges::vehicle_routing::*;
 use anyhow::Result;
 use serde_json::{Map, Value};
+
+pub fn help() {
+    println!("No help information provided.");
+}
 
 pub fn solve_challenge(
     _challenge: &Challenge,

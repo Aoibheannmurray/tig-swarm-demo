@@ -51,6 +51,10 @@ hints/inspiration across the swarm.
 - `setup.py` is the host-admin CLI, **not** Python packaging — don't `pip
   install` it. It runs as `python setup.py <subcommand>` and is called by
   subprocess from `scripts/run_loop.py` / `scripts/run_fleet.py`.
+- `src/lib.rs`'s `extern crate self as tig_challenges;` is **load-bearing**, not
+  cruft: it lets algorithms import `tig_challenges::<ch>::*` so one file compiles
+  both here and in the TIG-docker slot. (TIG-docker benchmark backend — see
+  `scripts/CLAUDE.md` + `tig_docker_plan.md`.)
 
 ## Editing note — the swarm overwrites CLAUDE.md in worktrees
 

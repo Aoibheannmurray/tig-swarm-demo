@@ -362,9 +362,9 @@ RUST RULES (the output is compiled as-is — it MUST build):
 - Available crates: `std` plus `anyhow`, `rand`, `serde`, `serde_json` (already
   in Cargo.toml). Do NOT add any OTHER crate (no rayon, itertools, ndarray, …)
   and do NOT edit `[dependencies]`.
-- KEEP the `use super::*;` import and the other `use` lines the starting file
-  relies on (e.g. `use anyhow::...;`) — dropping a needed import makes the file
-  fail to compile with `E0425: cannot find type ... in this scope`.
+- KEEP the existing `use` lines at the top of the starting file (e.g.
+  `use tig_challenges::...;`, `use anyhow::...;`) — dropping a needed import makes
+  the file fail to compile with `E0425: cannot find type ... in this scope`.
 - Keep the EXACT signatures of the harness entry-point function(s) you were
   given and don't rename them: for MOST challenges that is `fn solve_challenge(`
   (call the provided `save_solution` closure to record solutions); for
@@ -463,7 +463,7 @@ GENERAL COMPILE HYGIENE:
   suggests — do NOT rewrite the call into something else.
 - Don't introduce new generics, trait bounds, lifetimes, or macros unless the
   starting code already uses them — they are a common source of errors.
-- Reuse the data structures already imported via `use super::*;`; don't invent
+- Reuse the data structures already imported at the top of the file; don't invent
   types, constants, or functions that aren't defined. A `crate::...::NAME` path
   (or a bare name) that isn't actually declared is `E0425: cannot find
   value/function`. If you need a threshold or hyperparameter, define it as a
@@ -638,7 +638,7 @@ signature/name/visibility change is a compile error:
     ) -> Result<Vec<CudaSlice<f32>>>
 
 State — define ONE struct that implements the provided `OptimizerStateTrait`
-(in scope via `use super::*;`) and derives Clone:
+(in scope via the file's imports) and derives Clone:
 
     #[derive(Clone)]
     struct OptimizerState { /* lr, step count, momentum/variance buffers, ... */ }
@@ -747,7 +747,7 @@ You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
 {time_guidance}
 
 IMPORTANT RULES:
-- `use super::*;` must remain as the first import in the Rust file.
+- The existing `use` imports at the top of the starting file must remain.
 {entry_rule}
 - Return BOTH files: the complete Rust source AND the complete CUDA kernel source.
 - Separate them with a line containing exactly: // --- kernels.cu ---
@@ -762,9 +762,9 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
 OUTPUT FORMAT (strict):
 Your response will be written verbatim to mod.rs and compiled. The very first
-character of your response MUST be `u` from `use super::*;`. No preamble, no
+character of your response MUST be `u` from the opening `use` line. No preamble, no
 prose, no markdown fences (```), no commentary before or after the code.
-`use super::*;` must remain as the first import.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
+The starting file's `use` imports must remain.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
 
 
 def build_code_user_prompt(
@@ -821,7 +821,7 @@ def build_code_user_prompt(
     if role == "exploiter":
         parts.append(
             "\nApply ONE localized change only — preserve the rest of the code "
-            "and return the COMPLETE file (still starting with `use super::*;`)."
+            "and return the COMPLETE file (still starting with the same `use` imports)."
         )
 
     return "\n".join(parts)
@@ -1279,7 +1279,7 @@ def build_compile_fix_system_prompt(config: dict) -> str:
     else:
         fmt = (
             "Return the COMPLETE corrected mod.rs. The very first character of your "
-            "response MUST be `u` from `use super::*;`. No markdown fences, no prose."
+            "response MUST be `u` from the opening `use` line. No markdown fences, no prose."
         )
     return f"""\
 You are fixing Rust compile errors so the file builds. The code is otherwise

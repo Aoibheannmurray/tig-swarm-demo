@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+#
+# modified_test_algorithm — swarm copy of tig-monorepo `scripts/test_algorithm`
+# with ADDITIVE changes only (the upstream script is never modified):
+#
+#   1. Capture `fuel_consumed` from the tig-runtime per-nonce output file.
+#   2. Decode the tig-runtime exit code into a `failure_reason`.
+#   3. `--output-json <path|->` emits a machine-readable per-nonce record
+#      + cheap per-track aggregates, for the swarm benchmark adapter to map
+#      into benchmark.json.
+#
+# In `--output-json` mode the script runs every nonce (no early stop on the
+# first invalid) and prints nothing but the JSON to the chosen sink, so the
+# swarm can capture stdout cleanly. Without `--output-json` it behaves exactly
+# like the upstream tester (human-readable progress line).
+#
+# This file is baked into the custom benchmark image at
+# /usr/local/bin/tig-scripts/ — see Dockerfile.bench.
+
+import argparse
+import json
+import os
+import platform
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+if (CPU_ARCH := platform.machine().lower()) in ["x86_64", "amd64"]:
+    CPU_ARCH = "amd64"
+elif CPU_ARCH in ["arm64", "aarch64"]:
+    CPU_ARCH = "arm64"
+else:
+    print(f"Unsupported CPU architecture: {CPU_ARCH}")
+    sys.exit(1)
+
+HAS_GPU = subprocess.run(["which", "nvidia-smi"], capture_output=True).returncode == 0
+if (VISIBLE_CPUS := os.environ.get("CPU_VISIBLE_CORES", None)) is None:
+    VISIBLE_CPUS = list(os.sched_getaffinity(0))
+else:
+    VISIBLE_CPUS = list(map(int, VISIBLE_CPUS.split(",")))
+    os.sched_setaffinity(0, VISIBLE_CPUS)
+
+if not HAS_GPU:
+    VISIBLE_GPUS = []
+elif (VISIBLE_GPUS := os.environ.get("CUDA_VISIBLE_DEVICES", None)) is None:
+    VISIBLE_GPUS = [
+        int(match.group(1))
+        for line in subprocess.check_output(["nvidia-smi", "-L"]).decode("utf-8").splitlines()
+        if (match := re.match(r'^GPU (\d+):', line)) is not None
+    ]
+else:
+    VISIBLE_GPUS = list(map(int, VISIBLE_GPUS.split(",")))
+
+CHALLENGE = os.getenv("CHALLENGE")
+if CHALLENGE is None:
+    print("CHALLENGE environment variable must be set!")
+    sys.exit(1)
+
+# tig-runtime exit codes (see tig-runtime/README.md). 0 = solution found.
+RUNTIME_FAILURE_REASON = {
+    82: "cuda_oom",
+    83: "host_oom",
+    84: "runtime_error",
+    85: "no_solution",
+    86: "invalid_solution",
+    87: "out_of_fuel",
+}
+
+
+def now():
+    return int(time.time() * 1000)
+
+
+if __name__ == "__main__":
+    tig_runtime_path = shutil.which("tig-runtime")
+    tig_verifier_path = shutil.which("tig-verifier")
+    parser = argparse.ArgumentParser(description="TIG Algorithm Tester (swarm, fuel-capturing)")
+    parser.add_argument("algorithm", type=str, help="Algorithm name")
+    parser.add_argument("track_id", type=str, help="Track Id of the problem instance, comma separated key-values (e.g. a=1,b=2)")
+    parser.add_argument("hyperparameters", type=str, help="JSON string of hyperparameters for the algorithm (can set to null)")
+    parser.add_argument("--tig-runtime-path", type=str, default=tig_runtime_path, help=f"Path to tig-runtime executable (default: {tig_runtime_path})")
+    parser.add_argument("--tig-verifier-path", type=str, default=tig_verifier_path, help=f"Path to tig-verifier executable (default: {tig_verifier_path})")
+    parser.add_argument("--lib-dir", type=str, default="./tig-algorithms/lib", help="Path to the algorithms library folder (default: ./tig-algorithms/lib)")
+    parser.add_argument("--seed", type=str, default="rand_hash", help="String to use as seed instance generation (default: 'rand_hash')")
+    parser.add_argument("--start", type=int, default=0, help="Starting nonce (default: 0)")
+    parser.add_argument("--nonces", type=int, default=100, help="Number of nonces to process (default: 100)")
+    parser.add_argument("--fuel", type=int, default=int(100e9), help="Max fuel (default: 100 billion)")
+    parser.add_argument("--workers", type=int, default=1, help="Number of worker threads (default: 1)")
+    parser.add_argument("--ignore-invalid", action='store_true', help="Continue testing even if invalid solutions are encountered")
+    parser.add_argument("--verbose", action='store_true', help="Print debug logs")
+    parser.add_argument("--output-json", type=str, default=None, metavar="PATH",
+                        help="Emit machine-readable per-nonce records + aggregates as JSON to PATH ('-' for stdout). "
+                             "Implies running every nonce (no early stop).")
+
+    args = parser.parse_args()
+    json_mode = args.output_json is not None
+    # In JSON mode we want a complete picture of every nonce, so never bail early.
+    if json_mode:
+        args.ignore_invalid = True
+    if args.hyperparameters.lower() == "null":
+        args.hyperparameters = None
+    else:
+        try:
+            json.loads(args.hyperparameters)
+        except Exception as e:
+            print(f"Failed to parse hyperparameters as JSON: {e}")
+            sys.exit(1)
+
+    so_path = f"{args.lib_dir}/{CHALLENGE}/{CPU_ARCH}/{args.algorithm}.so"
+    ptx_path = f"{args.lib_dir}/{CHALLENGE}/ptx/{args.algorithm}.ptx"
+
+    if not os.path.exists(so_path):
+        print(
+f"""Library not found at {so_path}:
+    * To download: use download_algorithm
+    * To build: use build_algorithm
+    * To set the lib folder: set --lib-dir <path_to_folder>
+""")
+        sys.exit(1)
+
+    if not os.path.exists(ptx_path):
+        ptx_path = None
+    elif not HAS_GPU:
+        print(f"PTX file found at {ptx_path}, but no GPU support detected (failed to run nvidia-smi)")
+        sys.exit(1)
+
+    challenge_ids = {
+        "satisfiability": "c001",
+        "vehicle_routing": "c002",
+        "knapsack": "c003",
+        "vector_search": "c004",
+        "hypergraph": "c005",
+        "neuralnet_optimizer": "c006",
+        "job_scheduling": "c007",
+        "energy_arbitrage": "c008",
+    }
+    challenge_id = challenge_ids[CHALLENGE]
+
+    settings = {"algorithm_id": "", "challenge_id": challenge_id, "track_id": args.track_id, "block_id": "", "player_id": ""}
+    pool = ThreadPoolExecutor(max_workers=args.workers + 1)
+
+    results = {}
+    # Rich per-nonce records for --output-json (keyed by nonce).
+    records = {}
+
+    def print_results():
+        start = now()
+        while True:
+            time.sleep(0.5)
+            num_processing, num_finished, num_invalid = 0, 0, 0
+            total_quality = 0
+            for (_, _, ok, quality) in results.values():
+                if ok is None:
+                    num_processing += 1
+                elif ok:
+                    num_finished += 1
+                    total_quality += quality
+                else:
+                    num_invalid += 1
+
+            elapsed = (now() - start) / 1000
+            avg_quality = (total_quality // num_finished) if num_finished > 0 else 0
+            out = f"#processing: {num_processing}, #finished: {num_finished}, #invalid: {num_invalid}, elapsed: {elapsed:.2f}s, avg_quality: {avg_quality:,}       "
+            if args.verbose:
+                print(out)
+            else:
+                print(f"\r{out}", end="")
+
+            if (num_finished + num_invalid) == args.nonces:
+                if num_invalid > 0:
+                    print()
+                    print("Warning: Invalid solutions encountered. This will cause actual benchmarks to fail.")
+                break
+            if num_invalid > 0 and not args.ignore_invalid:
+                print()
+                print("Invalid solution encountered. Stopping tests")
+                print("To continue testing despite invalid solutions, use the --ignore-invalid flag.")
+                print("Warning: Invalid solutions will cause actual benchmarks to fail.")
+                break
+        if not args.verbose:
+            print("\n")
+
+    def run_tig_runtime(nonce):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cmd = [
+                args.tig_runtime_path,
+                json.dumps(settings, separators=(',',':')),
+                args.seed,
+                str(nonce),
+                so_path,
+                "--fuel", str(args.fuel),
+                "--output", temp_dir,
+            ]
+            if ptx_path is not None:
+                cmd += [
+                    "--ptx", ptx_path,
+                    "--gpu", str(nonce % len(VISIBLE_GPUS)),
+                ]
+            if args.hyperparameters:
+                cmd += [
+                    "--hyperparameters", args.hyperparameters,
+                ]
+            if args.verbose:
+                print(f"[nonce {nonce}]: {' '.join(cmd[:1] + [f"'{cmd[1]}'"] + cmd[2:])}")
+            start = now()
+            results[nonce] = (start, None, None, None)
+            ret = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, universal_newlines=True)
+            for line in ret.stdout:
+                if args.verbose:
+                    print(f"[nonce {nonce}] {line.strip()}")
+            ret.wait()
+            elapsed = now() - start
+            output_file = f"{temp_dir}/{nonce}.json"
+
+            # ── Additive: read fuel_consumed from the runtime output (written to
+            # the temp dir before the verifier runs). Absent on some failures.
+            fuel_consumed = None
+            try:
+                with open(output_file) as fp:
+                    fuel_consumed = json.load(fp).get("fuel_consumed")
+            except Exception:
+                pass
+            # Out-of-fuel by definition consumed the whole budget.
+            if fuel_consumed is None and ret.returncode == 87:
+                fuel_consumed = args.fuel
+
+            cmd2 = [
+                args.tig_verifier_path,
+                json.dumps(settings, separators=(',',':')),
+                args.seed,
+                str(nonce),
+                output_file,
+            ]
+            if ptx_path is not None:
+                cmd2 += [
+                    "--ptx", ptx_path,
+                    "--gpu", str(nonce % len(VISIBLE_GPUS)),
+                ]
+            if args.verbose:
+                cmd2 += ["--verbose"]
+                print(f"[nonce {nonce}] {' '.join(cmd2[:1] + [f"'{cmd2[1]}'"] + cmd2[2:])}")
+            line = ""
+            ret2 = subprocess.Popen(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, universal_newlines=True)
+            for line in ret2.stdout:
+                if args.verbose:
+                    print(f"[nonce {nonce}] {line.strip()}")
+            ret2.wait()
+            elapsed2 = now() - start - elapsed
+
+            if args.verbose:
+                out = f"[nonce {nonce}] finished\n\ttig-runtime\n\t\telapsed: {elapsed}ms\n\t\texit code: {ret.returncode}\n\t\tstderr: "
+                if ret.returncode != 0:
+                    if ret.returncode == 87:
+                        out += "out of fuel"
+                    else:
+                        out += ret.stderr.read()
+                out += f"\n\ttig-verifier\n\t\telapsed: {elapsed2}ms\n\t\texit code: {ret2.returncode}\n\t\tstderr: "
+                if ret2.returncode != 0:
+                    out += ret2.stderr.read()
+                print(out)
+
+            ok = ret2.returncode == 0
+            quality = None
+            if ok:
+                line = line.strip()
+                assert line.startswith("quality: ")
+                quality = int(line[len("quality: "):])
+
+            # ── Additive: a feasible nonce is one the runtime solved AND the
+            # verifier accepted. failure_reason explains why it didn't (runtime
+            # code first, else a verifier rejection).
+            feasible = ret.returncode == 0 and ok
+            if feasible:
+                failure_reason = None
+            elif ret.returncode != 0:
+                rc = ret.returncode
+                if rc < 0:
+                    # subprocess reports -N when the runtime is killed by signal N
+                    failure_reason = f"crashed_signal_{-rc}"
+                else:
+                    failure_reason = RUNTIME_FAILURE_REASON.get(rc, f"runtime_exit_{rc}")
+            else:
+                failure_reason = "invalid_solution"
+
+            results[nonce] = (start, elapsed, ok, quality)
+            records[nonce] = {
+                "nonce": nonce,
+                "quality": quality if feasible else None,
+                "fuel_consumed": fuel_consumed,
+                "fuel_limit": args.fuel,
+                "feasible": feasible,
+                "failure_reason": failure_reason,
+            }
+            if not ok and not args.ignore_invalid:
+                raise RuntimeError
+
+    nonces = list(range(args.start, args.start + args.nonces))
+    if args.verbose:
+        print(f"Processing {len(nonces)} nonces with {args.workers} workers...")
+    if not json_mode:
+        pool.submit(print_results)
+    try:
+        list(pool.map(run_tig_runtime, nonces))
+    except RuntimeError:
+        pass
+
+    if json_mode:
+        recs = [records[n] for n in sorted(records)]
+        feasible_recs = [r for r in recs if r["feasible"]]
+        qualities = [r["quality"] for r in feasible_recs if r["quality"] is not None]
+        ratios = [r["fuel_consumed"] / args.fuel
+                  for r in recs if r["fuel_consumed"] is not None and args.fuel]
+
+        def _stats(xs, fields):
+            if not xs:
+                return None
+            out = {}
+            if "mean" in fields:
+                out["mean"] = statistics.fmean(xs)
+            if "median" in fields:
+                out["median"] = statistics.median(xs)
+            if "min" in fields:
+                out["min"] = min(xs)
+            if "max" in fields:
+                out["max"] = max(xs)
+            return out
+
+        failure_hist = {}
+        for r in recs:
+            if r["failure_reason"] is not None:
+                failure_hist[r["failure_reason"]] = failure_hist.get(r["failure_reason"], 0) + 1
+
+        payload = {
+            "challenge": CHALLENGE,
+            "challenge_id": challenge_id,
+            "track_id": args.track_id,
+            "seed": args.seed,
+            "fuel_limit": args.fuel,
+            "nonces": recs,
+            "aggregates": {
+                "count": len(recs),
+                "feasible_count": len(feasible_recs),
+                "solve_rate": (len(feasible_recs) / len(recs)) if recs else 0.0,
+                "quality": _stats(qualities, ("mean", "median", "min", "max")),
+                "fuel_ratio": _stats(ratios, ("mean", "median", "max")),
+                "failure_reasons": failure_hist,
+            },
+        }
+        text = json.dumps(payload, separators=(",", ":"))
+        if args.output_json == "-":
+            print(text)
+        else:
+            with open(args.output_json, "w") as fp:
+                fp.write(text)
