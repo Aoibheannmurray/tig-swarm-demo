@@ -7,6 +7,23 @@ Usage:
 Outputs <outdir>/<challenge>.ptx (default outdir: target/ptx/).
 
 Designed to run inside the Docker GPU image where nvcc is available.
+
+Kept in lock-step with mainnet's `tig-binary/scripts/build_ptx` so a mainnet
+algorithm compiles here exactly as it does upstream:
+  - same concatenation: header includes -> challenge .cu -> algorithm .cu,
+    all globbed and joined into ONE temp .cu -> ONE <challenge>.ptx;
+  - same nvcc invocation: -arch compute_70 -code sm_70 --use_fast_math -dopt=on;
+  - the inline include block below is byte-identical to the head of mainnet's
+    `framework.cu` (stdio/stdint/cuda_runtime/math/float).
+
+Two mainnet steps are deliberately NOT replicated, because the swarm runs its
+own fuel-free GPU harness (`src/main_gpu_benchmark.rs`), not the metered
+`tig-runtime`:
+  - framework.cu's fuel scaffolding (gbl_FUELUSAGE / CHECK_FUEL_LIMIT /
+    initialize_kernel / finalize_kernel) — unused here; algorithm kernels never
+    reference it (fuel is a post-compile PTX injection upstream, not source);
+  - the PTX fuel + runtime-signature injection pass — would produce PTX the
+    swarm harness doesn't expect.
 """
 
 import argparse
@@ -59,7 +76,9 @@ def main():
         cmd = [
             "nvcc", "-ptx", tmp_path, "-o", out_ptx,
             "-arch", "compute_70",
+            "-code", "sm_70",
             "--use_fast_math",
+            "-dopt=on",
         ]
         print(f"Running: {' '.join(cmd)}", file=sys.stderr)
         subprocess.run(cmd, check=True)
