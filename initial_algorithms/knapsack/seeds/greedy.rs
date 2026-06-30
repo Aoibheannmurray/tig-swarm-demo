@@ -13,9 +13,13 @@
 // everything else) per unit weight, and pack greedily until the budget is
 // exhausted. Always feasible: items are distinct and total weight <= max_weight.
 
-use super::*;
 use anyhow::Result;
 use serde_json::{Map, Value};
+use tig_challenges::knapsack::*;
+
+pub fn help() {
+    println!("Greedy feasible knapsack seed.");
+}
 
 pub fn solve_challenge(
     challenge: &Challenge,

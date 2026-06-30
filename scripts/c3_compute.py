@@ -33,6 +33,19 @@ from benchmark import (
 _POLL_INTERVAL_SECS = 15
 _DEFAULT_CPU_IMAGE = "rust:1-bookworm"
 _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
+_DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
+_DEFAULT_GPU_HARDWARE = "l40"
+_AUTO_HARDWARE_VALUES = {"", "auto", "default"}
+_SUPPORTED_TIG_C3_CHALLENGES = frozenset({
+    "knapsack",
+    "vector_search",
+    "hypergraph",
+})
+_TIG_SOURCE_TAR_EXCLUDES = (
+    "./target",
+    "./.git",
+    "./tig-algorithms/lib",
+)
 # Pinned TIG monorepo source (re-added into the uploaded workspace; the dev image
 # strips it). Default sibling dir; override with cfg["tig_monorepo_path"].
 _TIG_MONOREPO = ROOT.parent / "tig-monorepo"
@@ -80,6 +93,23 @@ def _arg_value(args: argparse.Namespace, name: str, default=None):
     return getattr(args, name, default)
 
 
+def _is_gpu_config(config: dict) -> bool:
+    return bool(config.get("is_gpu"))
+
+
+def _resolve_c3_hardware(config: dict, requested: str | None = None) -> str:
+    value = str(
+        requested if requested is not None else config.get("c3_hardware", "")
+    ).strip().lower()
+    if value not in _AUTO_HARDWARE_VALUES:
+        return value
+    return _DEFAULT_GPU_HARDWARE if _is_gpu_config(config) else _DEFAULT_CPU_HARDWARE
+
+
+def _docker_requires_accelerator(config: dict) -> str:
+    return "cuda" if _is_gpu_config(config) else "none"
+
+
 def _select_docker_image(args: argparse.Namespace, config: dict) -> str:
     explicit = (
         _arg_value(args, "env")
@@ -90,7 +120,7 @@ def _select_docker_image(args: argparse.Namespace, config: dict) -> str:
     )
     if explicit:
         return explicit
-    if bool(config.get("is_gpu")):
+    if _is_gpu_config(config):
         return (
             _arg_value(args, "env_gpu")
             or _arg_value(args, "c3_gpu_image")
@@ -190,16 +220,19 @@ def _write_c3_project(
     run_id = uuid.uuid4().hex[:10]
     challenge = config.get("challenge", "unknown")
     script_name = f"run-benchmark-{run_id}.sh"
+    hardware = _resolve_c3_hardware(config)
+    requires_accelerator = _docker_requires_accelerator(config)
 
     c3_config = f"""\
 project: tig-swarm-benchmark
 script: {_yaml_quote(script_name)}
-gpu: {_yaml_quote(config.get("c3_hardware", "l40"))}
+hardware: {_yaml_quote(hardware)}
 time: {_yaml_quote(c3_time)}
 job_name: {_yaml_quote(f"tig-{challenge}-{run_id}")}
 
 docker:
   image: {_yaml_quote(image)}
+  requires_accelerator: {_yaml_quote(requires_accelerator)}
 
 output:
   - ./c3-artifacts
@@ -207,7 +240,7 @@ output:
     _write_container_file(stage / ".c3", c3_config)
 
     gpu_check = ""
-    if bool(config.get("is_gpu")):
+    if _is_gpu_config(config):
         gpu_check = """
 if ! command -v nvcc >/dev/null 2>&1; then
   echo "nvcc is required for GPU challenges; use a CUDA devel Docker image" >&2
@@ -359,9 +392,16 @@ def _read_job_status(job_id: str, env: dict, cwd: Path) -> str | None:
     return None
 
 
-def _poll_c3_job(job_id: str, env: dict, cwd: Path, walltime_secs: int) -> str:
+def _poll_c3_job(
+    job_id: str,
+    env: dict,
+    cwd: Path,
+    walltime_secs: int,
+    timeout_secs: int | None = None,
+) -> str:
     """Poll a C3 job until it reaches a terminal state."""
-    deadline = time.monotonic() + max(1800, walltime_secs + 2700)
+    wait_secs = timeout_secs if timeout_secs is not None else max(1800, walltime_secs + 2700)
+    deadline = time.monotonic() + wait_secs
     poll = 0
     while time.monotonic() < deadline:
         status = _read_job_status(job_id, env, cwd)
@@ -379,9 +419,33 @@ def _poll_c3_job(job_id: str, env: dict, cwd: Path, walltime_secs: int) -> str:
     return "timeout"
 
 
+def _c3_poll_timeout(args: argparse.Namespace, walltime_secs: int) -> int | None:
+    value = _arg_value(args, "c3_poll_timeout", None)
+    if value in (None, ""):
+        return None
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        return None
+    return timeout if timeout > 0 else None
+
+
 def _read_logs(job_id: str, env: dict, cwd: Path) -> str:
     result = subprocess.run(
         ["c3", "logs", job_id],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=cwd,
+        env=env,
+    )
+    return (result.stdout or "") + (result.stderr or "")
+
+
+def _cancel_c3_job(job_id: str, env: dict, cwd: Path) -> str:
+    result = subprocess.run(
+        ["c3", "cancel", job_id],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -520,8 +584,15 @@ pub fn solve_challenge(
 def _tig_c3_image(cfg: dict) -> str:
     if cfg.get("tig_c3_image"):
         return cfg["tig_c3_image"]
+    challenge = cfg["challenge"]
+    if challenge not in _SUPPORTED_TIG_C3_CHALLENGES:
+        supported = ", ".join(sorted(_SUPPORTED_TIG_C3_CHALLENGES))
+        raise ValueError(
+            f"TIG C3 Docker image is not configured for {challenge!r}; "
+            f"currently supported: {supported}"
+        )
     ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB", "danieltiagoadams")
-    return f"docker.io/{ns}/tig-dev-{cfg['challenge']}:{_bm_tig_version()}"
+    return f"docker.io/{ns}/tig-dev-{challenge}:{_bm_tig_version()}"
 
 
 def _create_tig_workspace(stage: Path, cfg: dict) -> None:
@@ -533,18 +604,39 @@ def _create_tig_workspace(stage: Path, cfg: dict) -> None:
     src.mkdir(parents=True, exist_ok=True)
     # Use tar to copy the source: it preserves symlinks (the monorepo has
     # self-referential symlinks under tig-benchmarker that shutil.copytree
-    # follows into a loop) and excludes build artifacts. Matches the build script.
+    # follows into a loop) and excludes build/generated artifacts.
+    exclude_args = " ".join(
+        f"--exclude={shlex.quote(path)}" for path in _TIG_SOURCE_TAR_EXCLUDES
+    )
     subprocess.run(
-        f"tar -C {shlex.quote(str(monorepo))} --exclude=./target --exclude=./.git -cf - . "
+        f"tar -C {shlex.quote(str(monorepo))} {exclude_args} -cf - . "
         f"| tar -C {shlex.quote(str(src))} -xf -",
         shell=True, check=True,
     )
     _copy_required(ROOT / "scripts" / "tig_bench_driver.py", stage / "tig_bench_driver.py")
     _copy_required(ROOT / "scripts" / "modified_test_algorithm", stage / "modified_test_algorithm")
-    algo_rel = cfg.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
-    _copy_required((ROOT / algo_rel).parent, stage / "algorithm")
+    _stage_tig_algorithm(stage, cfg)
     if challenge == "neuralnet_optimizer":
         _write_container_file(stage / "boilerplate.rs", _NN_BOILERPLATE)
+
+
+def _stage_tig_algorithm(stage: Path, cfg: dict) -> None:
+    challenge = cfg["challenge"]
+    algo_rel = cfg.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
+    algo_path = ROOT / algo_rel
+    dst = stage / "algorithm"
+    dst.mkdir(parents=True, exist_ok=True)
+
+    if algo_path.is_file():
+        _copy_required(algo_path, dst / "mod.rs")
+    else:
+        _copy_required(algo_path.parent, dst)
+
+    kernel_rel = cfg.get("kernel_path")
+    if kernel_rel:
+        kernel_path = ROOT / kernel_rel
+        if kernel_path.is_file():
+            _copy_required(kernel_path, dst / "kernels.cu")
 
 
 def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str:
@@ -606,14 +698,17 @@ def _write_tig_c3_project(stage: Path, cfg: dict, c3_time: str, image: str,
     challenge = cfg.get("challenge", "unknown")
     run_id = uuid.uuid4().hex[:10]
     script_name = f"run-tig-{run_id}.sh"
+    hardware = _resolve_c3_hardware(cfg)
+    requires_accelerator = _docker_requires_accelerator(cfg)
     c3_config = f"""project: tig-swarm-benchmark
 script: {_yaml_quote(script_name)}
-gpu: {_yaml_quote(cfg.get("c3_hardware", "l40"))}
+hardware: {_yaml_quote(hardware)}
 time: {_yaml_quote(c3_time)}
 job_name: {_yaml_quote(f"tig-{challenge}-{run_id}")}
 
 docker:
   image: {_yaml_quote(image)}
+  requires_accelerator: {_yaml_quote(requires_accelerator)}
 
 output:
   - ./c3-artifacts
@@ -680,11 +775,20 @@ def _run_tig_benchmark_c3(
 
         walltime_secs = _parse_walltime(args.c3_time)
         print(f"    [C3] TIG job {job_id} — polling for completion...")
-        status = _poll_c3_job(job_id, env, stage, walltime_secs)
+        status = _poll_c3_job(
+            job_id, env, stage, walltime_secs, _c3_poll_timeout(args, walltime_secs)
+        )
+        cancel_output = ""
+        if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
+            cancel_output = _cancel_c3_job(job_id, env, stage)
+            print(f"    [C3] canceled timed-out job {job_id}")
         _pull_artifacts(job_id, env, stage)
         if status != "completed":
             logs_out = _read_logs(job_id, env, stage)
-            return None, f"[C3] TIG job {job_id} {status}\n{logs_out[-3000:]}"
+            details = "\n".join(
+                part for part in (cancel_output[-1000:], logs_out[-3000:]) if part
+            )
+            return None, f"[C3] TIG job {job_id} {status}\n{details}"
 
         comb, perr = _load_tig_combined(stage)
         if comb is None:
@@ -705,7 +809,7 @@ def run_benchmark_c3(
 
     cfg = dict(config)
     cfg["server_url"] = server
-    cfg["c3_hardware"] = args.hardware.lower()
+    cfg["c3_hardware"] = _resolve_c3_hardware(cfg, _arg_value(args, "hardware"))
 
     image = _select_docker_image(args, cfg)
     cfg["env"] = image
@@ -776,7 +880,13 @@ def run_benchmark_c3(
 
         walltime_secs = _parse_walltime(args.c3_time)
         print(f"    [C3] Job submitted: {job_id} — polling for completion...")
-        status = _poll_c3_job(job_id, env, stage, walltime_secs)
+        status = _poll_c3_job(
+            job_id, env, stage, walltime_secs, _c3_poll_timeout(args, walltime_secs)
+        )
+        cancel_output = ""
+        if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
+            cancel_output = _cancel_c3_job(job_id, env, stage)
+            print(f"    [C3] canceled timed-out job {job_id}")
         logs_out = _read_logs(job_id, env, stage)
 
         if status != "completed":
@@ -793,7 +903,13 @@ def run_benchmark_c3(
                 print(f"    [C3] Last 4000 chars of job logs:\n{logs_out[-4000:]}")
             _, parse_err = _load_benchmark_json(stage)
             details = "\n".join(
-                part for part in (parse_err, pull_output[-2000:], logs_out[-2000:]) if part
+                part for part in (
+                    parse_err,
+                    cancel_output[-1000:],
+                    pull_output[-2000:],
+                    logs_out[-2000:],
+                )
+                if part
             )
             return None, f"{err}\n{details}"
 
@@ -811,6 +927,13 @@ def run_benchmark_c3(
             return bench, ""
 
         err = f"[C3] Job {job_id} completed but benchmark.json was not found or parseable"
-        details = "\n".join(part for part in (parse_err, pull_output[-2000:], logs_out[-2000:]) if part)
+        details = "\n".join(
+            part for part in (
+                parse_err,
+                pull_output[-2000:],
+                logs_out[-2000:],
+            )
+            if part
+        )
         print(f"    {err}")
         return None, f"{err}\n{details}"
