@@ -554,20 +554,23 @@ timeout to catch true hangs — but fuel already bounds all instrumented compute
   must match the swarm's `tig_dockerhub` namespace) + `DOCKERHUB_TOKEN`, then run it.
   After it runs, all 8 challenges are C3-pullable. (Custom warm-cache Option-B images
   are a future optimization.)
-- ⏭ **Remaining: task 9 (retire custom path)** — all *validation* prereqs done
-  (D4/11, GPU-seed/12, parity/13) + task-14 code done. Unblocks once the mirror
-  workflow has **run** (user pushes + sets secrets). Reason: retiring
-  makes TIG the only path — safe for local (builds on demand) but **breaks C3 for the
-  4 un-mirrored challenges** (only knapsack/hypergraph/vector_search/neuralnet are on
-  Docker Hub, manually). The custom path is the fallback until every challenge has a
-  C3-pullable image. Then delete the bins/generator/evaluator/datasets + benchmark.py
-  custom inner logic + custom `run_benchmark_c3` path (keep the vendored types).
-  Other follow-ups:
-  vector_search GPU validation ✅ (done),
-  + `help()` contract; seeds conformed), GPU seed mechanism (`initial_algorithms`
-  carrying a `.cu`), tracks config (operator), production **amd64 CI build** of the
-  warm-cache custom images → Docker Hub, and re-tag the neuralnet mirror to
-  `tig-dev-neuralnet_optimizer` (wiring uses the full challenge name).
+- ✅ **CPU-aware C3 hardware (task 15) — merged (PR #55, `868a43a`).** Both `.c3`
+  writers emit `hardware: <profile>` + `docker.requires_accelerator: none|cuda` (not
+  `gpu: l40`); `hardware: auto` → `cpu-d3-4vcpu-16gb` (CPU) / `l40` (GPU).
+  `_SUPPORTED_TIG_C3_CHALLENGES` guards the TIG C3 default to {knapsack,
+  vector_search, hypergraph} (override via `tig_c3_image`). Adds `c3_tig_smoke.py` +
+  `seeds/` pool conformance; validated on real C3 incl. a CPU instance.
+- ⏭ **Remaining (in order):**
+  1. **Run task 14** (mirror workflow — set Docker Hub secrets + dispatch) → all 8
+     challenge images on Docker Hub.
+  2. **Widen `_SUPPORTED_TIG_C3_CHALLENGES` to all 8** + re-mirror neuralnet as
+     `tig-dev-neuralnet_optimizer` (the workflow already uses the full name).
+  3. **Task 16** — set canonical TIG tracks in config (replace stale example
+     difficulties; values in Instance generation above).
+  4. **Task 9 (retire custom path)** — final cleanup, safe once all 8 work on C3:
+     delete the custom bins/generator/evaluator/datasets + `benchmark.py` custom inner
+     logic + custom `run_benchmark_c3` path (keep the vendored challenge types).
+  (Optional later: production warm-cache custom images via CI — Option B.)
 
   Empirical note: the naive greedy scored **negative** quality (TIG's
   baseline-relative scale); the real algorithm scores **positive**. Confirms the
