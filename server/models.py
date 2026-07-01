@@ -152,6 +152,20 @@ class AdminSeedInactive(AdminAuth):
     source_label: str = "tig-foundation"
 
 
+class AdminClearInactive(AdminAuth):
+    """Owner-only: empty the `inactive_algorithms` pool for a challenge.
+
+    Use to remove stale/diluting inactive trajectories so agents reliably adopt
+    a specific seed on their next reset. `keep_source_label` preserves entries
+    attributed to that synthetic source (e.g. a just-seeded test algorithm);
+    everything else on the challenge is deleted. Note the pool refills over time
+    as stagnating agents deposit their feasible bests, so this is a point-in-time
+    clear, not a permanent state.
+    """
+    challenge: "ChallengeName"
+    keep_source_label: Optional[str] = None
+
+
 class AdminSeedPool(AdminAuth):
     """Owner-only: deposit a host-authored seed algorithm into `seed_pool`.
 

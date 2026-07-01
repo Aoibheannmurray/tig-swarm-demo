@@ -1271,6 +1271,24 @@ async def remove_inactive(conn: aiosqlite.Connection, inactive_id: int) -> None:
     )
 
 
+async def clear_inactive_pool(
+    conn: aiosqlite.Connection, challenge: str, keep_agent_id: str | None = None
+) -> int:
+    """Delete all inactive-pool entries for `challenge`, optionally keeping those
+    attributed to `keep_agent_id` (e.g. a preserved seed source). Returns the
+    number of rows removed."""
+    if keep_agent_id:
+        cur = await conn.execute(
+            "DELETE FROM inactive_algorithms WHERE challenge = ? AND agent_id != ?",
+            (challenge, keep_agent_id),
+        )
+    else:
+        cur = await conn.execute(
+            "DELETE FROM inactive_algorithms WHERE challenge = ?", (challenge,),
+        )
+    return cur.rowcount
+
+
 async def count_inactive_from_agent(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> int:

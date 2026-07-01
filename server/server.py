@@ -14,7 +14,7 @@ from pathlib import Path
 from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
-    AdminRevoke, AdminSeedInactive, AdminSeedPool,
+    AdminRevoke, AdminSeedInactive, AdminSeedPool, AdminClearInactive,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
@@ -2319,6 +2319,29 @@ async def admin_seed_inactive(req: AdminSeedInactive):
         "challenge": req.challenge,
         "inactive_id": inactive_id,
         "source": req.source_label,
+    }
+
+
+@app.post("/api/admin/clear_inactive")
+async def admin_clear_inactive(req: AdminClearInactive):
+    """Empty the inactive-pool for a challenge (optionally keeping one source),
+    so agents reliably adopt a specific seed on their next reset instead of a
+    diluting mix. Point-in-time only — the pool refills as agents stagnate."""
+    await verify_admin(req)
+    async with db.connect() as conn:
+        keep_agent_id = None
+        if req.keep_source_label:
+            row = await (await conn.execute(
+                "SELECT id FROM agents WHERE name = ?", (req.keep_source_label,),
+            )).fetchone()
+            keep_agent_id = row["id"] if row else None
+        deleted = await db.clear_inactive_pool(conn, req.challenge, keep_agent_id)
+        await conn.commit()
+    return {
+        "cleared": True,
+        "challenge": req.challenge,
+        "deleted": deleted,
+        "kept_source": req.keep_source_label,
     }
 
 

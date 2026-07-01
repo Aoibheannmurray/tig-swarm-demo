@@ -133,10 +133,39 @@ async def test_already_seeded_guard():
     print("PASS test_already_seeded_guard")
 
 
+async def test_clear_inactive_pool_keeps_source():
+    """clear_inactive_pool removes everything on the challenge except a kept
+    source agent's entries."""
+    db, server = _fresh_modules()
+    await db.init_db()
+    async with db.connect() as conn:
+        keep = await db.ensure_synthetic_agent(conn, "keep-me", TS)
+        other = await db.ensure_synthetic_agent(conn, "tig-foundation", TS)
+        await db.deposit_inactive(conn, keep, CHALLENGE, "// keep\n", None, TS)
+        await db.deposit_inactive(conn, other, CHALLENGE, "// a\n", None, TS)
+        await db.deposit_inactive(conn, other, CHALLENGE, "// b\n", None, TS)
+        # a different challenge must be untouched
+        await db.deposit_inactive(conn, other, "knapsack", "// k\n", None, TS)
+        await conn.commit()
+
+    async with db.connect() as conn:
+        deleted = await db.clear_inactive_pool(conn, CHALLENGE, keep_agent_id=keep)
+        await conn.commit()
+    assert deleted == 2, f"expected 2 deleted, got {deleted}"
+
+    async with db.connect() as conn:
+        pool = await db.get_inactive_with_deactivations(conn, CHALLENGE)
+        knap = await db.get_inactive_with_deactivations(conn, "knapsack")
+    assert len(pool) == 1 and pool[0]["algorithm_code"] == "// keep\n", pool
+    assert len(knap) == 1, "other challenge's pool was wrongly cleared"
+    print("PASS test_clear_inactive_pool_keeps_source")
+
+
 async def _main():
     await test_multifile_roundtrip_through_adoption_read()
     await test_single_file_seed_has_no_files_map()
     await test_already_seeded_guard()
+    await test_clear_inactive_pool_keeps_source()
     print("\nAll Component 1 + 4 seeding tests passed.")
 
 
