@@ -1565,6 +1565,174 @@ def _wait_for_server(url: str, timeout: int = 240) -> bool:
 # ── Modes ────────────────────────────────────────────────────────────
 
 
+def create_swarm(params: dict, progress_cb=None) -> dict:
+    """Non-interactive core of `run_create`: provision + configure a swarm.
+
+    Assumes the Railway CLI is installed and authenticated and that every
+    wizard decision is already resolved into `params`. Performs the side-effect
+    sequence (Railway provision → env vars → volume → deploy → domain → wait →
+    push config → seed pools → write local files) and streams human-readable
+    progress through `progress_cb(msg)` (each line is also printed). Shared by
+    the CLI wizard and the control-ui host companion so the deploy logic lives
+    in one place.
+
+    `params`: swarm_name, workspace (optional), swarm_type ("cpu"|"gpu"),
+    active_challenge, challenges_cfg (from collect_per_challenge_configs),
+    stagnation_threshold, stagnation_limit, hypothesis_recall_threshold,
+    seed_inactive_pool (bool), seedable (set, optional).
+
+    Returns: server_url, admin_key, swarm_password, active_challenge,
+    swarm_type, type_label, n_challenges, config_ok."""
+    def emit(msg: str) -> None:
+        print(msg)
+        if progress_cb is not None:
+            try:
+                progress_cb(msg)
+            except Exception:  # a progress consumer must never break the deploy
+                pass
+
+    swarm_name = params["swarm_name"]
+    workspace = params.get("workspace")
+    swarm_type = params["swarm_type"]
+    is_gpu_swarm = swarm_type == "gpu"
+    challenge_set = GPU_CHALLENGES if is_gpu_swarm else CPU_CHALLENGES
+    n_challenges = len(challenge_set)
+    type_label = "GPU" if is_gpu_swarm else "CPU"
+    active_challenge = params["active_challenge"]
+    challenges_cfg = params["challenges_cfg"]
+    challenge_meta = challenge_set[active_challenge]
+    active_def = _CHALLENGE_REGISTRY[active_challenge]
+    stagnation_threshold = params["stagnation_threshold"]
+    stagnation_limit = params["stagnation_limit"]
+    hypothesis_recall_threshold = params["hypothesis_recall_threshold"]
+    seed_inactive_pool = params.get("seed_inactive_pool", False)
+    seedable = params.get("seedable")
+    if seedable is None:
+        seedable = set(challenge_set.keys())
+
+    initial_algorithms = read_initial_algorithms()
+
+    admin_key = secrets.token_urlsafe(16)
+    swarm_password = secrets.token_urlsafe(16)
+
+    railway_dir = ROOT / ".railway"
+    if railway_dir.exists():
+        emit(f"Removing existing {railway_dir.relative_to(ROOT)} from a prior run.")
+        shutil.rmtree(railway_dir)
+
+    emit("Provisioning on Railway…")
+    project, service, resumed = _railway_provision(swarm_name, workspace)
+    if resumed:
+        emit("  (resuming a prior half-finished run — adopting existing resources)")
+
+    owner_name = os.environ.get("USER", "owner")
+    emit("  setting environment variables…")
+    # The swarm config travels as deploy-time env vars (applied at server boot
+    # by db._apply_env_swarm_config) so the swarm comes up correctly configured
+    # the instant it deploys — independent of whether the post-deploy POST
+    # below lands during the Railway rollout.
+    _railway_set_variables(swarm_name, {
+        "DATA_DIR": "/data",
+        "ADMIN_KEY": admin_key,
+        "SWARM_PASSWORD": swarm_password,
+        "ACTIVE_CHALLENGE": active_challenge,
+        "SWARM_TYPE": swarm_type,
+        "SWARM_NAME": swarm_name,
+        "OWNER_NAME": owner_name,
+        "STAGNATION_THRESHOLD": str(stagnation_threshold),
+        "STAGNATION_LIMIT": str(stagnation_limit),
+        "HYPOTHESIS_RECALL_THRESHOLD": str(hypothesis_recall_threshold),
+        "SWARM_CHALLENGES_B64": encode_challenges_blob(challenges_cfg),
+    })
+
+    emit("  attaching /data volume…")
+    _railway_add_volume(swarm_name, "/data")
+
+    emit("  deploying (build logs follow; this takes a few minutes)…\n")
+    _railway_up(swarm_name)
+
+    emit("\n  fetching public URL…")
+    server_url = _railway_domain(swarm_name)
+    emit(f"  URL: {server_url}")
+
+    emit("  waiting for the server to come online…")
+    if not _wait_for_server(server_url):
+        emit(
+            "  warning: server did not respond at /api/swarm_config within 60s.\n"
+            "  Check `railway logs` for errors. Once it's up, the URL will be\n"
+            f"  reachable at {server_url} — point fleet.config.json's server_url at it."
+        )
+
+    n_with_code = sum(1 for v in initial_algorithms.values() if v.get("algorithm_code", "").strip())
+    n_total = len(initial_algorithms)
+    emit(f"  read initial algorithms from initial_algorithms/ "
+         f"({n_with_code}/{n_total} have content; the rest broadcast empty)")
+
+    # Top-level `tracks` and `timeout` mirror the active challenge's
+    # sub-config so `scripts/benchmark.py`'s offline fallback keeps working.
+    active_sub = challenges_cfg[active_challenge]
+    cfg = {
+        "swarm_name": swarm_name,
+        "owner_name": owner_name,
+        "server_url": server_url,
+        "admin_key": admin_key,
+        "swarm_password": swarm_password,
+        "role": "owner",
+        "swarm_type": swarm_type,
+        "active_challenge": active_challenge,
+        "challenge": active_challenge,
+        "challenges": challenges_cfg,
+        "stagnation_threshold": stagnation_threshold,
+        "stagnation_limit": stagnation_limit,
+        "hypothesis_recall_threshold": hypothesis_recall_threshold,
+        "scoring_direction": challenge_meta["scoring_direction"],
+        "tracks": active_sub["tracks"],
+        "timeout": active_sub["timeout"],
+        "algorithm_path": f"src/{active_challenge}/algorithm/mod.rs",
+    }
+    if active_def.is_gpu:
+        cfg["kernel_path"] = f"src/{active_challenge}/algorithm/kernels.cu"
+        cfg["is_gpu"] = True
+
+    emit("  verifying swarm config on the server…")
+    config_ok = push_config_to_server(server_url, admin_key, cfg)
+
+    # Only seed once the config is verified — seeding a server that's still on
+    # bare defaults loads pool entries for challenges nobody is running.
+    if config_ok:
+        if seed_inactive_pool:
+            emit("\nSeeding inactive trajectory pool from TIG mainnet…")
+            seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
+
+        authored_seeds = read_authored_seeds()
+        if authored_seeds:
+            emit("")
+            seed_pool_from_authored(server_url, admin_key, authored_seeds)
+
+    emit("\nWriting local files…")
+    template_files(
+        server_url,
+        challenge=active_challenge,
+        algorithm_path=cfg["algorithm_path"],
+        prior=read_swarm_cache(),
+    )
+    write_challenge_md(active_challenge)
+    write_swarm_admin(cfg)
+    write_swarm_cache(cfg)
+    _scaffold_fleet_config(server_url, swarm_password)
+
+    return {
+        "server_url": server_url,
+        "admin_key": admin_key,
+        "swarm_password": swarm_password,
+        "active_challenge": active_challenge,
+        "swarm_type": swarm_type,
+        "type_label": type_label,
+        "n_challenges": n_challenges,
+        "config_ok": config_ok,
+    }
+
+
 def run_create(args: argparse.Namespace | None = None) -> int:
     """Owner setup: configure a new swarm and deploy it on Railway.
 
@@ -1695,124 +1863,25 @@ def run_create(args: argparse.Namespace | None = None) -> int:
             3, minimum=1,
         )
 
-    admin_key = secrets.token_urlsafe(16)
-    swarm_password = secrets.token_urlsafe(16)
-
-    railway_dir = ROOT / ".railway"
-    if railway_dir.exists():
-        print(f"\nRemoving existing {railway_dir.relative_to(ROOT)} from a prior run.")
-        shutil.rmtree(railway_dir)
-
-    print("\nProvisioning on Railway…")
-    project, service, resumed = _railway_provision(swarm_name, workspace)
-    if resumed:
-        print("  (resuming a prior half-finished run — adopting existing resources)")
-
-    owner_name = os.environ.get("USER", "owner")
-    print("  setting environment variables…")
-    # The swarm config travels as deploy-time env vars (applied at server boot
-    # by db._apply_env_swarm_config) so the swarm comes up correctly configured
-    # the instant it deploys — independent of whether the post-deploy POST
-    # below lands during the Railway rollout. Set BEFORE the volume/deploy so
-    # the very first boot already has them. INSERT OR REPLACE on every boot
-    # means a redeploy never reverts to bare satisfiability/cpu defaults.
-    _railway_set_variables(swarm_name, {
-        "DATA_DIR": "/data",
-        "ADMIN_KEY": admin_key,
-        "SWARM_PASSWORD": swarm_password,
-        "ACTIVE_CHALLENGE": active_challenge,
-        "SWARM_TYPE": swarm_type,
-        "SWARM_NAME": swarm_name,
-        "OWNER_NAME": owner_name,
-        "STAGNATION_THRESHOLD": str(stagnation_threshold),
-        "STAGNATION_LIMIT": str(stagnation_limit),
-        "HYPOTHESIS_RECALL_THRESHOLD": str(hypothesis_recall_threshold),
-        "SWARM_CHALLENGES_B64": encode_challenges_blob(challenges_cfg),
-    })
-
-    print("  attaching /data volume…")
-    _railway_add_volume(swarm_name, "/data")
-
-    print("  deploying (build logs follow; this takes a few minutes)…\n")
-    _railway_up(swarm_name)
-
-    print("\n  fetching public URL…")
-    server_url = _railway_domain(swarm_name)
-    print(f"  URL: {server_url}")
-
-    print("  waiting for the server to come online…")
-    if not _wait_for_server(server_url):
-        print(
-            "  warning: server did not respond at /api/swarm_config within 60s.\n"
-            "  Check `railway logs` for errors. Once it's up, the URL will be\n"
-            f"  reachable at {server_url} — point fleet.config.json's server_url at it."
-        )
-
-    n_with_code = sum(1 for v in initial_algorithms.values() if v.get("algorithm_code", "").strip())
-    n_total = len(initial_algorithms)
-    print(f"  read initial algorithms from initial_algorithms/ "
-          f"({n_with_code}/{n_total} have content; the rest broadcast empty)")
-
-    # Top-level `tracks` and `timeout` mirror the active challenge's
-    # sub-config so `scripts/benchmark.py`'s offline fallback (which reads
-    # .swarm-cache.json when the server is unreachable) keeps working.
-    active_sub = challenges_cfg[active_challenge]
-    active_def = _CHALLENGE_REGISTRY[active_challenge]
-    cfg = {
+    # Hand the resolved wizard decisions to the non-interactive core, which does
+    # the Railway provisioning + config push + seeding + local-file writes. The
+    # control-ui host companion calls the same create_swarm() with a progress_cb.
+    result = create_swarm({
         "swarm_name": swarm_name,
-        "owner_name": owner_name,
-        "server_url": server_url,
-        "admin_key": admin_key,
-        "swarm_password": swarm_password,
-        "role": "owner",
+        "workspace": workspace,
         "swarm_type": swarm_type,
         "active_challenge": active_challenge,
-        # Active challenge mirrored as `challenge` for back-compat with
-        # tooling that still reads the flat key.
-        "challenge": active_challenge,
-        "challenges": challenges_cfg,
+        "challenges_cfg": challenges_cfg,
         "stagnation_threshold": stagnation_threshold,
         "stagnation_limit": stagnation_limit,
         "hypothesis_recall_threshold": hypothesis_recall_threshold,
-        "scoring_direction": challenge_meta["scoring_direction"],
-        "tracks": active_sub["tracks"],
-        "timeout": active_sub["timeout"],
-        "algorithm_path": f"src/{active_challenge}/algorithm/mod.rs",
-    }
-    if active_def.is_gpu:
-        cfg["kernel_path"] = f"src/{active_challenge}/algorithm/kernels.cu"
-        cfg["is_gpu"] = True
-
-    print("  verifying swarm config on the server…")
-    config_ok = push_config_to_server(server_url, admin_key, cfg)
-
-    # Only seed once the config is verified — seeding a server that's still on
-    # bare defaults loads pool entries for challenges nobody is running, and
-    # masks the real failure. If config failed, skip and let the user re-run.
-    if config_ok:
-        if seed_inactive_pool:
-            print("\nSeeding inactive trajectory pool from TIG mainnet…")
-            seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
-
-        # Load any host-authored seed algorithms (initial_algorithms/<ch>/seeds/)
-        # into the seed pool so standard-tier / exploiter agents start from working
-        # code instead of the stub.
-        authored_seeds = read_authored_seeds()
-        if authored_seeds:
-            print()
-            seed_pool_from_authored(server_url, admin_key, authored_seeds)
-
-    print("\nWriting local files…")
-    template_files(
-        server_url,
-        challenge=active_challenge,
-        algorithm_path=cfg["algorithm_path"],
-        prior=read_swarm_cache(),
-    )
-    write_challenge_md(active_challenge)
-    write_swarm_admin(cfg)
-    write_swarm_cache(cfg)
-    _scaffold_fleet_config(server_url, swarm_password)
+        "seed_inactive_pool": seed_inactive_pool,
+        "seedable": seedable,
+    })
+    server_url = result["server_url"]
+    admin_key = result["admin_key"]
+    swarm_password = result["swarm_password"]
+    config_ok = result["config_ok"]
     repo_url = "<this-repo-url>"
     try:
         result = sp.run(
@@ -1901,28 +1970,30 @@ def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:
 # ── Switch / sync subcommands ─────────────────────────────────────────
 
 
-def run_switch(challenge: str) -> int:
-    """Host-only: change the swarm's active challenge.
+def switch_challenge(challenge: str) -> dict:
+    """Non-interactive core of `run_switch`: change the swarm's active challenge.
 
     POSTs to /api/swarm_config (admin-key gated), then refreshes the local
-    .swarm-cache.json and re-templates CHALLENGE.md. Contributors auto-follow
-    on their next iteration via `setup.py sync`.
+    .swarm-cache.json and re-templates CHALLENGE.md. Switching is restricted to
+    challenges of the same type (CPU/GPU) as the swarm was created with.
 
-    Switching is restricted to challenges of the same type (CPU/GPU) as
-    the swarm was created with."""
+    Raises ValueError(message) on any failure (unknown challenge, missing
+    admin creds, type mismatch, unreachable server). Returns
+    {active_challenge, prior_challenge, server_url} on success. Shared by the
+    CLI wrapper and the control-ui host companion."""
     if challenge not in CHALLENGES:
-        print(f"unknown challenge: {challenge}")
-        print(f"choose from: {', '.join(CHALLENGES)}")
-        return 1
+        raise ValueError(
+            f"unknown challenge: {challenge}; choose from {', '.join(CHALLENGES)}"
+        )
     admin = read_swarm_admin()
     if not admin.get("admin_key"):
-        print("swarm.admin.json not found — `setup.py switch` is host-only; "
-              "run `python setup.py create` first.")
-        return 1
+        raise ValueError(
+            "swarm.admin.json not found — switch is host-only; run "
+            "`python setup.py create` first."
+        )
     server_url = resolve_server_url()
     if not server_url:
-        print("no server_url found — run `python setup.py create` first.")
-        return 1
+        raise ValueError("no server_url found — run `python setup.py create` first.")
     admin_key = admin["admin_key"]
     cache = read_swarm_cache()
     swarm_type = cache.get("swarm_type", "cpu")
@@ -1931,10 +2002,11 @@ def run_switch(challenge: str) -> int:
     if target_is_gpu != is_gpu_swarm:
         allowed = GPU_CHALLENGES if is_gpu_swarm else CPU_CHALLENGES
         label = "GPU" if is_gpu_swarm else "CPU"
-        print(f"This is a {label} swarm — cannot switch to "
-              f"{'GPU' if target_is_gpu else 'CPU'} challenge '{challenge}'.")
-        print(f"Available challenges: {', '.join(allowed)}")
-        return 1
+        raise ValueError(
+            f"This is a {label} swarm — cannot switch to "
+            f"{'GPU' if target_is_gpu else 'CPU'} challenge '{challenge}'. "
+            f"Available challenges: {', '.join(allowed)}"
+        )
 
     # 1. POST the new active_challenge to the server.
     payload = {"admin_key": admin_key, "active_challenge": challenge}
@@ -1947,10 +2019,8 @@ def run_switch(challenge: str) -> int:
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
             json.load(resp)
-        print(f"  active_challenge → {challenge} on {server_url}")
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
-        print(f"  could not reach {server_url} ({e}); aborting switch.")
-        return 1
+        raise ValueError(f"could not reach {server_url} ({e}); aborting switch.")
 
     # 2. Refresh the local cache + CHALLENGE.md so the host can also work on
     #    the new challenge from their own clone.
@@ -1977,14 +2047,30 @@ def run_switch(challenge: str) -> int:
         refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Carry the stagnation knobs into the host's cache too (switch doesn't
-    # fetch /api/swarm_config, so source them from swarm.admin.json). Keeps
-    # the host's own driver able to time tacit-knowledge distillation.
+    # fetch /api/swarm_config, so source them from swarm.admin.json).
     for knob in ("stagnation_threshold", "stagnation_limit"):
         if admin.get(knob) is not None:
             refreshed[knob] = admin[knob]
     write_swarm_cache(refreshed)
 
-    prior_challenge = cache.get("active_challenge")
+    return {
+        "active_challenge": challenge,
+        "prior_challenge": cache.get("active_challenge"),
+        "server_url": server_url,
+    }
+
+
+def run_switch(challenge: str) -> int:
+    """Host-only CLI: change the swarm's active challenge (wraps
+    switch_challenge). Contributors auto-follow on their next iteration via
+    `setup.py sync`."""
+    try:
+        result = switch_challenge(challenge)
+    except ValueError as e:
+        print(str(e))
+        return 1
+
+    prior_challenge = result["prior_challenge"]
     print(f"\nActive challenge → {challenge} (broadcast to all contributors).")
     if prior_challenge and prior_challenge != challenge:
         print(f"  Prior trajectories on {prior_challenge} are preserved")

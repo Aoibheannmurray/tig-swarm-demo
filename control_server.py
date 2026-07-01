@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""Local control-plane companion for the TIG swarm.
+
+A small FastAPI app that a host or contributor runs on their own machine to
+drive the setup/fleet operations that a remote browser tab physically can't:
+Railway provisioning (host) and spawning the local agent fleet (contributor).
+It serves the `control-ui/` Svelte bundle and exposes a thin `/local-api/*`
+surface that wraps the *existing* orchestration functions — it never
+re-implements them:
+
+  - init_fleet.build_fleet_config / write_fleet_config   (contributor config)
+  - run_fleet.cmd_run (foreground, stoppable, streamed)  (contributor fleet)
+  - setup.create_swarm / switch_challenge                (host provisioning)
+
+Launch it directly (`python control_server.py`) or via `python run.py --ui`.
+The CLI wizards (`python run.py`, `python setup.py …`) keep working unchanged;
+this is an alternative front door, not a replacement.
+
+The fleet runs in the *foreground* relative to this process: closing the
+companion (Ctrl-C) stops the fleet, exactly like `scripts/run_fleet.py` today.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import sys
+import threading
+import webbrowser
+from collections import deque
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+# The scripts/ modules import each other by bare name via sys.path (they are not
+# a package — see scripts/CLAUDE.md), so add scripts/, root, and server/ (setup
+# and init_fleet both import server-side helpers like tiers.py).
+for _p in (ROOT / "scripts", ROOT, ROOT / "server"):
+    sys.path.insert(0, str(_p))
+
+try:
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi.responses import JSONResponse, HTMLResponse
+    from fastapi.staticfiles import StaticFiles
+    import uvicorn
+except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+    sys.stderr.write(
+        f"control_server needs FastAPI + uvicorn ({exc.name} missing).\n"
+        "Install them with:\n"
+        "    pip install -r control-ui-requirements.txt\n"
+        "or reuse the server deps:\n"
+        "    pip install -r server/requirements.txt\n"
+    )
+    sys.exit(1)
+
+import init_fleet
+import run_fleet
+import setup as setup_mod
+
+UI_DIST = ROOT / "control-ui" / "dist"
+FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
+TACIT_PATH = ROOT / "tacit_knowledge.md"
+
+
+# ── Event hub: bridge worker-thread callbacks → async WebSocket clients ──
+
+
+class EventHub:
+    """Fan-out for progress events. Worker threads (fleet supervisor, Railway
+    deploy) push events; connected WebSocket clients drain them. A ring buffer
+    replays recent history to clients that connect mid-run."""
+
+    def __init__(self, history: int = 3000) -> None:
+        self._history: deque[dict] = deque(maxlen=history)
+        self._subscribers: set[asyncio.Queue] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        self._subscribers.discard(q)
+
+    def history(self) -> list[dict]:
+        return list(self._history)
+
+    def emit(self, event: dict) -> None:
+        """Thread-safe: schedule delivery on the server's event loop."""
+        self._history.append(event)
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._deliver, event)
+        except RuntimeError:  # loop already closed during shutdown
+            pass
+
+    def _deliver(self, event: dict) -> None:
+        for q in list(self._subscribers):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:  # slow client — drop rather than block
+                pass
+
+
+# ── Fleet supervisor ──────────────────────────────────────────────────
+
+
+class FleetController:
+    """Owns the single foreground fleet: starts run_fleet.cmd_run in a worker
+    thread, mirrors its output/status to the EventHub, and stops it via a
+    cooperative Event (cmd_run installs no signal handlers off the main
+    thread)."""
+
+    def __init__(self, hub: EventHub) -> None:
+        self._hub = hub
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self.state = "idle"  # idle | starting | running | stopping | stopped | error
+        self.agents: dict[str, dict] = {}  # name -> {pid, returncode, state}
+        self.error: str | None = None
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def status(self) -> dict:
+        return {
+            "state": self.state,
+            "running": self.is_running(),
+            "agents": self.agents,
+            "error": self.error,
+        }
+
+    def _on_output(self, name: str, line: str) -> None:
+        self._hub.emit({"type": "log", "name": name, "line": line})
+
+    def _on_status(self, event: str, info: dict) -> None:
+        if event == "spawned":
+            self.agents[info["name"]] = {"pid": info.get("pid"), "state": "running"}
+        elif event == "running":
+            self.state = "running"
+        elif event == "exited":
+            entry = self.agents.setdefault(info["name"], {})
+            entry["state"] = "exited"
+            entry["returncode"] = info.get("returncode")
+        elif event == "stopped":
+            self.state = "stopped"
+        elif event == "error":
+            self.state = "error"
+            self.error = info.get("error")
+        self._hub.emit({"type": "status", "event": event, "info": info,
+                        "fleet": self.status()})
+
+    def start(self, only: list[str] | None = None) -> dict:
+        if self.is_running():
+            raise RuntimeError("fleet is already running")
+        if not FLEET_CONFIG_PATH.exists():
+            raise RuntimeError("fleet.config.json not found — configure the fleet first")
+
+        server_url, username, swarm_password, agents, fleet_tacit = (
+            run_fleet._load_fleet()
+        )
+        self._stop = threading.Event()
+        self.state = "starting"
+        self.error = None
+        self.agents = {}
+
+        def _target() -> None:
+            try:
+                run_fleet.cmd_run(
+                    agents, only, server_url, username, swarm_password,
+                    fleet_tacit,
+                    stop_event=self._stop,
+                    on_output=self._on_output,
+                    on_status=self._on_status,
+                )
+            except Exception as exc:  # surface, don't crash the server
+                self._on_status("error", {"error": f"{type(exc).__name__}: {exc}"})
+
+        self._thread = threading.Thread(target=_target, daemon=True)
+        self._thread.start()
+        return self.status()
+
+    def stop(self) -> dict:
+        if self.is_running():
+            self.state = "stopping"
+            self._stop.set()
+        return self.status()
+
+
+# ── Deploy (host create) job ──────────────────────────────────────────
+
+
+class DeployController:
+    """Runs setup.create_swarm in a worker thread, streaming Railway progress
+    to the EventHub. One deploy at a time."""
+
+    def __init__(self, hub: EventHub) -> None:
+        self._hub = hub
+        self._thread: threading.Thread | None = None
+        self.state = "idle"  # idle | running | done | error
+        self.result: dict | None = None
+        self.error: str | None = None
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def status(self) -> dict:
+        return {"state": self.state, "running": self.is_running(),
+                "result": self.result, "error": self.error}
+
+    def start(self, params: dict) -> dict:
+        if self.is_running():
+            raise RuntimeError("a deploy is already in progress")
+        self.state = "running"
+        self.result = None
+        self.error = None
+
+        def progress(msg: str) -> None:
+            self._hub.emit({"type": "deploy_log", "line": msg})
+
+        def _target() -> None:
+            try:
+                res = setup_mod.create_swarm(params, progress_cb=progress)
+                self.result = res
+                self.state = "done"
+                self._hub.emit({"type": "deploy_status", "event": "done",
+                                "result": res})
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
+                self.state = "error"
+                self._hub.emit({"type": "deploy_status", "event": "error",
+                                "error": self.error})
+
+        self._thread = threading.Thread(target=_target, daemon=True)
+        self._thread.start()
+        return self.status()
+
+
+# ── App factory ────────────────────────────────────────────────────────
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="TIG Swarm Control", docs_url=None, redoc_url=None)
+    hub = EventHub()
+    fleet = FleetController(hub)
+    deploy = DeployController(hub)
+
+    @app.on_event("startup")
+    async def _startup() -> None:
+        hub.attach_loop(asyncio.get_running_loop())
+
+    # ── Environment / capabilities ──
+    @app.get("/local-api/env")
+    def env() -> dict:
+        admin = setup_mod.read_swarm_admin()
+        return {
+            "mode": "local",
+            "cwd": str(ROOT),
+            "has_fleet_config": FLEET_CONFIG_PATH.exists(),
+            "has_swarm_admin": bool(admin.get("admin_key")),
+            "server_url": admin.get("server_url") or setup_mod.resolve_server_url(),
+        }
+
+    @app.get("/local-api/providers")
+    def providers() -> dict:
+        return {
+            "providers": init_fleet.get_providers(),
+            "c3_hardware": init_fleet.get_c3_hardware_choices(),
+        }
+
+    @app.get("/local-api/challenges")
+    def challenges() -> dict:
+        return {
+            "cpu": list(setup_mod.CPU_CHALLENGES.keys()),
+            "gpu": list(setup_mod.GPU_CHALLENGES.keys()),
+            "all": list(setup_mod.CHALLENGES.keys()),
+        }
+
+    # ── Contributor: fleet config + tacit ──
+    @app.get("/local-api/fleet/config")
+    def get_fleet_config() -> dict:
+        if not FLEET_CONFIG_PATH.exists():
+            return {"exists": False, "config": None}
+        try:
+            return {"exists": True, "config": json.loads(FLEET_CONFIG_PATH.read_text())}
+        except (json.JSONDecodeError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    @app.post("/local-api/fleet/config")
+    async def set_fleet_config(payload: dict) -> dict:
+        try:
+            config = init_fleet.build_fleet_config(payload)
+            init_fleet.write_fleet_config(config)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return {"config": config}
+
+    @app.post("/local-api/tacit")
+    async def set_tacit(payload: dict) -> dict:
+        """Append tacit-knowledge to the fleet-default tacit file.
+
+        `payload`: either {"text": "..."} (a raw paste block) or
+        {"answers": [{"title": "...", "body": "..."}, ...]} from the guided
+        form. Composed the same way as setup.py's guided capture."""
+        threshold = setup_mod.read_swarm_admin().get("stagnation_threshold", 2)
+        path = TACIT_PATH
+        body = (payload.get("text") or "").strip()
+        if not body and payload.get("answers"):
+            sections = [
+                f"### {a['title']}\n\n{a['body'].strip()}"
+                for a in payload["answers"]
+                if a.get("title") and a.get("body", "").strip()
+            ]
+            body = "\n\n".join(sections)
+        if not body:
+            return JSONResponse({"error": "no tacit content provided"}, status_code=400)
+        if not path.exists():
+            path.write_text(setup_mod.tacit_header(threshold), encoding="utf-8")
+        existing = path.read_text(encoding="utf-8")
+        sep = "" if existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
+        path.write_text(existing + sep + body + "\n", encoding="utf-8")
+        try:
+            shown = str(path.relative_to(ROOT))
+        except ValueError:
+            shown = str(path)
+        return {"ok": True, "path": shown}
+
+    # ── Contributor: fleet lifecycle ──
+    @app.get("/local-api/fleet/status")
+    def fleet_status() -> dict:
+        return fleet.status()
+
+    @app.post("/local-api/fleet/start")
+    async def fleet_start(payload: dict | None = None) -> dict:
+        only = (payload or {}).get("only")
+        try:
+            return fleet.start(only=only)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/local-api/fleet/stop")
+    async def fleet_stop() -> dict:
+        return fleet.stop()
+
+    # ── Host: railway + provisioning ──
+    @app.get("/local-api/railway/status")
+    def railway_status() -> dict:
+        try:
+            user = setup_mod._railway_check_auth()
+            who = user.get("email") or user.get("name") or "unknown"
+            return {"available": True, "authed": True, "user": who}
+        except SystemExit as exc:
+            # _railway_check_installed / _check_auth exit on failure — translate
+            # to a soft status so the UI can show the right instruction.
+            return {"available": False, "authed": False, "message": str(exc)}
+        except Exception as exc:
+            return {"available": False, "authed": False, "message": str(exc)}
+
+    @app.get("/local-api/swarm/admin")
+    def swarm_admin() -> dict:
+        """Host-only: the local admin creds so the UI can deep-link into the
+        hosted Admin Console pre-filled."""
+        admin = setup_mod.read_swarm_admin()
+        return {
+            "server_url": admin.get("server_url"),
+            "admin_key": admin.get("admin_key"),
+            "swarm_password": admin.get("swarm_password"),
+            "active_challenge": admin.get("active_challenge"),
+        }
+
+    @app.post("/local-api/swarm/create")
+    async def swarm_create(payload: dict) -> dict:
+        """Provision a swarm. Builds challenges_cfg (defaults) then streams the
+        Railway deploy via the /local-api/stream WebSocket (type deploy_log)."""
+        swarm_type = payload.get("swarm_type", "cpu")
+        challenge_set = (
+            setup_mod.GPU_CHALLENGES if swarm_type == "gpu" else setup_mod.CPU_CHALLENGES
+        )
+        active_challenge = payload.get("active_challenge") or next(iter(challenge_set))
+        if active_challenge not in challenge_set:
+            return JSONResponse(
+                {"error": f"{active_challenge} not available in a {swarm_type} swarm"},
+                status_code=400,
+            )
+        initial_algorithms = setup_mod.read_initial_algorithms()
+        challenges_cfg = setup_mod.collect_per_challenge_configs(
+            initial_algorithms, use_defaults=True, challenge_set=challenge_set,
+        )
+        params = {
+            "swarm_name": payload.get("swarm_name", "my-tig-swarm"),
+            "workspace": payload.get("workspace"),
+            "swarm_type": swarm_type,
+            "active_challenge": active_challenge,
+            "challenges_cfg": challenges_cfg,
+            "stagnation_threshold": int(payload.get("stagnation_threshold", 2)),
+            "stagnation_limit": int(payload.get("stagnation_limit", 10)),
+            "hypothesis_recall_threshold": int(payload.get("hypothesis_recall_threshold", 3)),
+            "seed_inactive_pool": bool(payload.get("seed_inactive_pool", False)),
+        }
+        try:
+            return deploy.start(params)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.get("/local-api/swarm/create/status")
+    def swarm_create_status() -> dict:
+        return deploy.status()
+
+    @app.post("/local-api/swarm/switch")
+    async def swarm_switch(payload: dict) -> dict:
+        challenge = payload.get("challenge", "")
+        try:
+            return setup_mod.switch_challenge(challenge)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # ── Invite (host, local): derive per-contributor password ──
+    @app.post("/local-api/invite")
+    async def invite(payload: dict) -> dict:
+        """Generate a contributor invite from the base swarm password.
+
+        Same derivation as setup.py run_invite: sha256(username:base). Uses the
+        base password from swarm.admin.json unless one is supplied."""
+        admin = setup_mod.read_swarm_admin()
+        base = payload.get("swarm_password") or admin.get("swarm_password")
+        server_url = payload.get("server_url") or admin.get("server_url")
+        username = (payload.get("username") or "").strip()
+        if not base:
+            return JSONResponse({"error": "no base swarm_password available"}, status_code=400)
+        if not username:
+            return JSONResponse({"error": "username is required"}, status_code=400)
+        derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
+        return {"server_url": server_url, "username": username,
+                "swarm_password": derived}
+
+    # ── Live event stream ──
+    @app.websocket("/local-api/stream")
+    async def stream(ws: WebSocket) -> None:
+        await ws.accept()
+        q = hub.subscribe()
+        try:
+            # Replay recent history so a late connector catches up.
+            for event in hub.history():
+                await ws.send_json(event)
+            while True:
+                event = await q.get()
+                await ws.send_json(event)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            hub.unsubscribe(q)
+
+    # ── Static bundle (must be last: catches all unmatched routes) ──
+    if UI_DIST.exists():
+        app.mount("/", StaticFiles(directory=str(UI_DIST), html=True), name="ui")
+    else:
+        @app.get("/")
+        def _placeholder() -> HTMLResponse:
+            return HTMLResponse(
+                "<h1>TIG Swarm Control</h1><p>The UI bundle isn't built yet. "
+                "Run <code>cd control-ui &amp;&amp; npm install &amp;&amp; npm run build</code>, "
+                "then reload.</p>",
+                status_code=200,
+            )
+
+    return app
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Local control-plane UI for the TIG swarm.")
+    p.add_argument("--host", default="127.0.0.1", help="Bind address (default: localhost).")
+    p.add_argument("--port", type=int, default=8787, help="Port (default: 8787).")
+    p.add_argument("--no-browser", action="store_true",
+                   help="Don't auto-open a browser tab.")
+    args = p.parse_args()
+
+    url = f"http://{args.host}:{args.port}/"
+    print(f"TIG Swarm Control — {url}")
+    print("  (Ctrl-C stops the companion; a running fleet stops with it.)")
+    if not args.no_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nstopped")
+        sys.exit(130)

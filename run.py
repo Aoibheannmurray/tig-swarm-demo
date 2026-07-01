@@ -37,6 +37,14 @@ import run_fleet
 import setup as setup_mod
 
 
+def _launch_ui() -> int:
+    """`python run.py --ui` — open the local control-plane web UI instead of the
+    terminal wizard. Delegates to control_server.py (the same companion a host
+    would run). The CLI flow below is unchanged and still the default."""
+    import control_server
+    return control_server.main()
+
+
 def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
     """Tacit-knowledge phase.
 
@@ -112,6 +120,12 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
 
 
 def main() -> int:
+    # `--ui` opens the web companion instead of the terminal flow. Strip the
+    # flag so control_server's own argparse sees only its options (--port etc.).
+    if "--ui" in sys.argv:
+        sys.argv = [a for a in sys.argv if a != "--ui"]
+        return _launch_ui()
+
     fleet_path = ROOT / "fleet.config.json"
     if not fleet_path.exists():
         print("No fleet.config.json found — running setup wizard.\n")

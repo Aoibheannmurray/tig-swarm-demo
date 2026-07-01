@@ -18,9 +18,11 @@ hints/inspiration across the swarm.
 | `scripts/` | Orchestration: per-agent loop, fleet, benchmarking, publishing | Python — see `scripts/CLAUDE.md` |
 | `server/` | Coordination server (scores, config, leaderboard, WebSocket) | Python/FastAPI — see `server/CLAUDE.md` |
 | `dashboard/` | Web UI for the server | TypeScript/Vite — see `dashboard/CLAUDE.md` |
+| `control-ui/` | Web UI for setup/onboarding (host create, contributor join, admin console) | Svelte/Vite — see `control-ui/README.md` |
+| `control_server.py` | Local companion server the control-ui talks to (`/local-api/*`); wraps the CLI cores | Python/FastAPI |
 | `initial_algorithms/` | Editable per-challenge seed algorithms | Rust |
 | `docs/` | Long-form internals (`ARCHITECTURE.md`, …) | — |
-| `run.py` | **Contributor** entry point (`python3 run.py`) | Python |
+| `run.py` | **Contributor** entry point (`python3 run.py`, or `--ui` for the web companion) | Python |
 | `setup.py` | **Host-admin CLI** (`create`/`switch`/`sync`/`tacit`) — NOT packaging | Python |
 
 ## Build & test
