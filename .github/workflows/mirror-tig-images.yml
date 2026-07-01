@@ -1,14 +1,18 @@
 # Production image pipeline for the TIG-docker benchmark backend.
 #
-# Mirrors every challenge's TIG `dev` image (ghcr.io, where C3 cannot pull from)
-# to Docker Hub (where C3 can), keyed off the pinned version in tig_pin.json.
-# The C3 path (scripts/c3_compute.py) pulls `docker.io/<user>/tig-dev-<challenge>`
-# and uploads the source (cold-compile per job). This must run before the custom
-# benchmarking path can be retired (so every challenge is C3-pullable).
+# Two paths, keyed off the pinned version in tig_pin.json:
 #
-# Uses `crane copy` for a registry-to-registry copy — no local disk pull, so the
-# 4–9 GB images don't need to fit on the runner. Copies the full multi-arch
-# manifest list (C3 selects amd64).
+#   build-baked (CPU challenges, Option B): builds the *custom* image
+#     (Dockerfile.bench = dev image + re-added monorepo source + warm cargo cache
+#     + baked modified_test_algorithm) and pushes it as
+#     `docker.io/<user>/tig-bench-<challenge>`. C3 pulls it (cached per pool),
+#     injects ONLY the algorithm into the pre-baked swarm_algo slot, and
+#     incremental-builds in seconds — no per-job source upload, no cold compile.
+#     (See scripts/c3_compute.py `_TIG_BAKED_CHALLENGES`.)
+#
+#   mirror-raw (GPU challenges, Option A): still a plain registry-to-registry
+#     `crane copy` of the ghcr `dev` image to `docker.io/<user>/tig-dev-<challenge>`.
+#     The C3 GPU path uploads the source and cold-compiles per job.
 #
 # Setup (one-time, by a repo/Docker Hub admin):
 #   - Docker Hub access token (Read/Write).
@@ -16,22 +20,36 @@
 #   The Docker Hub namespace must match what the swarm pulls
 #   (cfg["tig_dockerhub"] / env TIG_DOCKERHUB, default the username).
 #
+# NOTE: the baked build re-adds monorepo *source* that must match the pinned dev
+# image. tig_pin.json tracks only the version tag; this workflow checks out
+# tig-foundation/tig-monorepo at TIG_MONOREPO_REF (default: its default branch).
+# Pin that ref to the release matching tig_version for digest-level repro.
+#
 # Run: on a manual dispatch, or automatically when the version pin changes.
 
-name: Mirror TIG images to Docker Hub
+name: Build & publish TIG images to Docker Hub
 
 on:
   workflow_dispatch:
+    inputs:
+      monorepo_ref:
+        description: "tig-monorepo git ref to build the baked source from"
+        required: false
+        default: ""
   push:
     paths:
       - "tig_pin.json"
+      - "Dockerfile.bench"
+      - "scripts/build_bench_image.sh"
+      - "scripts/modified_test_algorithm"
       - ".github/workflows/mirror-tig-images.yml"
 
 permissions:
   contents: read
 
 jobs:
-  mirror:
+  # -------- CPU challenges: build + push the baked custom image (Option B) -----
+  build-baked:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,9 +60,63 @@ jobs:
           - knapsack
           - job_scheduling
           - energy_arbitrage
+    steps:
+      - name: Checkout swarm repo
+        uses: actions/checkout@v4
+
+      - name: Free up runner disk (dev images are multi-GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          df -h /
+
+      - name: Read pinned TIG version
+        id: pin
+        run: |
+          ver=$(python3 -c "import json; print(json.load(open('tig_pin.json'))['tig_version'])")
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Pinned TIG version: $ver"
+
+      - name: Checkout pinned TIG monorepo source
+        uses: actions/checkout@v4
+        with:
+          repository: tig-foundation/tig-monorepo
+          ref: ${{ github.event.inputs.monorepo_ref || '' }}
+          path: _tig-monorepo
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build baked image for ${{ matrix.challenge }}
+        env:
+          VER: ${{ steps.pin.outputs.version }}
+          PLATFORM: linux/amd64
+        run: |
+          bash scripts/build_bench_image.sh "${{ matrix.challenge }}" "$VER" \
+            "${GITHUB_WORKSPACE}/_tig-monorepo"
+
+      - name: Tag + push as tig-bench-${{ matrix.challenge }}
+        env:
+          VER: ${{ steps.pin.outputs.version }}
+          NS: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          LOCAL="tig-custom-image-${{ matrix.challenge }}:${VER}"
+          DST="docker.io/${NS}/tig-bench-${{ matrix.challenge }}:${VER}"
+          docker tag "$LOCAL" "$DST"
+          docker push "$DST"
+          echo "Pushed: $DST"
+
+  # -------- GPU challenges: mirror the raw dev image (Option A) ----------------
+  mirror-raw:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        challenge:
           - vector_search
           - hypergraph
-          - neuralnet_optimizer
     steps:
       - uses: actions/checkout@v4
 
@@ -53,7 +125,6 @@ jobs:
         run: |
           ver=$(python3 -c "import json; print(json.load(open('tig_pin.json'))['tig_version'])")
           echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "Pinned TIG version: $ver"
 
       - name: Install crane
         uses: imjasonh/setup-crane@v0.4
@@ -71,5 +142,5 @@ jobs:
           SRC="ghcr.io/tig-foundation/tig-monorepo/${{ matrix.challenge }}/dev:${VER}"
           DST="docker.io/${NS}/tig-dev-${{ matrix.challenge }}:${VER}"
           echo "Mirroring $SRC -> $DST"
-          crane copy "$SRC" "$DST"
+          crane copy --platform linux/amd64 "$SRC" "$DST"
           echo "Mirrored: $DST"

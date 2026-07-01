@@ -36,18 +36,32 @@ _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 _DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
 _DEFAULT_GPU_HARDWARE = "l40"
 _AUTO_HARDWARE_VALUES = {"", "auto", "default"}
-_SUPPORTED_TIG_C3_CHALLENGES = frozenset({
+# CPU challenges served by a *baked* custom image (tig-bench-<ch>): the monorepo
+# source + warm cargo cache + modified_test_algorithm are pre-built into the
+# image (see Dockerfile.bench / build_bench_image.sh). C3 pulls it (cached per
+# pool), injects ONLY the algorithm into the pre-baked swarm_algo slot, and
+# incremental-builds (seconds) — no per-job source upload, no cold compile.
+_TIG_BAKED_CHALLENGES = frozenset({
+    "satisfiability",
+    "vehicle_routing",
     "knapsack",
+    "job_scheduling",
+    "energy_arbitrage",
+})
+# GPU challenges still use the raw dev image + per-job source upload (Option A).
+_TIG_RAW_CHALLENGES = frozenset({
     "vector_search",
     "hypergraph",
 })
+_SUPPORTED_TIG_C3_CHALLENGES = _TIG_BAKED_CHALLENGES | _TIG_RAW_CHALLENGES
 _TIG_SOURCE_TAR_EXCLUDES = (
     "./target",
     "./.git",
     "./tig-algorithms/lib",
 )
-# Pinned TIG monorepo source (re-added into the uploaded workspace; the dev image
-# strips it). Default sibling dir; override with cfg["tig_monorepo_path"].
+# Pinned TIG monorepo source (re-added into the uploaded workspace for the raw
+# Option-A path only; the dev image strips it). Baked challenges don't need this.
+# Default sibling dir; override with cfg["tig_monorepo_path"].
 _TIG_MONOREPO = ROOT.parent / "tig-monorepo"
 
 
@@ -592,27 +606,32 @@ def _tig_c3_image(cfg: dict) -> str:
             f"currently supported: {supported}"
         )
     ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB", "danieltiagoadams")
+    if challenge in _TIG_BAKED_CHALLENGES:
+        return f"docker.io/{ns}/tig-bench-{challenge}:{_bm_tig_version()}"
     return f"docker.io/{ns}/tig-dev-{challenge}:{_bm_tig_version()}"
 
 
 def _create_tig_workspace(stage: Path, cfg: dict) -> None:
     challenge = cfg["challenge"]
-    monorepo = Path(cfg.get("tig_monorepo_path") or _TIG_MONOREPO)
-    if not (monorepo / "tig-algorithms").exists():
-        raise FileNotFoundError(f"pinned TIG monorepo source not found at {monorepo}")
-    src = stage / "tig-source"
-    src.mkdir(parents=True, exist_ok=True)
-    # Use tar to copy the source: it preserves symlinks (the monorepo has
-    # self-referential symlinks under tig-benchmarker that shutil.copytree
-    # follows into a loop) and excludes build/generated artifacts.
-    exclude_args = " ".join(
-        f"--exclude={shlex.quote(path)}" for path in _TIG_SOURCE_TAR_EXCLUDES
-    )
-    subprocess.run(
-        f"tar -C {shlex.quote(str(monorepo))} {exclude_args} -cf - . "
-        f"| tar -C {shlex.quote(str(src))} -xf -",
-        shell=True, check=True,
-    )
+    # Baked (Option B): the source is already in the image at /app; upload only
+    # the small driver + the agent's algorithm. No per-job source tar.
+    if challenge not in _TIG_BAKED_CHALLENGES:
+        monorepo = Path(cfg.get("tig_monorepo_path") or _TIG_MONOREPO)
+        if not (monorepo / "tig-algorithms").exists():
+            raise FileNotFoundError(f"pinned TIG monorepo source not found at {monorepo}")
+        src = stage / "tig-source"
+        src.mkdir(parents=True, exist_ok=True)
+        # Use tar to copy the source: it preserves symlinks (the monorepo has
+        # self-referential symlinks under tig-benchmarker that shutil.copytree
+        # follows into a loop) and excludes build/generated artifacts.
+        exclude_args = " ".join(
+            f"--exclude={shlex.quote(path)}" for path in _TIG_SOURCE_TAR_EXCLUDES
+        )
+        subprocess.run(
+            f"tar -C {shlex.quote(str(monorepo))} {exclude_args} -cf - . "
+            f"| tar -C {shlex.quote(str(src))} -xf -",
+            shell=True, check=True,
+        )
     _copy_required(ROOT / "scripts" / "tig_bench_driver.py", stage / "tig_bench_driver.py")
     _copy_required(ROOT / "scripts" / "modified_test_algorithm", stage / "modified_test_algorithm")
     _stage_tig_algorithm(stage, cfg)
@@ -647,6 +666,35 @@ def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str
     }
     fuel = int(cfg.get("max_fuel_budget", _BM_DEFAULT_FUEL))
     is_nn = challenge == "neuralnet_optimizer"
+    baked = challenge in _TIG_BAKED_CHALLENGES
+
+    # Baked (Option B): source + warm cache live in the image at /app. Inject the
+    # algorithm into the pre-baked swarm_algo slot and incremental-build. No
+    # source re-add, no `pub mod swarm_algo` append (baked), no nn blinding (nn
+    # is a raw/GPU challenge, never baked).
+    if baked:
+        hp_export = ""
+        if hyperparameters is not None:
+            hp_export = f"export TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}\n"
+        return f"""#!/bin/bash
+set -euo pipefail
+cd "${{C3_JOB_WORKDIR:-/workspace}}"
+OUT="${{C3_ARTIFACTS_DIR:-./c3-artifacts}}"; mkdir -p "$OUT" c3-artifacts
+export CHALLENGE={challenge}
+cp modified_test_algorithm /usr/local/bin/tig-scripts/modified_test_algorithm
+chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
+SLOT=/app/tig-algorithms/src/{challenge}/swarm_algo
+mkdir -p "$SLOT"
+cp algorithm/mod.rs "$SLOT/mod.rs"
+cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
+export TIG_WORKDIR=/app
+export TIG_TRACKS={_yaml_quote(json.dumps(tracks))}
+export TIG_SEED={_yaml_quote(seed)}
+export TIG_FUEL={fuel}
+{hp_export}python3 tig_bench_driver.py > "$OUT/combined.json" 2> "$OUT/driver.stderr" || echo "driver rc=$?" >> "$OUT/driver.stderr"
+cp "$OUT/combined.json" c3-artifacts/ 2>/dev/null || true
+cp "$OUT/driver.stderr" c3-artifacts/ 2>/dev/null || true
+"""
 
     # neuralnet anti-cheat: blind the seed handed to optimizer_init_state.
     patch = ""
