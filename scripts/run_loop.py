@@ -346,6 +346,11 @@ def _use_search_replace(role: str, file_map: dict, config: dict) -> bool:
 # anything that breaks the build).
 _SR_REPAIR_ROUNDS = 2
 
+# Consecutive no-edit search/replace skips before the loop forces a full rewrite
+# to break the stall (see the main loop). Keeps occasional S/R misses cheap while
+# stopping a plateaued agent from spinning forever without ever publishing.
+_SR_SKIP_FALLBACK = 3
+
 
 def _generate_code_search_replace(
     args: argparse.Namespace, model: str, api_key: str,
@@ -424,7 +429,7 @@ def _generate_code(
     args: argparse.Namespace, model: str, api_key: str,
     state: dict, hypothesis: dict, config: dict,
     challenge_md: str, files: ChallengeFiles,
-    *, role: str = "explorer",
+    *, role: str = "explorer", force_full: bool = False,
 ) -> tuple[str | None, str | None, int, int]:
     """LLM code generation with retry on validation failure.
 
@@ -433,9 +438,14 @@ def _generate_code(
     multi-file algorithms, and `edit_mode: search_replace` agents go through the
     soft search/replace path; everyone else does full-file replacement.
 
+    `force_full=True` bypasses the search/replace path and always does a full
+    rewrite — the loop uses this to break out of a run of no-edit S/R skips (the
+    model kept returning no blocks), so the agent produces *something*, publishes,
+    and advances the server-side stagnation reset instead of spinning forever.
+
     Returns (code, kernel, input_tokens, output_tokens).
     """
-    if _use_search_replace(role, files.read_files(), config):
+    if not force_full and _use_search_replace(role, files.read_files(), config):
         return _generate_code_search_replace(
             args, model, api_key, state, hypothesis, config,
             challenge_md, files, role=role,
@@ -1639,6 +1649,7 @@ def main() -> int:
     # they survive restarts and adoption out of the inactive pool. See
     # docs/hyperparameter-search-plan.md.
     iteration = 0
+    consecutive_sr_skips = 0  # no-edit S/R skips in a row (see the fallback below)
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
         t_start = time.time()
@@ -1939,9 +1950,29 @@ def main() -> int:
             iter_input_tokens += gen_in
             iter_output_tokens += gen_out
 
+            # Search/replace can legitimately produce no edits (the model
+            # returned no blocks). A skip does NOT publish, so it never advances
+            # the server's stagnation counter — a plateaued S/R agent would spin
+            # forever, never getting reset with fresh code. After a few
+            # consecutive skips, force a full rewrite so the agent produces
+            # something, publishes, and lets stagnation → reset kick in.
             if not code:
-                print(f"  [SKIP] No valid code produced — skipping to next iteration")
-                continue
+                consecutive_sr_skips += 1
+                if consecutive_sr_skips >= _SR_SKIP_FALLBACK:
+                    print(f"  [SKIP] {consecutive_sr_skips} consecutive no-edit "
+                          f"skips — forcing a full rewrite to break the stall")
+                    code, new_kernel, gen_in, gen_out = _generate_code(
+                        args, model, api_key, state, hypothesis, config,
+                        challenge_md, files, role=role, force_full=True,
+                    )
+                    iter_input_tokens += gen_in
+                    iter_output_tokens += gen_out
+                    consecutive_sr_skips = 0
+                if not code:
+                    print(f"  [SKIP] No valid code produced — skipping to next iteration")
+                    continue
+            else:
+                consecutive_sr_skips = 0
 
             # ── Code similarity check ──────────────────────────
             if best_code:
