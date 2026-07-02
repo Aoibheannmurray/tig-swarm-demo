@@ -10,7 +10,7 @@
 // a working, structurally-correct algorithm to refine (better flip heuristics,
 // random restarts, WalkSAT noise) rather than bootstrapping from a stub.
 
-use super::*;
+use tig_challenges::satisfiability::*;
 use anyhow::Result;
 use serde_json::{Map, Value};
 use std::time::Instant;
@@ -125,4 +125,8 @@ pub fn solve_challenge(
 
     save_solution(&Solution { variables: best_assign })?;
     Ok(())
+}
+
+pub fn help() {
+    println!("No help information provided.");
 }

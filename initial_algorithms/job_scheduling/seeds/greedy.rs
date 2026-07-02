@@ -18,7 +18,7 @@
 // A weaker model can refine the dispatch rule (e.g. most-work-remaining,
 // bottleneck-aware machine choice, local search) from here.
 
-use super::*;
+use tig_challenges::job_scheduling::*;
 use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
 
@@ -85,4 +85,8 @@ pub fn solve_challenge(
 
     save_solution(&Solution { job_schedule })?;
     Ok(())
+}
+
+pub fn help() {
+    println!("No help information provided.");
 }
