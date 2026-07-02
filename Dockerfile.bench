@@ -31,7 +31,13 @@ RUN chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
 # cache by compiling it once. This pre-builds std (`-Z build-std`) + every
 # dependency crate, so run-time rebuilds only recompile the injected algorithm and
 # its two wrapper crates. `build_algorithm` reads $CHALLENGE and is on PATH.
+# GPU challenges also ship a template.cu: build_algorithm calls build_ptx, which
+# globs `swarm_algo/*.cu` — copy it in so the warm build covers the PTX path too
+# (nvcc is compile-only; no GPU needed at image-build time).
 RUN mkdir -p tig-algorithms/src/${CHALLENGE}/swarm_algo \
  && cp tig-algorithms/src/${CHALLENGE}/template.rs tig-algorithms/src/${CHALLENGE}/swarm_algo/mod.rs \
+ && if [ -f tig-algorithms/src/${CHALLENGE}/template.cu ]; then \
+      cp tig-algorithms/src/${CHALLENGE}/template.cu tig-algorithms/src/${CHALLENGE}/swarm_algo/kernels.cu; \
+    fi \
  && printf '\npub mod swarm_algo;\n' >> tig-algorithms/src/${CHALLENGE}/mod.rs \
  && build_algorithm swarm_algo

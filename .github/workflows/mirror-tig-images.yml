@@ -48,7 +48,9 @@ permissions:
   contents: read
 
 jobs:
-  # -------- CPU challenges: build + push the baked custom image (Option B) -----
+  # -------- Build + push the baked custom image (Option B) ---------------------
+  # GPU challenges bake too (nvcc compiles PTX without a GPU); the C3 GPU path
+  # still pulls the raw tig-dev mirrors until it's flipped to the baked images.
   build-baked:
     runs-on: ubuntu-latest
     strategy:
@@ -60,6 +62,9 @@ jobs:
           - knapsack
           - job_scheduling
           - energy_arbitrage
+          - vector_search
+          - hypergraph
+          - neuralnet_optimizer
     steps:
       - name: Checkout swarm repo
         uses: actions/checkout@v4
