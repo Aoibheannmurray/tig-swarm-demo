@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import Stepper from "../components/Stepper.svelte";
-  import LogStream from "../components/LogStream.svelte";
+  import FleetMonitor from "../components/FleetMonitor.svelte";
   import { localApi } from "../lib/api";
-  import { ensureStream, fleetLog, fleetStatus } from "../lib/stream";
+  import { ensureStream } from "../lib/stream";
 
   const STEPS = ["Connect", "Provider", "Agents", "Tacit", "Launch"];
   let step = $state(0);
@@ -114,9 +114,6 @@
     }
   }
 
-  async function stopFleet() {
-    try { await localApi.fleetStop(); } catch (e: any) { error = e.message; }
-  }
 </script>
 
 <Stepper steps={STEPS} current={step} />
@@ -246,24 +243,7 @@
   </div>
 
   {#if started}
-    <div class="card">
-      <div class="monitor-head">
-        <h2>Fleet monitor</h2>
-        <div class="spacer"></div>
-        <span class="pill {$fleetStatus.state === 'running' ? 'ok' : $fleetStatus.state === 'error' ? 'err' : 'info'}">{$fleetStatus.state}</span>
-        <button class="danger" onclick={stopFleet}>■ Stop</button>
-      </div>
-      <div class="agentgrid">
-        {#each Object.entries($fleetStatus.agents || {}) as [name, a]}
-          <div class="agentcard">
-            <b>{name}</b>
-            <span class="pill {(a as any).state === 'running' ? 'ok' : 'info'}">{(a as any).state}</span>
-            {#if (a as any).pid}<span class="muted mono">pid {(a as any).pid}</span>{/if}
-          </div>
-        {/each}
-      </div>
-      <LogStream lines={$fleetLog} height="360px" />
-    </div>
+    <FleetMonitor />
   {/if}
 {/if}
 
@@ -271,8 +251,4 @@
   .summary { list-style: none; margin-bottom: 8px; }
   .summary li { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }
   .summary li span { color: var(--ink-dim); }
-  .monitor-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-  .agentgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin-bottom: 16px; }
-  .agentcard { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--bg-page); border: 1px solid var(--border-subtle); border-radius: 6px; font-size: 13px; }
-  .agentcard b { flex: 1; }
 </style>

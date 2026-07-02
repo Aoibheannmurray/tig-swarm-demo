@@ -31,6 +31,8 @@ export const localApi = {
   getFleetConfig: () => fetch(`${LOCAL}/fleet/config`).then(jsonOrThrow),
   setFleetConfig: (params: any) =>
     fetch(`${LOCAL}/fleet/config`, post(params)).then(jsonOrThrow),
+  saveFleetConfig: (config: any) =>
+    fetch(`${LOCAL}/fleet/config/save`, post({ config })).then(jsonOrThrow),
   setTacit: (payload: any) =>
     fetch(`${LOCAL}/tacit`, post(payload)).then(jsonOrThrow),
 

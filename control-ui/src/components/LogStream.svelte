@@ -1,9 +1,15 @@
 <script lang="ts">
   // Colorized, auto-scrolling log viewer. `lines` is an array of {name?, line}.
-  export let lines: { name?: string; line: string }[] = [];
-  export let height = "320px";
+  let { lines = [], height = "320px" }: {
+    lines?: { name?: string; line: string }[];
+    height?: string;
+  } = $props();
 
-  let box: HTMLDivElement | undefined;
+  let box: HTMLDivElement | undefined = $state();
+  // `pinned` is a PLAIN (non-reactive) variable on purpose: onScroll updates it,
+  // and the autoscroll effect reads it, but it must NOT be a signal — otherwise
+  // the scroll we trigger fires onScroll, flips `pinned`, and re-triggers the
+  // effect, feeding back into an infinite loop (which froze the page).
   let pinned = true;
 
   // A stable earthen color per agent name (mirrors the dashboard's palette).
@@ -21,15 +27,22 @@
     return PALETTE[Math.abs(h) % PALETTE.length];
   }
 
-  $: if (lines && box && pinned) queueMicrotask(() => box && (box.scrollTop = box.scrollHeight));
-
   function onScroll() {
     if (!box) return;
     pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   }
+
+  // Autoscroll to the bottom when new lines arrive AND the user is pinned there.
+  // Depends only on `lines` (and `box`); `pinned` is intentionally untracked, so
+  // this can only run in response to new content, never in response to its own
+  // scroll side-effect.
+  $effect(() => {
+    lines.length; // track new lines
+    if (box && pinned) box.scrollTop = box.scrollHeight;
+  });
 </script>
 
-<div class="logbox" bind:this={box} on:scroll={onScroll} style="height:{height}">
+<div class="logbox" bind:this={box} onscroll={onScroll} style="height:{height}">
   {#if lines.length === 0}
     <div class="empty">Waiting for output…</div>
   {/if}

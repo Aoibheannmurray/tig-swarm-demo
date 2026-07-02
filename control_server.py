@@ -302,6 +302,34 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return {"config": config}
 
+    @app.post("/local-api/fleet/config/save")
+    async def save_fleet_config(payload: dict) -> dict:
+        """Write a full fleet.config.json verbatim (the direct editor path).
+
+        Unlike /fleet/config (which regenerates agents from wizard params via
+        build_fleet_config), this preserves every field the editor passes
+        through — role, api_base, detailed_prompts, hpo knobs, per-agent tacit
+        paths — so editing one value never silently drops the rest. Validates
+        the same invariants run_fleet._load_fleet enforces at launch."""
+        config = payload.get("config") if "config" in payload else payload
+        if not isinstance(config, dict):
+            return JSONResponse({"error": "config must be an object"}, status_code=400)
+        for key in ("server_url", "username", "swarm_password"):
+            if not str(config.get(key, "")).strip():
+                return JSONResponse({"error": f"{key} is required"}, status_code=400)
+        agents = config.get("agents")
+        if not isinstance(agents, list) or not agents:
+            return JSONResponse({"error": "at least one agent is required"}, status_code=400)
+        names = []
+        for a in agents:
+            if not isinstance(a, dict) or not str(a.get("name", "")).strip():
+                return JSONResponse({"error": "every agent needs a name"}, status_code=400)
+            names.append(a["name"])
+        if len(names) != len(set(names)):
+            return JSONResponse({"error": "agent names must be unique"}, status_code=400)
+        init_fleet.write_fleet_config(config)
+        return {"config": config}
+
     @app.post("/local-api/tacit")
     async def set_tacit(payload: dict) -> dict:
         """Append tacit-knowledge to the fleet-default tacit file.
