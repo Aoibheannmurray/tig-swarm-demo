@@ -34,8 +34,17 @@ RUN chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
 # GPU challenges also ship a template.cu: build_algorithm calls build_ptx, which
 # globs `swarm_algo/*.cu` — copy it in so the warm build covers the PTX path too
 # (nvcc is compile-only; no GPU needed at image-build time).
+# The sed fixes a monorepo-HEAD inconsistency: the vector_search/hypergraph
+# templates declare `-> anyhow::Result<Option<Solution>>` while tig-binary's
+# entry point (and every real algorithm) expects `-> Result<()>`. The template
+# body (`Err(anyhow!(..))`) is valid under either, so rewriting the annotation
+# is safe, and the sed is a no-op once upstream fixes the templates. The slot
+# is overwritten with a real algorithm at run time anyway — this file only
+# exists to warm the cargo cache.
 RUN mkdir -p tig-algorithms/src/${CHALLENGE}/swarm_algo \
  && cp tig-algorithms/src/${CHALLENGE}/template.rs tig-algorithms/src/${CHALLENGE}/swarm_algo/mod.rs \
+ && sed -i 's/-> anyhow::Result<Option<Solution>>/-> anyhow::Result<()>/' \
+      tig-algorithms/src/${CHALLENGE}/swarm_algo/mod.rs \
  && if [ -f tig-algorithms/src/${CHALLENGE}/template.cu ]; then \
       cp tig-algorithms/src/${CHALLENGE}/template.cu tig-algorithms/src/${CHALLENGE}/swarm_algo/kernels.cu; \
     fi \
