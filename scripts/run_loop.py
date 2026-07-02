@@ -91,7 +91,7 @@ from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 import challenge_files
 from challenge_files import (
     ChallengeFiles,
-    ensure_super_import,
+    ensure_challenge_import,
     is_stub_code,
     read_challenge_md,
     validate_code,
@@ -411,7 +411,9 @@ def _generate_code_search_replace(
         print("  [SR] no edits applied — skipping iteration")
         return None, None, input_tokens, output_tokens
 
-    entry_code = ensure_super_import(file_map.get(files.entry_name, ""))
+    entry_code = ensure_challenge_import(
+        file_map.get(files.entry_name, ""), config["challenge"]
+    )
     file_map[files.entry_name] = entry_code
     violation = validate_code(entry_code, config)
     if violation:
@@ -790,7 +792,10 @@ def _extract_hyperparameters_agentic(
         return None, 0, 0
     new_map = _read_worktree_map(workdir, config)
     entry = new_map.get(challenge_files.entry_name(config), "")
-    if not entry or "use super::*;" not in entry:
+    # Accept the mainnet anchor (current) or legacy `use super::*;` (pre-parity
+    # trajectories not yet migrated by ensure_challenge_import).
+    _anchor = f"use tig_challenges::{config['challenge']}::*;"
+    if not entry or (_anchor not in entry and "use super::*;" not in entry):
         print("  [HPO] worktree variant missing/invalid — skipping tune")
         return None, 0, 0
     return {
@@ -1853,9 +1858,10 @@ def main() -> int:
                 continue
 
             # The agent often rewrites the import block and drops the required
-            # `use super::*;` anchor (or spells it the long way), which would
-            # otherwise discard the whole run. Re-insert it before validating.
-            code = ensure_super_import(code)
+            # `use tig_challenges::<ch>::*;` anchor (or spells it the long
+            # way), which would otherwise discard the whole run. Re-insert it
+            # (migrating any legacy `use super::*;`) before validating.
+            code = ensure_challenge_import(code, config["challenge"])
             violation = validate_code(code, config)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
@@ -1869,7 +1875,7 @@ def main() -> int:
             # build still fails (e.g. feature-flag mismatch the agent
             # missed), we restore and continue without escalating.
             # Read the FULL worktree map (multi-file aware), then apply the
-            # validated/`use super::*;`-fixed entry file over it before writing.
+            # validated/anchor-fixed entry file over it before writing.
             agent_map = _read_worktree_map(workdir, config)
             if agent_map:
                 agent_map[files.entry_name] = code

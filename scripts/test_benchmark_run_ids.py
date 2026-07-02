@@ -136,12 +136,21 @@ def test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
 
 
 def test_tig_c3_default_image_rejects_unmirrored_challenge():
+    # neuralnet_optimizer is the one challenge the TIG backend doesn't support
+    # (harness-owned solve_challenge; no baked/mirrored image). CPU challenges
+    # resolve to baked tig-bench-<ch> images; GPU to raw tig-dev-<ch> mirrors.
     try:
-        c3_compute._tig_c3_image({"challenge": "satisfiability"})
+        c3_compute._tig_c3_image({"challenge": "neuralnet_optimizer"})
     except ValueError as exc:
         assert "currently supported" in str(exc)
     else:
         raise AssertionError("expected unsupported default TIG C3 image to fail")
+    assert c3_compute._tig_c3_image({"challenge": "satisfiability"}).endswith(
+        "tig-bench-satisfiability:" + c3_compute._bm_tig_version()
+    )
+    assert c3_compute._tig_c3_image({"challenge": "hypergraph"}).endswith(
+        "tig-dev-hypergraph:" + c3_compute._bm_tig_version()
+    )
     print("PASS test_tig_c3_default_image_rejects_unmirrored_challenge")
 
 

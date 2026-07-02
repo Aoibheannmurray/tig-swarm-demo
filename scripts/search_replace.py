@@ -208,7 +208,7 @@ def _indent(s: str, prefix: str = "    ") -> str:
 # ── Self-test ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     # Exact unique match.
-    files = {"mod.rs": "use super::*;\nlet x = 1;\nlet y = 2;\n"}
+    files = {"mod.rs": "use tig_challenges::knapsack::*;\nlet x = 1;\nlet y = 2;\n"}
     blocks = parse_blocks(
         "<<<<<<< SEARCH mod.rs\nlet x = 1;\n=======\nlet x = 42;\n>>>>>>> REPLACE"
     )
