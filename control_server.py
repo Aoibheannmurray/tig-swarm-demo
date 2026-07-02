@@ -28,6 +28,8 @@ import hashlib
 import json
 import sys
 import threading
+import urllib.error
+import urllib.request
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -40,8 +42,8 @@ for _p in (ROOT / "scripts", ROOT, ROOT / "server"):
     sys.path.insert(0, str(_p))
 
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.responses import JSONResponse, HTMLResponse
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+    from fastapi.responses import JSONResponse, HTMLResponse, Response
     from fastapi.staticfiles import StaticFiles
     import uvicorn
 except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
@@ -467,6 +469,47 @@ def create_app() -> FastAPI:
         derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
         return {"server_url": server_url, "username": username,
                 "swarm_password": derived}
+
+    # ── Proxy /api/* to the swarm's hosted server ──
+    #
+    # The Admin Console (served here at /admin/) makes same-origin /api/admin/*
+    # calls. Those endpoints live on the *hosted* swarm server, not this
+    # companion — so forward them there. This lets a host manage their swarm
+    # from the local UI without deploying the admin bundle to the server or
+    # wrestling with cross-origin CORS (the cross-origin hop happens here,
+    # server-side). The target comes from swarm.admin.json / the local cache.
+    @app.api_route("/api/{path:path}", methods=["GET", "POST"])
+    async def proxy_api(path: str, request: Request) -> Response:
+        admin = setup_mod.read_swarm_admin()
+        base = admin.get("server_url") or setup_mod.resolve_server_url()
+        if not base:
+            return JSONResponse(
+                {"error": "no swarm server_url known locally — create/join a swarm first"},
+                status_code=502,
+            )
+        target = f"{base.rstrip('/')}/api/{path}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+        body = await request.body()
+        req = urllib.request.Request(
+            target,
+            data=body if request.method == "POST" else None,
+            method=request.method,
+        )
+        req.add_header("Content-Type", request.headers.get("content-type", "application/json"))
+
+        def _fetch() -> tuple[int, bytes, str]:
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    return resp.status, resp.read(), resp.headers.get("Content-Type", "application/json")
+            except urllib.error.HTTPError as e:  # forward the server's status + body
+                return e.code, e.read(), e.headers.get("Content-Type", "application/json")
+
+        try:
+            status, data, ctype = await asyncio.to_thread(_fetch)
+        except Exception as exc:  # network error reaching the swarm server
+            return JSONResponse({"error": f"could not reach {base} ({exc})"}, status_code=502)
+        return Response(content=data, status_code=status, media_type=ctype)
 
     # ── Live event stream ──
     @app.websocket("/local-api/stream")
