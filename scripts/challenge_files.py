@@ -314,45 +314,57 @@ def _strip_fences(text: str) -> str:
 _FENCED_BLOCK_RE = re.compile(r"```(?:[\w+-]*)\s*\n(.*?)\n```", re.DOTALL)
 
 
-def ensure_super_import(code: str) -> str:
-    """Re-insert the required `use super::*;` anchor if it's missing.
+def ensure_challenge_import(code: str, challenge: str) -> str:
+    """Normalize the entry file's challenge-type import to the mainnet form.
 
-    The swarm puts each algorithm at `src/<challenge>/algorithm/mod.rs`, a
-    submodule of the challenge module, so `use super::*;` (equivalently
-    `use crate::<challenge>::*;`) pulls the Challenge/Solution types into
-    scope. Agents — especially the tooled agentic backend — sometimes rewrite
-    the import block and drop the literal anchor (or spell it the long way),
-    which previously discarded an otherwise-valid candidate. Inserting it is
-    safe: if the parent glob is already imported some other way the worst case
-    is an unused-import warning, never an error.
+    Algorithms author against `use tig_challenges::<challenge>::*;` — the ONE
+    import that resolves in BOTH builds: the swarm crate (src/lib.rs's
+    `extern crate self as tig_challenges` makes it an alias of
+    `crate::<challenge>::*`) and the TIG-docker slot (the baked tig-bench
+    images), so algorithms move between the swarm and mainnet with no import
+    swapping. Legacy `use super::*;` (the old swarm-only anchor) is rewritten
+    in place, which migrates pre-parity trajectories as agents touch them. If
+    no anchor is present at all (agents sometimes rewrite the import block and
+    drop it), the import is inserted: worst case is an unused-import warning,
+    never an error.
     """
-    if not code or "use super::*;" in code:
+    if not code:
         return code
+    anchor = f"use tig_challenges::{challenge}::*;"
+    if anchor in code:
+        return code
+    if "use super::*;" in code:
+        return code.replace("use super::*;", anchor, 1)
     lines = code.splitlines(keepends=True)
     # Insert before the first top-level `use` (which sits after any leading
     # comments and `#![...]` inner attributes), else at the very top.
     for i, line in enumerate(lines):
         if line.lstrip().startswith("use "):
-            lines.insert(i, "use super::*;\n")
+            lines.insert(i, anchor + "\n")
             return "".join(lines)
-    return "use super::*;\n" + code
+    return anchor + "\n" + code
+
+
+# Anchor probes for chopping chatty-LLM prose that precedes the code. Exact
+# import lines only (never a bare "use " — prose can start a line with it).
+_PROSE_CHOP_PROBES = ("use tig_challenges::", "use super::*;", "use crate::")
 
 
 def _clean_rust(text: str) -> str:
     # Defensive against chatty LLMs that ignore "no preamble / no fences":
     # if the response wraps the code in ```...```, take the first fenced
-    # block's contents; then drop any prose still sitting before the
-    # required `use super::*;` anchor.
+    # block's contents; then drop any prose still sitting before the first
+    # recognizable import anchor.
     text = text.strip()
     m = _FENCED_BLOCK_RE.search(text)
     if m:
         text = m.group(1).strip()
     else:
         text = _strip_fences(text)
-    idx = text.find("use super::*;")
-    if idx > 0:
-        text = text[idx:]
-    return ensure_super_import(text.strip())
+    hits = [i for i in (text.find(p) for p in _PROSE_CHOP_PROBES) if i > 0]
+    if hits:
+        text = text[min(hits):]
+    return text.strip()
 
 
 def parse_code(text: str) -> str:
@@ -411,9 +423,17 @@ def validate_code(code: str, config: dict | None = None) -> str | None:
             f"Replace it with the intended ASCII character. "
             f"({len(bad)} suspicious character(s) found.)"
         )
-    if "use super::*;" not in code:
-        return "`use super::*;` is missing — it must remain as the first import."
     challenge = (config or {}).get("challenge")
+    if challenge:
+        anchor = f"use tig_challenges::{challenge}::*;"
+        # Legacy `use super::*;` is accepted (pre-parity trajectories adopted
+        # from the server) — ensure_challenge_import migrates it on the next
+        # agent write; new code must carry the mainnet-form anchor.
+        if anchor not in code and "use super::*;" not in code:
+            return (
+                f"`{anchor}` is missing — import the challenge types via this "
+                f"exact line (it compiles both in the swarm and on TIG mainnet)."
+            )
     if challenge in _OPTIMIZER_HOOK_CHALLENGES:
         if "fn solve_challenge(" in code:
             return (
@@ -546,9 +566,10 @@ def reshape_mainnet_for_swarm(
     The only structural delta today is optimizer-hook challenges
     (`neuralnet_optimizer`): their `solve_challenge` + training loop are
     harness-owned, so we strip those definitions from the entry file and keep
-    only the optimizer hooks. Imports are already normalized to `use super::*;`
-    by download_algorithm; we add it if absent so the validator's first-import
-    rule holds. All challenges are validated via `validate_code` before seeding.
+    only the optimizer hooks. Imports are kept in the mainnet form verbatim
+    (`use tig_challenges::<ch>::*;` compiles unchanged in the swarm — see
+    ensure_challenge_import); we only add the anchor if absent. All challenges
+    are validated via `validate_code` before seeding.
     """
     entry = "mod.rs"
     if entry not in files:
@@ -560,8 +581,7 @@ def reshape_mainnet_for_swarm(
         for fn in _HARNESS_OWNED_FNS:
             code, _removed = _strip_top_level_fn(code, fn)
 
-    if "use super::*;" not in code:
-        code = "use super::*;\n" + code
+    code = ensure_challenge_import(code, challenge)
     out[entry] = code
 
     err = validate_code(code, {"challenge": challenge})
@@ -581,9 +601,14 @@ class ChallengeFiles:
         self.is_gpu = bool(config.get("is_gpu"))
 
     def parse_response(self, text: str) -> tuple[str, str]:
+        # Normalize the challenge-type import after parsing: LLMs sometimes
+        # rewrite the import block and drop the anchor (previously auto-fixed
+        # inside _clean_rust, which no longer knows the challenge).
+        challenge = self._config["challenge"]
         if self.is_gpu:
-            return parse_gpu_code(text)
-        return parse_code(text), ""
+            code, kernel = parse_gpu_code(text)
+            return ensure_challenge_import(code, challenge), kernel
+        return ensure_challenge_import(parse_code(text), challenge), ""
 
     def write(self, code: str, kernel: str = "") -> None:
         write_algorithm(code, self._config)

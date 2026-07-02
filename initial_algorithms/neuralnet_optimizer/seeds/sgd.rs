@@ -28,7 +28,7 @@ use cudarc::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::neuralnet_optimizer::*;
+use tig_challenges::neuralnet_optimizer::*;
 
 #[derive(Serialize, Deserialize)]
 pub struct Hyperparameters {

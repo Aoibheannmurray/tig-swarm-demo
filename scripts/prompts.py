@@ -850,8 +850,9 @@ Rules:
   if a snippet would otherwise be ambiguous.
 - Emit one block per distinct edit; you may emit several blocks.
 - Change ONLY what your hypothesis requires; leave everything else untouched.
-- Keep `use super::*;` intact and do not change the `solve_challenge` signature
-  (or, for optimizer-hook challenges, the hook signatures)."""
+- Keep the `use tig_challenges::<challenge>::*;` import and `pub fn help()`
+  intact, and do not change the `solve_challenge` signature (or, for
+  optimizer-hook challenges, the hook signatures)."""
 
 
 def _format_files_for_prompt(files: dict) -> str:

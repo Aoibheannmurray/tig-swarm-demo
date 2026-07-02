@@ -121,12 +121,20 @@ def test_missing_hook_is_rejected():
     print("PASS test_missing_hook_is_rejected")
 
 
-def test_missing_use_super_is_added():
+def test_anchor_normalized_to_mainnet_form():
+    # Legacy `use super::*;` (old swarm-only anchor) is migrated in place…
+    files, err = reshape_mainnet_for_swarm(
+        "neuralnet_optimizer", {"mod.rs": NEURALNET_MAINNET})
+    assert err is None, err
+    anchor = "use tig_challenges::neuralnet_optimizer::*;"
+    assert anchor in files["mod.rs"], "legacy super::* not migrated to the anchor"
+    assert "use super::*;" not in files["mod.rs"], "legacy anchor left behind"
+    # …and a bundle with no anchor at all gets it inserted at the top.
     code = NEURALNET_MAINNET.replace("use super::*;\n", "", 1)
     files, err = reshape_mainnet_for_swarm("neuralnet_optimizer", {"mod.rs": code})
     assert err is None, err
-    assert files["mod.rs"].startswith("use super::*;"), "use super::*; not prepended"
-    print("PASS test_missing_use_super_is_added")
+    assert files["mod.rs"].startswith(anchor), "anchor not prepended"
+    print("PASS test_anchor_normalized_to_mainnet_form")
 
 
 def test_no_mod_rs_entry_is_rejected():
@@ -140,6 +148,6 @@ if __name__ == "__main__":
     test_brace_matcher_handles_strings_and_comments()
     test_ordinary_challenge_passes_through()
     test_missing_hook_is_rejected()
-    test_missing_use_super_is_added()
+    test_anchor_normalized_to_mainnet_form()
     test_no_mod_rs_entry_is_rejected()
     print("\nAll Component 2 reshape tests passed.")

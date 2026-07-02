@@ -100,30 +100,11 @@ def _decode_blob(blob: object) -> str:
 # ── Cleaning ──────────────────────────────────────────────────────────
 
 
-def _clean_rust(challenge: str, code: str) -> str:
-    """Replace `use tig_challenges::{challenge}::...;` imports with the
-    in-tree equivalents. Leaves everything else (seeded_hasher, HashMap,
-    custom imports) untouched — those are rare and risky to rewrite."""
-    pattern = re.compile(
-        rf"^\s*use\s+tig_challenges::{re.escape(challenge)}::[^;]*;\s*$",
-        re.MULTILINE,
-    )
-    return pattern.sub("use super::*;", code)
-
-
-def _clean_cuda(challenge: str, code: str) -> str:
-    pattern = re.compile(
-        rf"^\s*use\s+tig_challenges::{re.escape(challenge)}::[^;]*;\s*$",
-        re.MULTILINE,
-    )
-    return pattern.sub(f"use crate::{challenge}::*;", code)
-
-
 def _clean(rel_path: str, challenge: str, content: str) -> str:
-    if rel_path.endswith(".rs"):
-        return _clean_rust(challenge, content)
-    if rel_path.endswith(".cu"):
-        return _clean_cuda(challenge, content)
+    """Mainnet code is used verbatim — the swarm's algorithm format IS the
+    mainnet format. `use tig_challenges::<ch>::*;` compiles unchanged in the
+    swarm crate (src/lib.rs's `extern crate self as tig_challenges`), so the
+    old import rewriting (→ `use super::*;`) is retired."""
     return content
 
 
@@ -220,11 +201,9 @@ def fetch_algorithm(
 def download_algorithm(
     challenge: str, algorithm: str, *, force: bool, ref: str | None = None,
 ) -> Path:
-    """Fetch + clean + stage. Returns the path written under initial_algorithms/."""
+    """Fetch + stage (mainnet code is used verbatim — see `_clean`). Returns
+    the path written under initial_algorithms/."""
     cleaned = fetch_algorithm(challenge, algorithm, ref=ref)
-    # _stage re-cleans internally; passing pre-cleaned content is idempotent
-    # because the regexes only rewrite `use tig_challenges::...` lines that
-    # the fetch pass has already replaced with `use super::*;`.
     staged = _stage(challenge, cleaned, force)
     rel = staged.relative_to(ROOT)
     print(f"    staged {len(cleaned)} file(s) -> {rel}")
