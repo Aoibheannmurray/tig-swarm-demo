@@ -393,6 +393,9 @@ _C3_HARDWARE_CHOICES = [
 
 _C3_INSTALL_URL = "https://cthree.cloud/install.sh"
 
+# Hardware keys accepted by build_fleet_config() — the choice keys above.
+_C3_HARDWARE_KEYS = {key for key, _ in _C3_HARDWARE_CHOICES}
+
 
 def _select_compute(supports_c3: bool) -> tuple[str, str | None]:
     """Pick where each benchmark runs.
@@ -538,6 +541,120 @@ def _build_agent(
     return entry
 
 
+# ── Non-interactive cores (shared by the wizard and the control-ui) ──
+#
+# The interactive wizard (`run_wizard`) collects answers via input() prompts;
+# the local companion UI collects the same answers over HTTP. Both funnel into
+# these pure functions so the config-shaping logic (provider remap, tier-based
+# role / detailed_prompts, C3 handling) lives in exactly one place.
+
+
+def get_providers() -> list[dict]:
+    """The provider table as JSON-serializable data (for the local-api / UI)."""
+    return [
+        {
+            "key": p[0],
+            "label": p[1],
+            "default_model": p[2],
+            "api_key_env": p[3],
+            "name_stub": p[4],
+            "supports_c3": p[5],
+            "blurb": p[6],
+        }
+        for p in PROVIDERS
+    ]
+
+
+def get_c3_hardware_choices() -> list[dict]:
+    """C3 hardware options as JSON-serializable data (for the local-api / UI)."""
+    return [{"key": key, "label": label} for key, label in _C3_HARDWARE_CHOICES]
+
+
+def build_fleet_config(params: dict) -> dict:
+    """Build a fleet.config.json dict from a params mapping — no I/O, no prompts.
+
+    Shared by the interactive wizard and the local companion UI. Applies the
+    same OpenRouter/DeepSeek → `openai` + api_base remap and the same tier-based
+    role / detailed_prompts defaults (`_build_agent`) as the wizard, so the two
+    entry points can never drift.
+
+    `params` keys: server_url, username, swarm_password (all required);
+    provider (a key from get_providers, may be openrouter/deepseek); model
+    (optional — falls back to the provider default); either `names` (explicit
+    list) or `count` + optional `prefix`; compute (local|c3); hardware
+    (optional C3 profile); c3_api_key (optional, stored only for C3)."""
+    server_url = (params.get("server_url") or "").strip()
+    username = (params.get("username") or "").strip()
+    swarm_password = (params.get("swarm_password") or "").strip()
+    if not (server_url and username and swarm_password):
+        raise ValueError("server_url, username and swarm_password are all required")
+
+    provider = params.get("provider") or "claude-code"
+    spec = next((p for p in PROVIDERS if p[0] == provider), None)
+    if spec is None:
+        raise ValueError(f"unknown provider: {provider!r}")
+    default_model, api_key_env, supports_c3 = spec[2], spec[3], spec[5]
+
+    # OpenRouter / DeepSeek are OpenAI-compatible: written as provider `openai`
+    # with an explicit api_base (mirrors the wizard).
+    api_base: str | None = None
+    if provider == "openrouter":
+        provider = "openai"
+        api_base = _OPENROUTER_API_BASE
+    elif provider == "deepseek":
+        provider = "openai"
+        api_base = _DEEPSEEK_API_BASE
+
+    model = (params.get("model") or "").strip() or (default_model or "")
+
+    names = params.get("names")
+    if names:
+        names = [str(n).strip() for n in names if str(n).strip()]
+        if not names:
+            raise ValueError("names, if given, must be non-empty")
+    else:
+        count = int(params.get("count") or 1)
+        if count < 1:
+            raise ValueError("count must be >= 1")
+        prefix = (params.get("prefix") or "").strip()
+        names = (
+            [f"{prefix}-{i}" for i in range(1, count + 1)]
+            if prefix
+            else _generate_agent_names(count)
+        )
+
+    compute = params.get("compute") or "local"
+    if not supports_c3:
+        compute = "local"
+    if compute not in ("local", "c3"):
+        raise ValueError(f"unknown compute backend: {compute!r}")
+    hardware = params.get("hardware") if compute == "c3" else None
+    if compute == "c3" and hardware and hardware not in _C3_HARDWARE_KEYS:
+        raise ValueError(f"unknown C3 hardware: {hardware!r}")
+
+    config: dict = {
+        "server_url": server_url,
+        "username": username,
+        "swarm_password": swarm_password,
+    }
+    c3_api_key = (params.get("c3_api_key") or "").strip() or None
+    if compute == "c3" and c3_api_key:
+        config["c3_api_key"] = c3_api_key
+    config["agents"] = [
+        _build_agent(name, provider, model, api_key_env, compute, hardware,
+                     api_base=api_base)
+        for name in names
+    ]
+    return config
+
+
+def write_fleet_config(config: dict, path: Path | None = None) -> Path:
+    """Serialize a fleet config dict to disk (default: root fleet.config.json)."""
+    dest = path or FLEET_CONFIG_PATH
+    dest.write_text(json.dumps(config, indent=2) + "\n")
+    return dest
+
+
 def run_wizard(force: bool = False) -> int:
     print("\nfleet.config.json wizard")
     print("─" * 40)
@@ -572,18 +689,9 @@ def run_wizard(force: bool = False) -> int:
     print("\nLLM provider")
     print("─" * 40)
     print("Which LLM should your agents call?")
+    # Keep the raw provider key (openrouter/deepseek included) — build_fleet_config
+    # does the OpenAI-compatible remap, so it lives in exactly one place.
     provider, default_model, api_key_env, name_stub, supports_c3 = _select_provider()
-
-    # OpenRouter and DeepSeek are OpenAI-compatible: write them as provider
-    # `openai` with an explicit api_base so they route through the OpenAI client
-    # against the right gateway (api_key_env stays the provider's own env var).
-    api_base: str | None = None
-    if provider == "openrouter":
-        provider = "openai"
-        api_base = _OPENROUTER_API_BASE
-    elif provider == "deepseek":
-        provider = "openai"
-        api_base = _DEEPSEEK_API_BASE
 
     if default_model:
         model = _prompt("model (press Enter for default)", default=default_model)
@@ -620,20 +728,18 @@ def run_wizard(force: bool = False) -> int:
         else None
     )
 
-    config: dict = {
+    config = build_fleet_config({
         "server_url": server_url,
         "username": username,
         "swarm_password": swarm_password,
-    }
-    if c3_api_key:
-        config["c3_api_key"] = c3_api_key
-    config["agents"] = [
-        _build_agent(name, provider, model, api_key_env, compute, hardware,
-                     api_base=api_base)
-        for name in names
-    ]
-
-    FLEET_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+        "provider": provider,   # raw key; remap happens inside build_fleet_config
+        "model": model,
+        "names": names,
+        "compute": compute,
+        "hardware": hardware,
+        "c3_api_key": c3_api_key,
+    })
+    write_fleet_config(config)
 
     names_str = ", ".join(a["name"] for a in config["agents"])
     compute_desc = f"c3/{hardware}" if compute == "c3" else compute

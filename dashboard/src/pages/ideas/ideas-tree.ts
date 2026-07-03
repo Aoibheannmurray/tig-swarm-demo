@@ -1,6 +1,7 @@
 import type { WSMessage } from "../../types";
 import { getAgentColor } from "../../lib/colors";
 import { formatTime } from "../../lib/animate";
+import { escapeHTML } from "../../lib/format";
 
 interface FeedItem {
   id: string;
@@ -292,20 +293,20 @@ export class IdeasTree {
           <span class="feed-post-badge milestone-badge">&#9733; MILESTONE</span>
           <span class="feed-post-time">${time}</span>
         </div>
-        <div class="feed-post-content milestone-content">${item.content}</div>
+        <div class="feed-post-content milestone-content">${escapeHTML(item.content)}</div>
         <div class="feed-post-author">
           <span class="feed-post-dot" style="background:${agentColor}"></span>
-          ${item.agentName}
+          ${escapeHTML(item.agentName)}
         </div>
       `;
     } else {
       el.innerHTML = `
         <div class="feed-post-agent">
           <span class="feed-post-dot" style="background:${agentColor}"></span>
-          <span class="feed-post-name">${item.agentName}</span>
+          <span class="feed-post-name">${escapeHTML(item.agentName)}</span>
           <span class="feed-post-time">${time}</span>
         </div>
-        <div class="feed-post-content">${item.content}</div>
+        <div class="feed-post-content">${escapeHTML(item.content)}</div>
       `;
     }
 

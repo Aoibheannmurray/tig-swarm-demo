@@ -1,13 +1,6 @@
 import type { Panel, WSMessage, LeaderboardEntry } from "../types";
 import { getAgentColor } from "../lib/colors";
-import { formatScore, shortenModel } from "../lib/format";
-
-function escapeHTML(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
+import { formatScore, shortenModel, escapeHTML } from "../lib/format";
 
 type SortKey =
   | "current_score"
@@ -173,7 +166,7 @@ export class LeaderboardPanel implements Panel {
         <span class="lb-rank">${rank}</span>
         <span class="lb-name">
           <span class="lb-dot" style="background:${color}"></span>
-          ${entry.agent_name}
+          ${escapeHTML(entry.agent_name)}
         </span>
         <span class="lb-model" title="${llmFull}">${llmText}</span>
         <span class="lb-col-sm">${entry.runs}</span>

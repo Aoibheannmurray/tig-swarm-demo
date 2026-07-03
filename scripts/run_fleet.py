@@ -420,12 +420,24 @@ def _ensure_root_swarm_cache(server_url: str) -> None:
 # ── Streaming ──────────────────────────────────────────────────────
 
 
-def _stream_output(name: str, color: str, proc: subprocess.Popen) -> None:
+def _stream_output(
+    name: str,
+    color: str,
+    proc: subprocess.Popen,
+    on_output=None,
+) -> None:
     prefix = f"{color}[{name}]{_RESET} " if color else f"[{name}] "
     assert proc.stdout is not None
     for line in proc.stdout:
         sys.stdout.write(prefix + line)
         sys.stdout.flush()
+        # Mirror each line (without the ANSI prefix) to an optional consumer —
+        # the control-ui companion feeds these to its live-log WebSocket.
+        if on_output is not None:
+            try:
+                on_output(name, line.rstrip("\n"))
+            except Exception:  # a UI consumer must never kill the fleet
+                pass
 
 
 # ── Subcommands ────────────────────────────────────────────────────
@@ -618,7 +630,20 @@ def cmd_run(
     username: str,
     swarm_password: str,
     fleet_tacit: str | None = None,
+    stop_event: "threading.Event | None" = None,
+    on_output=None,
+    on_status=None,
 ) -> int:
+    """Launch and supervise the fleet until every agent exits or a stop is
+    requested.
+
+    Interactive/CLI use (the default) installs SIGINT/SIGTERM handlers and runs
+    in the foreground. The control-ui companion instead runs this in a worker
+    thread and passes `stop_event` (set it to request a graceful shutdown),
+    `on_output(agent_name, line)` (live log lines), and `on_status(event, info)`
+    (lifecycle events: 'spawned', 'running', 'exited', 'stopped'). Signal
+    handlers are only installed when running on the main thread — installing
+    them elsewhere raises ValueError."""
     if only:
         names = {a["name"] for a in agents}
         unknown = [n for n in only if n not in names]
@@ -669,22 +694,27 @@ def cmd_run(
             encoding="utf-8", errors="replace",
         )
         t = threading.Thread(
-            target=_stream_output, args=(name, color, proc), daemon=True,
+            target=_stream_output, args=(name, color, proc, on_output),
+            daemon=True,
         )
         t.start()
         procs.append((name, proc, t))
         print(f"  [fleet] spawned {name} (pid {proc.pid}) in {path}")
+        if on_status is not None:
+            on_status("spawned", {"name": name, "pid": proc.pid})
 
     print(f"  [fleet] {len(procs)} agent(s) running. Ctrl-C to stop.")
+    if on_status is not None:
+        on_status("running", {"count": len(procs)})
 
     stopping = False
 
-    def _shutdown(_signum, _frame):
+    def _terminate_all(reason: str) -> None:
         nonlocal stopping
         if stopping:
             return
         stopping = True
-        print("\n  [fleet] shutdown signal — terminating agents…")
+        print(f"\n  [fleet] {reason} — terminating agents…")
         for _, p, _t in procs:
             if p.poll() is None:
                 p.terminate()
@@ -697,8 +727,14 @@ def cmd_run(
                 print(f"  [fleet] killing {nm} (didn't exit in 10s)")
                 p.kill()
 
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
+    def _shutdown(_signum, _frame):
+        _terminate_all("shutdown signal")
+
+    # Signal handlers can only be installed on the main thread. The companion
+    # runs cmd_run in a worker thread and drives shutdown via stop_event instead.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
 
     # Re-sync hot-reloadable fields (role) from fleet.config.json into each
     # running worktree's agent.config.json on a cadence, so a contributor can
@@ -707,6 +743,9 @@ def cmd_run(
     _SYNC_EVERY_S = 5
     ticks = 0
     while any(p.poll() is None for _, p, _ in procs):
+        if stop_event is not None and stop_event.is_set():
+            _terminate_all("stop requested")
+            break
         time.sleep(1)
         ticks += 1
         if ticks % _SYNC_EVERY_S == 0:
@@ -715,8 +754,12 @@ def cmd_run(
     for name, p, t in procs:
         t.join(timeout=2)
         print(f"  [fleet] {name} {_describe_exit(p.returncode)}")
+        if on_status is not None:
+            on_status("exited", {"name": name, "returncode": p.returncode})
 
     _sync_tacit_back(agents, fleet_tacit)
+    if on_status is not None:
+        on_status("stopped", {})
     return 0
 
 

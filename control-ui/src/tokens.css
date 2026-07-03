@@ -1,0 +1,51 @@
+/* Prometheus design tokens — copied verbatim from dashboard/src/style.css so
+   the control UI matches the live dashboard exactly. Keep in sync if the
+   dashboard palette changes. */
+:root {
+  /* Surfaces */
+  --bg-page:        #FFFFFF;
+  --bg-card:        #FAF7F2;
+  --bg-sunken:      #F2EDE4;
+  --bg-hover:       #F5F0E7;
+
+  /* Text */
+  --ink:            #1A1A1A;
+  --ink-mid:        rgba(26, 26, 26, 0.70);
+  --ink-dim:        rgba(26, 26, 26, 0.50);
+  --ink-faint:      rgba(26, 26, 26, 0.35);
+
+  /* Borders */
+  --border-subtle:  rgba(26, 26, 26, 0.08);
+  --border-default: rgba(26, 26, 26, 0.15);
+  --border-strong:  rgba(26, 26, 26, 0.25);
+
+  /* Brand accent — terracotta */
+  --color-accent:      #B8541F;
+  --color-accent-hov:  #A14817;
+  --accent-bg:         rgba(184, 84, 31, 0.12);
+  --accent-bg-strong:  rgba(184, 84, 31, 0.25);
+  --accent-text:       #8A3D14;
+
+  /* Semantic */
+  --success:    #4A7C5A;
+  --success-bg: rgba(74, 124, 90, 0.10);
+  --warn:       #C68F3E;
+  --warn-bg:    rgba(198, 143, 62, 0.12);
+  --danger:     #8B2D2D;
+  --danger-bg:  rgba(139, 45, 45, 0.10);
+  --info:       #4E6B85;
+  --info-bg:    rgba(78, 107, 133, 0.10);
+
+  /* Earthen viz palette (mirrors lib/colors.ts) */
+  --viz-1: #B8541F; --viz-2: #C68F3E; --viz-3: #6B7F4E; --viz-4: #4E6B85;
+  --viz-5: #7A4F6E; --viz-6: #4A8C8A; --viz-7: #A66E45; --viz-8: #8B6B8C;
+
+  /* Typography */
+  --display: 'EB Garamond', Georgia, 'Times New Roman', serif;
+  --body:    'Cormorant Infant', Georgia, 'Times New Roman', serif;
+  --ui:      'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono:    'JetBrains Mono', 'SF Mono', Menlo, Monaco, Consolas, monospace;
+
+  --radius:   8px;
+  --shadow:   0 1px 2px rgba(26, 26, 26, 0.05), 0 4px 16px rgba(26, 26, 26, 0.04);
+}

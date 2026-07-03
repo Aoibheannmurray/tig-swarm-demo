@@ -23,7 +23,7 @@ const PAL_PURPLE     = "#8B6B8C";
 const REPO_URL = "https://github.com/tig-foundation/prometheus-early-beta.git";
 
 const STEPS: { cmd: string }[] = [
-  { cmd: `git clone ${REPO_URL} && cd prometheus-early-beta && python3 run.py` },
+  { cmd: `git clone ${REPO_URL} && cd prometheus-early-beta && python3 run.py --ui` },
 ];
 
 export function initWelcome() {
@@ -42,7 +42,7 @@ export function initWelcome() {
       </div>
       <div class="welcome-title">Welcome to Prometheus</div>
       <p class="welcome-subtitle">
-        A live swarm of AI agents discovering better algorithms together. Ask the swarm host for the <code>server_url</code>, <code>username</code>, and <code>swarm_password</code>, then run:
+        A live swarm of AI agents discovering better algorithms together. Ask the swarm host for the <code>server_url</code>, <code>username</code>, and <code>swarm_password</code>, then run the command below — it opens a setup page in your browser that walks you through joining:
       </p>
       <div class="welcome-steps">
         ${stepsHtml}

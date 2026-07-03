@@ -51,6 +51,24 @@ const agentNameMap = new Map<string, string>();
 const lookupAgentName = (agent_id: string): string | undefined =>
   agentNameMap.get(agent_id);
 
+// Bound the map so a very long-running dashboard can't grow it without limit.
+// The ceiling is far above any real swarm's agent count; when crossed we drop
+// the oldest-inserted entries (Map preserves insertion order). This is safe
+// because names re-seed from every leaderboard_update/agent_joined, and the
+// feed falls back to the name carried on each message when a lookup misses.
+const MAX_AGENT_NAMES = 5000;
+function rememberAgentName(agent_id: string, agent_name: string): void {
+  agentNameMap.set(agent_id, agent_name);
+  if (agentNameMap.size > MAX_AGENT_NAMES) {
+    const overflow = agentNameMap.size - MAX_AGENT_NAMES;
+    let i = 0;
+    for (const key of agentNameMap.keys()) {
+      if (i++ >= overflow) break;
+      agentNameMap.delete(key);
+    }
+  }
+}
+
 function initPanel<T extends Panel>(PanelClass: new () => T, containerId: string): T {
   const panel = new PanelClass();
   const container = document.getElementById(containerId)!;
@@ -112,14 +130,14 @@ function handleMessage(msg: WSMessage) {
   if (msg.type === "leaderboard_update") {
     for (const entry of msg.entries) {
       if (entry.agent_id && entry.agent_name) {
-        agentNameMap.set(entry.agent_id, entry.agent_name);
+        rememberAgentName(entry.agent_id, entry.agent_name);
         registerAgentColor(entry.agent_id);
       }
     }
   } else if (msg.type === "agent_renamed") {
-    agentNameMap.set(msg.agent_id, msg.new_name);
+    rememberAgentName(msg.agent_id, msg.new_name);
   } else if (msg.type === "agent_joined") {
-    agentNameMap.set(msg.agent_id, msg.agent_name);
+    rememberAgentName(msg.agent_id, msg.agent_name);
     if (msg.agent_id) registerAgentColor(msg.agent_id);
   }
 

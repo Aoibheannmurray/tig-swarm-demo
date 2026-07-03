@@ -1,7 +1,7 @@
 import type { Panel, WSMessage } from "../types";
 import { formatTime } from "../lib/animate";
 import { getAgentColor, NEUTRAL_AGENT_COLOR } from "../lib/colors";
-import { formatScore } from "../lib/format";
+import { formatScore, escapeHTML } from "../lib/format";
 
 // Base in-memory/DOM cap for the live feed. "Load older" raises the effective
 // cap (this.maxItems) by the page size so paged-in history isn't immediately
@@ -198,11 +198,11 @@ export class FeedPanel implements Panel {
         eventType = "agent_joined";
         break;
       case "hypothesis_proposed":
-        render = (name) => `<b>${name}</b> proposed: "${msg.title}"`;
+        render = (name) => `<b>${name}</b> proposed: "${escapeHTML(msg.title)}"`;
         eventType = "hypothesis_proposed";
         break;
       case "chat_message": {
-        const content = msg.content;
+        const content = escapeHTML(msg.content);
         const isMilestone = msg.msg_type === "milestone";
         render = (name) => `<b>${name}</b>: ${content}`;
         eventType = isMilestone ? "new_global_best" : "chat";
@@ -253,7 +253,7 @@ export class FeedPanel implements Panel {
         break;
       }
       case "admin_broadcast":
-        render = () => `<b>ADMIN</b>: ${msg.message}`;
+        render = () => `<b>ADMIN</b>: ${escapeHTML(msg.message)}`;
         eventType = "new_global_best";
         agentId = "";
         break;
@@ -274,7 +274,10 @@ export class FeedPanel implements Panel {
     // text span via a stable class so we only touch the bit that needs
     // re-rendering.
     const writeText = (name: string) => {
-      const safeName = name || fallbackName || "agent";
+      // Escape here so every render() path (agent names flow through all of
+      // them) and every re-render (agent_renamed re-runs writeText) is safe
+      // in one place — render() bodies interpolate `safeName` into <b>…</b>.
+      const safeName = escapeHTML(name || fallbackName || "agent");
       item.innerHTML = `
         <span class="feed-time">${timestamp}</span>
         <span class="feed-dot" style="background:${agentColor}"></span>
