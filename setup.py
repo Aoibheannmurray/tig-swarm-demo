@@ -108,7 +108,7 @@ DEFAULT_TRACKS_PER_CHALLENGE = {
     "satisfiability": {"n_vars=100000,ratio=4150": 2},
     "vehicle_routing": {"n_nodes=600": 2},
     "knapsack": {"n_items=1000,budget=10": 2},
-    "job_scheduling": {"n=20,s=FLOW_SHOP": 2},
+    "job_scheduling": {"n=50,s=FLOW_SHOP": 2},
     "energy_arbitrage": {"s=BASELINE": 2},
     "hypergraph": {"n_h_edges=10000": 2},
     "neuralnet_optimizer": {"n_hidden=4": 2},

@@ -90,11 +90,11 @@ CHALLENGES: dict[str, ChallengeDef] = {
         name="job_scheduling",
         scoring_direction="max",
         track_keys=(
-            "n=20,s=FLOW_SHOP",
-            "n=20,s=HYBRID_FLOW_SHOP",
-            "n=20,s=JOB_SHOP",
-            "n=20,s=FJSP_MEDIUM",
-            "n=20,s=FJSP_HIGH",
+            "n=50,s=FLOW_SHOP",
+            "n=50,s=HYBRID_FLOW_SHOP",
+            "n=50,s=JOB_SHOP",
+            "n=50,s=FJSP_MEDIUM",
+            "n=50,s=FJSP_HIGH",
         ),
         strategy_tags=(
             "greedy", "construction", "local_search", "metaheuristic",
