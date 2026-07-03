@@ -154,6 +154,7 @@ button.danger { color: var(--danger); border-color: var(--danger); background: v
 .banner.err { background: var(--danger-bg); color: var(--danger); }
 .banner.ok { background: var(--success-bg); color: var(--success); }
 .banner.info { background: var(--info-bg); color: var(--info); }
+.banner.warn { background: var(--warn-bg); color: var(--warn); }
 
 .mono { font-family: var(--mono); font-size: 13px; }
 .muted { color: var(--ink-dim); }

@@ -25,6 +25,7 @@ const LOCAL = "/local-api";
 
 export const localApi = {
   env: () => fetch(`${LOCAL}/env`).then(jsonOrThrow),
+  preflight: () => fetch(`${LOCAL}/preflight`).then(jsonOrThrow),
   providers: () => fetch(`${LOCAL}/providers`).then(jsonOrThrow),
   challenges: () => fetch(`${LOCAL}/challenges`).then(jsonOrThrow),
 

@@ -41,10 +41,22 @@
   // ── Agents ──
   let count = $state(1);
   let prefix = $state("");
-  let compute = $state("local");
+  // Default to C3 cloud: it needs no local Docker / Rust toolchain, which is the
+  // smoothest path for a non-technical contributor. Falls back to local below
+  // when the provider can't use C3.
+  let compute = $state("c3");
   let hardware = $state("auto");
   let c3ApiKey = $state("");
   let supportsC3 = $derived(selectedProvider?.supports_c3 ?? false);
+  // Keep `compute` valid for the chosen provider: if it can't do C3, force local.
+  $effect(() => { if (!supportsC3 && compute === "c3") compute = "local"; });
+
+  // Capability probe (Docker / C3) so we can guide instead of failing mid-run.
+  let preflight: any = $state(null);
+  const c3Ready = $derived(
+    !!preflight && (preflight.c3.key_in_env || preflight.c3.cli_installed || !!c3ApiKey.trim()),
+  );
+  const dockerInstalled = $derived(!!preflight && preflight.docker.installed);
 
   // ── Tacit ──
   let tacitText = $state("");
@@ -58,6 +70,8 @@
       const p = await localApi.providers();
       providers = p.providers;
       c3hw = p.c3_hardware;
+      // Probe capabilities for the readiness panel (non-blocking best-effort).
+      localApi.preflight().then((pf) => (preflight = pf)).catch(() => {});
       // Prefill connection from an existing fleet.config.json, if any.
       const fc = await localApi.getFleetConfig();
       if (fc.exists && fc.config) {
@@ -180,12 +194,33 @@
     <div class="field">
       <label for="compute">Compute backend</label>
       <select id="compute" bind:value={compute} disabled={!supportsC3}>
+        {#if supportsC3}<option value="c3">C3 cloud hardware — recommended, no local setup</option>{/if}
         <option value="local">Local Docker — runs benchmarks on this machine</option>
-        {#if supportsC3}<option value="c3">C3 cloud hardware — runs benchmarks remotely</option>{/if}
       </select>
-      {#if !supportsC3}<div class="hint">This provider runs benchmarks locally.</div>{/if}
+      {#if !supportsC3}<div class="hint">This provider runs benchmarks locally (Docker).</div>{/if}
     </div>
+
+    <!-- Readiness: guide the user to the prerequisites for the chosen backend
+         instead of letting the fleet fail mid-run. -->
     {#if compute === "c3"}
+      {#if c3Ready}
+        <div class="banner ok">
+          C3 is ready — {preflight?.c3.key_in_env
+            ? "C3_API_KEY detected in your environment."
+            : c3ApiKey.trim()
+              ? "using the key you entered below."
+              : "the c3 CLI is installed (log in with c3 login if you haven't)."}
+          No local Docker needed.
+        </div>
+      {:else if preflight}
+        <div class="banner warn">
+          C3 isn't set up yet. Paste a C3 API key below, <em>or</em> install the
+          c3 CLI (<span class="mono">https://cthree.cloud/install.sh</span>) and run
+          <span class="mono">c3 login</span>.
+          {#if dockerInstalled}<br />Docker <em>is</em> installed here, so you could
+            switch to <b>Local Docker</b> above instead.{/if}
+        </div>
+      {/if}
       <div class="field">
         <label for="hw">C3 hardware</label>
         <select id="hw" bind:value={hardware}>
@@ -196,6 +231,20 @@
         <label for="c3k">C3 API key (optional)</label>
         <input id="c3k" type="password" bind:value={c3ApiKey} placeholder="leave blank to use C3_API_KEY / c3 login" />
       </div>
+    {:else if compute === "local"}
+      {#if preflight && !dockerInstalled}
+        <div class="banner warn">
+          Local compute needs Docker, which isn't installed on this machine.
+          Install Docker Desktop
+          (<span class="mono">https://www.docker.com/products/docker-desktop/</span>)
+          and start it{#if supportsC3}, or switch to <b>C3 cloud</b> above (no Docker
+            needed){/if}.
+        </div>
+      {:else if preflight && !preflight.docker.running}
+        <div class="banner ok">Docker is installed — it'll be started automatically at launch.</div>
+      {:else if preflight}
+        <div class="banner ok">Docker is installed and running.</div>
+      {/if}
     {/if}
     <div class="actions"><button onclick={back}>← Back</button><div class="spacer"></div><button class="primary" onclick={next}>Continue →</button></div>
   </div>

@@ -26,6 +26,9 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -168,6 +171,20 @@ class FleetController:
         server_url, username, swarm_password, agents, fleet_tacit = (
             run_fleet._load_fleet()
         )
+
+        # Local compute benchmarks in Docker. The fleet auto-starts the daemon,
+        # but can't conjure an install — so if any agent is on local compute and
+        # Docker isn't even installed, fail NOW with an actionable message
+        # instead of letting the agent crash mid-benchmark in the log stream.
+        uses_local = any((a.get("compute") or "local") == "local" for a in agents)
+        if uses_local and shutil.which("docker") is None:
+            raise RuntimeError(
+                "This fleet has agents on local compute, but Docker isn't "
+                "installed. Install Docker Desktop "
+                "(https://www.docker.com/products/docker-desktop/) and start it, "
+                "or switch those agents to C3 cloud compute (no local Docker needed)."
+            )
+
         self._stop = threading.Event()
         self.state = "starting"
         self.error = None
@@ -248,6 +265,41 @@ class DeployController:
 # ── App factory ────────────────────────────────────────────────────────
 
 
+def _cmd_ok(args: list[str], timeout: float = 4.0) -> bool:
+    """Run a command and report whether it exited 0. Swallows missing-binary,
+    timeout, and OS errors — used only for best-effort capability probes."""
+    try:
+        return subprocess.run(args, capture_output=True, timeout=timeout).returncode == 0
+    except Exception:
+        return False
+
+
+def preflight_status() -> dict:
+    """Best-effort probe of what the fleet needs to run, so the wizard can guide
+    a non-technical contributor BEFORE they hit a mid-run failure. All fields are
+    advisory — nothing here blocks; the UI decides what to surface.
+
+      - c3:     the default compute. `key_in_env` or a `c3 login` session (or a
+                key pasted in the wizard) means no local Docker is needed at all.
+      - docker: only needed for `compute: local`. The fleet auto-starts the
+                daemon if Docker is *installed*, so `installed` is the check that
+                matters; `running` is extra signal.
+    """
+    docker_installed = shutil.which("docker") is not None
+    c3_installed = shutil.which("c3") is not None
+    return {
+        "docker": {
+            "installed": docker_installed,
+            "running": docker_installed and _cmd_ok(["docker", "info"]),
+        },
+        "c3": {
+            "cli_installed": c3_installed,
+            "key_in_env": bool(os.environ.get("C3_API_KEY")),
+        },
+        "git": {"installed": shutil.which("git") is not None},
+    }
+
+
 def _host_is_loopback(host_header: str) -> bool:
     """True if the Host header names a loopback address. Handles an optional
     :port and the bracketed IPv6 form ([::1]:8787)."""
@@ -311,6 +363,11 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "has_swarm_admin": bool(admin.get("admin_key")),
             "server_url": admin.get("server_url") or setup_mod.resolve_server_url(),
         }
+
+    @app.get("/local-api/preflight")
+    def preflight() -> dict:
+        """Capability probe (Docker / C3 / git) for the wizard's readiness UI."""
+        return preflight_status()
 
     @app.get("/local-api/providers")
     def providers() -> dict:

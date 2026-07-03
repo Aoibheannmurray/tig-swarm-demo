@@ -1,5 +1,9 @@
 node_modules/
 dist/
+# Exception: ship the prebuilt companion UI so contributors need no Node/npm.
+# (dashboard/dist stays ignored — it reaches users via the server Docker image.)
+!control-ui/dist/
+!control-ui/dist/**
 target/
 .venv/
 __pycache__/
