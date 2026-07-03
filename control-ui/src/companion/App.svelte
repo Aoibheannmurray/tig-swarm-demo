@@ -70,6 +70,11 @@
   <Masthead title="Prometheus" subtitle="Swarm Control">
     {#if view !== "landing"}
       <button class="ghost" onclick={() => { view = "landing"; refresh(); }}>← Home</button>
+    {:else}
+      <!-- Admin mode: the console at /admin/ is served by this companion and
+           proxies /api/admin/* to the swarm; it gates on the admin key at
+           sign-in, so no extra auth is added here. -->
+      <a class="btn" href="/admin/">Admin →</a>
     {/if}
   </Masthead>
 
