@@ -297,6 +297,13 @@ def preflight_status() -> dict:
             "key_in_env": bool(os.environ.get("C3_API_KEY")),
         },
         "git": {"installed": shutil.which("git") is not None},
+        # Coding-agent CLIs used by the login-based providers (claude-code*,
+        # codex-agentic). We can cheaply see if the binary is on PATH; login
+        # state isn't reliably introspectable, so the UI advises `<cli> login`.
+        "clis": {
+            "claude": shutil.which("claude") is not None,
+            "codex": shutil.which("codex") is not None,
+        },
     }
 
 

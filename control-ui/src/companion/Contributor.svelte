@@ -176,6 +176,27 @@
         <div class="hint">Needs <code>{selectedProvider.api_key_env}</code> exported in the shell that runs the fleet.</div>
       {/if}
     </div>
+
+    <!-- Login-based providers (claude-code*, codex-agentic) have no api_key_env;
+         they use a CLI login. Surface whether that CLI is installed. -->
+    {#if selectedProvider && !selectedProvider.api_key_env}
+      {@const bin = selectedProvider.key.includes("codex") ? "codex" : "claude"}
+      {#if preflight?.clis}
+        {#if preflight.clis[bin]}
+          <div class="banner ok">
+            The <span class="mono">{bin}</span> CLI is installed. If you haven't yet,
+            run <span class="mono">{bin} login</span> in your terminal so agents can call it.
+          </div>
+        {:else}
+          <div class="banner warn">
+            This provider uses the <span class="mono">{bin}</span> CLI, which isn't
+            installed on this machine. Install it and run
+            <span class="mono">{bin} login</span>, then relaunch — or pick an API
+            provider above and export its key instead.
+          </div>
+        {/if}
+      {/if}
+    {/if}
     <div class="actions"><button onclick={back}>← Back</button><div class="spacer"></div><button class="primary" onclick={next}>Continue →</button></div>
   </div>
 {:else if step === 2}
