@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import Masthead from "../components/Masthead.svelte";
-  import { hostedApi, hostedBase, deriveInvitePassword } from "../lib/api";
+  import { hostedApi, hostedBase, deriveInvitePassword, localApi } from "../lib/api";
 
   let adminKey = $state(sessionStorage.getItem("prom_admin_key") ?? "");
   let basePassword = $state(sessionStorage.getItem("prom_base_pw") ?? "");
@@ -13,7 +13,25 @@
   let config: any = $state(null);
   let tab: "contributors" | "challenge" | "broadcast" | "pools" = $state("contributors");
 
-  const serverLabel = () => hostedBase() || location.origin;
+  // The swarm's PUBLIC url — what invites must carry so contributors can reach
+  // it. When this console is served by the local companion (at /admin/),
+  // location.origin is the companion (e.g. http://127.0.0.1:8790), NOT the
+  // swarm — so ask the companion for the real url. When served directly by the
+  // hosted swarm server, /local-api doesn't exist, the fetch fails, and we fall
+  // back to location.origin, which there IS the swarm url. An explicit
+  // ?server= override always wins.
+  let swarmUrl = $state(hostedBase());
+  onMount(async () => {
+    if (swarmUrl) return; // ?server= override supplied
+    try {
+      const env = await localApi.env();
+      if (env?.server_url) swarmUrl = String(env.server_url).replace(/\/$/, "");
+    } catch {
+      /* served by the hosted swarm itself — location.origin is correct */
+    }
+  });
+
+  const serverLabel = () => swarmUrl || location.origin;
 
   async function authenticate() {
     error = ""; busy = true;
