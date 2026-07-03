@@ -1,12 +1,14 @@
 import json
 import asyncio
+import contextvars
 import logging
 import random
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -304,8 +306,17 @@ async def get_baseline_score(conn, challenge: str) -> float | None:
 async def verify_admin(req: AdminAuth) -> None:
     config = await get_config_cached()
     expected = config.get("admin_key")
-    if not expected or req.admin_key != expected:
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+    supplied = req.admin_key or ""
+    ip = _client_ip.get()
+    # Constant-time compare (encode to bytes so a non-ASCII input can't raise
+    # inside compare_digest) FIRST — a correct key always succeeds and is never
+    # throttled. Only wrong keys count toward the per-IP brute-force limit.
+    if expected and secrets.compare_digest(supplied.encode(), expected.encode()):
+        _clear_auth_failure(f"admin:{ip}")
+        return
+    if _note_auth_failure(f"admin:{ip}") > _AUTH_FAIL_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many attempts; slow down")
+    raise HTTPException(status_code=403, detail="Invalid admin key")
 
 
 def _derive_user_password(username: str, base_password: str) -> str:
@@ -352,8 +363,15 @@ async def verify_swarm_password(
     if not base:
         raise HTTPException(status_code=403, detail="Swarm not configured")
     expected = _derive_user_password(x_username, base)
-    if not secrets.compare_digest(x_swarm_password, expected):
+    # Per-IP throttle on wrong passwords. Safe for fleets: every legitimate
+    # agent presents the correct derived password, so it passes here and is
+    # never throttled even when a whole fleet registers from one IP at once.
+    ip = _client_ip.get()
+    if not secrets.compare_digest(x_swarm_password.encode(), expected.encode()):
+        if _note_auth_failure(f"swarm:{ip}") > _AUTH_FAIL_LIMIT:
+            raise HTTPException(status_code=429, detail="Too many attempts; slow down")
         raise HTTPException(status_code=403, detail="Invalid credentials")
+    _clear_auth_failure(f"swarm:{ip}")
     if x_username in _revoked_usernames(config):
         raise HTTPException(status_code=403, detail="Contributor has been revoked")
     return x_username
@@ -462,6 +480,55 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Client IP for the current request, captured by middleware so the auth helpers
+# (verify_admin / verify_swarm_password) can throttle failed attempts per source
+# without threading Request through every endpoint. Behind Railway's proxy the
+# real client is the first X-Forwarded-For hop; fall back to the socket peer.
+_client_ip: contextvars.ContextVar[str] = contextvars.ContextVar("client_ip", default="")
+
+
+@app.middleware("http")
+async def _capture_client_ip(request: Request, call_next):
+    xff = request.headers.get("x-forwarded-for")
+    ip = (xff.split(",")[0].strip() if xff else "") or (
+        request.client.host if request.client else ""
+    )
+    _client_ip.set(ip)
+    return await call_next(request)
+
+
+# ── Brute-force throttle on failed auth (defense-in-depth) ──
+#
+# admin_key and the base swarm_password are 128-bit secrets (secrets.token_urlsafe(16)),
+# so online brute force is already infeasible; this bounds it further and slows
+# credential stuffing. It is DoS-safe BY CONSTRUCTION: a request bearing the
+# CORRECT secret always passes (the constant-time compare runs first and returns
+# before any throttle check), so a flood of wrong guesses — even sharing the
+# legitimate user's proxy IP — can never lock the real admin/contributor out.
+_AUTH_FAIL_WINDOW_S = 60.0
+_AUTH_FAIL_LIMIT = 20
+_auth_failures: dict[str, list[float]] = {}
+
+
+def _note_auth_failure(key: str) -> int:
+    """Record a failed attempt for `key` (e.g. "admin:1.2.3.4") and return the
+    number of failures still inside the sliding window."""
+    mono = time.monotonic()
+    recent = [t for t in _auth_failures.get(key, []) if mono - t < _AUTH_FAIL_WINDOW_S]
+    recent.append(mono)
+    _auth_failures[key] = recent
+    # Opportunistic cleanup so the map can't grow unbounded across many source IPs.
+    if len(_auth_failures) > 2048:
+        for k in [k for k, v in _auth_failures.items()
+                  if all(mono - t >= _AUTH_FAIL_WINDOW_S for t in v)]:
+            _auth_failures.pop(k, None)
+    return len(recent)
+
+
+def _clear_auth_failure(key: str) -> None:
+    _auth_failures.pop(key, None)
+
 
 # Static dashboard mounted after all routes (see bottom of file)
 

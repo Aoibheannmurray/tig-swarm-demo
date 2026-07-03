@@ -248,11 +248,43 @@ class DeployController:
 # ── App factory ────────────────────────────────────────────────────────
 
 
-def create_app() -> FastAPI:
+def _host_is_loopback(host_header: str) -> bool:
+    """True if the Host header names a loopback address. Handles an optional
+    :port and the bracketed IPv6 form ([::1]:8787)."""
+    if not host_header:
+        return False
+    if host_header.startswith("["):  # [::1] or [::1]:port
+        end = host_header.find("]")
+        hostname = host_header[1:end] if end != -1 else host_header
+    elif host_header.count(":") == 1:  # host:port (IPv4 / name)
+        hostname = host_header.rsplit(":", 1)[0]
+    else:  # bare name, or unbracketed IPv6 literal (e.g. ::1)
+        hostname = host_header
+    return hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def create_app(allow_remote: bool = False) -> FastAPI:
     app = FastAPI(title="TIG Swarm Control", docs_url=None, redoc_url=None)
     hub = EventHub()
     fleet = FleetController(hub)
     deploy = DeployController(hub)
+
+    # DNS-rebinding guard. This companion serves host credentials (e.g.
+    # /local-api/swarm/admin returns the admin_key) and can start/stop fleets,
+    # so it must only ever answer requests actually destined for localhost.
+    # A malicious web page can rebind its own domain to 127.0.0.1 and make the
+    # victim's browser hit this server — but the request still carries the
+    # attacker's Host header, which we reject here. Bypassed only when the
+    # operator explicitly binds a non-loopback address (--host), an opt-in
+    # they're warned about at startup.
+    @app.middleware("http")
+    async def _guard_host(request: Request, call_next):
+        if not allow_remote and not _host_is_loopback(request.headers.get("host", "")):
+            return JSONResponse(
+                {"error": "refused: non-loopback Host header (DNS-rebinding guard)"},
+                status_code=403,
+            )
+        return await call_next(request)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -552,16 +584,33 @@ def main() -> int:
                    help="Don't auto-open a browser tab.")
     args = p.parse_args()
 
+    # Binding anything other than loopback exposes host credentials and fleet
+    # controls to the network. Treat it as an explicit opt-out of the
+    # DNS-rebinding/Host guard, and make the risk loud.
+    is_loopback_bind = _host_is_loopback(args.host)
+
     url = f"http://{args.host}:{args.port}/"
     print(f"TIG Swarm Control — {url}")
     print("  (Ctrl-C stops the companion; a running fleet stops with it.)")
+    if not is_loopback_bind:
+        print(
+            "  ⚠  WARNING: binding a non-loopback address exposes host "
+            "credentials (admin_key, swarm_password) and fleet controls to "
+            "anyone who can reach this host. The DNS-rebinding guard is "
+            "DISABLED for this bind. Only do this on a trusted network."
+        )
     if not args.no_browser:
         try:
             webbrowser.open(url)
         except Exception:
             pass
 
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(
+        create_app(allow_remote=not is_loopback_bind),
+        host=args.host,
+        port=args.port,
+        log_level="warning",
+    )
     return 0
 
 

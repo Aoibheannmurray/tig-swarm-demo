@@ -31,6 +31,14 @@ type Tab =
   | { type: "global" }
   | { type: "agent"; agentId: string; agentName: string };
 
+// Cap on retained global best-so-far points. globalData only grows on a new
+// global best, so this is a high ceiling in practice — but a swarm running for
+// weeks can still cross it, and every redraw is an O(N) SVG rebuild. When we
+// exceed it we drop the OLDEST points: the curve is a monotonic best-so-far
+// line, so the oldest points are the lowest scores (least interesting) and the
+// recent high-score region — the part users care about — is preserved.
+const MAX_GLOBAL_POINTS = 2000;
+
 export class ChartPanel implements Panel {
   private svg!: any;
   private g!: any;
@@ -198,7 +206,10 @@ export class ChartPanel implements Panel {
         isBreakthrough: true,
       });
     }
-    this.globalData = filtered;
+    this.globalData =
+      filtered.length > MAX_GLOBAL_POINTS
+        ? filtered.slice(filtered.length - MAX_GLOBAL_POINTS)
+        : filtered;
     if (this.currentTab().type === "global") this.redraw();
   }
 
@@ -304,6 +315,10 @@ export class ChartPanel implements Panel {
         agentId: msg.agent_id,
         isBreakthrough: msg.is_new_best,
       });
+      // Bound retained points (see MAX_GLOBAL_POINTS) — drop the oldest.
+      if (this.globalData.length > MAX_GLOBAL_POINTS) {
+        this.globalData.splice(0, this.globalData.length - MAX_GLOBAL_POINTS);
+      }
       if (this.currentTab().type === "global") this.redraw();
     };
 
