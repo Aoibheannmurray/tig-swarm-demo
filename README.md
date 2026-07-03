@@ -252,6 +252,6 @@ finishes, then pulls the `benchmark.json` result back.
 The TIG-native C3 Docker path currently defaults only to the challenge images
 that already exist on Docker Hub:
 
-- `knapsack` (`docker.io/danieltiagoadams/tig-dev-knapsack:0.0.6`)
+- `job_scheduling` (`docker.io/danieltiagoadams/tig-dev-job_scheduling:0.0.6`)
 - `vector_search` (`docker.io/danieltiagoadams/tig-dev-vector_search:0.0.6`)
 - `hypergraph` (`docker.io/danieltiagoadams/tig-dev-hypergraph:0.0.6`)
