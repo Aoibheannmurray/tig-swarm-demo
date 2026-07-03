@@ -284,7 +284,17 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                 {"error": "refused: non-loopback Host header (DNS-rebinding guard)"},
                 status_code=403,
             )
-        return await call_next(request)
+        response = await call_next(request)
+        # Anti-clickjacking: the Host guard above stops DNS-rebinding, but a page
+        # can still *directly* iframe http://127.0.0.1:<port> (that request
+        # carries a loopback Host and passes) and overlay the fleet/admin
+        # controls to steal clicks. This companion never frames itself, so deny
+        # framing outright. `nosniff` blocks content-type confusion on the
+        # /local-api JSON. Both are set on every response, static bundle included.
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @app.on_event("startup")
     async def _startup() -> None:
