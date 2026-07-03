@@ -8,7 +8,8 @@
       "MultiEdit",
       "NotebookEdit",
       "Bash",
-      "WebSearch"
+      "WebSearch",
+      "WebFetch(domain:multi-file-roles-production.up.railway.app)"
     ],
     "defaultMode": "acceptEdits"
   }

@@ -1,3 +1,9 @@
+// Self-alias so vendored challenge modules + agent algorithms can refer to this
+// crate as `tig_challenges` — the same import path the monorepo's tig-algorithms
+// uses. This lets one algorithm file compile BOTH here (swarm crate) and when
+// injected into the monorepo's `swarm_algo` slot. See tig_docker_plan.md.
+extern crate self as tig_challenges;
+
 pub const BUILD_TIME_PATH: &str = env!("CARGO_MANIFEST_DIR");
 
 // Per-challenge quality scaling factor used by the upstream evaluators.

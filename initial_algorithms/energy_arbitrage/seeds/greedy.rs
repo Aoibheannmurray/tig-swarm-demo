@@ -21,7 +21,7 @@
 // Note: `grid_optimize` may be called only once per process — this does exactly
 // that and saves the resulting schedule.
 
-use super::*;
+use tig_challenges::energy_arbitrage::*;
 use super::constants::{
     EPS_BASELINE as EPS, EPS_FLOW, GLOBAL_SCALE_BSEARCH_ITERS, MAX_FLOW_ADJUST_ITERS,
 };
@@ -205,4 +205,8 @@ fn enforce_flow_feasibility(
         }
     }
     Ok(base.into_iter().map(|u| low * u).collect())
+}
+
+pub fn help() {
+    println!("No help information provided.");
 }

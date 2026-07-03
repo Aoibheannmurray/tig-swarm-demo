@@ -4,6 +4,7 @@
   "swarm_password": "paste-your-password-the-host-shared",
   "c3_api_key": "paste-your-c3-api-key-here",
   "hpo_min_improvements": 4,
+  "hpo_first_tune_improvements": 10,
   "hpo_num_suggested_configs": 5,
   "hpo_search_budget": 13,
   "agents": [
@@ -13,7 +14,7 @@
       "model": "claude-opus-4-7",
       "api_key_env": "ANTHROPIC_API_KEY",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto"
     },
     {
       "name": "my-gpt-agent",
@@ -21,14 +22,14 @@
       "model": "gpt-5",
       "api_key_env": "OPENAI_API_KEY",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto"
     },
     {
       "name": "mr-claude-agentic",
       "provider": "claude-code-agentic",
       "model": "claude-opus-4-7",
       "compute": "c3",
-      "hardware": "l40",
+      "hardware": "auto",
       "tacit_write": false
     },
     {
@@ -38,7 +39,7 @@
       "api_key_env": "OPENROUTER_API_KEY",
       "api_base": "https://openrouter.ai/api/v1",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto"
     },
     {
       "name": "my-deepseek-bot",
@@ -47,7 +48,7 @@
       "api_key_env": "DEEPSEEK_API_KEY",
       "api_base": "https://api.deepseek.com/v1",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto"
     }
   ]
 }

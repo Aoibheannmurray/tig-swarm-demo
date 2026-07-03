@@ -15,7 +15,7 @@
 // seed-customer choice, the c1/c2 insertion weights (alpha1/alpha2/lambda),
 // or route merging to shave distance.
 
-use super::*;
+use tig_challenges::vehicle_routing::*;
 use anyhow::Result;
 use serde_json::{Map, Value};
 
@@ -160,4 +160,8 @@ fn find_best_insertion(
         }
     }
     best
+}
+
+pub fn help() {
+    println!("No help information provided.");
 }

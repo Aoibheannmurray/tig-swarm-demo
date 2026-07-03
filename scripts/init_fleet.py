@@ -378,11 +378,15 @@ def _select_provider() -> tuple[str, str, str | None, str, bool]:
 # ── Compute backend selection ─────────────────────────────────────
 
 
-# C3 GPU profiles offered in the wizard. The C3 backend forwards `--hardware`
-# verbatim (run_loop.py / c3_compute.py accept any profile its CLI knows), so
-# this is just the common shortlist with `l40` as the default to match the
-# run_loop.py / c3_compute.py default.
+# C3 hardware choices offered in the wizard. The C3 backend forwards explicit
+# profile picks verbatim, while `auto` chooses CPU hardware for CPU challenges
+# and GPU hardware for GPU challenges at benchmark time.
 _C3_HARDWARE_CHOICES = [
+    ("auto", "Auto (CPU challenges: cpu-d3-4vcpu-16gb; GPU challenges: NVIDIA L40)"),
+    ("cpu-d3-4vcpu-16gb", "CPU: AMD EPYC Genoa 4 vCPU / 16 GiB"),
+    ("cpu-e2-4vcpu-16gb", "CPU: Intel Ice Lake 4 vCPU / 16 GiB"),
+    ("cpu-e2-48vcpu-192gb", "CPU: Intel Ice Lake 48 vCPU / 192 GiB"),
+    ("cpu-d3-96vcpu-384gb", "CPU: AMD EPYC Genoa 96 vCPU / 384 GiB"),
     ("l40", "NVIDIA L40"),
     ("h100", "NVIDIA H100"),
 ]
@@ -407,7 +411,7 @@ def _select_compute(supports_c3: bool) -> tuple[str, str | None]:
         "Where should each benchmark run?",
         [
             ("c3",
-             "C3 cloud GPU — runs benchmarks on a remote GPU "
+             "C3 cloud hardware — runs benchmarks remotely "
              "(needs the c3 CLI + an API key)"),
             ("local",
              "Local Docker — runs benchmarks on this machine"),
@@ -430,9 +434,7 @@ def _select_compute(supports_c3: bool) -> tuple[str, str | None]:
             "handles the key."
         )
 
-    hardware = _prompt_choice(
-        "Which C3 GPU profile?", _C3_HARDWARE_CHOICES, default_idx=0,
-    )
+    hardware = _prompt_choice("Which C3 hardware?", _C3_HARDWARE_CHOICES, default_idx=0)
     return "c3", hardware
 
 
@@ -525,8 +527,14 @@ def _build_agent(
     # says nothing about capability. Frontier models are left without the flag
     # (they don't need the verbosity). Contributors can override either way by
     # editing the flag in fleet.config.json.
-    if tiers.classify_tier(provider, model) == "standard":
+    tier = tiers.classify_tier(provider, model)
+    if tier == "standard":
         entry["detailed_prompts"] = True
+    # Default role from tier: frontier → explorer (ambitious rewrites, fills the
+    # seed pool), standard → exploiter (localized search/replace edits + HPO).
+    # Role is contributor-owned and hot-reloads, so editing `role` in
+    # fleet.config.json overrides this for either tier at any time.
+    entry["role"] = tiers.role_for_tier(tier)
     return entry
 
 

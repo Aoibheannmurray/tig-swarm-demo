@@ -29,9 +29,25 @@ multi-agent fleet, benchmarking, and publishing results to the server.
   the per-worktree `CLAUDE.md` / `AGENTS.md` and permission settings** — see
   `_build_sandbox_settings`.
 - `llm_backends.py` / `prompts.py` — single-shot (non-agentic) LLM mode.
-- `c3_compute.py` — cloud GPU compute (C3) path for benchmarking.
+- `c3_compute.py` — cloud (C3) path for benchmarking.
 - `challenge_files.py`, `download_algorithm.py`, `init_fleet.py`,
   `sync_identity.py`, `build_ptx.py` — supporting helpers.
+
+## TIG-docker benchmark backend
+
+An alternative to the custom benchmark path that compiles + scores in the **real
+TIG toolchain** (fuel-instrumented; `tig-runtime`/`tig-verifier`), gated by
+`benchmark_backend: "tig"` (or env `TIG_BENCH_BACKEND=tig`). Both `benchmark.py`
+(local docker) and `c3_compute.py` (C3) branch into it via `_tig_backend(cfg)`.
+
+- `modified_test_algorithm` — fuel-capturing tester (additive copy of the
+  monorepo `test_algorithm`); `--output-json` emits per-nonce records + aggregates.
+- `tig_bench_driver.py` — runs inside the image: `build_algorithm` + per-track
+  `modified_test_algorithm` → one combined JSON.
+- `build_bench_image.sh` — builds the custom image from `../tig-monorepo` + the pin.
+- Repo root: `Dockerfile.bench`, `tig_pin.json` (pinned TIG version),
+  `tig_docker_plan.md` (design + status). Algorithms author against
+  `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases the crate as `tig_challenges`).
 
 ## Tests
 

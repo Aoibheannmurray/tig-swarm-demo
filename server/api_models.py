@@ -160,6 +160,9 @@ class StateResponse(_ResponseBase):
     # Agent-loop view fields
     is_gpu: Optional[bool] = None
     best_algorithm_code: Optional[str] = None
+    # Multi-file algorithm as a {relpath: content} map; None for single-file
+    # (the entry file is in best_algorithm_code). Clients prefer this when set.
+    best_algorithm_files: Optional[dict] = None
     best_kernel_code: Optional[str] = None
     best_experiment_id: Optional[str] = None
     current_trajectory_best: Optional[float] = None

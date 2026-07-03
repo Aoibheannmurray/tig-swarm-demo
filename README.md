@@ -38,7 +38,7 @@ python3 run.py
 
 It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
 
-Export your keys before launching — your provider key (skip if you use a `claude` / `codex` CLI login) and `C3_API_KEY` for the GPU compute:
+Export your keys before launching — your provider key (skip if you use a `claude` / `codex` CLI login) and `C3_API_KEY` for C3 compute:
 
 ```bash
 # macOS / Linux
@@ -170,9 +170,9 @@ Secrets stay in environment variables.
 
 ## Remote benchmarking with C3
 
-This swarm benchmarks on [C3](https://cthree.cloud) cloud GPUs by default — the
+This swarm benchmarks on [C3](https://cthree.cloud) cloud hardware by default — the
 `run.py` wizard and `fleet.config.example.json` both set `"compute": "c3"`, so
-you don't need a local GPU. To benchmark locally in Docker instead, set
+you don't need local compute. To benchmark locally in Docker instead, set
 `"compute": "local"` on an agent in `fleet.config.json`, then launch as usual
 with `python run.py`. 
 
@@ -228,7 +228,7 @@ Then add the C3 keys to the agent:
   "model": "claude-opus-4-7",
   "api_key_env": "ANTHROPIC_API_KEY",
   "compute": "c3",          // run benchmarks on C3 instead of local Docker
-  "c3_hardware": "l40",     // GPU profile (default: l40)
+  "c3_hardware": "auto",    // CPU challenges -> cpu-d3-4vcpu-16gb; GPU -> l40
   "c3_time": "02:00:00",    // per-job walltime (default: 02:00:00)
   "c3_provider": null,      // optional C3 backend (c3 deploy -p ...)
   "c3_api_key": null,       // optional per-agent C3 key; omit to fall back
@@ -238,8 +238,8 @@ Then add the C3 keys to the agent:
 
 | key            | purpose                                                              |
 |----------------|---------------------------------------------------------------------|
-| `compute`      | `"c3"` for C3 cloud GPU (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`. |
-| `c3_hardware`  | C3 GPU profile (default: `l40`).                                    |
+| `compute`      | `"c3"` for C3 cloud hardware (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`. |
+| `c3_hardware`  | C3 hardware selector. Use `"auto"` to run CPU challenges on `cpu-d3-4vcpu-16gb` and GPU challenges on `l40`; pin an exact profile only when needed. |
 | `c3_time`      | Per-job walltime (default: `02:00:00`).                             |
 | `c3_provider`  | Optional C3 backend passed as `c3 deploy -p ...`.                  |
 | `c3_api_key`   | Optional per-agent C3 API key (raw value). Omit to inherit the top-level fleet `c3_api_key`, then `C3_API_KEY`, then the `c3 login` session. Lets agents bill C3 to different keys. |
@@ -248,3 +248,10 @@ Then add the C3 keys to the agent:
 Each C3 benchmark runs the same `scripts/benchmark.py` inside that Docker Hub
 image: the loop stages a minimal workspace, deploys it, polls until the job
 finishes, then pulls the `benchmark.json` result back.
+
+The TIG-native C3 Docker path currently defaults only to the challenge images
+that already exist on Docker Hub:
+
+- `job_scheduling` (`docker.io/danieltiagoadams/tig-dev-job_scheduling:0.0.6`)
+- `vector_search` (`docker.io/danieltiagoadams/tig-dev-vector_search:0.0.6`)
+- `hypergraph` (`docker.io/danieltiagoadams/tig-dev-hypergraph:0.0.6`)

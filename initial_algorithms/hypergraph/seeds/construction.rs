@@ -14,7 +14,6 @@
 // Verified on an L40 (C3): compiles, runs, and produces a feasible, balanced
 // partition (score −658834 on n_h_edges=10000 — poor cut by design).
 
-use crate::hypergraph::*;
 use anyhow::Result;
 use cudarc::{
     driver::{CudaModule, CudaStream, LaunchConfig, PushKernelArg},
@@ -22,8 +21,13 @@ use cudarc::{
 };
 use serde_json::{Map, Value};
 use std::sync::Arc;
+use tig_challenges::hypergraph::*;
 
 const THREADS_PER_BLOCK: u32 = 256;
+
+pub fn help() {
+    println!("GPU round-robin hypergraph seed.");
+}
 
 pub fn solve_challenge(
     challenge: &Challenge,

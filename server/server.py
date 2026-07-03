@@ -1,6 +1,5 @@
 import json
 import asyncio
-import hashlib
 import logging
 import random
 import secrets
@@ -15,7 +14,7 @@ from pathlib import Path
 from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
-    AdminRevoke, AdminSeedInactive, AdminSeedPool,
+    AdminRevoke, AdminSeedInactive, AdminSeedPool, AdminClearInactive,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
@@ -25,6 +24,7 @@ from names import generate_agent_name, load_used_names
 from dedup import fingerprint
 import db
 import tiers
+import seed_diversity
 import ws_events
 import api_models
 import challenges
@@ -49,6 +49,18 @@ SWARM_DEFAULTS: dict[str, int] = {
     "stagnation_threshold": 2,
     "stagnation_limit": 5,
     "hypothesis_recall_threshold": 3,
+    # Seed-pool diversity (server-side; see server/seed_diversity.py).
+    # K: max seeds kept per challenge. max_loc: simplicity ceiling — algorithms
+    # above this many source lines are never harvested as seeds.
+    "seed_pool_size": 10,
+    "seed_max_loc": 200,
+}
+
+# Float-valued swarm tunables (swarm_setting only returns ints).
+SWARM_FLOAT_DEFAULTS: dict[str, float] = {
+    # Novelty gate: a candidate seed is admitted only if its similarity to every
+    # existing seed is below this. Higher => more permissive (more seeds).
+    "seed_similarity_threshold": 0.6,
 }
 
 
@@ -59,6 +71,17 @@ def swarm_setting(config: dict, key: str) -> int:
         return default
     try:
         return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def swarm_setting_float(config: dict, key: str) -> float:
+    default = SWARM_FLOAT_DEFAULTS[key]
+    raw = config.get(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
     except (TypeError, ValueError):
         return default
 
@@ -150,10 +173,28 @@ async def load_initial_algorithm(challenge: str) -> tuple[str, str]:
     )
 
 
+def _files_json(files: dict | None) -> str | None:
+    """JSON-encode a {relpath: content} files-map for storage, or None when it
+    is empty/single-file (the entry lives in `algorithm_code`)."""
+    return json.dumps(files) if files else None
+
+
+def _row_files(row) -> dict | None:
+    """Decode a stored `algorithm_files` JSON column to a dict, or None."""
+    raw = row.get("algorithm_files") if hasattr(row, "get") else None
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return d if isinstance(d, dict) and d else None
+
+
 async def seed_for_agent(
     conn, agent_id: str, challenge: str, tier: str, role: str,
     *, direction: str, cutoff_ts: str,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, dict | None, str]:
     """Pick the starting code for an agent on a fresh trajectory.
 
     On CPU challenges frontier explorers keep the bare stub (they bootstrap),
@@ -164,8 +205,9 @@ async def seed_for_agent(
     working-code path is a fallback chain:
       seed pool (diverse per-agent assignment) → best active peer → stub.
 
-    Returns (algorithm_code, kernel_code, start) where `start` is one of
-    'seed' | 'peer' | 'stub' for the dashboard.
+    Returns (algorithm_code, kernel_code, algorithm_files, start) where
+    `algorithm_files` is the multi-file map (or None for single-file) and
+    `start` is one of 'seed' | 'peer' | 'stub' for the dashboard.
     """
     # For now, GPU challenges seed every model regardless of tier/role —
     # frontier models rarely produce a compiling kernel from the bare stub, so
@@ -175,15 +217,14 @@ async def seed_for_agent(
     needs_seed = is_gpu or (tier == "standard") or (role == "exploiter")
     if not needs_seed:
         code, kernel = await load_initial_algorithm(challenge)
-        return code, kernel, "stub"
+        return code, kernel, None, "stub"
 
     seeds = await db.list_seeds(conn, challenge)
     if seeds:
-        # Deterministic per-agent assignment spreads the population across the
-        # available seeds (and is stable across this agent's resets).
-        idx = int(hashlib.sha1(agent_id.encode()).hexdigest(), 16) % len(seeds)
-        s = seeds[idx]
-        return s["algorithm_code"], s.get("kernel_code") or "", "seed"
+        # Random per-trajectory draw: each fresh start re-rolls the launch point
+        # so the population spreads across the (small, curated) seed pool.
+        s = random.choice(seeds)
+        return s["algorithm_code"], s.get("kernel_code") or "", _row_files(s), "seed"
 
     # Empty seed pool → adopt the best active peer's current algorithm so the
     # agent exploits a real working lineage instead of idling on the stub.
@@ -196,11 +237,11 @@ async def seed_for_agent(
     )
     if peers:
         best = peers[0]
-        return best["algorithm_code"], best.get("kernel_code") or "", "peer"
+        return best["algorithm_code"], best.get("kernel_code") or "", _row_files(best), "peer"
 
     # True cold start: no seeds and no feasible peers yet.
     code, kernel = await load_initial_algorithm(challenge)
-    return code, kernel, "stub"
+    return code, kernel, None, "stub"
 
 
 async def get_direction(challenge: str | None = None) -> str:
@@ -823,7 +864,7 @@ async def get_state(
                 # start) so we can seed it as the agent's personal best below.
                 adopted_score = None
                 if go_fresh:
-                    new_code, new_kernel_code, _start = await seed_for_agent(
+                    new_code, new_kernel_code, new_files, _start = await seed_for_agent(
                         conn, agent_id, challenge, agent_tier, agent_role,
                         direction=direction, cutoff_ts=cutoff_ts,
                     )
@@ -834,12 +875,19 @@ async def get_state(
                     picked = random.choice(inactive_pool)
                     new_code = picked["algorithm_code"]
                     new_kernel_code = picked.get("kernel_code")
+                    new_files = _row_files(picked)
                     new_program_id = picked.get("program_id") or new_id()
                     adopted_score = picked.get("score")
                     await db.remove_inactive(conn, picked["id"])
                     trajectory_reset = {
                         "type": "adopted_inactive",
                         "prior_score": adopted_score,
+                        # Seeds deposited without a benchmark (admin/mainnet
+                        # seeds) have no score, so there's no floor to inherit.
+                        # Tell the agent to benchmark the adopted code unchanged
+                        # FIRST, so the trajectory floor is the seed's real
+                        # score instead of its first (possibly worse) mutation.
+                        "needs_benchmark": adopted_score is None,
                     }
                     if picked.get("trajectory_id"):
                         new_traj_id = picked["trajectory_id"]
@@ -863,6 +911,7 @@ async def get_state(
                         trajectory_id=cur_traj_id, program_id=old_program_id,
                         kernel_code=traj_best.get("kernel_code"),
                         experiment_id=traj_best.get("experiment_id"),
+                        algorithm_files=traj_best.get("algorithm_files"),
                     )
 
                 # Seed the agent's personal best with the adopted trajectory's
@@ -890,13 +939,14 @@ async def get_state(
                         feasible=True, challenge_metrics=None,
                         solution_data=None, updated_at=timestamp,
                         trajectory_id=new_traj_id, kernel_code=new_kernel_code,
+                        algorithm_files=_files_json(new_files),
                     )
-                    traj_best = {
-                        "algorithm_code": new_code,
-                        "score": adopted_score,
-                        "experiment_id": adopted_experiment_id,
-                        "kernel_code": new_kernel_code,
-                    }
+                    # Re-read the row we just upserted so traj_best has the full
+                    # canonical shape (solution_data / hyperparameters /
+                    # challenge_metrics included). A hand-built partial dict here
+                    # KeyErrors downstream — e.g. `traj_best["solution_data"]`
+                    # when building the state response.
+                    traj_best = await db.get_trajectory_best(conn, agent_id, challenge)
                     current_trajectory_best = adopted_score
                     traj_best_experiment_id = adopted_experiment_id
                 else:
@@ -915,6 +965,7 @@ async def get_state(
                 await conn.commit()
                 traj_best_code = new_code
                 traj_best_kernel_code = new_kernel_code
+                traj_best_files = new_files
                 runs_since = 0
                 agent_name = await get_agent_name(conn, agent_id)
                 await manager.broadcast(ws_events.TrajectoryReset(
@@ -930,8 +981,9 @@ async def get_state(
                 if traj_best:
                     traj_best_code = traj_best["algorithm_code"]
                     traj_best_kernel_code = traj_best.get("kernel_code")
+                    traj_best_files = _row_files(traj_best)
                 else:
-                    traj_best_code, traj_best_kernel_code, _start = await seed_for_agent(
+                    traj_best_code, traj_best_kernel_code, traj_best_files, _start = await seed_for_agent(
                         conn, agent_id, challenge, agent_tier, agent_role,
                         direction=direction, cutoff_ts=cutoff_ts,
                     )
@@ -1072,15 +1124,21 @@ async def get_state(
             improvement_scores = await db.get_recent_improvement_scores(
                 conn, active_trajectory_id, _IMPROVEMENT_HISTORY_LIMIT
             )
+            # Whether this trajectory has already been tuned once. The HPO gate
+            # auto-fires the first time a mature trajectory is eligible, then
+            # falls back to the improvement band.
+            has_tuned = await db.trajectory_has_tuned(conn, active_trajectory_id)
             resp = {
                 "challenge": challenge,
                 "is_gpu": is_gpu,
                 "agent_name": self_agent_name,
                 "best_score": global_best_score,
                 "best_algorithm_code": traj_best_code,
+                "best_algorithm_files": traj_best_files,
                 "best_experiment_id": traj_best_experiment_id,
                 "best_hyperparameters": traj_best_hyperparameters,
                 "improvement_scores": improvement_scores,
+                "has_tuned": has_tuned,
                 "current_trajectory_best": current_trajectory_best,
                 "my_runs": (acs or {}).get("experiments_completed") if acs else 0,
                 "my_improvements": (acs or {}).get("improvements") if acs else 0,
@@ -1151,6 +1209,7 @@ async def get_state(
         "best_score": global_best_score,
         "improvement_pct": overall_imp,
         "best_algorithm_code": served["algorithm_code"] if served else _initial_algo[0],
+        "best_algorithm_files": _row_files(served) if served else None,
         "best_kernel_code": (served.get("kernel_code") if served else _initial_algo[1]) or None,
         "best_experiment_id": served["id"] if served else None,
         "best_solution_data": json.loads(served["solution_data"]) if served and served["solution_data"] else None,
@@ -1268,10 +1327,27 @@ async def create_iteration(req: IterationCreate):
             or db.is_better(direction, req.score, prev_trajectory_best["score"])
         )
 
+        # Refactor path (docs/cleaner-agent-plan.md): a behavior-preserving
+        # bloat reduction the client has already benchmarked and delta-gated.
+        # It swaps the trajectory-best CODE while KEEPING the recorded score
+        # (a −2% refactor must not lower the bar the next mutation has to
+        # beat), and counts as neither improvement nor stagnation. Only
+        # meaningful when there IS a parent and the refactor didn't beat it —
+        # a refactor that beats outright is just a normal improvement.
+        is_refactor = (
+            req.iteration_type == "refactor"
+            and req.feasible
+            and prev_trajectory_best is not None
+            and not beats_trajectory_best
+        )
+
         target_best_experiment_id = (
             prev_trajectory_best["experiment_id"] if prev_trajectory_best else None
         )
-        hyp_status = "succeeded" if beats_trajectory_best else "failed"
+        hyp_status = (
+            "refactor" if is_refactor
+            else "succeeded" if beats_trajectory_best else "failed"
+        )
 
         # ── Program ID: tag hypothesis with current program (per-(agent, challenge)) ──
         acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
@@ -1286,11 +1362,11 @@ async def create_iteration(req: IterationCreate):
         await conn.execute(
             """INSERT INTO hypotheses
                (id, agent_id, challenge, title, description, strategy_tag, status,
-                fingerprint, target_best_experiment_id, program_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                fingerprint, target_best_experiment_id, program_id, role, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (hyp_id, req.agent_id, challenge, req.title, req.description,
              req.strategy_tag, hyp_status, fp, target_best_experiment_id,
-             current_program_id, timestamp),
+             current_program_id, req.role, timestamp),
         )
 
         delta_vs_best_pct: float | None = None
@@ -1334,17 +1410,23 @@ async def create_iteration(req: IterationCreate):
         iter_output_tokens = req.output_tokens or 0
         iter_estimated_cost = req.estimated_cost or 0.0
 
+        algorithm_files_json = _files_json(req.algorithm_files)
+        hyperparameters_json = (
+            json.dumps(req.hyperparameters) if req.hyperparameters else None
+        )
         await conn.execute(
             """INSERT INTO experiments
                (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
+                algorithm_files, hyperparameters,
                 score, default_score, feasible,
                 challenge_metrics, notes, solution_data, track_scores,
                 delta_vs_best_pct, delta_vs_trajectory_best_pct, beats_trajectory_best,
                 trajectory_id, received_hint, inspiration_source_id,
                 inspiration_source_trajectory_id,
                 input_tokens, output_tokens, estimated_cost, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
+             algorithm_files_json, hyperparameters_json,
              req.score,
              # default_score falls back to the published score for untuned
              # iterations (where they are equal) and legacy clients that omit it.
@@ -1409,8 +1491,42 @@ async def create_iteration(req: IterationCreate):
                 updated_at=timestamp, trajectory_id=trajectory_id,
                 track_scores=track_scores_json,
                 kernel_code=req.kernel_code,
+                algorithm_files=algorithm_files_json,
                 hyperparameters=(
                     json.dumps(req.hyperparameters) if req.hyperparameters else None
+                ),
+            )
+        elif is_refactor:
+            # Neither improvement (no momentum/HPO-band credit) nor
+            # stagnation (runs_since_improvement untouched): pure
+            # bookkeeping. Swap in the lean code at the PARENT's score.
+            await db.increment_agent_challenge_counters(
+                conn, req.agent_id, challenge,
+                runs=1,
+                best_ever_score=personal_best_candidate,
+                direction=direction,
+                input_tokens=iter_input_tokens,
+                output_tokens=iter_output_tokens,
+                estimated_cost=iter_estimated_cost,
+            )
+            await db.upsert_trajectory_best(
+                conn, agent_id=req.agent_id, challenge=challenge,
+                experiment_id=exp_id,
+                algorithm_code=req.algorithm_code,
+                score=prev_trajectory_best["score"],
+                feasible=req.feasible,
+                challenge_metrics=challenge_metrics_json,
+                solution_data=solution_data_json,
+                updated_at=timestamp, trajectory_id=trajectory_id,
+                track_scores=track_scores_json,
+                kernel_code=req.kernel_code,
+                algorithm_files=algorithm_files_json,
+                # Preserve the parent's tuned config unless the client sent
+                # one: the refactor kept the Map plumbing, so the winning
+                # hyperparameters still apply to the lean code.
+                hyperparameters=(
+                    json.dumps(req.hyperparameters) if req.hyperparameters
+                    else prev_trajectory_best.get("hyperparameters")
                 ),
             )
         else:
@@ -1443,18 +1559,35 @@ async def create_iteration(req: IterationCreate):
             conn, req.agent_id, challenge, set_fields={"ever_benchmarked": 1},
         )
 
-        # Auto-harvest: a frontier agent's first feasible algorithm for a
-        # strategy_tag becomes a seed for standard/exploiter agents. The
-        # UNIQUE(challenge, strategy_tag, source) index + INSERT OR IGNORE make
-        # first-feasible-per-tag win and bound the pool (≤ one seed per tag).
+        # Auto-harvest into the seed pool: a frontier agent's feasible, SIMPLE,
+        # and structurally-NOVEL algorithm becomes a launch point for other
+        # agents. Diversity is by code similarity (server/seed_diversity.py), not
+        # strategy tags; the pool is capped at K and, when full, the most
+        # REDUNDANT seed is evicted (never the lowest-scoring) so seeds stay
+        # simple and sticky. strategy_tag is kept only as a display label.
         if req.feasible and req.algorithm_code.strip():
             if (await db.get_agent_tier(conn, req.agent_id)) == "frontier":
-                await db.insert_seed(
-                    conn, challenge, req.strategy_tag, req.algorithm_code,
-                    created_at=timestamp, source="harvested", score=req.score,
-                    feasible=True, kernel_code=req.kernel_code,
-                    origin_agent_id=req.agent_id,
+                swarm_cfg = await get_config_cached()
+                existing = await db.list_seeds(conn, challenge)
+                decision = seed_diversity.decide_admission(
+                    req.algorithm_code,
+                    [s["algorithm_code"] for s in existing],
+                    pool_size=swarm_setting(swarm_cfg, "seed_pool_size"),
+                    similarity_threshold=swarm_setting_float(
+                        swarm_cfg, "seed_similarity_threshold"),
+                    max_loc=swarm_setting(swarm_cfg, "seed_max_loc"),
                 )
+                if decision.admit:
+                    if decision.evict_index is not None:
+                        await db.evict_seed(
+                            conn, existing[decision.evict_index]["id"])
+                    await db.insert_seed(
+                        conn, challenge, req.strategy_tag, req.algorithm_code,
+                        created_at=timestamp, source="harvested", score=req.score,
+                        feasible=True, kernel_code=req.kernel_code,
+                        origin_agent_id=req.agent_id,
+                        algorithm_files=_files_json(req.algorithm_files),
+                    )
 
         await conn.commit()
 
@@ -2099,7 +2232,7 @@ async def get_trajectory_experiments(
         cursor = await conn.execute(
             f"""SELECT e.id, e.trajectory_id, e.agent_id, a.name AS agent_name,
                        e.score, e.feasible, e.beats_trajectory_best, e.notes,
-                       e.created_at, h.title, h.description, h.strategy_tag
+                       e.created_at, h.title, h.description, h.strategy_tag, h.role
                        {code_col}
                 FROM experiments e
                 LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
@@ -2124,6 +2257,7 @@ async def get_trajectory_experiments(
             "title": r["title"],
             "description": r["description"],
             "strategy_tag": r["strategy_tag"],
+            "role": r["role"],
             "created_at": r["created_at"],
         }
         if include_code:
@@ -2187,9 +2321,6 @@ async def admin_reset_challenge(req: AdminResetChallenge):
     }
 
 
-SEED_INACTIVE_SUPPORTED = ("knapsack", "satisfiability")
-
-
 @app.post("/api/admin/seed_inactive")
 async def admin_seed_inactive(req: AdminSeedInactive):
     """Insert an externally-sourced algorithm into the inactive_algorithms
@@ -2199,19 +2330,12 @@ async def admin_seed_inactive(req: AdminSeedInactive):
     branch in server.py — at which point it is removed from the pool
     (consume-once semantics).
 
-    Restricted to challenges whose mainnet algorithm format matches the
-    swarm's single-file expectation. The host-side wizard enforces the
-    same set; this is defense-in-depth so a stray curl can't seed an
-    unsupported challenge with a payload that would break adoption."""
+    Supports every challenge, single- or multi-file: `algorithm_code` is the
+    entry file and `algorithm_files` (when present) carries the full map —
+    multiple `.rs` modules and multiple `.cu` kernels, names preserved. The
+    Pydantic `ChallengeName` Literal already rejects unknown challenge names,
+    so no explicit allowlist is needed here."""
     await verify_admin(req)
-    if req.challenge not in SEED_INACTIVE_SUPPORTED:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"seed_inactive is supported for {list(SEED_INACTIVE_SUPPORTED)} "
-                f"only (got {req.challenge!r})"
-            ),
-        )
     if not req.algorithm_code.strip():
         raise HTTPException(status_code=400, detail="algorithm_code is empty")
     timestamp = now()
@@ -2219,10 +2343,25 @@ async def admin_seed_inactive(req: AdminSeedInactive):
         agent_id = await db.ensure_synthetic_agent(
             conn, req.source_label, timestamp,
         )
+        # Idempotency guard: if this source already has an unconsumed seed for
+        # the challenge, skip — re-running `setup.py create` must not pile up
+        # duplicate mainnet seeds. Consume-once means an adopted seed leaves no
+        # row, so a later create still re-seeds.
+        existing = await db.count_inactive_from_agent(
+            conn, agent_id, req.challenge,
+        )
+        if existing:
+            return {
+                "seeded": False,
+                "challenge": req.challenge,
+                "reason": "already_seeded",
+                "source": req.source_label,
+            }
         inactive_id = await db.deposit_inactive(
             conn, agent_id, req.challenge,
             req.algorithm_code, None, timestamp,
             kernel_code=req.kernel_code,
+            algorithm_files=_files_json(req.algorithm_files),
         )
         await conn.commit()
     return {
@@ -2230,6 +2369,29 @@ async def admin_seed_inactive(req: AdminSeedInactive):
         "challenge": req.challenge,
         "inactive_id": inactive_id,
         "source": req.source_label,
+    }
+
+
+@app.post("/api/admin/clear_inactive")
+async def admin_clear_inactive(req: AdminClearInactive):
+    """Empty the inactive-pool for a challenge (optionally keeping one source),
+    so agents reliably adopt a specific seed on their next reset instead of a
+    diluting mix. Point-in-time only — the pool refills as agents stagnate."""
+    await verify_admin(req)
+    async with db.connect() as conn:
+        keep_agent_id = None
+        if req.keep_source_label:
+            row = await (await conn.execute(
+                "SELECT id FROM agents WHERE name = ?", (req.keep_source_label,),
+            )).fetchone()
+            keep_agent_id = row["id"] if row else None
+        deleted = await db.clear_inactive_pool(conn, req.challenge, keep_agent_id)
+        await conn.commit()
+    return {
+        "cleared": True,
+        "challenge": req.challenge,
+        "deleted": deleted,
+        "kept_source": req.keep_source_label,
     }
 
 

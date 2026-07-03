@@ -65,6 +65,11 @@ class IterationCreate(BaseModel):
     strategy_tag: str = "other"
     algorithm_code: str = ""
     kernel_code: Optional[str] = None
+    # Full multi-file algorithm as a {relpath: content} map (keys relative to the
+    # algorithm dir; `mod.rs` is the entry). None/absent for single-file clients,
+    # where `algorithm_code` is the whole algorithm. When present it is the
+    # source of truth and `algorithm_code` holds the entry file for back-compat.
+    algorithm_files: Optional[dict] = None
     score: float
     feasible: bool = True
     notes: str = ""
@@ -75,6 +80,9 @@ class IterationCreate(BaseModel):
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     estimated_cost: Optional[float] = None
+    # The publishing agent's role at iteration time: "explorer" or "exploiter"
+    # (None for legacy clients). Stored on the hypothesis row for attribution.
+    role: Optional[str] = None
     # Winning hyperparameter config when this iteration was tuned (the `score`
     # is then the tuned score); None means the algorithm was scored at its
     # in-code defaults. When tuned this is a per-track map
@@ -87,6 +95,12 @@ class IterationCreate(BaseModel):
     # server stores this and serves it back via improvement_scores. None for
     # legacy clients — the server falls back to `score`.
     default_score: Optional[float] = None
+    # "mutation" (default) or "refactor". A refactor is a behavior-preserving
+    # bloat reduction (docs/cleaner-agent-plan.md): the server swaps the
+    # trajectory-best CODE for the leaner version but KEEPS the recorded best
+    # score (no ratchet erosion), and counts it as neither an improvement nor
+    # stagnation.
+    iteration_type: str = "mutation"
 
 
 class AdminAuth(BaseModel):
@@ -124,17 +138,38 @@ class AdminSeedInactive(AdminAuth):
     path). Used at swarm-create time to seed the pool with the current
     top-earning TIG mainnet algorithm.
 
-    Restricted server-side to {knapsack, satisfiability} — the only
-    challenges whose mainnet algorithms ship as a single mod.rs (+ optional
-    kernels.cu), which is what the `trajectory_bests` / `inactive_algorithms`
-    wire format expects today.
+    Supports every challenge, single- or multi-file. `algorithm_code` always
+    carries the entry file (`mod.rs`) for single-file/back-compat consumers;
+    `algorithm_files` carries the full {relpath: content} map (multiple `.rs`
+    and multiple `.cu` kernels, names preserved) and is the source of truth on
+    adoption when present — `_row_files` / the `adopted_inactive` branch already
+    round-trip it.
     """
     challenge: "ChallengeName"
     algorithm_code: str
     kernel_code: Optional[str] = None
+    # Full multi-file algorithm as a {relpath: content} map (keys relative to
+    # the algorithm dir; `mod.rs` is the entry). None/absent for single-file
+    # seeds, where `algorithm_code` is the whole algorithm. When present it is
+    # the source of truth and `algorithm_code` holds the entry file.
+    algorithm_files: Optional[dict] = None
     # Free-form label for the synthetic agent the pool entry is attributed
     # to (e.g. "tig-foundation"). The server creates the agent on first use.
     source_label: str = "tig-foundation"
+
+
+class AdminClearInactive(AdminAuth):
+    """Owner-only: empty the `inactive_algorithms` pool for a challenge.
+
+    Use to remove stale/diluting inactive trajectories so agents reliably adopt
+    a specific seed on their next reset. `keep_source_label` preserves entries
+    attributed to that synthetic source (e.g. a just-seeded test algorithm);
+    everything else on the challenge is deleted. Note the pool refills over time
+    as stagnating agents deposit their feasible bests, so this is a point-in-time
+    clear, not a permanent state.
+    """
+    challenge: "ChallengeName"
+    keep_source_label: Optional[str] = None
 
 
 class AdminSeedPool(AdminAuth):

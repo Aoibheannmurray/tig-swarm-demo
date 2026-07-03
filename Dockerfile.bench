@@ -1,0 +1,52 @@
+# Custom benchmark image (Option B). See tig_docker_plan.md.
+#
+#   FROM the challenge's TIG dev image (toolchain + LLVM fuel plugin + build
+#   scripts + prebuilt tig-runtime/tig-verifier; the dev image inherits the
+#   correct base — ubuntu for CPU, CUDA for GPU)
+#   + re-add the workspace source the dev image strips
+#   + bake in the swarm's modified_test_algorithm
+#   + warm the cargo cache (compile std + deps once) via the fixed algorithm slot
+#
+# Built once per (challenge × version × arch). The agent's algorithm is injected
+# at run time by overwriting the `swarm_algo` slot — see the per-algorithm flow.
+ARG CHALLENGE
+ARG VERSION=0.0.6
+FROM ghcr.io/tig-foundation/tig-monorepo/${CHALLENGE}/dev:${VERSION}
+
+# FROM resets build args — redeclare so they're usable below.
+ARG CHALLENGE
+ENV CHALLENGE=${CHALLENGE}
+
+# Re-add the workspace source the dev image deletes after building runtime/verifier
+# (build context is staged by scripts/build_bench_image.sh).
+COPY tig-source/ /app/
+WORKDIR /app
+
+# Bake the swarm's fuel-capturing tester onto PATH (tig-scripts is already on PATH
+# in the dev image).
+COPY modified_test_algorithm /usr/local/bin/tig-scripts/modified_test_algorithm
+RUN chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
+
+# Seed the fixed `swarm_algo` slot with the challenge template and warm the cargo
+# cache by compiling it once. This pre-builds std (`-Z build-std`) + every
+# dependency crate, so run-time rebuilds only recompile the injected algorithm and
+# its two wrapper crates. `build_algorithm` reads $CHALLENGE and is on PATH.
+# GPU challenges also ship a template.cu: build_algorithm calls build_ptx, which
+# globs `swarm_algo/*.cu` — copy it in so the warm build covers the PTX path too
+# (nvcc is compile-only; no GPU needed at image-build time).
+# The sed fixes a monorepo-HEAD inconsistency: the vector_search/hypergraph
+# templates declare `-> anyhow::Result<Option<Solution>>` while tig-binary's
+# entry point (and every real algorithm) expects `-> Result<()>`. The template
+# body (`Err(anyhow!(..))`) is valid under either, so rewriting the annotation
+# is safe, and the sed is a no-op once upstream fixes the templates. The slot
+# is overwritten with a real algorithm at run time anyway — this file only
+# exists to warm the cargo cache.
+RUN mkdir -p tig-algorithms/src/${CHALLENGE}/swarm_algo \
+ && cp tig-algorithms/src/${CHALLENGE}/template.rs tig-algorithms/src/${CHALLENGE}/swarm_algo/mod.rs \
+ && sed -i 's/-> anyhow::Result<Option<Solution>>/-> anyhow::Result<()>/' \
+      tig-algorithms/src/${CHALLENGE}/swarm_algo/mod.rs \
+ && if [ -f tig-algorithms/src/${CHALLENGE}/template.cu ]; then \
+      cp tig-algorithms/src/${CHALLENGE}/template.cu tig-algorithms/src/${CHALLENGE}/swarm_algo/kernels.cu; \
+    fi \
+ && printf '\npub mod swarm_algo;\n' >> tig-algorithms/src/${CHALLENGE}/mod.rs \
+ && build_algorithm swarm_algo

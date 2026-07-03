@@ -362,9 +362,9 @@ RUST RULES (the output is compiled as-is — it MUST build):
 - Available crates: `std` plus `anyhow`, `rand`, `serde`, `serde_json` (already
   in Cargo.toml). Do NOT add any OTHER crate (no rayon, itertools, ndarray, …)
   and do NOT edit `[dependencies]`.
-- KEEP the `use super::*;` import and the other `use` lines the starting file
-  relies on (e.g. `use anyhow::...;`) — dropping a needed import makes the file
-  fail to compile with `E0425: cannot find type ... in this scope`.
+- KEEP the existing `use` lines at the top of the starting file (e.g.
+  `use tig_challenges::...;`, `use anyhow::...;`) — dropping a needed import makes
+  the file fail to compile with `E0425: cannot find type ... in this scope`.
 - Keep the EXACT signatures of the harness entry-point function(s) you were
   given and don't rename them: for MOST challenges that is `fn solve_challenge(`
   (call the provided `save_solution` closure to record solutions); for
@@ -463,7 +463,7 @@ GENERAL COMPILE HYGIENE:
   suggests — do NOT rewrite the call into something else.
 - Don't introduce new generics, trait bounds, lifetimes, or macros unless the
   starting code already uses them — they are a common source of errors.
-- Reuse the data structures already imported via `use super::*;`; don't invent
+- Reuse the data structures already imported at the top of the file; don't invent
   types, constants, or functions that aren't defined. A `crate::...::NAME` path
   (or a bare name) that isn't actually declared is `E0425: cannot find
   value/function`. If you need a threshold or hyperparameter, define it as a
@@ -638,7 +638,7 @@ signature/name/visibility change is a compile error:
     ) -> Result<Vec<CudaSlice<f32>>>
 
 State — define ONE struct that implements the provided `OptimizerStateTrait`
-(in scope via `use super::*;`) and derives Clone:
+(in scope via the file's imports) and derives Clone:
 
     #[derive(Clone)]
     struct OptimizerState { /* lr, step count, momentum/variance buffers, ... */ }
@@ -747,7 +747,7 @@ You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
 {time_guidance}
 
 IMPORTANT RULES:
-- `use super::*;` must remain as the first import in the Rust file.
+- The existing `use` imports at the top of the starting file must remain.
 {entry_rule}
 - Return BOTH files: the complete Rust source AND the complete CUDA kernel source.
 - Separate them with a line containing exactly: // --- kernels.cu ---
@@ -762,9 +762,9 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
 OUTPUT FORMAT (strict):
 Your response will be written verbatim to mod.rs and compiled. The very first
-character of your response MUST be `u` from `use super::*;`. No preamble, no
+character of your response MUST be `u` from the opening `use` line. No preamble, no
 prose, no markdown fences (```), no commentary before or after the code.
-`use super::*;` must remain as the first import.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
+The starting file's `use` imports must remain.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
 
 
 def build_code_user_prompt(
@@ -821,24 +821,121 @@ def build_code_user_prompt(
     if role == "exploiter":
         parts.append(
             "\nApply ONE localized change only — preserve the rest of the code "
-            "and return the COMPLETE file (still starting with `use super::*;`)."
+            "and return the COMPLETE file (still starting with the same `use` imports)."
         )
 
     return "\n".join(parts)
+
+
+# ── Search/replace (soft edit) prompts ─────────────────────────────
+#
+# Used in API (non-agentic) mode for multi-file algorithms, exploiters, and any
+# agent with `edit_mode: search_replace`. Instead of returning whole files the
+# model emits targeted SEARCH/REPLACE blocks (parsed by scripts/search_replace).
+# Far cheaper on output tokens; the apply step is whitespace-tolerant.
+
+SEARCH_REPLACE_FORMAT = """\
+OUTPUT FORMAT (strict) — emit ONLY search/replace blocks, no prose, no fences:
+
+<<<<<<< SEARCH <relpath>
+<exact lines copied from the current file to find>
+=======
+<the replacement lines>
+>>>>>>> REPLACE
+
+Rules:
+- `<relpath>` is the file to edit (e.g. `mod.rs`, `helpers.rs`). Always include it.
+- The SEARCH text must be copied verbatim from the file shown below and be large
+  enough to match EXACTLY ONE place — include a few surrounding lines for context
+  if a snippet would otherwise be ambiguous.
+- Emit one block per distinct edit; you may emit several blocks.
+- Change ONLY what your hypothesis requires; leave everything else untouched.
+- Keep the `use tig_challenges::<challenge>::*;` import and `pub fn help()`
+  intact, and do not change the `solve_challenge` signature (or, for
+  optimizer-hook challenges, the hook signatures)."""
+
+
+def _format_files_for_prompt(files: dict) -> str:
+    parts = []
+    for path in sorted(files):
+        lang = "cuda" if path.endswith((".cu", ".cuh")) else "rust"
+        parts.append(f"### {path}\n```{lang}\n{files[path]}\n```")
+    return "\n\n".join(parts)
+
+
+def build_search_replace_system_prompt(
+    challenge_md: str, config: dict, *, role: str = "explorer",
+) -> str:
+    challenge = config.get("challenge", "unknown")
+    timeout = config.get("timeout", 30)
+    role_steer = ("\n\n" + _role_guidance(role)) if role == "exploiter" else ""
+    rust_rules = _rust_rules_block(config)
+    opt_contract = OPTIMIZER_HOOK_CONTRACT if _is_optimizer_hook_challenge(config) else ""
+    return f"""\
+You are optimizing a Rust algorithm for the "{challenge}" challenge by making
+targeted edits to its source files.
+
+{challenge_md}
+
+Per-instance time budget: {timeout} seconds.{role_steer}
+
+{SEARCH_REPLACE_FORMAT}{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
+
+
+def build_search_replace_user_prompt(
+    files: dict, hypothesis: dict, config: dict, *, role: str = "explorer",
+    omitted: list | None = None,
+) -> str:
+    title = hypothesis.get("title", "")
+    description = hypothesis.get("description", "")
+    parts = [
+        "Current algorithm source files:\n",
+        _format_files_for_prompt(files),
+    ]
+    if omitted:
+        parts.append(
+            "\nThese files also exist but are NOT shown (too large for this "
+            "request): " + ", ".join(sorted(omitted)) + ". Only emit "
+            "search/replace blocks for the files shown above."
+        )
+    parts.append(
+        f"\nApply this change as search/replace blocks:\n{title}\n{description}"
+    )
+    if role == "exploiter":
+        parts.append(
+            "\nMake ONE small, localized change — the fewest blocks that "
+            "implement the hypothesis. Do not restructure the code."
+        )
+    return "\n".join(parts)
+
+
+def build_search_replace_repair_prompt(
+    files: dict, misses_text: str, config: dict,
+) -> str:
+    return (
+        "Some of your search/replace blocks did not match the current files and "
+        "were skipped. Re-emit ONLY the failed edits, copying the SEARCH text "
+        "EXACTLY from the files below (enough lines to be unique).\n\n"
+        "Failed blocks:\n" + misses_text +
+        "\n\nCurrent files:\n" + _format_files_for_prompt(files) +
+        "\n\n" + SEARCH_REPLACE_FORMAT
+    )
 
 
 # ── Hyperparameter extraction prompts (Phase 3) ────────────────────
 #
 # A separate LLM call, made only when a candidate passes the tuning gate (see
 # docs/hyperparameter-search-plan.md). It reads the *final, compiled* mutated
-# algorithm and (1) decides which constants become tunable hyperparameters with
-# a search range, (2) suggests a few concrete configs, and (3) rewrites mod.rs
-# to read each hyperparameter from the `Map` with the in-code value as default,
-# so an empty Map reproduces the default-score behaviour exactly.
+# algorithm (ALL its files) and (1) decides which constants become tunable
+# hyperparameters with a search range, (2) suggests a few concrete configs, and
+# (3) makes each chosen constant read from the `Map` argument with the in-code
+# value as default, so an empty Map reproduces the default-score behaviour
+# exactly. The rewrite is expressed as SEARCH/REPLACE edits (multi-file aware),
+# or omitted entirely when the algorithm already applies the Map to a config.
 #
-# Response layout (mirrors the repo's "// --- kernels.cu ---" separator
-# convention): a JSON spec, the separator line below, then the full Rust source.
-HYPERPARAM_VARIANT_SEP = "// --- variant mod.rs ---"
+# Response layout: a JSON spec, then (only if code edits are needed) the
+# separator line below, then SEARCH/REPLACE blocks.
+HYPERPARAM_EDITS_SEP = "// --- hyperparameter edits ---"
 
 
 def build_hyperparameter_system_prompt(challenge_md: str, config: dict) -> str:
@@ -846,9 +943,9 @@ def build_hyperparameter_system_prompt(challenge_md: str, config: dict) -> str:
     rust_rules = _rust_rules_block(config)
     return f"""\
 You are tuning a Rust algorithm for the "{challenge}" challenge. The algorithm
-has already been written; your job is NOT to change its logic, but to expose its
-most impactful magic-number constants as searchable hyperparameters so a
-hyperparameter search can find a good configuration.
+has already been written (possibly across several files); your job is NOT to
+change its logic, but to expose its most impactful magic-number constants as
+searchable hyperparameters so a search can find a good configuration.
 
 Do TWO things:
 
@@ -860,14 +957,30 @@ Do TWO things:
    otherwise), a `type` ("float", "int", or "categorical"), and the `default`
    equal to the constant's CURRENT in-code value.
 
-2. Rewrite mod.rs so each chosen hyperparameter is read from the
-   `hyperparameters: &Option<Map<String, Value>>` argument, falling back to the
-   current in-code value when the key is absent. This rewrite MUST be
-   behaviour-preserving: with an empty or `None` map the algorithm must behave
-   EXACTLY as it does now (same defaults). Change nothing else about the logic.
+2. Make each chosen hyperparameter read from the
+   `hyperparameters: &Option<Map<String, Value>>` argument, falling back to its
+   current in-code value when the key is absent. This MUST be behaviour-
+   preserving: an empty or `None` map must reproduce today's behaviour EXACTLY.
+
+   SCOPE RULE — the Map is a function ARGUMENT, in scope ONLY at the entry
+   (`solve_challenge`, or the optimizer hooks). You CANNOT read it from a
+   module-level `const`/`static` or from a helper that isn't given it. So:
+   - If the algorithm ALREADY threads the Map into a config/params object
+     (e.g. `Config::initialize(hyperparameters, …)` that merges Map keys onto a
+     struct), and your chosen names are existing FIELDS of that object, emit NO
+     code edits at all — the spec alone suffices (the existing merge applies
+     them). Make every hyperparameter `name` exactly such a field name.
+   - Otherwise, edit the code so the values enter AT THE ENTRY and reach their
+     use site: read each from the Map into a local at the top of the entry and
+     thread it down (e.g. override a config object's fields right after it is
+     constructed), or — for a constant read directly across modules — set a
+     process-global `OnceLock<…>` at the top of the entry from the Map and read
+     it via an accessor whose fallback equals the old constant. (Exactly one
+     instance runs per process, so a process-global set once at the entry is
+     safe.) Keep edits minimal and behaviour-preserving.
 
 OUTPUT FORMAT (strict):
-First, a single JSON object (you may wrap it in a ```json fence) of the form:
+First, a single JSON object (you may wrap it in a ```json fence):
 {{
   "hyperparameters": [
     {{"name": "learning_rate", "type": "float", "range": [0.0001, 0.1], "scale": "log", "default": 0.01}},
@@ -881,20 +994,32 @@ First, a single JSON object (you may wrap it in a ```json fence) of the form:
 Every key used in a suggested config MUST be a declared hyperparameter `name`,
 and every declared hyperparameter MUST appear in every suggested config.
 
-Then, on its own line, exactly this separator:
-{HYPERPARAM_VARIANT_SEP}
+THEN:
+- If the spec alone is enough (the algorithm already applies the Map to those
+  fields), output NOTHING after the JSON.
+- Otherwise, on its own line emit exactly this separator:
+{HYPERPARAM_EDITS_SEP}
+  followed by one or more SEARCH/REPLACE blocks (across any files) in this
+  format — the SEARCH text must be copied verbatim from the files shown and
+  match exactly one place:
 
-Then the COMPLETE rewritten mod.rs as raw Rust (no markdown fences). It must
-start with `use super::*;` and compile.{rust_rules}"""
+<<<<<<< SEARCH <relpath>
+<original lines>
+=======
+<replacement lines>
+>>>>>>> REPLACE
+
+Do not output whole files or markdown fences after the separator — only blocks.{rust_rules}"""
 
 
 def build_hyperparameter_user_prompt(
-    algorithm_code: str, config: dict,
+    files: dict, config: dict,
     parent_hyperparameters: dict | None = None,
     num_suggested_configs: int = 5,
 ) -> str:
     parts: list[str] = []
-    parts.append(f"Current algorithm (mod.rs):\n```rust\n{algorithm_code}\n```")
+    parts.append("Current algorithm source files:\n")
+    parts.append(_format_files_for_prompt(files))
     if parent_hyperparameters:
         parts.append(
             "\nThe parent algorithm in this trajectory was tuned. Its winning "
@@ -908,7 +1033,9 @@ def build_hyperparameter_user_prompt(
         )
     parts.append(
         f"\nPropose the hyperparameters and exactly {num_suggested_configs} "
-        "suggested configs, then the separator, then the rewritten mod.rs."
+        "suggested configs as JSON. If the algorithm already applies the Map to "
+        "your chosen fields, output JSON only; otherwise add the separator and "
+        "SEARCH/REPLACE blocks."
     )
     return "\n".join(parts)
 
@@ -928,6 +1055,7 @@ def build_hyperparameter_agentic_prompt(
     worktree directly and drops the spec as a JSON file we read back.
     """
     algo_path = config.get("algorithm_path", "the algorithm file")
+    algo_dir = algo_path.rsplit("/", 1)[0] if "/" in algo_path else "the algorithm directory"
     parent_block = ""
     if parent_hyperparameters:
         parent_block = (
@@ -940,11 +1068,22 @@ def build_hyperparameter_agentic_prompt(
 This is a hyperparameter-extraction task, NOT a new optimization. Do not change \
 the algorithm's logic.
 
-Edit `{algo_path}` so its most impactful magic-number constants become tunable \
+Edit the algorithm's source (files under `{algo_dir}`; the entry is \
+`{algo_path}`) so its most impactful magic-number constants become tunable \
 hyperparameters read from the `hyperparameters: &Option<Map<String, Value>>` \
 argument, each falling back to its CURRENT in-code value when the key is absent. \
 The rewrite MUST be behaviour-preserving: with an empty or None map the \
 algorithm must behave EXACTLY as it does now.
+
+SCOPE RULE: the Map is a function argument, in scope ONLY at the entry \
+(`solve_challenge` / the optimizer hooks) — you cannot read it from a \
+module-level const. If the algorithm already threads the Map into a config (e.g. \
+`Config::initialize(hyperparameters, …)`) and your chosen names are existing \
+fields of that config, you need NO code edits — just write the spec. Otherwise \
+inject at the entry and thread the values to their use sites (override a config \
+object's fields after construction, or set a process-global `OnceLock` at the \
+entry and read it via an accessor whose fallback equals the old const; one \
+instance runs per process, so that is safe).
 
 Choose 2-5 constants worth tuning (a learning rate, temperature, restart count, \
 threshold, population size, …) — prefer fewer; a smaller search space is \
@@ -967,8 +1106,8 @@ suggested configs. Every key in a suggested config MUST be a declared \
 hyperparameter name, and every declared hyperparameter MUST appear in every \
 suggested config, with `default` equal to the constant's current in-code value.
 
-Finally, run `cargo check` to confirm the edited file compiles. Do not edit any \
-file other than `{algo_path}` and `{_HYPERPARAM_SPEC_RELPATH}`."""
+Finally, run `cargo check` to confirm the edited code compiles. Only edit source \
+files under `{algo_dir}` and write `{_HYPERPARAM_SPEC_RELPATH}`."""
 
 
 def _strip_code_fence(text: str, lang: str = "") -> str:
@@ -1014,22 +1153,26 @@ def _validate_hyperparameter_spec(spec: dict) -> str:
 
 
 def parse_hyperparameter_response(response: str) -> dict:
-    """Parse the extraction response into spec + variant code.
+    """Parse the extraction response into a spec + search/replace edit text.
 
-    Returns {ok, error, hyperparameters, suggested_configs, variant_code}.
+    Returns {ok, error, hyperparameters, suggested_configs, edits_text}, where
+    `edits_text` is the SEARCH/REPLACE block text after the separator (parsed by
+    scripts/search_replace), or "" for the spec-only case (Case 0 — the
+    algorithm already applies the Map to the chosen config fields).
     """
     fail = {
         "ok": False, "hyperparameters": [], "suggested_configs": [],
-        "variant_code": "",
+        "edits_text": "",
     }
-    if HYPERPARAM_VARIANT_SEP not in response:
-        return {**fail, "error": f"missing separator {HYPERPARAM_VARIANT_SEP!r}"}
-    json_part, _, code_part = response.partition(HYPERPARAM_VARIANT_SEP)
+    if HYPERPARAM_EDITS_SEP in response:
+        json_part, _, edits_text = response.partition(HYPERPARAM_EDITS_SEP)
+    else:
+        json_part, edits_text = response, ""  # spec-only (no code edits)
     json_text = _strip_code_fence(json_part)
     # The JSON may have prose around it; grab the outermost {...}.
     brace = re.search(r"\{.*\}", json_text, re.DOTALL)
     if not brace:
-        return {**fail, "error": "no JSON object found before the separator"}
+        return {**fail, "error": "no JSON spec object found"}
     try:
         spec = json.loads(brace.group(0))
     except json.JSONDecodeError as e:
@@ -1037,15 +1180,12 @@ def parse_hyperparameter_response(response: str) -> dict:
     err = _validate_hyperparameter_spec(spec)
     if err:
         return {**fail, "error": err}
-    variant_code = _strip_code_fence(code_part, "rust")
-    if "use super::*;" not in variant_code:
-        return {**fail, "error": "variant mod.rs missing `use super::*;`"}
     return {
         "ok": True,
         "error": "",
         "hyperparameters": spec["hyperparameters"],
         "suggested_configs": spec.get("suggested_configs", []),
-        "variant_code": variant_code,
+        "edits_text": edits_text.strip(),
     }
 
 
@@ -1149,7 +1289,7 @@ def build_compile_fix_system_prompt(config: dict) -> str:
     else:
         fmt = (
             "Return the COMPLETE corrected mod.rs. The very first character of your "
-            "response MUST be `u` from `use super::*;`. No markdown fences, no prose."
+            "response MUST be `u` from the opening `use` line. No markdown fences, no prose."
         )
     return f"""\
 You are fixing Rust compile errors so the file builds. The code is otherwise

@@ -66,6 +66,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -538,6 +539,151 @@ def _chown_worktree_back(image: str, cfg: dict) -> None:
     except Exception as e:
         print(f"  [BENCH] could not reclaim worktree ownership: {e}",
               file=sys.stderr)
+
+
+# ── TIG-docker benchmark path (Option B) ─────────────────────────
+#
+# Runs the agent's algorithm through the real TIG toolchain (fuel-instrumented
+# compile + tig-runtime/tig-verifier) inside the custom image, instead of the
+# swarm's own solver/evaluator. Selected by config `benchmark_backend: "tig"`
+# (or env TIG_BENCH_BACKEND=tig). See tig_docker_plan.md.
+
+DEFAULT_MAX_FUEL_BUDGET = 5_000_000_000_000  # per-challenge max_fuel_budget (5e12)
+
+
+def _tig_backend(cfg: dict) -> bool:
+    if os.environ.get("TIG_BENCH_BACKEND") == "tig":
+        return True
+    return cfg.get("benchmark_backend") == "tig" or bool(cfg.get("tig_native"))
+
+
+def _tig_version() -> str:
+    try:
+        return json.loads((ROOT_DIR / "tig_pin.json").read_text())["tig_version"]
+    except Exception:
+        return "0.0.6"
+
+
+def _tig_image(cfg: dict) -> str:
+    return f"tig-custom-image-{cfg['challenge']}:{_tig_version()}"
+
+
+def _ensure_tig_image(image: str, challenge: str) -> None:
+    """Ensure the custom TIG image exists locally, building it if missing.
+    (C3 pulls the image from the registry instead — handled in the C3 path.)"""
+    if subprocess.run(["docker", "image", "inspect", image],
+                      capture_output=True).returncode == 0:
+        return
+    print(f"TIG image '{image}' not found — building via build_bench_image.sh…",
+          file=sys.stderr)
+    build = subprocess.run(
+        ["bash", str(ROOT_DIR / "scripts" / "build_bench_image.sh"), challenge],
+    )
+    if build.returncode != 0:
+        print(f"error: TIG image build failed (exit {build.returncode}).",
+              file=sys.stderr)
+        sys.exit(build.returncode)
+
+
+def _tig_adapter(combined: dict, cfg: dict) -> dict:
+    """Reshape the driver's combined per-track JSON into benchmark.json.
+
+    Scoring policy (v1): per-track score = MEDIAN of per-nonce quality, with
+    infeasible nonces counted at the infeasible floor; overall = shifted
+    geometric mean across track medians (same combiner as the custom path).
+    """
+    challenge = combined.get("challenge", cfg["challenge"])
+    track_scores: dict[str, float] = {}
+    total = feasible_total = infeasible_total = 0
+    errors: list[str] = []
+
+    for track_key, payload in (combined.get("tracks") or {}).items():
+        if "error" in payload:
+            errors.append(f"{track_key}: {payload['error']}")
+            continue
+        recs = payload.get("nonces") or []
+        if not recs:
+            continue
+        qualities: list[float] = []
+        for r in recs:
+            total += 1
+            if r.get("feasible"):
+                feasible_total += 1
+                q = r.get("quality")
+                qualities.append(float(q) if q is not None else float(INFEASIBLE_QUALITY))
+            else:
+                infeasible_total += 1
+                qualities.append(float(INFEASIBLE_QUALITY))
+        track_scores[track_key] = statistics.median(qualities)
+
+    overall = _shifted_geomean(list(track_scores.values())) if track_scores else 0.0
+    return {
+        "challenge": challenge,
+        "score": overall,
+        "feasible": infeasible_total == 0 and feasible_total > 0,
+        "instances_solved": total,
+        "instances_feasible": feasible_total,
+        "instances_infeasible": infeasible_total,
+        "track_scores": track_scores,
+        "viz_data": None,  # v1: TIG path doesn't emit per-solution viz yet
+        "errors": errors or None,
+    }
+
+
+def run_tig_benchmark(cfg: dict) -> int:
+    """Host-side TIG benchmark: build+run the agent's algorithm in the custom
+    image and print benchmark.json. Does NOT bind-mount the worktree over /app
+    (the image already contains the pinned TIG source)."""
+    challenge = cfg["challenge"]
+    image = _tig_image(cfg)
+    _ensure_docker_daemon()
+    _ensure_tig_image(image, challenge)
+
+    algo_path = ROOT_DIR / cfg.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
+    if not algo_path.exists():
+        print(f"error: algorithm file not found at {algo_path}", file=sys.stderr)
+        return 2
+
+    tracks = cfg.get("tracks") or {}
+    seed = os.environ.get("TIG_BENCH_SEED") or str(tracks.get("seed", "test"))
+    fuel = int(cfg.get("max_fuel_budget", DEFAULT_MAX_FUEL_BUDGET))
+    hp = os.environ.get("TIG_HYPERPARAMETERS") or "null"
+    driver = ROOT_DIR / "scripts" / "tig_bench_driver.py"
+    # Mount the algorithm DIRECTORY over the slot so GPU challenges' kernels
+    # (`*.cu`, required by build_ptx) ride along with mod.rs. CPU algorithm dirs
+    # contain only mod.rs, so this is equivalent there.
+    algo_dir = algo_path.parent
+    slot_dir = f"/app/tig-algorithms/src/{challenge}/swarm_algo"
+    track_counts = {k: v for k, v in tracks.items() if k != "seed"}
+
+    gpu_flags = ["--gpus", "all"] if is_gpu_challenge(cfg) else []
+    cmd = [
+        "docker", "run", "--rm", *gpu_flags,
+        "-v", f"{algo_dir}:{slot_dir}:ro",
+        "-v", f"{driver}:/usr/local/bin/tig_bench_driver.py:ro",
+        "-e", f"TIG_TRACKS={json.dumps(track_counts)}",
+        "-e", f"TIG_SEED={seed}",
+        "-e", f"TIG_FUEL={fuel}",
+        "-e", f"TIG_HYPERPARAMETERS={hp}",
+        image, "python3", "/usr/local/bin/tig_bench_driver.py",
+    ]
+    print(f"Benchmarking {challenge} via TIG docker ({image})…", file=sys.stderr)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.stderr:
+        print(proc.stderr[-4000:], file=sys.stderr)
+    if proc.returncode != 0:
+        print(f"error: TIG benchmark container exited {proc.returncode}", file=sys.stderr)
+        return proc.returncode
+    # The driver prints exactly one JSON object on stdout (take last non-empty line).
+    line = next((ln for ln in reversed(proc.stdout.splitlines()) if ln.strip()), "")
+    try:
+        combined = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"error: driver output not JSON:\n{proc.stdout[-500:]}", file=sys.stderr)
+        return 1
+    out = _tig_adapter(combined, cfg)
+    print(json.dumps(out, indent=2))
+    return 0
 
 
 # ── GPU build & run (native — always called from inside Docker) ──
@@ -1355,6 +1501,12 @@ def main() -> int:
         f"synced_at={synced}).",
         file=sys.stderr,
     )
+
+    # TIG-docker backend: self-contained host-side orchestration (its own image
+    # + container), not the swarm's re-exec-into-/app path. Branch before the
+    # _INSIDE_DOCKER / _reexec logic so the custom path is untouched.
+    if _tig_backend(cfg):
+        return run_tig_benchmark(cfg)
 
     if not _INSIDE_DOCKER:
         return _reexec_in_docker(cfg)

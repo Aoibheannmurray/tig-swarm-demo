@@ -15,7 +15,7 @@ Usage:
     python scripts/run_loop.py --provider openai --model gpt-4o
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
-    python scripts/run_loop.py --provider anthropic --compute c3 --hardware l40
+    python scripts/run_loop.py --provider anthropic --compute c3 --hardware auto
     python scripts/run_loop.py --provider anthropic --compute c3 --env rust:1-bookworm
     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
@@ -57,6 +57,7 @@ import argparse
 import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,9 +89,11 @@ def _read_json(path: Path) -> dict:
 
 from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
+import challenge_files
+import cleaner_prepass
 from challenge_files import (
     ChallengeFiles,
-    ensure_super_import,
+    ensure_challenge_import,
     is_stub_code,
     read_challenge_md,
     validate_code,
@@ -117,6 +120,9 @@ from prompts import (
     build_redescribe_hypothesis_prompt,
     build_redescribe_system_prompt,
     build_runtime_fix_prompt,
+    build_search_replace_repair_prompt,
+    build_search_replace_system_prompt,
+    build_search_replace_user_prompt,
     build_tacit_distillation_prompts,
     parse_hypothesis,
     parse_tacit_distillation,
@@ -124,6 +130,7 @@ from prompts import (
 import prompts as _prompts
 import agentic_backends
 import agentic_sandbox
+import search_replace
 import hpo
 from c3_compute import run_benchmark_c3
 
@@ -289,6 +296,9 @@ def _run_benchmark_local(
         return None, "Benchmark output was not valid JSON"
 
 
+_BENCH_HEARTBEAT_INTERVAL_S = 300
+
+
 def run_benchmark(
     args: argparse.Namespace, config: dict, server: str,
     seed: str | None = None, hyperparameters: str | None = None,
@@ -299,32 +309,357 @@ def run_benchmark(
     non-test seed). `hyperparameters` is a JSON string forwarded to the solver
     as --hyperparameters; None means the solver uses its in-code defaults (the
     "default score").
+
+    A benchmark can block for well past the server's `inactive_minutes`
+    trajectory TTL (many instances x a multi-minute timeout each), so a
+    background heartbeat keeps `last_active_at` fresh for the duration —
+    otherwise the server reaps the trajectory mid-benchmark and the publish
+    lands on a fresh one.
     """
-    if args.compute == "local":
-        return _run_benchmark_local(seed, hyperparameters)
-    if args.compute == "c3":
-        return run_benchmark_c3(
-            args, config, server, seed=seed, hyperparameters=hyperparameters
+    agent_id = config.get("agent_id")
+    agent_token = config.get("agent_token")
+    hb_stop = None
+    if agent_id and agent_token:
+        hb_stop = _start_heartbeat_thread(
+            server, agent_id, agent_token,
+            interval_s=_BENCH_HEARTBEAT_INTERVAL_S, label="BENCH",
         )
-    return None, f"Unknown compute provider: {args.compute}"
+    try:
+        if args.compute == "local":
+            return _run_benchmark_local(seed, hyperparameters)
+        if args.compute == "c3":
+            return run_benchmark_c3(
+                args, config, server, seed=seed, hyperparameters=hyperparameters
+            )
+        return None, f"Unknown compute provider: {args.compute}"
+    finally:
+        if hb_stop is not None:
+            hb_stop.set()
 
 
 # ── Extracted iteration helpers ────────────────────────────────────
+
+
+def _use_search_replace(role: str, file_map: dict, config: dict) -> bool:
+    """Whether this API-mode iteration should edit via search/replace rather
+    than full-file replacement. True when any of:
+      - exploiter role (exploiters always make localized search/replace edits),
+      - the algorithm spans multiple files (whole-file rewrites are wasteful /
+        often impossible within token limits),
+      - the agent opted in via `edit_mode: search_replace` in its config.
+    Single-file explorers default to full-file replacement (edit_mode 'full').
+
+    Never used when there's nothing concrete to edit (empty / stub algorithm):
+    a bootstrap must full-write a complete implementation, not patch a stub.
+    """
+    if not isinstance(file_map, dict) or not file_map:
+        return False
+    # A lone stub file can't be search/replaced — that's a bootstrap.
+    if len(file_map) == 1 and is_stub_code(next(iter(file_map.values()))):
+        return False
+    if role == "exploiter":
+        return True
+    if len(file_map) > 1:
+        return True
+    return str(config.get("edit_mode") or "").strip().lower() == "search_replace"
+
+
+# Bounded LLM repair rounds for search/replace blocks that don't match. After
+# these, any still-unmatched blocks are skipped (the compile-fix loop catches
+# anything that breaks the build).
+_SR_REPAIR_ROUNDS = 2
+
+# Consecutive no-edit search/replace skips before the loop forces a full rewrite
+# to break the stall (see the main loop). Keeps occasional S/R misses cheap while
+# stopping a plateaued agent from spinning forever without ever publishing.
+_SR_SKIP_FALLBACK = 3
+
+# Char budget for the algorithm files inlined into a search/replace prompt.
+# Multi-file algorithms can grow far past any model's context window (a 2.5MB
+# six-file map produced a ~1M-token prompt that every provider rejects, which
+# then stalls the agent into the risky full-rewrite fallback). When the map
+# exceeds the budget, show the entry file plus the files the hypothesis
+# actually targets and name the rest without contents. ~600k chars ≈ 150k
+# tokens — safely inside claude-code's 1M-token request limit even with its
+# ~400k tokens of system/tool overhead, and inside a 200k-token API context.
+_SR_PROMPT_CHAR_BUDGET = 600_000
+
+
+# ── Cleaner: deterministic bloat reduction (docs/cleaner-agent-plan.md) ──
+#
+# When the trajectory best outgrows `cleaner_trigger_chars`, one iteration is
+# spent running the Tier-0 pre-pass (cleaner_prepass.py — duplicate-file merge
+# + unreachable-file removal, no LLM), benchmarking the result, and — if the
+# score sits within `cleaner_score_delta_pct` of the parent and the size
+# dropped to ≤ `cleaner_target_pct` of the original — publishing it as an
+# `iteration_type="refactor"`: the server swaps in the lean code but keeps the
+# parent's score (no ratchet erosion), counting neither improvement nor
+# stagnation. All knobs are host-tunable via fleet.config.json.
+_CLEANER_TRIGGER_CHARS = 500_000
+_CLEANER_TARGET_PCT = 60
+_CLEANER_SCORE_DELTA_PCT = 2.0
+_CLEANER_COOLDOWN_ITERS = 15
+# Above this fraction of the trigger, prompts get a "prefer size-reducing
+# edits" warning — bloat prevented is a benchmark never spent.
+_CLEANER_WARN_FRACTION = 0.8
+
+
+def _cleaner_size_warning(file_map: dict, config: dict) -> str:
+    """One-line prompt warning when the algorithm nears the cleaner trigger."""
+    total = sum(len(v) for v in file_map.values())
+    trigger = int(config.get("cleaner_trigger_chars", _CLEANER_TRIGGER_CHARS))
+    if total <= trigger * _CLEANER_WARN_FRACTION:
+        return ""
+    return (
+        f"\nNOTE: this algorithm is {total} chars of source — approaching the "
+        f"size limit ({trigger}). Prefer edits that REDUCE duplication; never "
+        f"clone a module or file to create a variant."
+    )
+
+
+def _score_within_delta(
+    direction: str, score: float, parent: float, delta_pct: float,
+) -> bool:
+    """Direction-aware 'refactor kept the score' check. The delta is a noise
+    allowance for time-budgeted anytime solvers, not a quality budget."""
+    d = abs(delta_pct) / 100.0
+    if direction == "min":
+        return score <= parent * (1 + d) if parent >= 0 else score <= parent * (1 - d)
+    return score >= parent * (1 - d) if parent >= 0 else score >= parent * (1 + d)
+
+
+def _run_cleaner_iteration(
+    args: argparse.Namespace, config: dict, server: str,
+    files: ChallengeFiles, state: dict,
+    agent_id: str, agent_token: str | None, role: str,
+) -> bool:
+    """One cleaner iteration: pre-pass → benchmark → delta gate → publish.
+
+    Returns True if a refactor was published (the caller `continue`s); False
+    when there was nothing to clean or the gate rejected — the original files
+    are restored and the caller proceeds with a normal iteration.
+    """
+    file_map = files.read_files()
+    old_size = cleaner_prepass.total_chars(file_map)
+    entry = challenge_files.entry_name(config)
+    new_map, actions = cleaner_prepass.run_prepass(file_map, entry)
+    new_size = cleaner_prepass.total_chars(new_map)
+    target_pct = float(config.get("cleaner_target_pct", _CLEANER_TARGET_PCT))
+    if not actions:
+        print("  [CLEANER] pre-pass found nothing mechanical to remove — skipping")
+        return False
+    if new_size > old_size * target_pct / 100.0:
+        print(f"  [CLEANER] pre-pass only reached {new_size}/{old_size} chars "
+              f"(target ≤{target_pct:.0f}%) — not worth a benchmark, skipping")
+        return False
+
+    parent = _clean_score(state.get("current_trajectory_best"))
+    if parent is None:
+        print("  [CLEANER] no parent trajectory score to compare against — skipping")
+        return False
+
+    print(f"  [CLEANER] pre-pass: {old_size} → {new_size} chars "
+          f"({len(actions)} action(s)):")
+    for a in actions:
+        print(f"  [CLEANER]   - {a}")
+    files.write_files(new_map)
+    print("  [CLEANER] benchmarking the lean code…")
+    bench, err = run_benchmark(args, config, server)
+
+    delta_pct = float(config.get("cleaner_score_delta_pct", _CLEANER_SCORE_DELTA_PCT))
+    direction = str(config.get("scoring_direction", "max"))
+    score = (bench or {}).get("score")
+    ok = (
+        bench is not None
+        and bench.get("feasible", False)
+        and score is not None
+        and _score_within_delta(direction, score, parent, delta_pct)
+    )
+    if not ok:
+        why = (f"benchmark failed: {err[:200]}" if bench is None
+               else f"score {score} outside ±{delta_pct}% of parent {parent} "
+                    f"(or infeasible)")
+        print(f"  [CLEANER] REJECTED — {why}; restoring original files")
+        files.write_files(file_map)
+        return False
+
+    print(f"  [CLEANER] ACCEPTED — score {score:.0f} within {delta_pct}% of "
+          f"parent {parent:.0f}; publishing refactor")
+    hyp = {
+        "title": f"refactor: bloat reduction {old_size//1000}k → {new_size//1000}k chars",
+        "description": "Deterministic cleaner pre-pass (no LLM): " + "; ".join(actions),
+        "strategy_tag": "other",
+        "notes": "behavior-preserving; server keeps the parent score",
+    }
+    try:
+        publish_results(
+            server, agent_id, bench, hyp, config,
+            agent_token=agent_token, role=role, iteration_type="refactor",
+        )
+    except Exception as e:
+        print(f"  [CLEANER] publish FAILED: {e} — restoring original files")
+        files.write_files(file_map)
+        return False
+    return True
+
+
+def _sr_prompt_file_subset(
+    file_map: dict, hypothesis: dict, config: dict,
+) -> tuple[dict, list[str]]:
+    """Choose which files to inline in the S/R prompt, under a char budget.
+
+    Returns (subset_map, omitted_names). The whole map is returned when it
+    fits. Otherwise: the entry file is always shown; files whose name (or
+    "t<NN>" shorthand, e.g. "T48" for track_t48.rs) appears in the hypothesis
+    are shown next — at least one even if it alone busts the budget, since the
+    model cannot edit a file it cannot see; any remaining room is filled
+    smallest-file-first.
+    """
+    budget = int(config.get("sr_prompt_char_budget", _SR_PROMPT_CHAR_BUDGET))
+    if sum(len(v) for v in file_map.values()) <= budget:
+        return dict(file_map), []
+
+    hyp_text = (
+        f"{hypothesis.get('title', '')} {hypothesis.get('description', '')}"
+    ).lower()
+
+    def _mentioned(name: str) -> bool:
+        stem = Path(name).stem.lower()
+        if stem in hyp_text:
+            return True
+        m = re.search(r"(\d+)$", stem)
+        return bool(m) and bool(re.search(rf"\bt{m.group(1)}\b", hyp_text))
+
+    entry = challenge_files.entry_name(config)
+    keep: dict = {}
+    used = 0
+    if entry in file_map:
+        keep[entry] = file_map[entry]
+        used += len(file_map[entry])
+    for name in sorted(n for n in file_map if n not in keep and _mentioned(n)):
+        # Guarantee at least one hypothesis-targeted file is visible.
+        if used + len(file_map[name]) <= budget or len(keep) <= 1:
+            keep[name] = file_map[name]
+            used += len(file_map[name])
+    for name, code in sorted(file_map.items(), key=lambda kv: len(kv[1])):
+        if name not in keep and used + len(code) <= budget:
+            keep[name] = code
+            used += len(code)
+    return keep, [n for n in file_map if n not in keep]
+
+
+def _generate_code_search_replace(
+    args: argparse.Namespace, model: str, api_key: str,
+    state: dict, hypothesis: dict, config: dict,
+    challenge_md: str, files: ChallengeFiles,
+    *, role: str,
+) -> tuple[str | None, str | None, int, int]:
+    """Mutate the algorithm with soft SEARCH/REPLACE edits.
+
+    Reads the current files-map from disk (seeded with the best at loop top),
+    asks the model for blocks, applies them (fuzzy match), runs a bounded repair
+    pass on misses, skips whatever still won't match, then writes the edited map
+    back to disk. Returns (entry_code, kernel, input_tokens, output_tokens).
+    """
+    input_tokens = output_tokens = 0
+    file_map = files.read_files()
+    if not file_map:
+        print("  [SR] No files on disk to edit — skipping")
+        return None, None, 0, 0
+
+    prompt_map, omitted = _sr_prompt_file_subset(file_map, hypothesis, config)
+    if omitted:
+        shown_chars = sum(len(v) for v in prompt_map.values())
+        print(f"  [SR] prompt budget: inlining {len(prompt_map)}/{len(file_map)} "
+              f"files ({shown_chars} chars); omitted: {', '.join(omitted)}")
+
+    system = build_search_replace_system_prompt(challenge_md, config, role=role)
+    user = build_search_replace_user_prompt(
+        prompt_map, hypothesis, config, role=role, omitted=omitted,
+    ) + _cleaner_size_warning(file_map, config)
+    print(f"  [SR] Generating search/replace edits via {args.provider}/{model}…")
+
+    applied_any = False
+    for round_i in range(_SR_REPAIR_ROUNDS + 1):
+        try:
+            response, usage = _call_llm_logged(
+                "code", config, args.provider, model, api_key, system, user, args.api_base,
+            )
+            input_tokens += usage["input_tokens"]
+            output_tokens += usage["output_tokens"]
+        except Exception as e:
+            print(f"  [SR] generation failed: {e}")
+            break
+
+        blocks = search_replace.parse_blocks(response)
+        if not blocks:
+            print("  [SR] model returned no search/replace blocks")
+            break
+
+        file_map, misses = search_replace.apply_blocks(file_map, blocks)
+        applied = len(blocks) - len(misses)
+        applied_any = applied_any or applied > 0
+        print(f"  [SR] applied {applied}/{len(blocks)} blocks"
+              + (f", {len(misses)} unmatched" if misses else ""))
+        if not misses:
+            break
+        if round_i < _SR_REPAIR_ROUNDS:
+            print(f"  [SR] repair round {round_i + 1}/{_SR_REPAIR_ROUNDS}…")
+            # Same budget subset, re-read from the post-apply map so the
+            # repair sees applied edits without re-inlining omitted files.
+            user = build_search_replace_repair_prompt(
+                {k: file_map[k] for k in prompt_map if k in file_map},
+                search_replace.format_misses(misses), config
+            )
+        else:
+            print(f"  [SR] skipping {len(misses)} still-unmatched block(s)")
+
+    if not applied_any:
+        print("  [SR] no edits applied — skipping iteration")
+        return None, None, input_tokens, output_tokens
+
+    entry_code = ensure_challenge_import(
+        file_map.get(files.entry_name, ""), config["challenge"]
+    )
+    file_map[files.entry_name] = entry_code
+    violation = validate_code(entry_code, config)
+    if violation:
+        print(f"  [SR] validation failed after edits: {violation} — skipping")
+        return None, None, input_tokens, output_tokens
+
+    files.write_files(file_map)
+    kernel_name = Path(config["kernel_path"]).name if config.get("kernel_path") else ""
+    kernel = file_map.get(kernel_name, "") if kernel_name else ""
+    print(f"  [SR] wrote {len(file_map)} file(s)")
+    return entry_code, kernel, input_tokens, output_tokens
 
 
 def _generate_code(
     args: argparse.Namespace, model: str, api_key: str,
     state: dict, hypothesis: dict, config: dict,
     challenge_md: str, files: ChallengeFiles,
-    *, role: str = "explorer",
+    *, role: str = "explorer", force_full: bool = False,
 ) -> tuple[str | None, str | None, int, int]:
     """LLM code generation with retry on validation failure.
 
     Role only steers the prompt guidance (explorer vs exploiter); it no longer
-    gates the candidate on similarity to the starting code.
+    gates the candidate on similarity to the starting code. Exploiters,
+    multi-file algorithms, and `edit_mode: search_replace` agents go through the
+    soft search/replace path; everyone else does full-file replacement.
+
+    `force_full=True` bypasses the search/replace path and always does a full
+    rewrite — the loop uses this to break out of a run of no-edit S/R skips (the
+    model kept returning no blocks), so the agent produces *something*, publishes,
+    and advances the server-side stagnation reset instead of spinning forever.
 
     Returns (code, kernel, input_tokens, output_tokens).
     """
+    if not force_full and _use_search_replace(role, files.read_files(), config):
+        return _generate_code_search_replace(
+            args, model, api_key, state, hypothesis, config,
+            challenge_md, files, role=role,
+        )
+
     input_tokens = 0
     output_tokens = 0
     max_attempts = 3
@@ -514,38 +849,69 @@ def _benchmark_with_compile_fix(
 
 def _hpo_gate_open(
     config: dict, default_bench: dict, improvement_scores: list[float],
+    has_tuned: bool,
 ) -> bool:
     """Should this candidate be hyperparameter-tuned? (see the plan doc)
 
-    Gate: the trajectory has had >= min_improvements improvements AND the
-    candidate's default score is within the band (>= the min_improvements-th-
-    previous best improvement) AND the candidate is feasible. Both CPU and GPU
-    solver paths accept --hyperparameters, so GPU challenges tune too.
+    Available to BOTH roles. The candidate must be feasible. Then:
+      - the FIRST time a trajectory is eligible (`has_tuned` is False), it must
+        have had >= first_tune_improvements improvements (a higher bar, so the
+        trajectory is well established before any HPO budget is spent); the
+        gate then opens automatically — the band check is skipped that once;
+      - thereafter the trajectory needs only >= min_improvements improvements,
+        and the candidate's default score must fall strictly inside the
+        tune band: better than the min_improvements-th-previous improvement
+        (`improvement_scores[-min_improvements]`, the floor) AND worse than the
+        parent (`improvement_scores[-1]`, the latest improvement). The point is
+        to spend HPO budget only on "near-miss" candidates — ones that made real
+        progress but haven't beaten the parent — where tuning might push them
+        over. A candidate already at/above the parent is a win on its own; one
+        at/below the floor has regressed too far.
+    "Better"/"worse" respect `scoring_direction` (max: higher is better; min:
+    lower is better), so the band is correct for both. Both CPU and GPU solver
+    paths accept --hyperparameters, so GPU tunes too.
     """
     min_improvements = int(config.get("hpo_min_improvements", 4))
+    first_tune_improvements = int(config.get("hpo_first_tune_improvements", 10))
+    direction = str(config.get("scoring_direction", "max"))
     score = default_bench.get("score")
     if score is None or not default_bench.get("feasible", False):
         return False
+    if not has_tuned:
+        if len(improvement_scores) < first_tune_improvements:
+            return False
+        print(f"  [HPO] gate open: first tune for this trajectory "
+              f"({len(improvement_scores)} improvements) — band check waived")
+        return True
     if len(improvement_scores) < min_improvements:
         return False
+
+    def _better(a: float, b: float) -> bool:  # a strictly better than b
+        return a < b if direction == "min" else a > b
+
+    parent_score = improvement_scores[-1]
     band_floor = improvement_scores[-min_improvements]
-    if score < band_floor:
-        print(f"  [HPO] gate closed: default score {score:.0f} below band floor "
-              f"{band_floor:.0f} (last {min_improvements} improvements)")
+    if not (_better(score, band_floor) and _better(parent_score, score)):
+        print(f"  [HPO] gate closed: default score {score:.0f} outside tune band "
+              f"(must be better than floor {band_floor:.0f} and worse than parent "
+              f"{parent_score:.0f}; direction={direction})")
         return False
+    print(f"  [HPO] gate open: score {score:.0f} in tune band "
+          f"(floor {band_floor:.0f}, parent {parent_score:.0f}; direction={direction})")
     return True
 
 
 def _extract_hyperparameters_api(
     args: argparse.Namespace, model: str, api_key: str,
-    config: dict, challenge_md: str, algorithm_code: str,
+    config: dict, challenge_md: str, file_map: dict,
     parent_hyperparameters: dict | None, num_suggested: int,
 ) -> tuple[dict | None, int, int]:
     """Extraction via a single structured completion (API / CLI providers).
 
-    Returns (parsed | None, input_tokens, output_tokens) where parsed is the
-    `parse_hyperparameter_response` dict (hyperparameters / suggested_configs /
-    variant_code).
+    Reads ALL algorithm files, asks for a spec + (optional) SEARCH/REPLACE edits,
+    and applies the edits over the files-map. Returns (parsed | None, in, out)
+    where parsed has hyperparameters / suggested_configs / algorithm_files (the
+    edited map; == input map for the spec-only Case 0).
     """
     try:
         response, usage = _call_llm_logged(
@@ -553,7 +919,7 @@ def _extract_hyperparameters_api(
             args.provider, model, api_key,
             _prompts.build_hyperparameter_system_prompt(challenge_md, config),
             _prompts.build_hyperparameter_user_prompt(
-                algorithm_code, config, parent_hyperparameters, num_suggested,
+                file_map, config, parent_hyperparameters, num_suggested,
             ),
             args.api_base,
         )
@@ -564,7 +930,30 @@ def _extract_hyperparameters_api(
     if not parsed["ok"]:
         print(f"  [HPO] extraction parse failed: {parsed['error']}")
         return None, usage["input_tokens"], usage["output_tokens"]
-    return parsed, usage["input_tokens"], usage["output_tokens"]
+
+    new_map = dict(file_map)
+    edits_text = parsed.get("edits_text", "")
+    if edits_text:
+        blocks = search_replace.parse_blocks(edits_text)
+        if not blocks:
+            print("  [HPO] extraction emitted edits but no parseable blocks — skipping")
+            return None, usage["input_tokens"], usage["output_tokens"]
+        new_map, misses = search_replace.apply_blocks(new_map, blocks)
+        if misses:
+            # A partial apply can break the empty-Map==default invariant, so a
+            # miss is fatal for the tune (the build/score guard would otherwise
+            # accept a half-rewritten variant).
+            print(f"  [HPO] {len(misses)} extraction edit(s) did not match — skipping tune")
+            return None, usage["input_tokens"], usage["output_tokens"]
+    else:
+        print("  [HPO] spec-only extraction (no code edits — config already Map-aware)")
+
+    return {
+        "ok": True, "error": "",
+        "hyperparameters": parsed["hyperparameters"],
+        "suggested_configs": parsed["suggested_configs"],
+        "algorithm_files": new_map,
+    }, usage["input_tokens"], usage["output_tokens"]
 
 
 def _extract_hyperparameters_agentic(
@@ -584,18 +973,11 @@ def _extract_hyperparameters_agentic(
         print("  [HPO] agentic extraction unavailable (no backend/worktree)")
         return None, 0, 0
     # Seed the worktree with the EXACT algorithm that produced default_bench
-    # (the main checkout) before the agent edits it. The worktree copy can be
-    # stale — e.g. a runtime-error fix this iteration was applied to the main
-    # checkout, not the worktree — so without this the variant would be built
-    # from pre-fix code.
-    main_code, main_kernel = files.read()
-    algo_path = workdir / config["algorithm_path"]
-    algo_path.parent.mkdir(parents=True, exist_ok=True)
-    algo_path.write_text(main_code, encoding="utf-8")
-    if files.is_gpu and config.get("kernel_path") and main_kernel:
-        kp = workdir / config["kernel_path"]
-        kp.parent.mkdir(parents=True, exist_ok=True)
-        kp.write_text(main_kernel, encoding="utf-8")
+    # (the main checkout) before the agent edits it — ALL files, multi-file
+    # aware. The worktree copy can be stale (e.g. a runtime-error fix this
+    # iteration was applied to the main checkout, not the worktree), so without
+    # this the variant would be built from pre-fix code.
+    challenge_files.write_files(files.read_files(), config, base=workdir)
     agentic_sandbox.reset_hyperparameter_spec(workdir)
     backend.prepare(workdir, challenge_md, config, extraction=True)
     prompt = _prompts.build_hyperparameter_agentic_prompt(
@@ -620,15 +1002,19 @@ def _extract_hyperparameters_agentic(
     if err:
         print(f"  [HPO] agentic spec invalid: {err} — skipping tune")
         return None, 0, 0
-    variant_code, _variant_kernel = _read_worktree_files(workdir, files, config)
-    if not variant_code or "use super::*;" not in variant_code:
+    new_map = _read_worktree_map(workdir, config)
+    entry = new_map.get(challenge_files.entry_name(config), "")
+    # Accept the mainnet anchor (current) or legacy `use super::*;` (pre-parity
+    # trajectories not yet migrated by ensure_challenge_import).
+    _anchor = f"use tig_challenges::{config['challenge']}::*;"
+    if not entry or (_anchor not in entry and "use super::*;" not in entry):
         print("  [HPO] worktree variant missing/invalid — skipping tune")
         return None, 0, 0
     return {
         "ok": True, "error": "",
         "hyperparameters": spec["hyperparameters"],
         "suggested_configs": spec.get("suggested_configs", []),
-        "variant_code": variant_code,
+        "algorithm_files": new_map,
     }, 0, 0
 
 
@@ -638,6 +1024,7 @@ def _maybe_tune_hyperparameters(
     files: ChallengeFiles, challenge_md: str,
     default_bench: dict, improvement_scores: list[float],
     parent_hyperparameters: dict | None,
+    has_tuned: bool = False,
     backend: "agentic_backends.AgenticBackend | None" = None,
     workdir: "Path | None" = None,
 ) -> tuple[dict, dict | None, int, int]:
@@ -654,7 +1041,7 @@ def _maybe_tune_hyperparameters(
     """
     in_tok = 0
     out_tok = 0
-    if not _hpo_gate_open(config, default_bench, improvement_scores):
+    if not _hpo_gate_open(config, default_bench, improvement_scores, has_tuned):
         return default_bench, None, in_tok, out_tok
 
     num_suggested = int(config.get("hpo_num_suggested_configs", 5))
@@ -663,12 +1050,14 @@ def _maybe_tune_hyperparameters(
     default_score = default_bench.get("score")
     print(f"  [HPO] gate open — tuning (N={n}, suggested={num_suggested}, seed='{hpo_seed}')")
 
-    original_code, original_kernel = files.read()
+    # Snapshot ALL algorithm files so any failure path restores the exact
+    # pre-tuning state (multi-file aware).
+    original_map = files.read_files()
 
     # 1. Extraction: which constants become hyperparameters (with ranges +
-    #    suggested configs) and a behaviour-preserving variant of mod.rs.
-    #    Agentic providers do this as a second agent pass (Fix 1); everyone else
-    #    via a single structured completion.
+    #    suggested configs) and a behaviour-preserving variant (the full
+    #    files-map, multi-file aware). Agentic providers do this as a second
+    #    agent pass (Fix 1); everyone else via a single structured completion.
     if args.provider in _AGENTIC_PROVIDERS:
         parsed, ei, eo = _extract_hyperparameters_agentic(
             args, backend, workdir, files, config, challenge_md,
@@ -677,7 +1066,7 @@ def _maybe_tune_hyperparameters(
     else:
         parsed, ei, eo = _extract_hyperparameters_api(
             args, model, api_key, config, challenge_md,
-            original_code, parent_hyperparameters, num_suggested,
+            original_map, parent_hyperparameters, num_suggested,
         )
     in_tok += ei
     out_tok += eo
@@ -686,12 +1075,14 @@ def _maybe_tune_hyperparameters(
         return default_bench, None, in_tok, out_tok
     print(f"  [HPO] hyperparameters: {[h['name'] for h in parsed['hyperparameters']]}")
 
-    # 2. Write the variant and build/smoke-test it on the HPO seed (default
-    #    config), with LLM compile-fix retries.
-    files.write(parsed["variant_code"], original_kernel)
-    if validate_code(parsed["variant_code"], config):
+    # 2. Write the variant (full map) and build/smoke-test it on the HPO seed
+    #    (default config), with LLM compile-fix retries.
+    variant_map = parsed["algorithm_files"]
+    files.write_files(variant_map)
+    entry_code = variant_map.get(files.entry_name, "")
+    if validate_code(entry_code, config):
         print("  [HPO] variant failed validation — restoring, skipping tune")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
     compile_bench, build_err, _changed, ci, co = _benchmark_with_compile_fix(
         args, model, api_key, config, server, files,
@@ -701,7 +1092,7 @@ def _maybe_tune_hyperparameters(
     out_tok += co
     if compile_bench is None:
         print(f"  [HPO] variant build failed: {build_err[:200]} — restoring, skipping tune")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
 
     # 3. Random search on the (non-test) HPO seed.
@@ -712,37 +1103,43 @@ def _maybe_tune_hyperparameters(
         benchmark_fn, parsed["hyperparameters"], parsed["suggested_configs"],
         n=n, num_suggested=num_suggested, hpo_seed=hpo_seed, log=print,
     )
+
     winning = result["winning_configs"]  # {track_key: config} — a winner per track
     if not winning:
         print("  [HPO] search produced no per-track winners — keeping default")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
 
-    # 4. Score the per-track winners on the TEST seed (each track's instances run
-    #    under that track's winning config — benchmark.py selects per track from
-    #    the map). Keep them only if the aggregate tuned score strictly beats the
-    #    default there: search ran on a different seed, so the "default is in the
-    #    set" guarantee doesn't transfer. The keep/revert is one global decision
-    #    over the whole per-track map (not per track), preserving
-    #    tuned_score >= default_score with a single bit of test-seed selection.
+    # 4. Adopt the per-track winning map as the trajectory's new default
+    #    hyperparameters and score the variant on the TEST seed under that map
+    #    (benchmark.py selects each track's config per instance). The tuned score
+    #    is published UNCONDITIONALLY — no "must beat the default" revert. The
+    #    only safety is feasibility: an infeasible/missing tuned result can't be
+    #    published (it would tank the trajectory), so we fall back to the default
+    #    in that case. Because the default config {} is in every track's search
+    #    set, each track's winner is >= default on the HPO seed; a tuned score
+    #    below the untuned default can only arise from the test-vs-HPO seed
+    #    mismatch, and per the design we accept that.
     tuned_bench, terr = run_benchmark(
         args, config, server, hyperparameters=json.dumps(winning),
     )
     if tuned_bench is None:
         print(f"  [HPO] final test-seed benchmark failed: {terr[:200]} — restoring, using default")
-        files.write(original_code, original_kernel)
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
 
     tuned_score = tuned_bench.get("score")
     tuned_feasible = bool(tuned_bench.get("feasible", False))
-    if tuned_score is None or not tuned_feasible or tuned_score <= default_score:
-        print(f"  [HPO] tuned score {tuned_score} did not beat default {default_score:.0f} "
-              "on the test seed — keeping default")
-        files.write(original_code, original_kernel)
+    if tuned_score is None or not tuned_feasible:
+        print(f"  [HPO] tuned result infeasible/missing on the test seed "
+              "— restoring, using default")
+        files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
 
-    print(f"  [HPO] tuned score {tuned_score:.0f} beats default {default_score:.0f} "
-          f"— publishing variant + per-track configs {json.dumps(winning)}")
+    delta = tuned_score - default_score
+    print(f"  [HPO] tuned score {tuned_score:.0f} (default {default_score:.0f}, "
+          f"{'+' if delta >= 0 else ''}{delta:.0f}) — publishing variant + per-track "
+          f"configs {json.dumps(winning)}")
     return tuned_bench, winning, in_tok, out_tok
 
 
@@ -816,7 +1213,7 @@ def _fix_runtime_errors(
         if bench_result is None:
             print(f"  Runtime fix caused compile error — asking LLM to fix ...")
             ok, it, ot = _try_compile_fix(
-                args, model, api_key, config, challenge_md,
+                args, model, api_key, config,
                 files, build_err,
             )
             input_tokens += it
@@ -844,24 +1241,29 @@ _AGENTIC_HEARTBEAT_INTERVAL_S = 60
 def _start_heartbeat_thread(
     server: str, agent_id: str, agent_token: str,
     timeout_s: int | None = None,
+    interval_s: int = _AGENTIC_HEARTBEAT_INTERVAL_S,
+    label: str = "AGENTIC",
 ) -> threading.Event:
-    """Send a heartbeat every minute while the agentic call is running.
+    """Send a heartbeat every `interval_s` seconds while a long call runs.
 
     Mode-2 iterations can run 10+ minutes inside a single `claude -p`
-    subprocess. Without a background heartbeat the agent would drop from
-    the server's inspiration pool mid-iteration. The same loop also prints
-    a periodic elapsed-time line to the terminal so the silent capture
-    doesn't look like a hang ("is it frozen?"). Returns a stop event the
-    caller must set when the agentic call exits.
+    subprocess, and a local benchmark can block for hours. Without a
+    background heartbeat the agent would drop from the server's
+    inspiration pool mid-iteration — and worse, the server's
+    `inactive_minutes` sweep would deactivate its trajectory, so the next
+    publish lands on a fresh one and progress never compounds. The same
+    loop also prints a periodic elapsed-time line to the terminal so the
+    silent capture doesn't look like a hang ("is it frozen?"). Returns a
+    stop event the caller must set when the wrapped call exits.
     """
     stop = threading.Event()
     started = time.monotonic()
 
     def _beat() -> None:
-        while not stop.wait(_AGENTIC_HEARTBEAT_INTERVAL_S):
+        while not stop.wait(interval_s):
             elapsed = int(time.monotonic() - started)
             budget = f" / {timeout_s}s budget" if timeout_s else ""
-            print(f"  [AGENTIC] …still working ({elapsed}s elapsed{budget})")
+            print(f"  [{label}] …still working ({elapsed}s elapsed{budget})")
             try:
                 send_heartbeat(server, agent_id, agent_token=agent_token)
             except Exception as e:
@@ -882,19 +1284,23 @@ def _seed_worktree_files(
     there before the agent runs. Same for kernels.cu on GPU challenges.
     Also copies .swarm-cache.json across (benchmark.py reads it).
     """
-    best_code = state.get("best_algorithm_code") or ""
-    best_kernel = state.get("best_kernel_code") or ""
-    algo_rel = config["algorithm_path"]
-    algo_path = workdir / algo_rel
-    algo_path.parent.mkdir(parents=True, exist_ok=True)
-    if best_code:
-        algo_path.write_text(best_code, encoding="utf-8")
-
-    kernel_rel = config.get("kernel_path")
-    if files.is_gpu and kernel_rel and best_kernel:
-        kp = workdir / kernel_rel
-        kp.parent.mkdir(parents=True, exist_ok=True)
-        kp.write_text(best_kernel, encoding="utf-8")
+    # Prefer the multi-file map; fall back to the legacy single-file (+kernel)
+    # fields so a server/state that predates files-map still seeds correctly.
+    file_map = _state_files_map(state, config)
+    if file_map:
+        challenge_files.write_files(file_map, config, base=workdir)
+    else:
+        best_code = state.get("best_algorithm_code") or ""
+        algo_path = workdir / config["algorithm_path"]
+        algo_path.parent.mkdir(parents=True, exist_ok=True)
+        if best_code:
+            algo_path.write_text(best_code, encoding="utf-8")
+        kernel_rel = config.get("kernel_path")
+        best_kernel = state.get("best_kernel_code") or ""
+        if files.is_gpu and kernel_rel and best_kernel:
+            kp = workdir / kernel_rel
+            kp.parent.mkdir(parents=True, exist_ok=True)
+            kp.write_text(best_kernel, encoding="utf-8")
 
     agentic_sandbox.seed_worktree_config(workdir)
 
@@ -994,7 +1400,8 @@ def _distill_tacit_if_due(
 def _read_worktree_files(
     workdir: Path, files: ChallengeFiles, config: dict,
 ) -> tuple[str, str]:
-    """Read whatever the agent left on disk in the worktree."""
+    """Read whatever the agent left on disk in the worktree (entry file +
+    optional kernel). For multi-file algorithms use `_read_worktree_map`."""
     algo_path = workdir / config["algorithm_path"]
     code = algo_path.read_text(encoding="utf-8", errors="replace") if algo_path.exists() else ""
     kernel = ""
@@ -1003,6 +1410,30 @@ def _read_worktree_files(
         if kp.exists():
             kernel = kp.read_text(encoding="utf-8", errors="replace")
     return code, kernel
+
+
+def _read_worktree_map(workdir: Path, config: dict) -> dict[str, str]:
+    """Read the full {relpath: content} algorithm map the agent left on disk."""
+    return challenge_files.read_files(config, base=workdir)
+
+
+def _state_files_map(state: dict, config: dict) -> dict[str, str]:
+    """The algorithm files-map from server state, with single-file fallback.
+
+    Prefers `best_algorithm_files` (the multi-file map). Falls back to the
+    legacy single-file (`best_algorithm_code`) + optional kernel
+    (`best_kernel_code`) so older server state still works."""
+    fm = state.get("best_algorithm_files")
+    if isinstance(fm, dict) and fm:
+        return dict(fm)
+    out: dict[str, str] = {}
+    code = state.get("best_algorithm_code") or ""
+    if code:
+        out[challenge_files.entry_name(config)] = code
+    kernel = state.get("best_kernel_code") or ""
+    if kernel and config.get("kernel_path"):
+        out[Path(config["kernel_path"]).name] = kernel
+    return out
 
 
 def _run_agentic_iteration(
@@ -1108,7 +1539,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--hardware",
-        help="C3 GPU profile for --compute c3 (default: l40)",
+        help=(
+            "C3 hardware for --compute c3. Use 'auto' to choose "
+            "cpu-d3-4vcpu-16gb for CPU challenges and l40 for GPU "
+            "challenges (default: auto)."
+        ),
     )
     p.add_argument(
         "--c3-api-key",
@@ -1231,7 +1666,7 @@ def main() -> int:
     args.model = args.model or agent_config.get("model")
     args.api_base = args.api_base or agent_config.get("api_base")
     args.compute = args.compute or agent_config.get("compute") or "local"
-    args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "l40"
+    args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "auto"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
     args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
     # Per-agent C3 key from agent.config.json (forwarded by run_fleet from the
@@ -1436,6 +1871,11 @@ def main() -> int:
     # they survive restarts and adoption out of the inactive pool. See
     # docs/hyperparameter-search-plan.md.
     iteration = 0
+    consecutive_sr_skips = 0  # no-edit S/R skips in a row (see the fallback below)
+    # Iteration of the last cleaner attempt (accepted or rejected) — enforces
+    # cleaner_cooldown_iters so a rejected clean can't burn a benchmark every
+    # single iteration on unchanged code.
+    cleaner_last_attempt = -(10 ** 9)
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
         t_start = time.time()
@@ -1467,11 +1907,15 @@ def main() -> int:
             print(f"  [ROLE] role changed: {role} -> {live_role}")
             role = live_role
 
-        # Surface host-tunable HPO knobs (materialized into agent.config.json
-        # from fleet.config.json) onto `config`, which the gate/search read.
-        # Absent keys fall back to the defaults baked into _maybe_tune_hyperparameters.
-        for _hpo_key in ("hpo_min_improvements", "hpo_num_suggested_configs",
-                         "hpo_search_budget", "hpo_seed"):
+        # Surface host-tunable HPO + cleaner knobs (materialized into
+        # agent.config.json from fleet.config.json) onto `config`, which the
+        # gate/search/cleaner read. Absent keys fall back to the defaults
+        # baked into _maybe_tune_hyperparameters / the _CLEANER_* constants.
+        for _hpo_key in ("hpo_min_improvements", "hpo_first_tune_improvements",
+                         "hpo_num_suggested_configs",
+                         "hpo_search_budget", "hpo_seed",
+                         "cleaner_trigger_chars", "cleaner_target_pct",
+                         "cleaner_score_delta_pct", "cleaner_cooldown_iters"):
             if _hpo_key in _agent_cfg:
                 config[_hpo_key] = _agent_cfg[_hpo_key]
 
@@ -1540,6 +1984,9 @@ def main() -> int:
         # ── Write current best to disk ─────────────────────────
         best_code = state.get("best_algorithm_code") or ""
         best_kernel = state.get("best_kernel_code") or ""
+        # Full multi-file best (single-file collapses to {entry: best_code});
+        # used to seed the main checkout so multi-file algorithms land intact.
+        best_file_map = _state_files_map(state, config)
         files = ChallengeFiles(config)
         bootstrap = is_stub_code(best_code)
 
@@ -1554,13 +2001,87 @@ def main() -> int:
             continue
 
         if best_code and not bootstrap:
-            files.write(best_code, best_kernel)
+            # write_files prunes stale source files so a multi-file best lands
+            # intact; for a single-file best the map is just {entry: best_code}.
+            files.write_files(best_file_map)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
             if files.is_gpu and not best_kernel:
                 print(f"  [FILES] No kernel code from server — using local kernels.cu")
 
+        # Adopted an unbenchmarked seed (admin/mainnet seed deposited with no
+        # score): benchmark it UNCHANGED first so the trajectory floor is the
+        # seed's true score, not its first mutation. The adopted code is already
+        # on disk (written just above). Publish a no-mutation iteration, then
+        # re-loop so the next pass starts from the now-floored state and mutates
+        # normally. Best-effort: if the seed won't even benchmark, fall through.
+        if (reset and reset.get("type") == "adopted_inactive"
+                and reset.get("needs_benchmark") and best_code and not bootstrap):
+            compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
+            print(f"  [SEED-BENCH] Adopted unbenchmarked seed — scoring it unchanged "
+                  f"on {compute_label} to set the floor before mutating…")
+            send_heartbeat(server, agent_id, agent_token=agent_token)
+            seed_bench, seed_err = run_benchmark(args, config, server)
+            if seed_bench is None:
+                print(f"  [SEED-BENCH] FAILED — {seed_err[:300]}")
+                print(f"  [SEED-BENCH] Could not score the seed; proceeding to a normal iteration.")
+            else:
+                _print_bench_result(seed_bench)
+                seed_hyp = {
+                    "title": "Baseline: adopted mainnet seed",
+                    "description": (
+                        "Benchmarked the adopted inactive-pool seed unchanged to "
+                        "record its true score before mutating."
+                    ),
+                    "strategy_tag": "seed_baseline",
+                }
+                try:
+                    publish_results(
+                        server, agent_id, seed_bench, seed_hyp, config,
+                        agent_token=agent_token, role=role,
+                    )
+                    print(f"  [SEED-BENCH] Floor set at "
+                          f"{_clean_score(seed_bench.get('score', 0)):.0f}; "
+                          f"re-syncing before mutating.")
+                except Exception as e:
+                    print(f"  [SEED-BENCH] publish FAILED: {e}")
+                post_message(server, agent_name, agent_id,
+                             f"[seed_baseline] benchmarked adopted seed → "
+                             f"{_clean_score(seed_bench.get('score', 0)):.0f}",
+                             challenge=seed_bench.get("challenge") or iter_challenge,
+                             agent_token=agent_token)
+                send_heartbeat(server, agent_id, agent_token=agent_token)
+                continue
+
         if bootstrap:
             print("  [FILES] Starting from stub — will ask LLM to write initial implementation")
+
+        # ── Cleaner: spend this iteration on bloat reduction when the best
+        # has outgrown the trigger (docs/cleaner-agent-plan.md). Gated on:
+        # size over trigger, cooldown elapsed (a failed clean must not retry
+        # next iteration — nothing changed), and the trajectory not being one
+        # failure away from a reset (the benchmark would be wasted).
+        cleaner_trigger = int(config.get("cleaner_trigger_chars", _CLEANER_TRIGGER_CHARS))
+        cleaner_cooldown = int(config.get("cleaner_cooldown_iters", _CLEANER_COOLDOWN_ITERS))
+        stagnation_limit = int(config.get("stagnation_limit") or 0)
+        total_algo_chars = cleaner_prepass.total_chars(best_file_map)
+        if (best_code and not bootstrap
+                and total_algo_chars > cleaner_trigger
+                and iteration - cleaner_last_attempt >= cleaner_cooldown
+                and not (stagnation_limit and stagnation >= stagnation_limit - 1)):
+            cleaner_last_attempt = iteration
+            print(f"  [CLEANER] trajectory best is {total_algo_chars} chars "
+                  f"(> {cleaner_trigger}) — attempting deterministic clean")
+            send_heartbeat(server, agent_id, agent_token=agent_token)
+            if _run_cleaner_iteration(
+                    args, config, server, files, state,
+                    agent_id, agent_token, role):
+                post_message(server, agent_name, agent_id,
+                             f"[refactor] cleaned trajectory best "
+                             f"({total_algo_chars} chars → smaller); score kept",
+                             challenge=iter_challenge, agent_token=agent_token)
+                continue
+            # Rejected/no-op: files are restored; fall through to a normal
+            # iteration. The cooldown stops immediate retries either way.
 
         if is_agentic:
             # ── Mode 2: tooled agent in sandboxed worktree ─────
@@ -1590,9 +2111,10 @@ def main() -> int:
                 continue
 
             # The agent often rewrites the import block and drops the required
-            # `use super::*;` anchor (or spells it the long way), which would
-            # otherwise discard the whole run. Re-insert it before validating.
-            code = ensure_super_import(code)
+            # `use tig_challenges::<ch>::*;` anchor (or spells it the long
+            # way), which would otherwise discard the whole run. Re-insert it
+            # (migrating any legacy `use super::*;`) before validating.
+            code = ensure_challenge_import(code, config["challenge"])
             violation = validate_code(code, config)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
@@ -1600,12 +2122,19 @@ def main() -> int:
                     files.write(best_code, best_kernel)
                 continue
 
-            # Copy the worktree's edited code into the main checkout so the
-            # official benchmark sees it. No compile-fix retry: the agent
+            # Copy the worktree's edited files into the main checkout so the
+            # official benchmark sees them. No compile-fix retry: the agent
             # ran `cargo check` itself before stopping. If the official
             # build still fails (e.g. feature-flag mismatch the agent
             # missed), we restore and continue without escalating.
-            files.write(code, new_kernel)
+            # Read the FULL worktree map (multi-file aware), then apply the
+            # validated/anchor-fixed entry file over it before writing.
+            agent_map = _read_worktree_map(workdir, config)
+            if agent_map:
+                agent_map[files.entry_name] = code
+                files.write_files(agent_map)
+            else:
+                files.write(code, new_kernel)
             print(f"  [FILES] {files.describe_write(code, new_kernel)}")
 
             compute_label = f"C3/{args.hardware}" if args.compute == "c3" else "local Docker"
@@ -1640,7 +2169,8 @@ def main() -> int:
                     "hypothesis", config,
                     args.provider, model, api_key,
                     build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap, role=role, assigned_tag=assigned_tag),
-                    build_hypothesis_user_prompt(state, config, role=role, assigned_tag=assigned_tag),
+                    build_hypothesis_user_prompt(state, config, role=role, assigned_tag=assigned_tag)
+                    + _cleaner_size_warning(best_file_map, config),
                     args.api_base,
                 )
                 iter_input_tokens += hyp_usage["input_tokens"]
@@ -1680,9 +2210,29 @@ def main() -> int:
             iter_input_tokens += gen_in
             iter_output_tokens += gen_out
 
+            # Search/replace can legitimately produce no edits (the model
+            # returned no blocks). A skip does NOT publish, so it never advances
+            # the server's stagnation counter — a plateaued S/R agent would spin
+            # forever, never getting reset with fresh code. After a few
+            # consecutive skips, force a full rewrite so the agent produces
+            # something, publishes, and lets stagnation → reset kick in.
             if not code:
-                print(f"  [SKIP] No valid code produced — skipping to next iteration")
-                continue
+                consecutive_sr_skips += 1
+                if consecutive_sr_skips >= _SR_SKIP_FALLBACK:
+                    print(f"  [SKIP] {consecutive_sr_skips} consecutive no-edit "
+                          f"skips — forcing a full rewrite to break the stall")
+                    code, new_kernel, gen_in, gen_out = _generate_code(
+                        args, model, api_key, state, hypothesis, config,
+                        challenge_md, files, role=role, force_full=True,
+                    )
+                    iter_input_tokens += gen_in
+                    iter_output_tokens += gen_out
+                    consecutive_sr_skips = 0
+                if not code:
+                    print(f"  [SKIP] No valid code produced — skipping to next iteration")
+                    continue
+            else:
+                consecutive_sr_skips = 0
 
             # ── Code similarity check ──────────────────────────
             if best_code:
@@ -1789,6 +2339,7 @@ def main() -> int:
             files, challenge_md, bench,
             state.get("improvement_scores") or [],
             state.get("best_hyperparameters"),
+            has_tuned=bool(state.get("has_tuned")),
             backend=backend, workdir=workdir,
         )
         iter_input_tokens += hpo_in
@@ -1823,6 +2374,7 @@ def main() -> int:
                 agent_token=agent_token,
                 hyperparameters=winning_hyperparameters,
                 default_score=default_score,
+                role=role,
             )
             is_new_best = result.get("is_new_best", False)
             if is_new_best:
