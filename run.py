@@ -37,10 +37,70 @@ import run_fleet
 import setup as setup_mod
 
 
+def _ensure_ui_deps() -> None:
+    """Make FastAPI + uvicorn importable for the web companion, installing them
+    on first use so `python run.py --ui` is a SINGLE command (no separate
+    `pip install` step). No-op once they're present — the common case after the
+    first run.
+
+    Two-stage install so it 'just works' regardless of how Python was obtained:
+      1. Install into the current interpreter — works in a venv/conda and in
+         python.org installs.
+      2. If that fails (Homebrew / modern-Linux system Python marks itself
+         'externally managed' per PEP 668 and refuses), create a project-local
+         .venv, install there, and re-exec into it. Never touches system site.
+    """
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+
+    import os
+    import importlib
+    import subprocess
+
+    req = str(ROOT / "control-ui-requirements.txt")
+    print("First run: installing the web companion's dependencies…")
+
+    try:
+        # Stage 1 — current interpreter.
+        if subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "-r", req]
+        ).returncode == 0:
+            importlib.invalidate_caches()
+            try:
+                import fastapi  # noqa: F401
+                import uvicorn  # noqa: F401
+                return
+            except ModuleNotFoundError:
+                pass  # installed somewhere not on this process's path — use a venv
+
+        # Stage 2 — self-contained .venv + re-exec.
+        venv_dir = ROOT / ".venv"
+        bindir = "Scripts" if os.name == "nt" else "bin"
+        vpy = venv_dir / bindir / ("python.exe" if os.name == "nt" else "python")
+        if not vpy.exists():
+            print("Creating a local Python environment (.venv)…")
+            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+        subprocess.run([str(vpy), "-m", "pip", "install", "-q", "-r", req], check=True)
+        print("Relaunching inside the local environment…")
+        os.execv(str(vpy), [str(vpy), str(ROOT / "run.py"), "--ui"])
+    except (subprocess.CalledProcessError, OSError) as exc:
+        sys.exit(
+            f"Couldn't auto-install the companion's dependencies ({exc}).\n"
+            f"Install them manually and retry:\n"
+            f"    pip3 install -r control-ui-requirements.txt\n"
+            f"    python3 run.py --ui"
+        )
+
+
 def _launch_ui() -> int:
     """`python run.py --ui` — open the local control-plane web UI instead of the
     terminal wizard. Delegates to control_server.py (the same companion a host
     would run). The CLI flow below is unchanged and still the default."""
+    _ensure_ui_deps()
     import control_server
     return control_server.main()
 
