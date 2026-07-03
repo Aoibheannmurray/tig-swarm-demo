@@ -57,6 +57,7 @@ import argparse
 import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,7 @@ def _read_json(path: Path) -> dict:
 from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
 
 import challenge_files
+import cleaner_prepass
 from challenge_files import (
     ChallengeFiles,
     ensure_challenge_import,
@@ -294,6 +296,9 @@ def _run_benchmark_local(
         return None, "Benchmark output was not valid JSON"
 
 
+_BENCH_HEARTBEAT_INTERVAL_S = 300
+
+
 def run_benchmark(
     args: argparse.Namespace, config: dict, server: str,
     seed: str | None = None, hyperparameters: str | None = None,
@@ -304,14 +309,32 @@ def run_benchmark(
     non-test seed). `hyperparameters` is a JSON string forwarded to the solver
     as --hyperparameters; None means the solver uses its in-code defaults (the
     "default score").
+
+    A benchmark can block for well past the server's `inactive_minutes`
+    trajectory TTL (many instances x a multi-minute timeout each), so a
+    background heartbeat keeps `last_active_at` fresh for the duration —
+    otherwise the server reaps the trajectory mid-benchmark and the publish
+    lands on a fresh one.
     """
-    if args.compute == "local":
-        return _run_benchmark_local(seed, hyperparameters)
-    if args.compute == "c3":
-        return run_benchmark_c3(
-            args, config, server, seed=seed, hyperparameters=hyperparameters
+    agent_id = config.get("agent_id")
+    agent_token = config.get("agent_token")
+    hb_stop = None
+    if agent_id and agent_token:
+        hb_stop = _start_heartbeat_thread(
+            server, agent_id, agent_token,
+            interval_s=_BENCH_HEARTBEAT_INTERVAL_S, label="BENCH",
         )
-    return None, f"Unknown compute provider: {args.compute}"
+    try:
+        if args.compute == "local":
+            return _run_benchmark_local(seed, hyperparameters)
+        if args.compute == "c3":
+            return run_benchmark_c3(
+                args, config, server, seed=seed, hyperparameters=hyperparameters
+            )
+        return None, f"Unknown compute provider: {args.compute}"
+    finally:
+        if hb_stop is not None:
+            hb_stop.set()
 
 
 # ── Extracted iteration helpers ────────────────────────────────────
@@ -351,6 +374,179 @@ _SR_REPAIR_ROUNDS = 2
 # stopping a plateaued agent from spinning forever without ever publishing.
 _SR_SKIP_FALLBACK = 3
 
+# Char budget for the algorithm files inlined into a search/replace prompt.
+# Multi-file algorithms can grow far past any model's context window (a 2.5MB
+# six-file map produced a ~1M-token prompt that every provider rejects, which
+# then stalls the agent into the risky full-rewrite fallback). When the map
+# exceeds the budget, show the entry file plus the files the hypothesis
+# actually targets and name the rest without contents. ~600k chars ≈ 150k
+# tokens — safely inside claude-code's 1M-token request limit even with its
+# ~400k tokens of system/tool overhead, and inside a 200k-token API context.
+_SR_PROMPT_CHAR_BUDGET = 600_000
+
+
+# ── Cleaner: deterministic bloat reduction (docs/cleaner-agent-plan.md) ──
+#
+# When the trajectory best outgrows `cleaner_trigger_chars`, one iteration is
+# spent running the Tier-0 pre-pass (cleaner_prepass.py — duplicate-file merge
+# + unreachable-file removal, no LLM), benchmarking the result, and — if the
+# score sits within `cleaner_score_delta_pct` of the parent and the size
+# dropped to ≤ `cleaner_target_pct` of the original — publishing it as an
+# `iteration_type="refactor"`: the server swaps in the lean code but keeps the
+# parent's score (no ratchet erosion), counting neither improvement nor
+# stagnation. All knobs are host-tunable via fleet.config.json.
+_CLEANER_TRIGGER_CHARS = 500_000
+_CLEANER_TARGET_PCT = 60
+_CLEANER_SCORE_DELTA_PCT = 2.0
+_CLEANER_COOLDOWN_ITERS = 15
+# Above this fraction of the trigger, prompts get a "prefer size-reducing
+# edits" warning — bloat prevented is a benchmark never spent.
+_CLEANER_WARN_FRACTION = 0.8
+
+
+def _cleaner_size_warning(file_map: dict, config: dict) -> str:
+    """One-line prompt warning when the algorithm nears the cleaner trigger."""
+    total = sum(len(v) for v in file_map.values())
+    trigger = int(config.get("cleaner_trigger_chars", _CLEANER_TRIGGER_CHARS))
+    if total <= trigger * _CLEANER_WARN_FRACTION:
+        return ""
+    return (
+        f"\nNOTE: this algorithm is {total} chars of source — approaching the "
+        f"size limit ({trigger}). Prefer edits that REDUCE duplication; never "
+        f"clone a module or file to create a variant."
+    )
+
+
+def _score_within_delta(
+    direction: str, score: float, parent: float, delta_pct: float,
+) -> bool:
+    """Direction-aware 'refactor kept the score' check. The delta is a noise
+    allowance for time-budgeted anytime solvers, not a quality budget."""
+    d = abs(delta_pct) / 100.0
+    if direction == "min":
+        return score <= parent * (1 + d) if parent >= 0 else score <= parent * (1 - d)
+    return score >= parent * (1 - d) if parent >= 0 else score >= parent * (1 + d)
+
+
+def _run_cleaner_iteration(
+    args: argparse.Namespace, config: dict, server: str,
+    files: ChallengeFiles, state: dict,
+    agent_id: str, agent_token: str | None, role: str,
+) -> bool:
+    """One cleaner iteration: pre-pass → benchmark → delta gate → publish.
+
+    Returns True if a refactor was published (the caller `continue`s); False
+    when there was nothing to clean or the gate rejected — the original files
+    are restored and the caller proceeds with a normal iteration.
+    """
+    file_map = files.read_files()
+    old_size = cleaner_prepass.total_chars(file_map)
+    entry = challenge_files.entry_name(config)
+    new_map, actions = cleaner_prepass.run_prepass(file_map, entry)
+    new_size = cleaner_prepass.total_chars(new_map)
+    target_pct = float(config.get("cleaner_target_pct", _CLEANER_TARGET_PCT))
+    if not actions:
+        print("  [CLEANER] pre-pass found nothing mechanical to remove — skipping")
+        return False
+    if new_size > old_size * target_pct / 100.0:
+        print(f"  [CLEANER] pre-pass only reached {new_size}/{old_size} chars "
+              f"(target ≤{target_pct:.0f}%) — not worth a benchmark, skipping")
+        return False
+
+    parent = _clean_score(state.get("current_trajectory_best"))
+    if parent is None:
+        print("  [CLEANER] no parent trajectory score to compare against — skipping")
+        return False
+
+    print(f"  [CLEANER] pre-pass: {old_size} → {new_size} chars "
+          f"({len(actions)} action(s)):")
+    for a in actions:
+        print(f"  [CLEANER]   - {a}")
+    files.write_files(new_map)
+    print("  [CLEANER] benchmarking the lean code…")
+    bench, err = run_benchmark(args, config, server)
+
+    delta_pct = float(config.get("cleaner_score_delta_pct", _CLEANER_SCORE_DELTA_PCT))
+    direction = str(config.get("scoring_direction", "max"))
+    score = (bench or {}).get("score")
+    ok = (
+        bench is not None
+        and bench.get("feasible", False)
+        and score is not None
+        and _score_within_delta(direction, score, parent, delta_pct)
+    )
+    if not ok:
+        why = (f"benchmark failed: {err[:200]}" if bench is None
+               else f"score {score} outside ±{delta_pct}% of parent {parent} "
+                    f"(or infeasible)")
+        print(f"  [CLEANER] REJECTED — {why}; restoring original files")
+        files.write_files(file_map)
+        return False
+
+    print(f"  [CLEANER] ACCEPTED — score {score:.0f} within {delta_pct}% of "
+          f"parent {parent:.0f}; publishing refactor")
+    hyp = {
+        "title": f"refactor: bloat reduction {old_size//1000}k → {new_size//1000}k chars",
+        "description": "Deterministic cleaner pre-pass (no LLM): " + "; ".join(actions),
+        "strategy_tag": "other",
+        "notes": "behavior-preserving; server keeps the parent score",
+    }
+    try:
+        publish_results(
+            server, agent_id, bench, hyp, config,
+            agent_token=agent_token, role=role, iteration_type="refactor",
+        )
+    except Exception as e:
+        print(f"  [CLEANER] publish FAILED: {e} — restoring original files")
+        files.write_files(file_map)
+        return False
+    return True
+
+
+def _sr_prompt_file_subset(
+    file_map: dict, hypothesis: dict, config: dict,
+) -> tuple[dict, list[str]]:
+    """Choose which files to inline in the S/R prompt, under a char budget.
+
+    Returns (subset_map, omitted_names). The whole map is returned when it
+    fits. Otherwise: the entry file is always shown; files whose name (or
+    "t<NN>" shorthand, e.g. "T48" for track_t48.rs) appears in the hypothesis
+    are shown next — at least one even if it alone busts the budget, since the
+    model cannot edit a file it cannot see; any remaining room is filled
+    smallest-file-first.
+    """
+    budget = int(config.get("sr_prompt_char_budget", _SR_PROMPT_CHAR_BUDGET))
+    if sum(len(v) for v in file_map.values()) <= budget:
+        return dict(file_map), []
+
+    hyp_text = (
+        f"{hypothesis.get('title', '')} {hypothesis.get('description', '')}"
+    ).lower()
+
+    def _mentioned(name: str) -> bool:
+        stem = Path(name).stem.lower()
+        if stem in hyp_text:
+            return True
+        m = re.search(r"(\d+)$", stem)
+        return bool(m) and bool(re.search(rf"\bt{m.group(1)}\b", hyp_text))
+
+    entry = challenge_files.entry_name(config)
+    keep: dict = {}
+    used = 0
+    if entry in file_map:
+        keep[entry] = file_map[entry]
+        used += len(file_map[entry])
+    for name in sorted(n for n in file_map if n not in keep and _mentioned(n)):
+        # Guarantee at least one hypothesis-targeted file is visible.
+        if used + len(file_map[name]) <= budget or len(keep) <= 1:
+            keep[name] = file_map[name]
+            used += len(file_map[name])
+    for name, code in sorted(file_map.items(), key=lambda kv: len(kv[1])):
+        if name not in keep and used + len(code) <= budget:
+            keep[name] = code
+            used += len(code)
+    return keep, [n for n in file_map if n not in keep]
+
 
 def _generate_code_search_replace(
     args: argparse.Namespace, model: str, api_key: str,
@@ -371,8 +567,16 @@ def _generate_code_search_replace(
         print("  [SR] No files on disk to edit — skipping")
         return None, None, 0, 0
 
+    prompt_map, omitted = _sr_prompt_file_subset(file_map, hypothesis, config)
+    if omitted:
+        shown_chars = sum(len(v) for v in prompt_map.values())
+        print(f"  [SR] prompt budget: inlining {len(prompt_map)}/{len(file_map)} "
+              f"files ({shown_chars} chars); omitted: {', '.join(omitted)}")
+
     system = build_search_replace_system_prompt(challenge_md, config, role=role)
-    user = build_search_replace_user_prompt(file_map, hypothesis, config, role=role)
+    user = build_search_replace_user_prompt(
+        prompt_map, hypothesis, config, role=role, omitted=omitted,
+    ) + _cleaner_size_warning(file_map, config)
     print(f"  [SR] Generating search/replace edits via {args.provider}/{model}…")
 
     applied_any = False
@@ -401,8 +605,11 @@ def _generate_code_search_replace(
             break
         if round_i < _SR_REPAIR_ROUNDS:
             print(f"  [SR] repair round {round_i + 1}/{_SR_REPAIR_ROUNDS}…")
+            # Same budget subset, re-read from the post-apply map so the
+            # repair sees applied edits without re-inlining omitted files.
             user = build_search_replace_repair_prompt(
-                file_map, search_replace.format_misses(misses), config
+                {k: file_map[k] for k in prompt_map if k in file_map},
+                search_replace.format_misses(misses), config
             )
         else:
             print(f"  [SR] skipping {len(misses)} still-unmatched block(s)")
@@ -646,11 +853,13 @@ def _hpo_gate_open(
 ) -> bool:
     """Should this candidate be hyperparameter-tuned? (see the plan doc)
 
-    Available to BOTH roles. The candidate must be feasible and the trajectory
-    must have had >= min_improvements improvements. Then:
-      - the FIRST time a mature trajectory is eligible (`has_tuned` is False),
-        the gate opens automatically — the band check is skipped that once;
-      - thereafter the candidate's default score must fall strictly inside the
+    Available to BOTH roles. The candidate must be feasible. Then:
+      - the FIRST time a trajectory is eligible (`has_tuned` is False), it must
+        have had >= first_tune_improvements improvements (a higher bar, so the
+        trajectory is well established before any HPO budget is spent); the
+        gate then opens automatically — the band check is skipped that once;
+      - thereafter the trajectory needs only >= min_improvements improvements,
+        and the candidate's default score must fall strictly inside the
         tune band: better than the min_improvements-th-previous improvement
         (`improvement_scores[-min_improvements]`, the floor) AND worse than the
         parent (`improvement_scores[-1]`, the latest improvement). The point is
@@ -663,16 +872,19 @@ def _hpo_gate_open(
     paths accept --hyperparameters, so GPU tunes too.
     """
     min_improvements = int(config.get("hpo_min_improvements", 4))
+    first_tune_improvements = int(config.get("hpo_first_tune_improvements", 10))
     direction = str(config.get("scoring_direction", "max"))
     score = default_bench.get("score")
     if score is None or not default_bench.get("feasible", False):
         return False
-    if len(improvement_scores) < min_improvements:
-        return False
     if not has_tuned:
+        if len(improvement_scores) < first_tune_improvements:
+            return False
         print(f"  [HPO] gate open: first tune for this trajectory "
               f"({len(improvement_scores)} improvements) — band check waived")
         return True
+    if len(improvement_scores) < min_improvements:
+        return False
 
     def _better(a: float, b: float) -> bool:  # a strictly better than b
         return a < b if direction == "min" else a > b
@@ -1029,24 +1241,29 @@ _AGENTIC_HEARTBEAT_INTERVAL_S = 60
 def _start_heartbeat_thread(
     server: str, agent_id: str, agent_token: str,
     timeout_s: int | None = None,
+    interval_s: int = _AGENTIC_HEARTBEAT_INTERVAL_S,
+    label: str = "AGENTIC",
 ) -> threading.Event:
-    """Send a heartbeat every minute while the agentic call is running.
+    """Send a heartbeat every `interval_s` seconds while a long call runs.
 
     Mode-2 iterations can run 10+ minutes inside a single `claude -p`
-    subprocess. Without a background heartbeat the agent would drop from
-    the server's inspiration pool mid-iteration. The same loop also prints
-    a periodic elapsed-time line to the terminal so the silent capture
-    doesn't look like a hang ("is it frozen?"). Returns a stop event the
-    caller must set when the agentic call exits.
+    subprocess, and a local benchmark can block for hours. Without a
+    background heartbeat the agent would drop from the server's
+    inspiration pool mid-iteration — and worse, the server's
+    `inactive_minutes` sweep would deactivate its trajectory, so the next
+    publish lands on a fresh one and progress never compounds. The same
+    loop also prints a periodic elapsed-time line to the terminal so the
+    silent capture doesn't look like a hang ("is it frozen?"). Returns a
+    stop event the caller must set when the wrapped call exits.
     """
     stop = threading.Event()
     started = time.monotonic()
 
     def _beat() -> None:
-        while not stop.wait(_AGENTIC_HEARTBEAT_INTERVAL_S):
+        while not stop.wait(interval_s):
             elapsed = int(time.monotonic() - started)
             budget = f" / {timeout_s}s budget" if timeout_s else ""
-            print(f"  [AGENTIC] …still working ({elapsed}s elapsed{budget})")
+            print(f"  [{label}] …still working ({elapsed}s elapsed{budget})")
             try:
                 send_heartbeat(server, agent_id, agent_token=agent_token)
             except Exception as e:
@@ -1655,6 +1872,10 @@ def main() -> int:
     # docs/hyperparameter-search-plan.md.
     iteration = 0
     consecutive_sr_skips = 0  # no-edit S/R skips in a row (see the fallback below)
+    # Iteration of the last cleaner attempt (accepted or rejected) — enforces
+    # cleaner_cooldown_iters so a rejected clean can't burn a benchmark every
+    # single iteration on unchanged code.
+    cleaner_last_attempt = -(10 ** 9)
     while args.max_iterations == 0 or iteration < args.max_iterations:
         iteration += 1
         t_start = time.time()
@@ -1686,11 +1907,15 @@ def main() -> int:
             print(f"  [ROLE] role changed: {role} -> {live_role}")
             role = live_role
 
-        # Surface host-tunable HPO knobs (materialized into agent.config.json
-        # from fleet.config.json) onto `config`, which the gate/search read.
-        # Absent keys fall back to the defaults baked into _maybe_tune_hyperparameters.
-        for _hpo_key in ("hpo_min_improvements", "hpo_num_suggested_configs",
-                         "hpo_search_budget", "hpo_seed"):
+        # Surface host-tunable HPO + cleaner knobs (materialized into
+        # agent.config.json from fleet.config.json) onto `config`, which the
+        # gate/search/cleaner read. Absent keys fall back to the defaults
+        # baked into _maybe_tune_hyperparameters / the _CLEANER_* constants.
+        for _hpo_key in ("hpo_min_improvements", "hpo_first_tune_improvements",
+                         "hpo_num_suggested_configs",
+                         "hpo_search_budget", "hpo_seed",
+                         "cleaner_trigger_chars", "cleaner_target_pct",
+                         "cleaner_score_delta_pct", "cleaner_cooldown_iters"):
             if _hpo_key in _agent_cfg:
                 config[_hpo_key] = _agent_cfg[_hpo_key]
 
@@ -1830,6 +2055,34 @@ def main() -> int:
         if bootstrap:
             print("  [FILES] Starting from stub — will ask LLM to write initial implementation")
 
+        # ── Cleaner: spend this iteration on bloat reduction when the best
+        # has outgrown the trigger (docs/cleaner-agent-plan.md). Gated on:
+        # size over trigger, cooldown elapsed (a failed clean must not retry
+        # next iteration — nothing changed), and the trajectory not being one
+        # failure away from a reset (the benchmark would be wasted).
+        cleaner_trigger = int(config.get("cleaner_trigger_chars", _CLEANER_TRIGGER_CHARS))
+        cleaner_cooldown = int(config.get("cleaner_cooldown_iters", _CLEANER_COOLDOWN_ITERS))
+        stagnation_limit = int(config.get("stagnation_limit") or 0)
+        total_algo_chars = cleaner_prepass.total_chars(best_file_map)
+        if (best_code and not bootstrap
+                and total_algo_chars > cleaner_trigger
+                and iteration - cleaner_last_attempt >= cleaner_cooldown
+                and not (stagnation_limit and stagnation >= stagnation_limit - 1)):
+            cleaner_last_attempt = iteration
+            print(f"  [CLEANER] trajectory best is {total_algo_chars} chars "
+                  f"(> {cleaner_trigger}) — attempting deterministic clean")
+            send_heartbeat(server, agent_id, agent_token=agent_token)
+            if _run_cleaner_iteration(
+                    args, config, server, files, state,
+                    agent_id, agent_token, role):
+                post_message(server, agent_name, agent_id,
+                             f"[refactor] cleaned trajectory best "
+                             f"({total_algo_chars} chars → smaller); score kept",
+                             challenge=iter_challenge, agent_token=agent_token)
+                continue
+            # Rejected/no-op: files are restored; fall through to a normal
+            # iteration. The cooldown stops immediate retries either way.
+
         if is_agentic:
             # ── Mode 2: tooled agent in sandboxed worktree ─────
             # Single tooled `claude -p` invocation replaces the entire
@@ -1916,7 +2169,8 @@ def main() -> int:
                     "hypothesis", config,
                     args.provider, model, api_key,
                     build_hypothesis_system_prompt(challenge_md, config, is_bootstrap=bootstrap, role=role, assigned_tag=assigned_tag),
-                    build_hypothesis_user_prompt(state, config, role=role, assigned_tag=assigned_tag),
+                    build_hypothesis_user_prompt(state, config, role=role, assigned_tag=assigned_tag)
+                    + _cleaner_size_warning(best_file_map, config),
                     args.api_base,
                 )
                 iter_input_tokens += hyp_usage["input_tokens"]

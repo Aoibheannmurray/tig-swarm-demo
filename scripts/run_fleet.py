@@ -98,15 +98,22 @@ _AGENT_CONFIG_KEYS = (
     # Hyperparameter-search knobs (host-tunable; see
     # docs/hyperparameter-search-plan.md). Set them once at the top level of
     # fleet.config.json and every agent inherits them as fleet-wide defaults.
-    "hpo_min_improvements", "hpo_num_suggested_configs", "hpo_search_budget",
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget",
     "hpo_seed",
+    # Cleaner knobs (docs/cleaner-agent-plan.md) — same passthrough pattern.
+    "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
+    "cleaner_cooldown_iters",
 )
 
 # Top-level fleet keys that become fleet-wide defaults inherited by every agent
 # (via setdefault, so a per-agent override still wins).
 _FLEET_WIDE_DEFAULT_KEYS = (
-    "hpo_min_improvements", "hpo_num_suggested_configs", "hpo_search_budget",
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget",
     "hpo_seed",
+    "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
+    "cleaner_cooldown_iters",
 )
 
 # Fleet-entry fields the monitor loop re-syncs into a running worktree's

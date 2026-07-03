@@ -239,6 +239,7 @@ def publish_results(
     hyperparameters: dict | None = None,
     default_score: float | None = None,
     role: str | None = None,
+    iteration_type: str | None = None,
 ) -> dict:
     code = read_algorithm(config)
     kernel_code = read_optional(kernel_path(config))
@@ -286,6 +287,12 @@ def publish_results(
         payload["default_score"] = default_score
     if bench.get("challenge_metrics") is not None:
         payload["challenge_metrics"] = bench["challenge_metrics"]
+    # "refactor" marks a behavior-preserving bloat reduction (cleaner —
+    # docs/cleaner-agent-plan.md): the server swaps the trajectory-best code
+    # but keeps the recorded score, counting it as neither improvement nor
+    # stagnation. Omitted => "mutation" (server default).
+    if iteration_type is not None:
+        payload["iteration_type"] = iteration_type
     # Publish carries the full algorithm source + bench artifacts and is the
     # only call that loses work on timeout (score + hypothesis never reach
     # the dashboard, while the local code is overwritten next iteration). A

@@ -1327,10 +1327,27 @@ async def create_iteration(req: IterationCreate):
             or db.is_better(direction, req.score, prev_trajectory_best["score"])
         )
 
+        # Refactor path (docs/cleaner-agent-plan.md): a behavior-preserving
+        # bloat reduction the client has already benchmarked and delta-gated.
+        # It swaps the trajectory-best CODE while KEEPING the recorded score
+        # (a −2% refactor must not lower the bar the next mutation has to
+        # beat), and counts as neither improvement nor stagnation. Only
+        # meaningful when there IS a parent and the refactor didn't beat it —
+        # a refactor that beats outright is just a normal improvement.
+        is_refactor = (
+            req.iteration_type == "refactor"
+            and req.feasible
+            and prev_trajectory_best is not None
+            and not beats_trajectory_best
+        )
+
         target_best_experiment_id = (
             prev_trajectory_best["experiment_id"] if prev_trajectory_best else None
         )
-        hyp_status = "succeeded" if beats_trajectory_best else "failed"
+        hyp_status = (
+            "refactor" if is_refactor
+            else "succeeded" if beats_trajectory_best else "failed"
+        )
 
         # ── Program ID: tag hypothesis with current program (per-(agent, challenge)) ──
         acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
@@ -1477,6 +1494,39 @@ async def create_iteration(req: IterationCreate):
                 algorithm_files=algorithm_files_json,
                 hyperparameters=(
                     json.dumps(req.hyperparameters) if req.hyperparameters else None
+                ),
+            )
+        elif is_refactor:
+            # Neither improvement (no momentum/HPO-band credit) nor
+            # stagnation (runs_since_improvement untouched): pure
+            # bookkeeping. Swap in the lean code at the PARENT's score.
+            await db.increment_agent_challenge_counters(
+                conn, req.agent_id, challenge,
+                runs=1,
+                best_ever_score=personal_best_candidate,
+                direction=direction,
+                input_tokens=iter_input_tokens,
+                output_tokens=iter_output_tokens,
+                estimated_cost=iter_estimated_cost,
+            )
+            await db.upsert_trajectory_best(
+                conn, agent_id=req.agent_id, challenge=challenge,
+                experiment_id=exp_id,
+                algorithm_code=req.algorithm_code,
+                score=prev_trajectory_best["score"],
+                feasible=req.feasible,
+                challenge_metrics=challenge_metrics_json,
+                solution_data=solution_data_json,
+                updated_at=timestamp, trajectory_id=trajectory_id,
+                track_scores=track_scores_json,
+                kernel_code=req.kernel_code,
+                algorithm_files=algorithm_files_json,
+                # Preserve the parent's tuned config unless the client sent
+                # one: the refactor kept the Map plumbing, so the winning
+                # hyperparameters still apply to the lean code.
+                hyperparameters=(
+                    json.dumps(req.hyperparameters) if req.hyperparameters
+                    else prev_trajectory_best.get("hyperparameters")
                 ),
             )
         else:

@@ -95,6 +95,12 @@ class IterationCreate(BaseModel):
     # server stores this and serves it back via improvement_scores. None for
     # legacy clients — the server falls back to `score`.
     default_score: Optional[float] = None
+    # "mutation" (default) or "refactor". A refactor is a behavior-preserving
+    # bloat reduction (docs/cleaner-agent-plan.md): the server swaps the
+    # trajectory-best CODE for the leaner version but KEEPS the recorded best
+    # score (no ratchet erosion), and counts it as neither an improvement nor
+    # stagnation.
+    iteration_type: str = "mutation"
 
 
 class AdminAuth(BaseModel):

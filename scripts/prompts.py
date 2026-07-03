@@ -884,14 +884,23 @@ Per-instance time budget: {timeout} seconds.{role_steer}
 
 def build_search_replace_user_prompt(
     files: dict, hypothesis: dict, config: dict, *, role: str = "explorer",
+    omitted: list | None = None,
 ) -> str:
     title = hypothesis.get("title", "")
     description = hypothesis.get("description", "")
     parts = [
         "Current algorithm source files:\n",
         _format_files_for_prompt(files),
-        f"\nApply this change as search/replace blocks:\n{title}\n{description}",
     ]
+    if omitted:
+        parts.append(
+            "\nThese files also exist but are NOT shown (too large for this "
+            "request): " + ", ".join(sorted(omitted)) + ". Only emit "
+            "search/replace blocks for the files shown above."
+        )
+    parts.append(
+        f"\nApply this change as search/replace blocks:\n{title}\n{description}"
+    )
     if role == "exploiter":
         parts.append(
             "\nMake ONE small, localized change — the fewest blocks that "

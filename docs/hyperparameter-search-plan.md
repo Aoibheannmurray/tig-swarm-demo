@@ -184,7 +184,8 @@ completeness with sensible defaults.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `min_improvements` | **4** | Maturity threshold for the gate **and** the band window (the candidate must beat the `min_improvements`-th-previous best improvement). |
+| `min_improvements` | **4** | Maturity threshold for the gate **and** the band window (the candidate must beat the `min_improvements`-th-previous best improvement). Applies after the first tune. |
+| `first_tune_improvements` | **10** | Higher maturity bar for the FIRST tune of a trajectory (`hpo_first_tune_improvements`): no HPO fires until the trajectory has this many improvements. Subsequent tunes use `min_improvements`. |
 | `num_suggested_configs` | **5** | How many concrete configs the extraction LLM proposes. The rest of the budget is random search. |
 | `N` (`search_budget`) | **13** | Total number of hyperparameter searches (configs evaluated) per tune = `num_suggested_configs` suggested + 1 default + `N - num_suggested_configs - 1` random. |
 | `tuning_instances_per_track` | 5 | Instances generated per scored track for the search. |
@@ -535,3 +536,20 @@ needs Fix 1 too). Fix 2 only removes the binary/gate blockers.
 - **Smarter search** (Bayesian/TPE, multi-fidelity pruning, seed-averaging for
   noise) — explicitly out of scope at the "decent" bar; revisit only if random
   search proves insufficient.
+
+[deeper-seeker]   [BENCH] Build retry 2/2 — asking LLM to fix…
+[deeper-seeker]   Fix changed the code (similarity to broken: 92.0%) — re-benchmarking.
+[deeper-seeker]   [BENCH] Score: 169672  Feasible: True
+[deeper-seeker]           Track n_items=1000,budget=10: 169672
+[deeper-seeker]   Code changed during error recovery (post-fix similarity 80%) — re-describing hypothesis ...
+[deeper-seeker]   Updated hypothesis: [metaheuristic] Tabu search with random perturbation and DP/cluster restarts
+[deeper-seeker]   [HPO] gate open — tuning (N=13, suggested=5, seed='hpo')
+[deeper-seeker]   [HPO] hyperparameters: ['alpha', 'tenure_multiplier', 'dp_fixed_point_iters', 'cluster_divisor']
+[deeper-seeker]   [HPO] evaluating 13 configs on seed 'hpo' (N=13, suggested=5)
+[deeper-seeker]   [HPO] 1/13 score=167464.36 feasible=True default
+[deeper-seeker]   [HPO] 2/13 score=167441.4 feasible=True {"alpha": 0.0, "tenure_multiplier": 1.0, "dp_fixed_point_iters": 3, "cluster_divisor": 20.0}
+[deeper-seeker]   [HPO] 3/13 score=178477.62 feasible=True {"alpha": 0.1, "tenure_multiplier": 1.5, "dp_fixed_point_iters": 5, "cluster_divisor": 15.0}
+[deeper-seeker]   [HPO] 4/13 score=164208.34 feasible=True {"alpha": 0.05, "tenure_multiplier": 0.8, "dp_fixed_point_iters": 2, "cluster_divisor": 30.0}
+[deeper-seeker]   [HPO] 5/13 score=172928.94 feasible=True {"alpha": 0.2, "tenure_multiplier": 2.0, "dp_fixed_point_iters": 4, "cluster_divisor": 10.0}
+[deeper-seeker]   [HPO] 6/13 score=173950.98 feasible=True {"alpha": 0.15, "tenure_multiplier": 1.2, "dp_fixed_point_iters": 3, "cluster_divisor": 25.0}
+[deeper-seeker]   [HPO] 7/13 score=175306.54 feasible=True {"alpha": 0.14945299569960604, "tenure_multiplier": 1.2582186470712815, "dp_fixed_point_iters": 5, "cluster_divisor": 9.417843125668465}
