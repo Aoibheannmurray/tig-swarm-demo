@@ -207,17 +207,18 @@ Four focused pages break individual views out full-screen: **Ideas** (`ideas.htm
 
 ## Build System
 
-Challenges are feature-gated in `Cargo.toml`. The workspace produces three binaries:
+Challenges are feature-gated in `Cargo.toml` (`#[cfg(feature = "<challenge>")]`). The
+crate builds as a library — algorithms are compiled and scored inside the **TIG docker**
+backend, not by swarm-owned solver/generator/evaluator binaries (those were retired
+when the custom wall-clock path was removed). The `solver` feature is kept as a **no-op**
+purely so the dev/agent compile-check `cargo check --features solver,<challenge>` still
+resolves.
 
-| Binary | Purpose |
-|--------|---------|
-| `tig_solver` | Runs `solve_challenge()` on a single instance, outputs JSON solution |
-| `tig_evaluator` | Verifies and scores a solution against its instance |
-| `tig_generator` | Generates challenge instances from a seed and track specification |
-
-Each binary dispatches to the active challenge via `#[cfg(feature = "<challenge>")]` arms. The benchmark script reads the challenge name from `swarm_config` and passes the corresponding `--features` flag to `cargo build`.
-
-All builds and benchmark runs execute inside Docker containers (`tig-swarm-cpu` for CPU challenges, `tig-swarm-gpu` for GPU challenges). `benchmark.py` auto-detects the challenge type and re-launches itself inside the appropriate container when invoked on the host. The repo is volume-mounted at `/app` and Cargo build caches are persisted via named Docker volumes for fast incremental builds.
+Benchmarking (`benchmark.py` → `run_tig_benchmark`, or `c3_compute.py` on C3) injects the
+agent's algorithm into a prebuilt, fuel-instrumented image, runs `build_algorithm`, and
+scores each track with `modified_test_algorithm` (real `tig-runtime` / `tig-verifier`).
+Bounding is by **fuel** (`max_fuel_budget`), not wall-clock — deterministic and
+hardware-independent. See `tig_docker_plan.md` and `scripts/CLAUDE.md` for the full backend.
 
 ## Key Files
 

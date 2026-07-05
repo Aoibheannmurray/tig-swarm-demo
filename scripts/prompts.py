@@ -701,27 +701,38 @@ def _rust_rules_block(config: dict) -> str:
     return block
 
 
+def _fuel_budget_guidance(config: dict) -> str:
+    """Bounding guidance for code prompts. The TIG backend bounds by FUEL
+    (instruction-counted, deterministic), NOT wall-clock — so agents must not
+    self-terminate on a clock deadline, which would under-spend the budget and
+    break fuel determinism."""
+    if _is_optimizer_hook_challenge(config):
+        return (
+            "\nBounding is by FUEL, not wall-clock: the harness-owned training loop runs "
+            "until the challenge's fuel budget is exhausted, then its best checkpoint is "
+            "scored. Keep your optimizer hooks lean — fewer instructions per step means more "
+            "epochs fit in the fuel budget. The harness calls save_solution for you (you do "
+            "NOT call it). Avoid clock-based control flow — fuel accounting must stay "
+            "deterministic."
+        )
+    return (
+        "\nBounding is by FUEL, not wall-clock: your solver runs until it exhausts the "
+        "challenge's fuel budget (instruction-counted, deterministic) or returns. Call "
+        "save_solution() early with your first feasible solution, then keep improving and "
+        "re-saving — the last saved solution is scored. Do NOT self-terminate on a wall-clock "
+        "deadline and do NOT branch on std::time::Instant / SystemTime: clock-based control "
+        "flow makes fuel usage nondeterministic. If nothing is saved before fuel runs out, "
+        "the instance counts as infeasible."
+    )
+
+
 def build_code_system_prompt(
     challenge_md: str, config: dict, *, role: str = "explorer",
 ) -> str:
     challenge = config.get("challenge", "unknown")
     is_gpu = bool(config.get("is_gpu"))
-    timeout = config.get("timeout", 30)
     opt_hooks = _is_optimizer_hook_challenge(config)
-    if opt_hooks:
-        time_guidance = (
-            f"\nPer-instance time budget: {timeout} seconds — the harness-owned training "
-            f"loop is killed at this hard deadline and the best checkpoint it saved is "
-            f"evaluated. Keep your optimizer hooks fast so more epochs fit in the budget; "
-            f"the harness calls save_solution for you (you do NOT call it)."
-        )
-    else:
-        time_guidance = (
-            f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
-            f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
-            f"keep improving and re-saving — the last saved solution is evaluated. If no "
-            f"solution was saved when the deadline hits, the instance counts as infeasible."
-        )
+    time_guidance = _fuel_budget_guidance(config)
     # For exploiters, inject the localized-edit rule between the time budget and
     # the output-format rules so it's read before they start writing.
     if role == "exploiter":
@@ -867,7 +878,6 @@ def build_search_replace_system_prompt(
     challenge_md: str, config: dict, *, role: str = "explorer",
 ) -> str:
     challenge = config.get("challenge", "unknown")
-    timeout = config.get("timeout", 30)
     role_steer = ("\n\n" + _role_guidance(role)) if role == "exploiter" else ""
     rust_rules = _rust_rules_block(config)
     opt_contract = OPTIMIZER_HOOK_CONTRACT if _is_optimizer_hook_challenge(config) else ""
@@ -876,8 +886,7 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge by making
 targeted edits to its source files.
 
 {challenge_md}
-
-Per-instance time budget: {timeout} seconds.{role_steer}
+{_fuel_budget_guidance(config)}{role_steer}
 
 {SEARCH_REPLACE_FORMAT}{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
 
@@ -1209,13 +1218,15 @@ def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", time
         f"Score: {score}  Feasible: {feasible}\n"
         f"Per-track scores:\n{track_summary}\n"
         f"Errors:\n{error_lines}\n\n"
-        f"Per-instance time budget: {timeout} seconds. The solver is killed after this deadline.\n\n"
+        "Bounding is by FUEL, not wall-clock: the solver runs until it exhausts the "
+        "challenge's fuel budget (instruction-counted, deterministic) or returns.\n\n"
         "How to interpret the errors:\n"
         "- 'no solution saved' = the code crashed, panicked, or returned Err() "
-        "before ever calling save_solution(), OR the solver ran out of time "
-        f"without saving. Fix: use a time-based loop (std::time::Instant + deadline "
-        f"at {timeout}s minus a few seconds margin) and call save_solution() EARLY "
-        "with your first feasible solution, then keep improving and re-saving.\n"
+        "before ever calling save_solution(), OR it exhausted its fuel before saving. "
+        "Fix: call save_solution() EARLY with your first feasible solution, then keep "
+        "improving and re-saving in a loop (the runtime stops you at the fuel cap). Do "
+        "NOT gate the loop on a wall-clock deadline / std::time::Instant — that is "
+        "nondeterministic under fuel accounting.\n"
         "- Any other error = the code saved a solution but the evaluator "
         "rejected it (constraint violation). Fix: check that your solution "
         "satisfies all feasibility constraints described in the challenge.\n\n"

@@ -108,11 +108,11 @@ DEFAULT_TRACKS_PER_CHALLENGE = {
     "satisfiability": {"n_vars=100000,ratio=4150": 2},
     "vehicle_routing": {"n_nodes=600": 2},
     "knapsack": {"n_items=1000,budget=10": 2},
-    "job_scheduling": {"n=50,s=FLOW_SHOP": 2},
-    "energy_arbitrage": {"s=BASELINE": 2},
+    "job_scheduling": {"n=50,s=flow_shop": 2},
+    "energy_arbitrage": {"s=baseline": 2},
     "hypergraph": {"n_h_edges=10000": 2},
     "neuralnet_optimizer": {"n_hidden=4": 2},
-    "vector_search": {"n_queries=10": 2},
+    "vector_search": {"n_queries=7000": 2},
 }
 
 AGENT_CONFIG_PATH = ROOT / "agent.config.json"
@@ -731,6 +731,10 @@ def collect_per_challenge_configs(
     for ch, meta in target.items():
         ch_def = _CHALLENGE_REGISTRY[ch]
         tracks: dict = {"seed": "test"}
+        # Per-instance wall-clock timeout retired — the TIG backend bounds by
+        # fuel (max_fuel_budget), not the clock. `default_timeout` is kept only
+        # as harmless metadata for backward compat; it is no longer prompted.
+        timeout = ch_def.default_timeout
         if use_defaults:
             default_tracks = DEFAULT_TRACKS_PER_CHALLENGE.get(ch)
             if default_tracks:
@@ -739,7 +743,6 @@ def collect_per_challenge_configs(
             else:
                 for key in meta["track_keys"]:
                     tracks[key] = DEFAULT_INSTANCES_PER_TRACK
-            timeout = ch_def.default_timeout
         else:
             print(f"\n── {ch} ──")
             ch_track_defaults = DEFAULT_TRACKS_PER_CHALLENGE.get(ch, {})
@@ -749,10 +752,6 @@ def collect_per_challenge_configs(
                     ch_track_defaults.get(key, 0),
                     minimum=0,
                 )
-            timeout = prompt_int(
-                f"  per-instance timeout for {ch} (seconds)",
-                ch_def.default_timeout, minimum=1,
-            )
         algo_data = initial_algorithms.get(ch, {})
         sub: dict = {
             "tracks": tracks,

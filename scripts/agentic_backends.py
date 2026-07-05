@@ -250,7 +250,6 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     challenge = config.get("challenge", "unknown")
     algo_relpath = config["algorithm_path"]
     kernel_relpath = config.get("kernel_path")
-    timeout = config.get("timeout", 30)
 
     from prompts import get_strategy_tags
     strategy_tags = ", ".join(f"`{t}`" for t in get_strategy_tags(config))
@@ -273,18 +272,21 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     if opt_hooks:
         from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
         time_bullet = (
-            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
-            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
-            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
-            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+            "- Bounding is by FUEL, not wall-clock: the harness-owned training loop runs "
+            "until the challenge's fuel budget is exhausted and its best checkpoint is "
+            "scored. Keep your optimizer hooks lean (fewer instructions => more epochs fit "
+            "the fuel budget); the harness calls save_solution for you (do NOT call it "
+            "yourself, and do NOT write your own loop). Avoid clock-based control flow."
         )
     else:
         opt_contract = ""
         time_bullet = (
-            f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
-            f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
-            f"  `save_solution()` early with your first feasible solution, then keep\n"
-            f"  improving and re-saving. The last saved solution is what gets scored."
+            "- Bounding is by FUEL, not wall-clock: your solver runs until it exhausts the\n"
+            "  challenge's fuel budget (instruction-counted, deterministic) or returns. Call\n"
+            "  `save_solution()` early with your first feasible solution, then keep improving\n"
+            "  and re-saving — the last saved solution is scored, and the runtime stops you\n"
+            "  at the fuel cap. Do NOT gate the loop on `std::time::Instant` / a wall-clock\n"
+            "  deadline: clock-based control flow makes fuel usage nondeterministic."
         )
 
     return f"""\
@@ -479,7 +481,6 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     challenge = config.get("challenge", "unknown")
     algo_relpath = config["algorithm_path"]
     kernel_relpath = config.get("kernel_path")
-    timeout = config.get("timeout", 30)
 
     from prompts import get_strategy_tags
     strategy_tags = ", ".join(f"`{t}`" for t in get_strategy_tags(config))
@@ -492,18 +493,21 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     if opt_hooks:
         from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
         time_bullet = (
-            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
-            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
-            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
-            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+            "- Bounding is by FUEL, not wall-clock: the harness-owned training loop runs "
+            "until the challenge's fuel budget is exhausted and its best checkpoint is "
+            "scored. Keep your optimizer hooks lean (fewer instructions => more epochs fit "
+            "the fuel budget); the harness calls save_solution for you (do NOT call it "
+            "yourself, and do NOT write your own loop). Avoid clock-based control flow."
         )
     else:
         opt_contract = ""
         time_bullet = (
-            f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
-            f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
-            f"  `save_solution()` early with your first feasible solution, then keep\n"
-            f"  improving and re-saving. The last saved solution is what gets scored."
+            "- Bounding is by FUEL, not wall-clock: your solver runs until it exhausts the\n"
+            "  challenge's fuel budget (instruction-counted, deterministic) or returns. Call\n"
+            "  `save_solution()` early with your first feasible solution, then keep improving\n"
+            "  and re-saving — the last saved solution is scored, and the runtime stops you\n"
+            "  at the fuel cap. Do NOT gate the loop on `std::time::Instant` / a wall-clock\n"
+            "  deadline: clock-based control flow makes fuel usage nondeterministic."
         )
 
     return f"""\

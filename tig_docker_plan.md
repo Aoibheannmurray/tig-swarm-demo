@@ -560,17 +560,40 @@ timeout to catch true hangs — but fuel already bounds all instrumented compute
   `_SUPPORTED_TIG_C3_CHALLENGES` guards the TIG C3 default to {knapsack,
   vector_search, hypergraph} (override via `tig_c3_image`). Adds `c3_tig_smoke.py` +
   `seeds/` pool conformance; validated on real C3 incl. a CPU instance.
-- ⏭ **Remaining (in order):**
+- ✅ **Canonical TIG tracks (task 16) done.** `server/challenges.py` `track_keys` now
+  hold the canonical 5-track set for every challenge (fixed the stale
+  `job_scheduling` `n=20,s=UPPER` → `n=50,s=lower`, `energy_arbitrage` `s=UPPER` →
+  lower, `vector_search` `n_queries=10..200` → `7000..15000`; casing verified against
+  the Rust `Scenario` `Display`/`FromStr`, `n=50` against the hardcoded generator).
+  `setup.py DEFAULT_TRACKS_PER_CHALLENGE` seeds a run with **one** canonical track per
+  challenge (a light default; hosts widen from the `track_keys` menu). No server-side
+  track validation or dashboard mirror to update.
+- ✅ **Custom path retired (task 9) done.** The fuel-instrumented TIG docker backend is
+  now the **only** benchmarking path. Removed: the four Rust bins (`main_solver`/
+  `main_generator`/`main_evaluator`/`main_gpu_benchmark`) + their `[[bin]]` targets and
+  `generator`/`evaluator`/`gpu_benchmark` features + the dead `rayon` dep (kept `solver`
+  as a **no-op** feature — the agent/dev compile-check `cargo check --features
+  solver,<ch>` still needs it); `benchmark.py`'s docker re-exec + `build`/
+  `materialize_instances`/`run_instance`/`build_gpu`/`run_gpu_instance`/`aggregate` +
+  per-challenge viz `*_extras` (1518→~500 lines, `main()` now just calls
+  `run_tig_benchmark`); `c3_compute.py`'s `_create_workspace`/`_write_c3_project` +
+  the custom `run_benchmark_c3` branch (now always `_run_tig_benchmark_c3`); the
+  `datasets/` cache; the wizard per-instance `timeout` prompt; the 2 custom C3 tests.
+  Agent prompts (`prompts.py` + `agentic_backends.py` CLAUDE.md/AGENTS.md) are now
+  **fuel-aware** — the wall-clock/`std::time::Instant` guidance is replaced by "bounded
+  by fuel; keep re-saving; no clock-based control flow" (also fixes the correctness bug
+  where agents self-terminated early and under-spent the fuel budget). Kept: the
+  vendored challenge types, `_tig_*` infra, `_shifted_geomean`, scoring constants.
+  Verified: `cargo check --features solver,knapsack` + all script/server tests green.
+- ⚠️ **Consequence — TIG is now the only path, so C3 needs its images.** With no custom
+  fallback, C3 benchmarking of a challenge REQUIRES its Docker Hub image to exist.
+  Still outstanding (now blocking full C3 coverage, not optional):
   1. **Run task 14** (mirror workflow — set Docker Hub secrets + dispatch) → all 8
      challenge images on Docker Hub.
   2. **Widen `_SUPPORTED_TIG_C3_CHALLENGES` to all 8** + re-mirror neuralnet as
      `tig-dev-neuralnet_optimizer` (the workflow already uses the full name).
-  3. **Task 16** — set canonical TIG tracks in config (replace stale example
-     difficulties; values in Instance generation above).
-  4. **Task 9 (retire custom path)** — final cleanup, safe once all 8 work on C3:
-     delete the custom bins/generator/evaluator/datasets + `benchmark.py` custom inner
-     logic + custom `run_benchmark_c3` path (keep the vendored challenge types).
-  (Optional later: production warm-cache custom images via CI — Option B.)
+  (Local docker benchmarking works for any challenge whose image is built locally.
+  Optional later: production warm-cache custom images via CI — Option B.)
 
   Empirical note: the naive greedy scored **negative** quality (TIG's
   baseline-relative scale); the real algorithm scores **positive**. Confirms the
