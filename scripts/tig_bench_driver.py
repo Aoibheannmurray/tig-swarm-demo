@@ -13,6 +13,9 @@
 # Inputs (env):
 #   CHALLENGE            (set by the image) — challenge name
 #   TIG_TRACKS           JSON {track_key: nonce_count}  (no "seed" key)
+#   TIG_STARTS           JSON {track_key: start_nonce}  (default {} -> 0); lets a
+#                        distributed C3 run give each shard a disjoint nonce
+#                        window (see c3_compute.py fan-out)
 #   TIG_SEED             rand_hash / base seed string
 #   TIG_FUEL             fuel cap (= max_fuel_budget)
 #   TIG_HYPERPARAMETERS  "null" | flat JSON | per-track {track: {...}} JSON
@@ -40,6 +43,7 @@ def hp_for(hp: str, track_key: str) -> str:
 def main() -> int:
     challenge = os.environ["CHALLENGE"]
     tracks = json.loads(os.environ.get("TIG_TRACKS", "{}"))
+    starts = json.loads(os.environ.get("TIG_STARTS", "{}"))
     seed = os.environ.get("TIG_SEED", "test")
     fuel = int(os.environ.get("TIG_FUEL", str(5_000_000_000_000)))
     hp = os.environ.get("TIG_HYPERPARAMETERS") or "null"
@@ -65,13 +69,15 @@ def main() -> int:
     for track_key, count in tracks.items():
         if track_key == "seed" or not isinstance(count, int) or count <= 0:
             continue
+        start = int(starts.get(track_key, 0))
         path = tempfile.mktemp(suffix=".json")
         cmd = [
             "modified_test_algorithm", "swarm_algo", track_key, hp_for(hp, track_key),
-            "--seed", seed, "--nonces", str(count), "--fuel", str(fuel),
-            "--workers", workers, "--output-json", path,
+            "--seed", seed, "--start", str(start), "--nonces", str(count),
+            "--fuel", str(fuel), "--workers", workers, "--output-json", path,
         ]
-        print(f"[driver] track {track_key} ({count} nonces)…", file=sys.stderr)
+        print(f"[driver] track {track_key} (nonces {start}..{start + count})…",
+              file=sys.stderr)
         r = subprocess.run(cmd, cwd=workdir, stderr=subprocess.PIPE, text=True)
         if r.returncode != 0 or not os.path.exists(path):
             print(f"[driver] track {track_key} failed: {(r.stderr or '')[-500:]}",

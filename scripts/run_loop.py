@@ -1561,6 +1561,21 @@ def parse_args() -> argparse.Namespace:
         help="Optional C3 CLI provider passed as `c3 deploy -p ...`",
     )
     p.add_argument(
+        "--c3-nonces-per-shard", type=int,
+        help=(
+            "Distributed C3 benchmarking: nonces per machine/shard (default 8). "
+            "Each track's nonces split into ceil(count/N) concurrent C3 jobs; "
+            "<=0 disables sharding (one job per whole track)."
+        ),
+    )
+    p.add_argument(
+        "--c3-max-parallel-jobs", type=int,
+        help=(
+            "Max concurrent C3 shard jobs (default 3, the basic C3 plan cap). "
+            "Extra shards queue and run as slots free up."
+        ),
+    )
+    p.add_argument(
         "--env",
         help="Docker Hub environment image for C3 jobs; overrides built-in defaults",
     )
@@ -1669,6 +1684,13 @@ def main() -> int:
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "auto"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
     args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
+    # Distributed C3 benchmarking knobs (default-on when compute=c3). CLI flag
+    # wins, else per-agent agent.config.json, else defaults (8 nonces/shard, 3
+    # concurrent jobs). Falsy CLI (None) falls through; explicit 0 is honored.
+    if args.c3_nonces_per_shard is None:
+        args.c3_nonces_per_shard = agent_config.get("c3_nonces_per_shard", 8)
+    if args.c3_max_parallel_jobs is None:
+        args.c3_max_parallel_jobs = agent_config.get("c3_max_parallel_jobs", 3)
     # Per-agent C3 key from agent.config.json (forwarded by run_fleet from the
     # agent entry or the fleet-wide default). The --c3-api-key flag still wins;
     # if both are empty, c3_compute falls back to C3_API_KEY / `c3 login`.
@@ -1796,6 +1818,8 @@ def main() -> int:
         "c3_hardware": args.hardware,
         "c3_time": args.c3_time,
         "c3_provider": args.c3_provider,
+        "c3_nonces_per_shard": args.c3_nonces_per_shard,
+        "c3_max_parallel_jobs": args.c3_max_parallel_jobs,
         "env": args.env,
     }
     for key, value in runtime_defaults.items():

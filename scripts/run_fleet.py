@@ -71,6 +71,10 @@ for _stream in (sys.stdout, sys.stderr):
 _AGENT_CONFIG_KEYS = (
     "provider", "model", "api_base", "compute",
     "c3_hardware", "c3_time", "c3_cloud_provider", "c3_no_build",
+    # Distributed C3 benchmarking (see c3_compute.py). Per-agent: nonces per
+    # shard/machine (default 8) and the max concurrent C3 shard jobs this agent
+    # runs (default 3 — the basic C3 plan's cap). Each agent can pick its own.
+    "c3_nonces_per_shard", "c3_max_parallel_jobs",
     # Per-agent C3 API key (raw value). Omit to inherit the top-level fleet
     # `c3_api_key`, the C3_API_KEY env var, or the `c3 login` session — in that
     # order. Lets each agent bill C3 to a different key without separate fleets.
@@ -114,6 +118,9 @@ _FLEET_WIDE_DEFAULT_KEYS = (
     "hpo_seed",
     "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
     "cleaner_cooldown_iters",
+    # Distributed C3 benchmarking: set once at the top level and every agent
+    # inherits (per-agent entry still overrides via setdefault).
+    "c3_nonces_per_shard", "c3_max_parallel_jobs",
 )
 
 # Fleet-entry fields the monitor loop re-syncs into a running worktree's
