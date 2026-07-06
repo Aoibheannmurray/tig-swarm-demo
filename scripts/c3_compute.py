@@ -4,6 +4,17 @@ The current C3 architecture runs a project described by a root `.c3` file.
 For Docker jobs C3 pulls a public Docker Hub image, uploads the project
 workspace, runs the configured bash script inside the container, then returns
 files written to `$C3_ARTIFACTS_DIR` or configured `output:` directories.
+
+Distributed benchmarking (fan-out): a benchmark's nonces are bin-packed into
+fixed-size shards (``c3_nonces_per_shard``, default 8), packing *across* track
+boundaries so no machine is under-filled — a shard may carry slices from several
+tracks. The job count is ceil(total_nonces / size), not one-per-track. Every
+shard is deployed as its own concurrent C3 job (bounded by
+``c3_max_parallel_jobs``, default 3, the basic C3 plan's concurrent-job cap).
+The per-shard ``combined.json`` outputs are merged back into a single combined
+dict and scored once by ``_tig_adapter`` — so the score is identical to a
+single-job run, only faster. A benchmark whose total nonces fit in one shard
+reproduces the old single-job behavior exactly.
 """
 
 from __future__ import annotations
@@ -18,6 +29,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
@@ -36,6 +48,12 @@ _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 _DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
 _DEFAULT_GPU_HARDWARE = "l40"
 _AUTO_HARDWARE_VALUES = {"", "auto", "default"}
+# Distributed benchmarking defaults. Each shard = one C3 machine running up to
+# _DEFAULT_NONCES_PER_SHARD nonces; at most _DEFAULT_MAX_PARALLEL_JOBS shards run
+# concurrently (the basic C3 plan's cap — overridable per-agent via
+# c3_max_parallel_jobs in fleet.config.json).
+_DEFAULT_NONCES_PER_SHARD = 8
+_DEFAULT_MAX_PARALLEL_JOBS = 3
 # CPU challenges served by a *baked* custom image (tig-bench-<ch>): the monorepo
 # source + warm cargo cache + modified_test_algorithm are pre-built into the
 # image (see Dockerfile.bench / build_bench_image.sh). C3 pulls it (cached per
@@ -172,6 +190,68 @@ def _copy_required(src: Path, dst: Path) -> None:
 def _copy_optional(src: Path, dst: Path) -> None:
     if src.exists():
         _copy_required(src, dst)
+
+
+# ── Nonce sharding (distributed fan-out) ───────────────────────────
+
+
+def _shard_size(cfg: dict) -> int:
+    """Nonces per shard/machine. <= 0 disables sharding (one shard for all nonces)."""
+    try:
+        return int(cfg.get("c3_nonces_per_shard", _DEFAULT_NONCES_PER_SHARD))
+    except (TypeError, ValueError):
+        return _DEFAULT_NONCES_PER_SHARD
+
+
+def _max_parallel(cfg: dict) -> int:
+    """Max concurrent C3 jobs. Clamped to >= 1."""
+    try:
+        value = int(cfg.get("c3_max_parallel_jobs", _DEFAULT_MAX_PARALLEL_JOBS))
+    except (TypeError, ValueError):
+        value = _DEFAULT_MAX_PARALLEL_JOBS
+    return max(1, value)
+
+
+def _plan_shards(tracks: dict, shard_size: int) -> list[list[dict]]:
+    """Bin-pack every track's nonces into shards of at most ``shard_size`` nonces
+    each, packing *across* track boundaries so no machine is under-filled.
+
+    Returns a list of shards; each shard is a list of ``{track_key, start,
+    count}`` slices (a single job runs one ``modified_test_algorithm`` per slice,
+    which the driver already supports). So the job count is
+    ``ceil(total_nonces / shard_size)`` — not one-per-track.
+
+    e.g. tracks {9: 10, 16: 8} @ size 8 -> 3 shards:
+        [9[0:8]], [9[8:10], 16[0:6]], [16[6:8]]
+    ``shard_size <= 0`` disables sharding: one shard holds every slice (the
+    original single-job behavior). The ``seed`` key and any non-positive / non-int
+    count are skipped (matches the driver / adapter).
+    """
+    units = [
+        (k, v) for k, v in (tracks or {}).items()
+        if k != "seed" and isinstance(v, int) and v > 0
+    ]
+    total = sum(count for _, count in units)
+    if total == 0:
+        return []
+    cap = shard_size if (shard_size and shard_size > 0) else total
+
+    shards: list[list[dict]] = []
+    cur: list[dict] = []
+    cur_used = 0
+    for track_key, count in units:
+        pos = 0
+        while pos < count:
+            if cur_used == cap:  # current shard full -> start a new one
+                shards.append(cur)
+                cur, cur_used = [], 0
+            take = min(cap - cur_used, count - pos)
+            cur.append({"track_key": track_key, "start": pos, "count": take})
+            pos += take
+            cur_used += take
+    if cur:
+        shards.append(cur)
+    return shards
 
 
 # ── C3 command parsing / polling ───────────────────────────────────
@@ -510,6 +590,12 @@ def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str
         k: v for k, v in (cfg.get("tracks") or {}).items()
         if k != "seed" and isinstance(v, int) and v > 0
     }
+    # Per-track nonce start offsets (distributed shard window). Absent -> {} so
+    # the driver defaults every track to start 0 (single-job behavior).
+    starts = {
+        k: int(v) for k, v in (cfg.get("track_starts") or {}).items()
+        if k != "seed" and k in tracks
+    }
     fuel = int(cfg.get("max_fuel_budget", _BM_DEFAULT_FUEL))
     is_nn = challenge == "neuralnet_optimizer"
     baked = challenge in _TIG_BAKED_CHALLENGES
@@ -535,6 +621,7 @@ cp algorithm/mod.rs "$SLOT/mod.rs"
 cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
 export TIG_WORKDIR=/app
 export TIG_TRACKS={_yaml_quote(json.dumps(tracks))}
+export TIG_STARTS={_yaml_quote(json.dumps(starts))}
 export TIG_SEED={_yaml_quote(seed)}
 export TIG_FUEL={fuel}
 {hp_export}python3 tig_bench_driver.py > "$OUT/combined.json" 2> "$OUT/driver.stderr" || echo "driver rc=$?" >> "$OUT/driver.stderr"
@@ -579,6 +666,7 @@ cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
 grep -q "pub mod swarm_algo;" tig-source/tig-algorithms/src/{challenge}/mod.rs || echo "pub mod swarm_algo;" >> tig-source/tig-algorithms/src/{challenge}/mod.rs
 export TIG_WORKDIR="$PWD/tig-source"
 export TIG_TRACKS={_yaml_quote(json.dumps(tracks))}
+export TIG_STARTS={_yaml_quote(json.dumps(starts))}
 export TIG_SEED={_yaml_quote(seed)}
 export TIG_FUEL={fuel}
 {hp_export}python3 tig_bench_driver.py > "$OUT/combined.json" 2> "$OUT/driver.stderr" || echo "driver rc=$?" >> "$OUT/driver.stderr"
@@ -624,6 +712,79 @@ def _load_tig_combined(stage: Path) -> tuple[dict | None, str]:
         return None, f"combined.json not parseable: {e}"
 
 
+def _run_one_c3_shard(
+    args: argparse.Namespace, env: dict, stage: Path, label: str,
+) -> tuple[dict | None, str]:
+    """Deploy one already-staged shard job, poll it, pull artifacts, and return
+    its raw ``combined.json`` dict (unadapted — the orchestrator merges + scores
+    all shards together). ``stage`` must already contain the `.c3` + runner."""
+    cmd = ["c3", "deploy"]
+    provider = _arg_value(args, "c3_provider")
+    if provider:
+        cmd.extend(["-p", provider])
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding="utf-8", errors="replace", cwd=stage, env=env,
+    )
+    lines: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip()
+        lines.append(line)
+        print(f"    [C3][{label}]   {line}")
+    proc.wait()
+    combined = "\n".join(lines)
+    if proc.returncode != 0:
+        return None, f"c3 deploy failed ({proc.returncode}):\n{combined[-2000:]}"
+
+    job_id = _parse_c3_id(combined)
+    if not job_id:
+        return None, f"could not parse job ID:\n{combined[-1000:]}"
+
+    walltime_secs = _parse_walltime(args.c3_time)
+    print(f"    [C3][{label}] job {job_id} — polling for completion...")
+    status = _poll_c3_job(
+        job_id, env, stage, walltime_secs, _c3_poll_timeout(args, walltime_secs)
+    )
+    cancel_output = ""
+    if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
+        cancel_output = _cancel_c3_job(job_id, env, stage)
+        print(f"    [C3][{label}] canceled timed-out job {job_id}")
+    _pull_artifacts(job_id, env, stage)
+    if status != "completed":
+        logs_out = _read_logs(job_id, env, stage)
+        details = "\n".join(
+            part for part in (cancel_output[-1000:], logs_out[-3000:]) if part
+        )
+        return None, f"job {job_id} {status}\n{details}"
+
+    comb, perr = _load_tig_combined(stage)
+    if comb is None:
+        logs_out = _read_logs(job_id, env, stage)
+        return None, f"job {job_id} completed but {perr}\n{logs_out[-3000:]}"
+    return comb, ""
+
+
+def _merge_combined(results: list, challenge: str, fuel: int) -> dict:
+    """Reassemble per-shard ``combined.json`` dicts into one, concatenating each
+    track's nonce records across shards. Shaped exactly like a single-job
+    combined so ``_tig_adapter`` scores it unchanged. Iterating ``results`` in
+    shard order keeps nonces in ascending order (shards are disjoint windows)."""
+    merged: dict = {"challenge": challenge, "fuel_limit": fuel, "tracks": {}}
+    tracks = merged["tracks"]
+    for comb in results:
+        if not comb:
+            continue
+        for track_key, payload in (comb.get("tracks") or {}).items():
+            slot = tracks.setdefault(track_key, {"nonces": []})
+            if not isinstance(payload, dict):
+                continue
+            if "error" in payload and "error" not in slot:
+                slot["error"] = payload["error"]
+            slot["nonces"].extend(payload.get("nonces") or [])
+    return merged
+
+
 def _run_tig_benchmark_c3(
     args: argparse.Namespace, cfg: dict, server: str, env: dict,
     seed: str | None, hyperparameters: str | None,
@@ -634,61 +795,76 @@ def _run_tig_benchmark_c3(
     cfg["env"] = image
     if seed is None:
         seed = str((cfg.get("tracks") or {}).get("seed", "test"))
+    fuel = int(cfg.get("max_fuel_budget", _BM_DEFAULT_FUEL))
 
-    print(f"    [C3] (TIG backend) staging {challenge} with image {image}...")
+    shards = _plan_shards(cfg.get("tracks") or {}, _shard_size(cfg))
+    if not shards:
+        return None, f"[C3] No positive-count tracks to benchmark for {challenge}"
+    max_parallel = _max_parallel(cfg)
+    print(
+        f"    [C3] (TIG backend) {challenge}: {len(shards)} shard job(s) "
+        f"across ≤{max_parallel} machine(s), image {image}..."
+    )
+
     with tempfile.TemporaryDirectory(prefix="tig-c3-tig-", ignore_cleanup_errors=True) as tmp:
-        stage = Path(tmp)
+        root = Path(tmp)
+        base = root / "base"
+        base.mkdir()
+        # Stage the shared workspace ONCE (for raw challenges this is the pricey
+        # monorepo tar); each shard then gets a cheap copytree + its own project.
         try:
-            _create_tig_workspace(stage, cfg)
-            _write_tig_c3_project(stage, cfg, args.c3_time, image, seed, hyperparameters)
+            _create_tig_workspace(base, cfg)
         except Exception as exc:
-            return None, f"[C3] Failed to create TIG project: {exc}"
+            return None, f"[C3] Failed to create TIG workspace: {exc}"
 
-        cmd = ["c3", "deploy"]
-        provider = _arg_value(args, "c3_provider")
-        if provider:
-            cmd.extend(["-p", provider])
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            encoding="utf-8", errors="replace", cwd=stage, env=env,
-        )
-        lines: list[str] = []
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip()
-            lines.append(line)
-            print(f"    [C3]   {line}")
-        proc.wait()
-        combined = "\n".join(lines)
-        if proc.returncode != 0:
-            return None, f"[C3] c3 deploy failed ({proc.returncode}):\n{combined[-4000:]}"
-
-        job_id = _parse_c3_id(combined)
-        if not job_id:
-            return None, f"[C3] Could not parse job ID:\n{combined[-2000:]}"
-
-        walltime_secs = _parse_walltime(args.c3_time)
-        print(f"    [C3] TIG job {job_id} — polling for completion...")
-        status = _poll_c3_job(
-            job_id, env, stage, walltime_secs, _c3_poll_timeout(args, walltime_secs)
-        )
-        cancel_output = ""
-        if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
-            cancel_output = _cancel_c3_job(job_id, env, stage)
-            print(f"    [C3] canceled timed-out job {job_id}")
-        _pull_artifacts(job_id, env, stage)
-        if status != "completed":
-            logs_out = _read_logs(job_id, env, stage)
-            details = "\n".join(
-                part for part in (cancel_output[-1000:], logs_out[-3000:]) if part
+        jobs: list[tuple[int, Path, str]] = []
+        for idx, shard in enumerate(shards):
+            stage = root / f"shard-{idx}"
+            try:
+                shutil.copytree(base, stage)
+                shard_cfg = dict(cfg)
+                # A shard may hold slices from several tracks (bin-packed); each
+                # distinct track appears at most once per shard, so these dicts
+                # never collide.
+                shard_cfg["tracks"] = {s["track_key"]: s["count"] for s in shard}
+                shard_cfg["track_starts"] = {s["track_key"]: s["start"] for s in shard}
+                _write_tig_c3_project(
+                    stage, shard_cfg, args.c3_time, image, seed, hyperparameters
+                )
+            except Exception as exc:
+                return None, f"[C3] Failed to stage shard {idx}: {exc}"
+            label = "+".join(
+                f"{s['track_key']}[{s['start']}:{s['start'] + s['count']}]"
+                for s in shard
             )
-            return None, f"[C3] TIG job {job_id} {status}\n{details}"
+            jobs.append((idx, stage, label))
 
-        comb, perr = _load_tig_combined(stage)
-        if comb is None:
-            logs_out = _read_logs(job_id, env, stage)
-            return None, f"[C3] TIG job completed but {perr}\n{logs_out[-3000:]}"
-        return _bm_tig_adapter(comb, cfg), ""
+        results: list[dict | None] = [None] * len(jobs)
+        errs: list[str] = [""] * len(jobs)
+        with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+            futures = {
+                pool.submit(_run_one_c3_shard, args, env, stage, label): idx
+                for idx, stage, label in jobs
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    comb, err = future.result()
+                except Exception as exc:  # defensive: never let a thread crash silently
+                    comb, err = None, f"shard raised {exc!r}"
+                results[idx], errs[idx] = comb, err
+
+        # Strict all-or-nothing (mirrors the single-job path): any failed shard
+        # means missing nonces, so fail rather than score on a partial set.
+        failed = [(jobs[i][2], errs[i]) for i in range(len(jobs)) if results[i] is None]
+        if failed:
+            detail = "\n".join(f"  {label}: {err}" for label, err in failed)
+            return None, (
+                f"[C3] {len(failed)}/{len(jobs)} TIG shard job(s) failed:\n{detail}"
+            )
+
+        merged = _merge_combined(results, challenge, fuel)
+        return _bm_tig_adapter(merged, cfg), ""
 
 
 def run_benchmark_c3(
@@ -704,6 +880,16 @@ def run_benchmark_c3(
     cfg = dict(config)
     cfg["server_url"] = server
     cfg["c3_hardware"] = _resolve_c3_hardware(cfg, _arg_value(args, "hardware"))
+    # Distributed sharding knobs come from args (like c3_time/c3_provider);
+    # fall back to any config value, then the module defaults.
+    cfg["c3_nonces_per_shard"] = _arg_value(
+        args, "c3_nonces_per_shard",
+        cfg.get("c3_nonces_per_shard", _DEFAULT_NONCES_PER_SHARD),
+    )
+    cfg["c3_max_parallel_jobs"] = _arg_value(
+        args, "c3_max_parallel_jobs",
+        cfg.get("c3_max_parallel_jobs", _DEFAULT_MAX_PARALLEL_JOBS),
+    )
 
     image = _select_docker_image(args, cfg)
     cfg["env"] = image

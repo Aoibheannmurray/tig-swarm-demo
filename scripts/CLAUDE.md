@@ -49,6 +49,19 @@ TIG toolchain** (fuel-instrumented; `tig-runtime`/`tig-verifier`), gated by
   `tig_docker_plan.md` (design + status). Algorithms author against
   `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases the crate as `tig_challenges`).
 
+**Distributed C3 (nonce sharding).** On the C3 path (`c3_compute.py`) a
+benchmark's nonces are **bin-packed** into shards of `c3_nonces_per_shard`
+(default 8), packing *across* track boundaries (a shard may carry slices from
+several tracks), so the job count is `ceil(total_nonces/8)` — not one-per-track.
+Each shard runs as its own **concurrent** C3 job (bounded by
+`c3_max_parallel_jobs`, default 3, the basic-plan cap). A job runs one
+`modified_test_algorithm` per track-slice it holds; the per-shard `combined.json`s
+are merged (`_merge_combined`) and scored once by `_tig_adapter`, so the score
+matches a single-job run — only faster. A benchmark whose total nonces fit in one
+shard reproduces the old single-job behavior. Both knobs are per-agent (or
+fleet-wide) in `fleet.config.json`; the driver reads each track's `--start`
+window from `TIG_STARTS`. See `scripts/test_c3_sharding.py`.
+
 ## Tests
 
 No pytest. `test_*.py` are self-running scripts (`if __name__ == "__main__"`) —

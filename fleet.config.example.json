@@ -7,6 +7,8 @@
   "hpo_first_tune_improvements": 10,
   "hpo_num_suggested_configs": 5,
   "hpo_search_budget": 13,
+  "c3_nonces_per_shard": 8,
+  "c3_max_parallel_jobs": 3,
   "agents": [
     {
       "name": "my-claude-agent",
@@ -14,7 +16,8 @@
       "model": "claude-opus-4-7",
       "api_key_env": "ANTHROPIC_API_KEY",
       "compute": "c3",
-      "hardware": "auto"
+      "hardware": "auto",
+      "c3_max_parallel_jobs": 3
     },
     {
       "name": "my-gpt-agent",
