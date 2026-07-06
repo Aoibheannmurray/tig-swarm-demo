@@ -18,6 +18,12 @@ deployment per swarm** — no multi-tenancy.
 ## Layout
 
 - `server.py` — FastAPI app + routes; `app` is the ASGI entry point.
+  GET /api/state dispatches to `_agent_state` / `_dashboard_state`;
+  POST /api/iterations is an orchestrator over phase helpers.
+- `trajectory_reset.py` — the stagnation-driven trajectory-reset state
+  machine (deactivate → adopt/fresh-start → deposit). Runs in one
+  BEGIN IMMEDIATE transaction on an injected conn; called from the
+  /api/state agent view.
 - `db.py` — SQLite schema/access; config applied from env on first boot.
 - `models.py` / `api_models.py` — internal and API data shapes.
 - `challenges.py`, `tiers.py`, `dedup.py`, `names.py`, `ws_events.py` — domain

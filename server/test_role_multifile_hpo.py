@@ -25,6 +25,12 @@ def _fresh_modules():
     return db, server
 
 
+async def _publish(server, req):
+    """create_iteration requires the caller's token to resolve to
+    req.agent_id; tests bypass HTTP, so pass the resolved id directly."""
+    return await server.create_iteration(req, token_agent_id=req.agent_id)
+
+
 async def _register_agent(db, agent_id="agentA", name=None, tier="frontier"):
     name = name or f"Agent {agent_id}"
     async with db.connect() as conn:
@@ -50,7 +56,7 @@ async def test_role_stored_on_hypothesis():
     db, server = _fresh_modules()
     await db.init_db()
     await _register_agent(db)
-    await server.create_iteration(_iter("agentA", 100.0, role="explorer"))
+    await _publish(server, _iter("agentA", 100.0, role="explorer"))
     async with db.connect() as conn:
         row = await (await conn.execute(
             "SELECT role FROM hypotheses WHERE agent_id = ?", ("agentA",))).fetchone()
@@ -63,7 +69,7 @@ async def test_multifile_round_trips_to_storage():
     await db.init_db()
     await _register_agent(db)
     files = {"mod.rs": "use super::*;\nmod helpers;\n", "helpers.rs": "pub fn h() {}\n"}
-    await server.create_iteration(
+    await _publish(server, 
         _iter("agentA", 100.0, role="explorer", algorithm_files=files,
               code=files["mod.rs"]))
     async with db.connect() as conn:
@@ -83,7 +89,7 @@ async def test_frontier_multifile_is_harvested_as_seed():
     await db.init_db()
     await _register_agent(db, tier="frontier")
     files = {"mod.rs": "use super::*;\nfn solve_challenge() {}\n", "h.rs": "// helper\n"}
-    await server.create_iteration(
+    await _publish(server, 
         _iter("agentA", 100.0, role="explorer", algorithm_files=files,
               code=files["mod.rs"]))
     async with db.connect() as conn:
@@ -97,7 +103,7 @@ async def test_standard_tier_does_not_harvest():
     db, server = _fresh_modules()
     await db.init_db()
     await _register_agent(db, tier="standard")
-    await server.create_iteration(_iter("agentA", 100.0, role="exploiter"))
+    await _publish(server, _iter("agentA", 100.0, role="exploiter"))
     async with db.connect() as conn:
         seeds = await db.list_seeds(conn, CHALLENGE)
     assert seeds == [], seeds
@@ -110,10 +116,10 @@ async def test_near_duplicate_seed_rejected():
     await _register_agent(db, "a1", tier="frontier")
     await _register_agent(db, "a2", tier="frontier")
     code = "use super::*;\nfn solve_challenge() {\n    let x = greedy_pick();\n}\n"
-    await server.create_iteration(_iter("a1", 100.0, role="explorer", code=code))
+    await _publish(server, _iter("a1", 100.0, role="explorer", code=code))
     # An (almost) identical algorithm from another frontier agent must NOT be
     # admitted as a second seed — diversity is by code similarity now.
-    await server.create_iteration(_iter("a2", 200.0, role="explorer", code=code))
+    await _publish(server, _iter("a2", 200.0, role="explorer", code=code))
     async with db.connect() as conn:
         seeds = await db.list_seeds(conn, CHALLENGE)
     assert len(seeds) == 1, f"near-duplicate should be rejected, got {len(seeds)} seeds"

@@ -45,16 +45,16 @@ def test_env_override_wins():
 
 def test_username_and_agent_id_compose():
     with tempfile.TemporaryDirectory() as tmp:
-        _with_root(tmp, **{"agent.config.json": {"username": "aoibheann", "agent_id": "69e67db9ffb3"}})
-        assert benchmark._resolve_user_id() == "aoibheann (agent 69e67db9ffb3)"
+        _with_root(tmp, **{"agent.config.json": {"username": "contributor", "agent_id": "69e67db9ffb3"}})
+        assert benchmark._resolve_user_id() == "contributor (agent 69e67db9ffb3)"
     print("PASS test_username_and_agent_id_compose")
 
 
 def test_username_only_falls_back_to_fleet_config():
     with tempfile.TemporaryDirectory() as tmp:
         # No agent.config.json → username comes from fleet.config.json, no agent id.
-        _with_root(tmp, **{"fleet.config.json": {"username": "aoibheann"}})
-        assert benchmark._resolve_user_id() == "aoibheann"
+        _with_root(tmp, **{"fleet.config.json": {"username": "contributor"}})
+        assert benchmark._resolve_user_id() == "contributor"
     print("PASS test_username_only_falls_back_to_fleet_config")
 
 
@@ -78,10 +78,6 @@ def test_benchmark_id_is_fresh_10_char_hex():
     assert len(ids) == 100, "benchmark ids must be unique per run"
     assert all(re.fullmatch(r"[0-9a-f]{10}", i) for i in ids)
     print("PASS test_benchmark_id_is_fresh_10_char_hex")
-
-
-
-
 
 
 def test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():

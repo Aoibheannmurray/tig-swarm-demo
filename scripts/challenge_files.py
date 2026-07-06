@@ -268,7 +268,9 @@ def write_files(files: dict[str, str], config: dict, base: Path = ROOT) -> None:
     for rel, content in files.items():
         # Keep all writes inside the algorithm dir (defend against `..`).
         dest = (d / rel).resolve()
-        if not str(dest).startswith(str(d.resolve())):
+        try:
+            dest.relative_to(d.resolve())
+        except ValueError:
             raise ValueError(f"refusing to write outside algorithm dir: {rel}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         _safe_write(dest, content)

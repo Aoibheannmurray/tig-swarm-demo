@@ -83,17 +83,24 @@ impl Challenge {
                 ));
             }
 
-            if self.clauses.iter().all(|clause| {
-                clause.iter().any(|&literal| {
-                    let var_idx = literal.abs() as usize - 1;
-                    let var_value = solution.variables[var_idx];
-                    (literal > 0 && var_value) || (literal < 0 && !var_value)
-                })
-            }) {
-                Ok(QUALITY_PRECISION)
-            } else {
-                Ok(0)
+            for clause in &self.clauses {
+                let mut satisfied = false;
+                for &literal in clause {
+                    let var = literal.unsigned_abs() as usize;
+                    if var == 0 || var > self.num_variables {
+                        return Err(anyhow!("Literal ({}) is out of bounds", literal));
+                    }
+                    let var_value = solution.variables[var - 1];
+                    if (literal > 0 && var_value) || (literal < 0 && !var_value) {
+                        satisfied = true;
+                        break;
+                    }
+                }
+                if !satisfied {
+                    return Ok(0);
+                }
             }
+            Ok(QUALITY_PRECISION)
         }
     );
 }

@@ -43,6 +43,8 @@ import threading
 import time
 from pathlib import Path
 
+from proc_utils import group_kwargs, kill_tree, term_tree
+
 ROOT = Path(__file__).resolve().parent.parent
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
 WORKTREES_DIR = ROOT / "worktrees"
@@ -53,6 +55,14 @@ WORKTREES_DIR = ROOT / "worktrees"
 # the BOM transparently and is a no-op for normal UTF-8.
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Write JSON via tmp file + os.replace so concurrent readers (run_loop
+    re-reads agent.config.json every iteration) never observe a torn file."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # Windows console crashes on the box-drawing / ellipsis characters this script
@@ -132,6 +142,7 @@ _PROVIDER_TO_DEFAULT_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
     "venice": "VENICE_API_KEY",
 }
 
@@ -344,7 +355,7 @@ def _seed_worktree(
     merged["swarm_password"] = fleet_swarm_password
     if agent.get("tacit_knowledge"):
         merged["tacit_knowledge"] = agent["tacit_knowledge"]
-    wt_agent.write_text(json.dumps(merged, indent=2) + "\n")
+    _write_json_atomic(wt_agent, merged)
 
     src, explicit = _resolve_tacit_source(agent, fleet_tacit)
     if src.exists():
@@ -469,20 +480,6 @@ def cmd_list(agents: list[dict]) -> int:
     return 0
 
 
-def _safe_volume_suffix(name: str) -> str:
-    """Mirror of `_safe_volume_suffix` in benchmark.py — kept duplicated here
-    instead of imported so `run_fleet.py --clean` doesn't pull benchmark.py's
-    heavier import graph (urllib, math, ThreadPoolExecutor, …) just to delete
-    a few Docker volumes. Keep these two helpers in sync."""
-    import re
-    s = re.sub(r"[^a-zA-Z0-9_.-]", "_", name)
-    if not s:
-        return "x"
-    if not s[0].isalnum():
-        s = "x" + s
-    return s
-
-
 def _remove_cargo_volumes(agent_name: str) -> None:
     """Best-effort cleanup of the per-agent cargo target volumes.
 
@@ -492,6 +489,11 @@ def _remove_cargo_volumes(agent_name: str) -> None:
     errors. A docker daemon that isn't running is also fine — the volumes
     will just stay there until the user starts Docker and removes them
     manually."""
+    # Shared with the volume creator (benchmark.py) so the names always
+    # match. Imported lazily so run/list paths don't pull benchmark.py's
+    # import graph; benchmark.py is import-safe (its module-level
+    # resolve_server_url call is required=False, so no I/O failure exits).
+    from benchmark import _safe_volume_suffix
     safe = _safe_volume_suffix(agent_name)
     for suffix in ("cpu", "gpu"):
         vol = f"tig-cargo-cache-{suffix}-{safe}"
@@ -622,9 +624,19 @@ def _sync_hot_reload_to_worktrees(agents: list[dict]) -> None:
                 changed = True
         if changed:
             try:
-                wt_cfg_path.write_text(
-                    json.dumps(current, indent=2) + "\n", encoding="utf-8",
-                )
+                # run_loop may have registered and persisted agent_id/name/
+                # token between our read above and this write — re-read and
+                # keep those so the hot-reload write can't clobber a freshly
+                # issued agent_token (which would force a re-register).
+                try:
+                    latest = _read_json(wt_cfg_path)
+                except Exception:
+                    latest = {}
+                if isinstance(latest, dict):
+                    for ident_key in ("agent_id", "agent_name", "agent_token"):
+                        if latest.get(ident_key) and not current.get(ident_key):
+                            current[ident_key] = latest[ident_key]
+                _write_json_atomic(wt_cfg_path, current)
                 print(f"  [fleet] {name}: role -> {current.get('role')}")
             except OSError as e:
                 print(f"  [fleet] {name}: role sync failed: {e}", file=sys.stderr)
@@ -694,11 +706,15 @@ def cmd_run(
         # spillover, Rust panic backtraces with raw bytes). Without
         # errors="replace" the parent crashes the moment it tries to decode a
         # stray byte, killing the whole fleet.
+        # group_kwargs(): each agent loop gets its own process group (POSIX)
+        # so teardown can kill its docker/cargo/CLI grandchildren too, not
+        # just the run_loop.py process itself.
         proc = subprocess.Popen(
             cmd, cwd=path, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
             encoding="utf-8", errors="replace",
+            **group_kwargs(),
         )
         t = threading.Thread(
             target=_stream_output, args=(name, color, proc, on_output),
@@ -722,9 +738,11 @@ def cmd_run(
             return
         stopping = True
         print(f"\n  [fleet] {reason} — terminating agents…")
+        # Tree-wide TERM/KILL (see proc_utils): each agent's whole process
+        # group dies, so in-flight docker/cargo grandchildren don't linger.
         for _, p, _t in procs:
             if p.poll() is None:
-                p.terminate()
+                term_tree(p)
         deadline = time.time() + 10
         for nm, p, _t in procs:
             remaining = max(0.0, deadline - time.time())
@@ -732,7 +750,7 @@ def cmd_run(
                 p.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 print(f"  [fleet] killing {nm} (didn't exit in 10s)")
-                p.kill()
+                kill_tree(p)
 
     def _shutdown(_signum, _frame):
         _terminate_all("shutdown signal")

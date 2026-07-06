@@ -98,7 +98,7 @@ from challenge_files import (
     read_challenge_md,
     validate_code,
 )
-from server import (
+from swarm_client import (
     AgentTokenRevoked,
     agent_exists,
     get_state,
@@ -226,12 +226,26 @@ def load_agent_config() -> dict:
     try:
         data = _read_json(AGENT_CONFIG_PATH)
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except Exception as e:
+        # Malformed JSON (hand-edit typo, torn write): warn loudly but keep
+        # the loop alive on defaults — identity/provider fall back to the
+        # registration flow rather than crashing mid-run.
+        print(
+            f"  [WARN] {AGENT_CONFIG_PATH} is unreadable ({e}) — "
+            f"ignoring it and continuing with defaults. Fix the JSON to "
+            f"restore the persisted identity/provider settings.",
+            file=sys.stderr,
+        )
         return {}
 
 
 def write_agent_config(config: dict) -> None:
-    AGENT_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+    # Atomic tmp-file + os.replace: agent.config.json is also read/written by
+    # run_fleet's hot-reload monitor, so a plain write_text could be observed
+    # torn (or interleave with the monitor's own write).
+    tmp = AGENT_CONFIG_PATH.with_name(AGENT_CONFIG_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(config, indent=2) + "\n")
+    os.replace(tmp, AGENT_CONFIG_PATH)
 
 
 def _one_line_identity_part(value: object) -> str:
@@ -1198,11 +1212,16 @@ def _fix_runtime_errors(
             print(f"  Fix failed validation: {violation}")
             return restore_and_fail()
 
-        sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
-        print(f"  Fix similarity: {sim * 100:.0f}%")
-        if sim >= 0.99:
-            print("  Fix made no changes (identical to broken code) — restoring previous best.")
+        # Abort ONLY on a byte-identical echo — same rationale as the
+        # compile-fix path above: a legitimate one-line runtime fix in a long
+        # file is ~99.7% similar, so a `sim >= 0.99` threshold rejected
+        # exactly the small, correct fixes we want. Similarity is kept purely
+        # as a diagnostic readout.
+        if fixed == current_code and (fixed_kernel or "") == (current_kernel or ""):
+            print("  Fix returned the broken code unchanged (no-op) — restoring previous best.")
             return restore_and_fail()
+        sim = difflib.SequenceMatcher(None, current_code, fixed).ratio()
+        print(f"  Fix changed the code (similarity to broken: {sim * 100:.1f}%) — re-benchmarking.")
         files.write(fixed, fixed_kernel)
         code_changed = True
 
@@ -1510,7 +1529,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--provider",
         choices=[
-            "anthropic", "openai", "google",
+            "anthropic", "openai", "google", "openrouter", "venice",
             "claude-code", "claude-code-agentic", "codex-agentic",
         ],
         help=(
@@ -1609,11 +1628,19 @@ def resolve_api_key(provider: str, api_key: str | None) -> str:
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
         "venice": "VENICE_API_KEY",
     }
-    key = os.environ.get(env_map[provider], "")
+    env_var = env_map.get(provider)
+    if env_var is None:
+        sys.exit(
+            f"Unknown provider {provider!r}. "
+            f"Known: {', '.join(sorted(env_map))} (plus the CLI-auth "
+            "providers claude-code, claude-code-agentic, codex-agentic)."
+        )
+    key = os.environ.get(env_var, "")
     if not key:
-        sys.exit(f"No API key. Set ${env_map[provider]} or pass --api-key.")
+        sys.exit(f"No API key. Set ${env_var} or pass --api-key.")
     return key
 
 
@@ -1758,7 +1785,7 @@ def main() -> int:
         # same display name so the contributor keeps their identity.
         # Multi-agent coordination keys off agent_id only — renaming or
         # re-registering one contributor is invisible to everyone else.
-        if agent_exists(server, agent_id):
+        if agent_exists(server, agent_id, agent_token):
             # Authenticated probe before the loop spends an LLM call: a
             # revoked worker still satisfies agent_exists (the row is
             # preserved for dashboard history; only token + status change),
@@ -1952,7 +1979,7 @@ def main() -> int:
         # ── Get state ──────────────────────────────────────────
         print("  [STATE] Fetching agent state…")
         try:
-            state = get_state(server, agent_id, role=role)
+            state = get_state(server, agent_id, role=role, agent_token=agent_token)
         except Exception as e:
             print(f"  [STATE] FAILED: {e}")
             time.sleep(_ITERATION_BACKOFF_SECS)

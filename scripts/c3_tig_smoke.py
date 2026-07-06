@@ -21,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from c3_compute import run_benchmark_c3  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TIG_MONOREPO = Path("/home/sam/personal_projects/tig_2026/tig-monorepo")
+DEFAULT_TIG_MONOREPO = Path(
+    os.environ.get("TIG_MONOREPO") or (ROOT.parent / "tig-monorepo")
+)
 
 SMOKE_CHALLENGES: dict[str, dict] = {
     "knapsack": {

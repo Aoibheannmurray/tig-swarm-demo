@@ -55,7 +55,7 @@ impl Challenge {
             flow_structure,
             product_mix_ratio,
         } = track.s.clone().into();
-        let n_jobs = 50;
+        let n_jobs = track.n;
         let n_machines = n_jobs / 2 + 5;
         let n_op_types = n_jobs / 2 + 5;
         let n_products = 1.max((product_mix_ratio * n_jobs as f32) as usize);
@@ -244,7 +244,11 @@ impl Challenge {
                             job,
                         ));
                     }
-                    let finish_time = start_time + eligible_machines[&machine];
+                    let finish_time = start_time
+                        .checked_add(eligible_machines[&machine])
+                        .ok_or_else(|| {
+                            anyhow!("Job {} schedule contains overflowing start time", job)
+                        })?;
                     machine_usage
                         .entry(machine)
                         .or_default()

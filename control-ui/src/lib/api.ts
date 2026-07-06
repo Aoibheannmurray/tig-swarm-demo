@@ -46,11 +46,8 @@ export const localApi = {
   swarmAdmin: () => fetch(`${LOCAL}/swarm/admin`).then(jsonOrThrow),
   swarmCreate: (params: any) =>
     fetch(`${LOCAL}/swarm/create`, post(params)).then(jsonOrThrow),
-  swarmCreateStatus: () => fetch(`${LOCAL}/swarm/create/status`).then(jsonOrThrow),
   swarmSwitch: (challenge: string) =>
     fetch(`${LOCAL}/swarm/switch`, post({ challenge })).then(jsonOrThrow),
-  invite: (payload: any) =>
-    fetch(`${LOCAL}/invite`, post(payload)).then(jsonOrThrow),
 };
 
 // Live event stream from the companion (fleet logs + deploy progress).
@@ -102,6 +99,12 @@ export const hostedApi = {
 // run_invite: sha256(username + ':' + base)). Used by the Admin Console so the
 // host can generate invites without any server round-trip.
 export async function deriveInvitePassword(username: string, base: string): Promise<string> {
+  // crypto.subtle only exists in secure contexts — on a plain-HTTP,
+  // non-localhost origin it's undefined and the digest below would throw
+  // an opaque TypeError. Fail with an actionable message instead.
+  if (!crypto?.subtle) {
+    throw new Error("Invite generation needs HTTPS or localhost (Web Crypto unavailable)");
+  }
   const data = new TextEncoder().encode(`${username}:${base}`);
   const digest = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");

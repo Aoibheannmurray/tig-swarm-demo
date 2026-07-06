@@ -394,13 +394,23 @@ async def _relax_trajectory_bests_experiment_id() -> None:
                 track_scores TEXT,
                 updated_at TEXT NOT NULL,
                 trajectory_id TEXT,
+                -- Added by _add_column earlier in init_db; the rebuild must
+                -- carry them or the first boot after upgrade on a legacy DB
+                -- drops them and every read of these columns 500s.
+                hyperparameters TEXT,
+                algorithm_files TEXT,
                 PRIMARY KEY (agent_id, challenge),
                 FOREIGN KEY (agent_id) REFERENCES agents(id)
             );
             INSERT INTO trajectory_bests_new
+                (agent_id, challenge, experiment_id, algorithm_code,
+                 kernel_code, score, feasible, challenge_metrics,
+                 solution_data, track_scores, updated_at, trajectory_id,
+                 hyperparameters, algorithm_files)
                 SELECT agent_id, challenge, experiment_id, algorithm_code,
                        kernel_code, score, feasible, challenge_metrics,
-                       solution_data, track_scores, updated_at, trajectory_id
+                       solution_data, track_scores, updated_at, trajectory_id,
+                       hyperparameters, algorithm_files
                 FROM trajectory_bests;
             DROP TABLE trajectory_bests;
             ALTER TABLE trajectory_bests_new RENAME TO trajectory_bests;
@@ -603,6 +613,32 @@ def _direction_order(direction: str) -> str:
 
 def is_better(direction: str, candidate: float, prior: float) -> bool:
     return candidate > prior if direction == "max" else candidate < prior
+
+
+# ── algorithm_files JSON codecs ──
+#
+# Multi-file algorithms are stored as one JSON {relpath: content} map in the
+# `algorithm_files` column (experiments / trajectory_bests / seed_pool /
+# inactive_algorithms all share the convention). Shared by server.py and
+# trajectory_reset.py.
+
+
+def files_json(files: dict | None) -> str | None:
+    """JSON-encode a {relpath: content} files-map for storage, or None when it
+    is empty/single-file (the entry lives in `algorithm_code`)."""
+    return json.dumps(files) if files else None
+
+
+def row_files(row) -> dict | None:
+    """Decode a stored `algorithm_files` JSON column to a dict, or None."""
+    raw = row.get("algorithm_files") if hasattr(row, "get") else None
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return d if isinstance(d, dict) and d else None
 
 
 _TRAJECTORY_BESTS_COLS = (

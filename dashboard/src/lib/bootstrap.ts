@@ -34,6 +34,19 @@ export function getDashboardUrls(): { wsUrl: string; apiUrl: string } {
 // is a no-op so pressing it doesn't trigger a reload.
 export function installKeyboardNav(currentPage: PageId): void {
   document.addEventListener("keydown", (e) => {
+    // Don't hijack modified keystrokes (browser/OS shortcuts) or digits
+    // typed into a form control — only bare keypresses on the page navigate.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "SELECT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
     for (const [page, { key, href }] of Object.entries(PAGES) as [
       PageId,
       { key: string; href: string },

@@ -1,6 +1,8 @@
 import { getAgentColor } from "../lib/colors";
 import type { Panel, WSMessage } from "../types";
 import { getViewedChallenge } from "../lib/viewedChallenge";
+import { getDashboardUrls } from "../lib/bootstrap";
+import { heatmapCorner, heatmapShortName, ThrottledRefresh } from "../lib/heatmap";
 
 interface DiversityData {
   trajectories: { trajectory_id: string; display_name: string }[];
@@ -11,13 +13,11 @@ export class DiversityPanel implements Panel {
   private container!: HTMLElement;
   private inner!: HTMLElement;
   private apiUrl = "";
-  private throttleTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastFetch = 0;
+  private throttle = new ThrottledRefresh(() => this.fetchAndRender());
   // Tracks the challenge whose data is currently in `inner`. Used to detect
   // a viewed-challenge switch so we can drop stale rows immediately rather
   // than letting the previous matrix linger until the next fetch.
   private renderedChallenge = "";
-  private static THROTTLE_MS = 30_000;
   // Above this many trajectories, stop shrinking cells to fit and let the
   // grid overflow horizontally/vertically inside its scroll container.
   private static SCROLL_THRESHOLD = 20;
@@ -35,23 +35,7 @@ export class DiversityPanel implements Panel {
     `;
     this.inner = document.getElementById("diversity-grid")!;
 
-    const wsEl = document.querySelector(".ws-status");
-    if (wsEl) {
-      const proto = window.location.protocol;
-      this.apiUrl = `${proto}//${window.location.host}`;
-    }
-    const params = new URLSearchParams(window.location.search);
-    const explicit = params.get("api");
-    if (explicit) this.apiUrl = explicit;
-    else {
-      const ws = params.get("ws") || "";
-      if (ws) {
-        this.apiUrl = ws
-          .replace("ws://", "http://")
-          .replace("wss://", "https://")
-          .replace("/ws/dashboard", "");
-      }
-    }
+    this.apiUrl = getDashboardUrls().apiUrl;
 
     this.fetchAndRender();
   }
@@ -61,7 +45,7 @@ export class DiversityPanel implements Panel {
     // setChallenge. We fetch here (not in reset) so the inner is empty
     // while the new challenge's matrix is in flight, then refetched
     // against the now-current viewed challenge.
-    this.lastFetch = 0;
+    this.throttle.forceNext();
     this.fetchAndRender();
   }
 
@@ -72,20 +56,11 @@ export class DiversityPanel implements Panel {
       return;
     }
     if (msg.type !== "leaderboard_update") return;
-
-    const elapsed = Date.now() - this.lastFetch;
-    if (elapsed >= DiversityPanel.THROTTLE_MS) {
-      this.fetchAndRender();
-    } else if (!this.throttleTimer) {
-      this.throttleTimer = setTimeout(() => {
-        this.throttleTimer = null;
-        this.fetchAndRender();
-      }, DiversityPanel.THROTTLE_MS - elapsed);
-    }
+    this.throttle.request();
   }
 
   private async fetchAndRender() {
-    this.lastFetch = Date.now();
+    this.throttle.markRun();
     // Always scope the matrix to the viewed challenge — the server
     // endpoint defaults to the active challenge otherwise, which would
     // show e.g. the energy_arbitrage matrix while the user is viewing
@@ -136,12 +111,12 @@ export class DiversityPanel implements Panel {
     this.inner.classList.toggle("diversity-grid--scroll", scrollMode);
 
     // Column headers
-    grid.appendChild(this.corner());
+    grid.appendChild(heatmapCorner());
     for (let j = 0; j < n; j++) {
       const hdr = document.createElement("div");
       hdr.className = "dv-col-hdr";
       hdr.style.color = getAgentColor(trajectories[j].trajectory_id);
-      hdr.textContent = this.shortName(trajectories[j].display_name);
+      hdr.textContent = heatmapShortName(trajectories[j].display_name);
       hdr.title = trajectories[j].display_name;
       grid.appendChild(hdr);
     }
@@ -152,7 +127,7 @@ export class DiversityPanel implements Panel {
       const rh = document.createElement("div");
       rh.className = "dv-row-hdr";
       rh.style.color = getAgentColor(trajectories[i].trajectory_id);
-      rh.textContent = this.shortName(trajectories[i].display_name);
+      rh.textContent = heatmapShortName(trajectories[i].display_name);
       rh.title = trajectories[i].display_name;
       grid.appendChild(rh);
 
@@ -173,29 +148,6 @@ export class DiversityPanel implements Panel {
 
     this.inner.innerHTML = "";
     this.inner.appendChild(grid);
-  }
-
-  private corner(): HTMLElement {
-    const el = document.createElement("div");
-    el.className = "dv-corner";
-    return el;
-  }
-
-  private shortName(name: string): string {
-    // The server now labels rows as "<traj-id> · <agent-name>(possibly · inactive)".
-    // The traj-id prefix is what the operator scans for, so keep it intact
-    // and truncate from the trailing agent-name half when the label is too
-    // long for the heatmap chip.
-    if (name.length <= 12) return name;
-    const dot = " · ";
-    const idx = name.indexOf(dot);
-    if (idx < 0 || idx >= 10) return name.slice(0, 11) + "…";
-    const head = name.slice(0, idx); // traj-id
-    const tail = name.slice(idx + dot.length);
-    const tailBudget = Math.max(1, 12 - head.length - dot.length);
-    return tail.length <= tailBudget
-      ? `${head}${dot}${tail}`
-      : `${head}${dot}${tail.slice(0, tailBudget)}…`;
   }
 
   private cellColor(val: number): string {

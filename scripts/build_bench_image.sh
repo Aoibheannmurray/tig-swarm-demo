@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build the custom benchmark image (Option B) for one challenge, locally.
-# See tig_docker_plan.md.
+# See docs/tig_docker_plan.md.
 #
 #   build_bench_image.sh <challenge> [version] [monorepo_path]
 #
@@ -15,7 +15,7 @@ set -euo pipefail
 
 CHALLENGE="${1:?usage: build_bench_image.sh <challenge> [version] [monorepo_path]}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"   # swarm repo root
-VERSION="${2:-$(python3 -c "import json,sys; print(json.load(open('$HERE/tig_pin.json'))['tig_version'])")}"
+VERSION="${2:-$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['tig_version'])" "$HERE/tig_pin.json")}"
 MONOREPO="${3:-$(cd "$HERE/.." && pwd)/tig-monorepo}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 

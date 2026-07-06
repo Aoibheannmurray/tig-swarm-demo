@@ -56,15 +56,6 @@ class ReplayRow(_ResponseBase):
     solution_data: Optional[Any] = None
 
 
-class ReplayCompactRow(_ResponseBase):
-    """``compact=1`` variant — strictly score/agent/timestamp."""
-    experiment_id: str
-    agent_id: Optional[str] = None
-    agent_name: str
-    score: float
-    created_at: str
-
-
 # ── /api/diversity ───────────────────────────────────────────────────────
 
 

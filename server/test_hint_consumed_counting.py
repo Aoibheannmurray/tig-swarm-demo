@@ -33,6 +33,12 @@ def _fresh_modules():
     return db, server
 
 
+async def _publish(server, req):
+    """create_iteration requires the caller's token to resolve to
+    req.agent_id; tests bypass HTTP, so pass the resolved id directly."""
+    return await server.create_iteration(req, token_agent_id=req.agent_id)
+
+
 async def _register(db, agent_id="agentA"):
     async with db.connect() as conn:
         await conn.execute(
@@ -76,10 +82,10 @@ async def test_leaderboard_counts_consumed_not_offered():
                 set_fields={"pending_hint": "tacit_knowledge"},
             )
             await conn.commit()
-        await server.create_iteration(_iter("agentA", 100.0 + i))
+        await _publish(server, _iter("agentA", 100.0 + i))
 
     # A plain iteration with no pending hint (not counted).
-    await server.create_iteration(_iter("agentA", 50.0))
+    await _publish(server, _iter("agentA", 50.0))
 
     async with db.connect() as conn:
         raw = await (await conn.execute(
@@ -113,8 +119,8 @@ async def test_no_hint_means_zero_consumed():
     await db.init_db()
     await _register(db)
     # Two iterations, no pending hint ever set.
-    await server.create_iteration(_iter("agentA", 100.0))
-    await server.create_iteration(_iter("agentA", 110.0))
+    await _publish(server, _iter("agentA", 100.0))
+    await _publish(server, _iter("agentA", 110.0))
     async with db.connect() as conn:
         lb = await db.compute_leaderboard(conn, CHALLENGE, None, direction="max")
     row = next(r for r in lb if r["agent_id"] == "agentA")

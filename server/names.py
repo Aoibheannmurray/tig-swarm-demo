@@ -35,3 +35,9 @@ def generate_agent_name() -> str:
 def load_used_names(names: set[str]) -> None:
     """Restore used names from DB on startup."""
     _used_names.update(names)
+
+
+def reserve_name(name: str) -> None:
+    """Mark a name taken after boot (custom register / rename) so the
+    generator can never produce it again in this process."""
+    _used_names.add(name)

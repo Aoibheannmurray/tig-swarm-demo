@@ -703,6 +703,24 @@ pub fn training_loop(
 }
 
 pub fn load_solution(mlp: &mut MLP, solution: &Solution, stream: Arc<CudaStream>) -> Result<()> {
+    if solution.weights.len() != mlp.lin.len() || solution.biases.len() != mlp.lin.len() {
+        return Err(anyhow::anyhow!(
+            "Solution has {} weight / {} bias layers; model expects {}",
+            solution.weights.len(),
+            solution.biases.len(),
+            mlp.lin.len()
+        ));
+    }
+    if solution.bn_weights.len() != mlp.bns.len()
+        || solution.bn_biases.len() != mlp.bns.len()
+        || solution.bn_running_means.len() != mlp.bns.len()
+        || solution.bn_running_vars.len() != mlp.bns.len()
+    {
+        return Err(anyhow::anyhow!(
+            "Solution batch-norm parameter counts do not match model ({} batch-norm layers)",
+            mlp.bns.len()
+        ));
+    }
     for (i, layer) in mlp.lin.iter_mut().enumerate() {
         let w_flat: Vec<f32> = solution.weights[i].iter().flatten().cloned().collect();
         stream.memcpy_htod(&w_flat, &mut layer.weight)?;

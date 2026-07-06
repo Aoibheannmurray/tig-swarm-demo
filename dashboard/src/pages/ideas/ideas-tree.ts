@@ -2,6 +2,7 @@ import type { WSMessage } from "../../types";
 import { getAgentColor } from "../../lib/colors";
 import { formatTime } from "../../lib/animate";
 import { escapeHTML } from "../../lib/format";
+import { renderPageHeader } from "../../lib/pageChrome";
 
 interface FeedItem {
   id: string;
@@ -47,20 +48,7 @@ export class IdeasTree {
   init(container: HTMLElement) {
     container.innerHTML = `
       <div class="ideas-page">
-        <div class="ideas-header">
-          <div class="ideas-title">
-            <img class="stats-mark" src="/prometheus-icon.png" alt="" draggable="false" />
-            <span class="ideas-title-text">Insight Library</span>
-          </div>
-          <div class="ideas-nav">
-            <a href="/" class="ideas-nav-link">Dashboard</a>
-            <span class="ideas-nav-active">Ideas</span>
-            <a href="/diversity.html" class="ideas-nav-link">Diversity</a>
-            <a href="/benchmark.html" class="ideas-nav-link">Benchmark</a>
-            <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
-            <a href="/leaderboard.html" class="ideas-nav-link">Leaderboard</a>
-          </div>
-        </div>
+        ${renderPageHeader("ideas", "Insight Library")}
 
         <div class="ideas-body">
           <div class="ideas-feed-col">
@@ -239,9 +227,11 @@ export class IdeasTree {
         // Three outcomes: new global best → milestone with own + global %s;
         // beats own best but not global → lightweight "improvement" post;
         // no improvement → skip (research feed stays narrative-focused).
+        // Server deltas are improvement-positive (positive = better score),
+        // same convention as panels/feed.ts.
         const fmtPct = (p: number | null | undefined): string => {
           if (p == null) return "";
-          const sign = p >= 0 ? "-" : "+";
+          const sign = p >= 0 ? "+" : "-";
           return `${sign}${Math.abs(p).toFixed(2)}%`;
         };
 

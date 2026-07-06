@@ -21,7 +21,6 @@ already have an `/api/state` response in hand — it avoids the extra GET.
 from __future__ import annotations
 
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -30,22 +29,7 @@ from typing import Optional
 
 ROOT = Path(__file__).parent.parent
 
-
-def _resolve_server_url() -> str:
-    if os.environ.get("TIG_SWARM_SERVER"):
-        return os.environ["TIG_SWARM_SERVER"].rstrip("/")
-    cfg_path = ROOT / ".swarm-cache.json"
-    if cfg_path.exists():
-        try:
-            url = json.loads(cfg_path.read_text()).get("server_url", "")
-            if url and not url.startswith("$"):
-                return url.rstrip("/")
-        except Exception:
-            pass
-    sys.exit(
-        "sync_identity.py: server URL not configured. "
-        "Run `python setup.py sync` (or set TIG_SWARM_SERVER)."
-    )
+from swarm_client import resolve_server_url  # noqa: E402
 
 
 def _read_contributor_name() -> Optional[str]:
@@ -141,8 +125,13 @@ def sync_identity(
     if not desired:
         return None
     try:
-        url = f"{server}/api/state?agent_id={agent_id}"
-        with urllib.request.urlopen(url, timeout=10) as r:
+        # /api/state?agent_id=X is authenticated — the server requires an
+        # X-Agent-Token header resolving to agent X.
+        headers = {"X-Agent-Token": agent_token} if agent_token else {}
+        req = urllib.request.Request(
+            f"{server}/api/state?agent_id={agent_id}", headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
             state = json.load(r)
     except Exception as e:
         print(f"[sync_identity] state fetch failed: {e}", file=sys.stderr)
@@ -158,7 +147,7 @@ def main() -> int:
         print("Usage: python3 scripts/sync_identity.py <agent_id>", file=sys.stderr)
         return 1
     agent_id = sys.argv[1]
-    server = _resolve_server_url()
+    server = resolve_server_url("sync_identity.py")
     renamed = sync_identity(server, agent_id, agent_token=_read_agent_token())
     if renamed:
         print(f"renamed to {renamed!r}")

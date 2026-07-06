@@ -33,7 +33,10 @@
     return { server_url: "", username: "", swarm_password: "", agents: [] };
   }
   function addAgent() {
-    config.agents = [...config.agents, { name: "", provider: "claude-code", model: "claude-opus-4-7", compute: "local", role: "explorer" }];
+    // Default model comes from the provider registry (same source the wizard
+    // uses) so it tracks scripts/init_fleet.py instead of a hardcoded id.
+    const model = providers.find((p) => p.key === "claude-code")?.default_model || "";
+    config.agents = [...config.agents, { name: "", provider: "claude-code", model, compute: "local", role: "explorer" }];
   }
   function removeAgent(i: number) {
     config.agents = config.agents.filter((_: any, idx: number) => idx !== i);

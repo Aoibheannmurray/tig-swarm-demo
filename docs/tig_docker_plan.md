@@ -180,7 +180,9 @@ source are already public from TIG). Never bake secrets/API keys in.
 > not `ghcr.io`** (`c3 deploy` → "only Docker Hub images are supported; got registry
 > ghcr.io"). So **C3-targeted images must live on Docker Hub** (`docker.io/<user>/…`);
 > local docker can still use ghcr. **✅ VALIDATED on C3:** mirrored the amd64 TIG dev
-> image to `docker.io/danieltiagoadams/tig-dev-knapsack:0.0.6` (mirroring is
+> image to `docker.io/<namespace>/tig-dev-knapsack:0.0.6` — the mirrored images
+> live under the TIG dev's public Docker Hub namespace, overridable via the
+> `TIG_DOCKERHUB` env var — (mirroring is
 > pull→tag→push — no execution, so cross-arch is fine from an arm64 host) and a
 > knapsack benchmark ran on a C3 l40 instance → real fuel + positive quality →
 > `benchmark.json`. C3 pulled the repo anonymously, so a pushed repo is **public** by
@@ -532,7 +534,9 @@ timeout to catch true hangs — but fuel already bounds all instrumented compute
   writes a `.c3` with the Docker Hub TIG image + a generated runner (per-challenge;
   neuralnet gets the seed-blinding patch + boilerplate assembly), reuses the
   deploy/poll/pull helpers, then `_load_tig_combined` → `_tig_adapter` → `benchmark.json`.
-  Image = `docker.io/<tig_dockerhub|env TIG_DOCKERHUB|danieltiagoadams>/tig-dev-<challenge>:<pin>`.
+  Image = `docker.io/<namespace>/tig-dev-<challenge>:<pin>`, where the namespace
+  resolves swarm config `tig_dockerhub` → env `TIG_DOCKERHUB` → the default
+  (the TIG dev's public Docker Hub namespace).
   Validated: live `run_benchmark_c3` knapsack → score 32726.5, feasible.
 - ✅ **D4 agent prompts (task 11) done.** `prompts.py` + `agentic_backends.py` no
   longer hardcode `use super::*;` — generic "keep the existing `use` imports"
@@ -550,8 +554,9 @@ timeout to catch true hangs — but fuel already bounds all instrumented compute
 - ✅ **Production image pipeline (task 14) — code done.** `.github/workflows/mirror-tig-images.yml`:
   matrix over all 8 challenges, `crane copy` each ghcr `dev` image → `docker.io/<user>/tig-dev-<ch>:<pin>`
   (registry-to-registry, no disk pull), keyed off `tig_pin.json`. **Activation (user):**
-  push the branch to GitHub + set secrets `DOCKERHUB_USERNAME` (=`danieltiagoadams`,
-  must match the swarm's `tig_dockerhub` namespace) + `DOCKERHUB_TOKEN`, then run it.
+  push the branch to GitHub + set secrets `DOCKERHUB_USERNAME` (must match the
+  swarm's `tig_dockerhub` namespace / `TIG_DOCKERHUB`; by default the TIG dev's
+  public Docker Hub namespace) + `DOCKERHUB_TOKEN`, then run it.
   After it runs, all 8 challenges are C3-pullable. (Custom warm-cache Option-B images
   are a future optimization.)
 - ✅ **CPU-aware C3 hardware (task 15) — merged (PR #55, `868a43a`).** Both `.c3`

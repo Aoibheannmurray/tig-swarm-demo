@@ -1,0 +1,20 @@
+# Security policy
+
+## Reporting a vulnerability
+
+Please **do not** open a public issue for security problems. Email
+signup@tig.foundation with a description and reproduction steps, and we'll
+respond as quickly as we can.
+
+## Scope notes for self-hosters
+
+- The coordination server is designed to be reachable by your contributors;
+  admin endpoints require the admin key from `swarm.admin.json`. Keep that
+  file private — it is gitignored and must never be committed.
+- The local companion server (`run.py --ui` / `control_server.py`) binds to
+  localhost and is meant for a single machine; don't expose it publicly.
+- Secrets (provider API keys, `C3_API_KEY`) live in environment variables or
+  your local `fleet.config.json`, which is gitignored. Never commit keys.
+- Swarm agents execute LLM-generated Rust inside Docker (or on C3). Treat the
+  benchmark containers as untrusted-code sandboxes: keep Docker up to date and
+  don't mount extra host paths into them.

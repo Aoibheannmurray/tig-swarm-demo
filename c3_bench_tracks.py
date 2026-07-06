@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """One-off: benchmark the on-disk algorithm on C3 across ALL TIG tracks.
 
-Like c3_bench_once.py, but overrides the track set to every mainnet track
-(n_hidden=4/7/10/14/18) with a fixed per-track instance count, and saves the
-full benchmark.json to a result file. Never publishes.
+Submits a single scripts/c3_compute.run_benchmark_c3 job using the swarm
+config from .swarm-cache.json, but overrides the track set to every mainnet
+track (n_hidden=4/7/10/14/18) with a fixed per-track instance count, and
+saves the full benchmark.json to a result file. Never publishes.
 
 Usage: python3 c3_bench_tracks.py <count_per_track> <out_json> [walltime]
 """
@@ -21,8 +22,19 @@ count = int(sys.argv[1]) if len(sys.argv) >= 2 else 200
 out_path = Path(sys.argv[2]) if len(sys.argv) >= 3 else ROOT / "reports" / "bench_tracks.json"
 walltime = sys.argv[3] if len(sys.argv) >= 4 else "05:00:00"
 
-config = json.loads((ROOT / ".swarm-cache.json").read_text())
-server = config["server_url"]
+cache_path = ROOT / ".swarm-cache.json"
+if not cache_path.exists():
+    sys.exit(
+        ".swarm-cache.json not found (it's gitignored and machine-managed) — "
+        "run `python3 setup.py sync` against a live swarm first."
+    )
+config = json.loads(cache_path.read_text(encoding="utf-8-sig"))
+server = config.get("server_url")
+if not server or not config.get("challenge"):
+    sys.exit(
+        ".swarm-cache.json has no server_url/challenge — re-run "
+        "`python3 setup.py sync` against a live swarm."
+    )
 seed = config.get("tracks", {}).get("seed", "test")
 config["tracks"] = {
     "seed": seed,

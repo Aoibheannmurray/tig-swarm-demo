@@ -17,9 +17,9 @@ scripts/admin_reset_challenge.py
 scripts/dump_trajectories.py
 
 README.md
-AGENTS.md.template
 Cargo.lock
 setup.py
+hostadmin/
 
 src/energy_arbitrage/
 src/vehicle_routing/

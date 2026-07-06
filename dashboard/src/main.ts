@@ -2,10 +2,6 @@ import "./style.css";
 import { SwarmWebSocket } from "./lib/websocket";
 import { getDashboardUrls, installKeyboardNav } from "./lib/bootstrap";
 import { viewportFlash } from "./lib/animate";
-import {
-  soundAgentJoined, soundHypothesisProposed, soundExperimentPublished,
-  soundNewGlobalBest, startHeartbeat,
-} from "./lib/sounds";
 import { initWelcome, toggleWelcome } from "./lib/welcome";
 import { startReplay } from "./lib/replay";
 import {
@@ -111,8 +107,6 @@ function constructPanels() {
 }
 
 // ── Message dispatch ──
-let soundEnabled = false;
-
 function handleMessage(msg: WSMessage) {
   // Drop challenge-scoped events that don't belong to the viewed challenge.
   // See lib/messageScope.ts for which event types are filtered.
@@ -139,14 +133,6 @@ function handleMessage(msg: WSMessage) {
   } else if (msg.type === "agent_joined") {
     rememberAgentName(msg.agent_id, msg.agent_name);
     if (msg.agent_id) registerAgentColor(msg.agent_id);
-  }
-
-  if (soundEnabled) {
-    if (msg.type === "agent_joined") soundAgentJoined();
-    if (msg.type === "hypothesis_proposed") soundHypothesisProposed(msg.strategy_tag);
-    if (msg.type === "experiment_published") soundExperimentPublished();
-    if (msg.type === "new_global_best") soundNewGlobalBest();
-    if (msg.type === "stats_update") startHeartbeat(msg.total_agents ?? msg.active_agents ?? 0);
   }
 
   if (msg.type === "new_global_best") {
@@ -384,7 +370,6 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       })
       .catch((e) => console.warn("[Dashboard] /api/messages backfill failed:", e));
 
-    soundEnabled = true;
     console.log("[Dashboard] Loaded initial state for challenge:", challenge);
 
     // Seed the chart's score-history line when the (compact) replay

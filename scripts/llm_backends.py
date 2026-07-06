@@ -229,7 +229,21 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> tuple[
         },
     )
     usage = data.get("usage") or {}
-    return data["content"][0]["text"], {
+    # Guard the body shape: an empty `content` list (e.g. the model stopped
+    # before emitting any block, or the request hit max_tokens mid-thought)
+    # would otherwise surface as an opaque IndexError. Mirror the OpenAI
+    # path: raise an informative error the caller logs and retries.
+    text = ""
+    for block in data.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text") or ""
+            break
+    if not text.strip():
+        stop = data.get("stop_reason") or "unknown"
+        raise RuntimeError(
+            f"Anthropic returned an empty completion (stop_reason={stop})"
+        )
+    return text, {
         "input_tokens": usage.get("input_tokens", 0),
         "output_tokens": usage.get("output_tokens", 0),
     }
@@ -374,7 +388,24 @@ def call_google(system: str, prompt: str, model: str, api_key: str) -> tuple[str
         {"Content-Type": "application/json"},
     )
     um = data.get("usageMetadata") or {}
-    return data["candidates"][0]["content"]["parts"][0]["text"], {
+    # Guard the body shape: a safety-blocked prompt has no candidates at all,
+    # and a blocked/empty candidate can lack content.parts — either way the
+    # old chained indexing raised an opaque IndexError/KeyError. Mirror the
+    # OpenAI path: raise an informative error the caller logs and retries.
+    candidates = data.get("candidates") or []
+    candidate = candidates[0] if candidates else {}
+    parts = (candidate.get("content") or {}).get("parts") or []
+    text = "".join(
+        p.get("text", "") for p in parts if isinstance(p, dict)
+    )
+    if not text.strip():
+        finish = candidate.get("finishReason") or "unknown"
+        detail = f"finishReason={finish}"
+        block = (data.get("promptFeedback") or {}).get("blockReason")
+        if block:
+            detail += f", blockReason={block}"
+        raise RuntimeError(f"Google returned an empty completion ({detail})")
+    return text, {
         "input_tokens": um.get("promptTokenCount", 0),
         "output_tokens": um.get("candidatesTokenCount", 0),
     }

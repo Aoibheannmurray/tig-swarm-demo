@@ -68,8 +68,10 @@
     error = "";
     if (!basePassword) { error = "Enter the base swarm password (from create) to generate invites."; return; }
     if (!inviteName.trim()) { error = "Enter a username for the invite."; return; }
-    const pw = await deriveInvitePassword(inviteName.trim(), basePassword);
-    inviteBlock = `"server_url": "${serverLabel()}",\n"username": "${inviteName.trim()}",\n"swarm_password": "${pw}"`;
+    try {
+      const pw = await deriveInvitePassword(inviteName.trim(), basePassword);
+      inviteBlock = `"server_url": "${serverLabel()}",\n"username": "${inviteName.trim()}",\n"swarm_password": "${pw}"`;
+    } catch (e: any) { error = e.message; }
   }
 
   async function revoke(username: string) {

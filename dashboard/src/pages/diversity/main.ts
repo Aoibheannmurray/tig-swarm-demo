@@ -1,6 +1,7 @@
 import "../../style.css";
 import { SwarmWebSocket } from "../../lib/websocket";
 import { getDashboardUrls, installKeyboardNav } from "../../lib/bootstrap";
+import { renderPageHeader } from "../../lib/pageChrome";
 import { DiversityPanel } from "../../panels/diversity";
 import { InspirationMatrixPanel } from "./inspiration-matrix";
 import { ChallengeSelectorPanel } from "../../panels/challenge-selector";
@@ -18,20 +19,7 @@ if (selectorMount) challengeSelector.init(selectorMount);
 const panelEl = document.getElementById("panel-diversity")!;
 panelEl.innerHTML = `
   <div class="page-flex">
-    <div class="ideas-header">
-      <div class="ideas-title">
-        <img class="stats-mark" src="/prometheus-icon.png" alt="" draggable="false" />
-        <span class="ideas-title-text">Diversity Map</span>
-      </div>
-      <div class="ideas-nav">
-        <a href="/" class="ideas-nav-link">Dashboard</a>
-        <a href="/ideas.html" class="ideas-nav-link">Ideas</a>
-        <span class="ideas-nav-active">Diversity</span>
-        <a href="/benchmark.html" class="ideas-nav-link">Benchmark</a>
-        <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
-        <a href="/leaderboard.html" class="ideas-nav-link">Leaderboard</a>
-      </div>
-    </div>
+    ${renderPageHeader("diversity", "Diversity Map")}
     <div class="page-body diversity-page-body">
       <div id="panel-diversity-body"></div>
       <div id="panel-inspiration-body"></div>

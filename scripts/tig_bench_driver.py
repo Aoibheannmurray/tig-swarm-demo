@@ -28,16 +28,39 @@ import tempfile
 
 
 def hp_for(hp: str, track_key: str) -> str:
-    """Resolve the hyperparameters arg for one track (flat or per-track map)."""
+    """Resolve the hyperparameters arg for one track (flat or per-track map).
+
+    KEEP IN SYNC with the canonical `_track_hyperparameters` in
+    scripts/benchmark.py. This file runs INSIDE the benchmark image with
+    nothing staged next to it (local docker mounts only this file — see
+    benchmark.run_tig_benchmark; C3 uploads only this file +
+    modified_test_algorithm — see c3_compute._create_tig_workspace), so it
+    cannot import the shared implementation. Only the "no hyperparameters"
+    representation differs: benchmark.py returns None (flag omitted) where
+    modified_test_algorithm wants the literal string "null".
+    """
     if hp in (None, "", "null"):
         return "null"
     try:
         obj = json.loads(hp)
-    except Exception:
-        return "null"
-    if isinstance(obj, dict) and isinstance(obj.get(track_key), dict):
-        return json.dumps(obj[track_key])
+    except ValueError:
+        return hp  # let modified_test_algorithm surface the parse error
+    if _is_per_track(obj):
+        return json.dumps(obj.get(track_key, {}))
     return hp
+
+
+def _is_per_track(parsed: object) -> bool:
+    """True if `parsed` is a per-track map {track_key: {param: value}} rather
+    than a flat {param: value} config. Mirrors benchmark.py's
+    `_is_per_track_hyperparameters` (see hp_for's keep-in-sync note): a flat
+    config's values are scalars, a per-track map's values are all dicts, and
+    an empty dict is treated as flat (the default config)."""
+    return (
+        isinstance(parsed, dict)
+        and len(parsed) > 0
+        and all(isinstance(v, dict) for v in parsed.values())
+    )
 
 
 def main() -> int:
@@ -70,23 +93,31 @@ def main() -> int:
         if track_key == "seed" or not isinstance(count, int) or count <= 0:
             continue
         start = int(starts.get(track_key, 0))
-        path = tempfile.mktemp(suffix=".json")
-        cmd = [
-            "modified_test_algorithm", "swarm_algo", track_key, hp_for(hp, track_key),
-            "--seed", seed, "--start", str(start), "--nonces", str(count),
-            "--fuel", str(fuel), "--workers", workers, "--output-json", path,
-        ]
-        print(f"[driver] track {track_key} (nonces {start}..{start + count})…",
-              file=sys.stderr)
-        r = subprocess.run(cmd, cwd=workdir, stderr=subprocess.PIPE, text=True)
-        if r.returncode != 0 or not os.path.exists(path):
-            print(f"[driver] track {track_key} failed: {(r.stderr or '')[-500:]}",
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            cmd = [
+                "modified_test_algorithm", "swarm_algo", track_key, hp_for(hp, track_key),
+                "--seed", seed, "--start", str(start), "--nonces", str(count),
+                "--fuel", str(fuel), "--workers", workers, "--output-json", path,
+            ]
+            print(f"[driver] track {track_key} (nonces {start}..{start + count})…",
                   file=sys.stderr)
-            out_tracks[track_key] = {"error": (r.stderr or "")[-500:]}
-            continue
-        with open(path) as fp:
-            out_tracks[track_key] = json.load(fp)
-        os.unlink(path)
+            r = subprocess.run(cmd, cwd=workdir, stderr=subprocess.PIPE, text=True)
+            # mkstemp pre-creates the file, so "still empty" is the
+            # didn't-write signal (mktemp's was "doesn't exist").
+            if r.returncode != 0 or os.path.getsize(path) == 0:
+                print(f"[driver] track {track_key} failed: {(r.stderr or '')[-500:]}",
+                      file=sys.stderr)
+                out_tracks[track_key] = {"error": (r.stderr or "")[-500:]}
+                continue
+            with open(path) as fp:
+                out_tracks[track_key] = json.load(fp)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     print(json.dumps({"challenge": challenge, "fuel_limit": fuel, "tracks": out_tracks}))
     return 0

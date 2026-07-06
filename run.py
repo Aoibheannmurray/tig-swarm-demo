@@ -7,7 +7,8 @@ One command per session (use `python` instead of `python3` on Windows):
 
 Phases (each only runs when it has something to do):
 
-  1. Preflight     - check `docker` is on PATH.
+  1. Preflight     - check `docker` is on PATH when any agent benchmarks
+                     locally (compute "local" or omitted).
   2. Init wizard   - if fleet.config.json is missing.
   3. Tacit prompt  - ask whether to add/edit tacit knowledge (default No,
                      append-mode so existing notes are preserved).
@@ -25,6 +26,7 @@ The underlying scripts still work for power-user / scripted flows:
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -86,7 +88,9 @@ def _ensure_ui_deps() -> None:
             subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
         subprocess.run([str(vpy), "-m", "pip", "install", "-q", "-r", req], check=True)
         print("Relaunching inside the local environment…")
-        os.execv(str(vpy), [str(vpy), str(ROOT / "run.py"), "--ui"])
+        # Preserve the user's flags (--port/--host/--no-browser). main() has
+        # already stripped --ui from sys.argv, so re-add it.
+        os.execv(str(vpy), [str(vpy), str(ROOT / "run.py"), "--ui", *sys.argv[1:]])
     except (subprocess.CalledProcessError, OSError) as exc:
         sys.exit(
             f"Couldn't auto-install the companion's dependencies ({exc}).\n"
@@ -210,6 +214,22 @@ def main() -> int:
     server_url, username, swarm_password, agents, fleet_tacit = (
         run_fleet._load_fleet()
     )
+
+    # Preflight: agents on local compute (or with compute omitted, which
+    # defaults to local) benchmark in Docker. The fleet can auto-start the
+    # daemon but not conjure an install — fail now with an actionable message
+    # instead of mid-benchmark. Same check the --ui companion performs.
+    uses_local = any((a.get("compute") or "local") == "local" for a in agents)
+    if uses_local and shutil.which("docker") is None:
+        print(
+            "This fleet has agents on local compute, but Docker isn't "
+            "installed.\nInstall Docker Desktop "
+            "(https://www.docker.com/products/docker-desktop/) and start it,\n"
+            "or switch those agents to C3 cloud compute (no local Docker "
+            "needed).",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         _tacit_phase(agents, fleet_tacit)

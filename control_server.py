@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from collections import deque
@@ -251,7 +252,11 @@ class DeployController:
                 self.state = "done"
                 self._hub.emit({"type": "deploy_status", "event": "done",
                                 "result": res})
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
+                # SystemExit too: setup's CLI-oriented helpers may still exit
+                # instead of raising — a bare `except Exception` would let that
+                # kill the worker thread silently and leave state "running"
+                # forever.
                 self.error = f"{type(exc).__name__}: {exc}"
                 self.state = "error"
                 self._hub.emit({"type": "deploy_status", "event": "error",
@@ -305,6 +310,19 @@ def preflight_status() -> dict:
             "codex": shutil.which("codex") is not None,
         },
     }
+
+
+def _origin_is_loopback(origin: str) -> bool:
+    """True if an Origin header names a loopback host. An absent Origin is
+    fine (non-browser clients don't send one); "null" and any web origin are
+    not — a rebinding/attacker page must never read the stream."""
+    if not origin:
+        return True
+    try:
+        hostname = urllib.parse.urlsplit(origin).hostname or ""
+    except ValueError:
+        return False
+    return hostname.lower() in {"localhost", "127.0.0.1", "::1"}
 
 
 def _host_is_loopback(host_header: str) -> bool:
@@ -492,11 +510,10 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             user = setup_mod._railway_check_auth()
             who = user.get("email") or user.get("name") or "unknown"
             return {"available": True, "authed": True, "user": who}
-        except SystemExit as exc:
-            # _railway_check_installed / _check_auth exit on failure — translate
-            # to a soft status so the UI can show the right instruction.
-            return {"available": False, "authed": False, "message": str(exc)}
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
+            # _railway_check_installed / _check_auth raise RailwayError on
+            # failure (SystemExit kept for belt-and-braces) — translate to a
+            # soft status so the UI can show the right instruction.
             return {"available": False, "authed": False, "message": str(exc)}
 
     @app.get("/local-api/swarm/admin")
@@ -620,6 +637,17 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     # ── Live event stream ──
     @app.websocket("/local-api/stream")
     async def stream(ws: WebSocket) -> None:
+        # The HTTP middleware above does NOT run for WebSocket handshakes, so
+        # enforce the same DNS-rebinding guard here: loopback Host, and (for
+        # browsers, which always send one) a loopback Origin. Otherwise any
+        # web page could open ws://127.0.0.1:<port>/local-api/stream and read
+        # the replayed event history.
+        if not allow_remote and not (
+            _host_is_loopback(ws.headers.get("host", ""))
+            and _origin_is_loopback(ws.headers.get("origin", ""))
+        ):
+            await ws.close(code=1008)  # policy violation — reject pre-accept
+            return
         await ws.accept()
         q = hub.subscribe()
         try:

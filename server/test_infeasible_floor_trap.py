@@ -50,6 +50,12 @@ def _fresh_modules():
     return db, server
 
 
+async def _publish(server, req):
+    """create_iteration requires the caller's token to resolve to
+    req.agent_id; tests bypass HTTP, so pass the resolved id directly."""
+    return await server.create_iteration(req, token_agent_id=req.agent_id)
+
+
 async def _register_agent(db, agent_id="agentA", name="Agent A"):
     async with db.connect() as conn:
         await conn.execute(
@@ -76,12 +82,12 @@ async def test_infeasible_does_not_beat_feasible_best():
     await db.init_db()
     await _register_agent(db)
 
-    feas = await server.create_iteration(
+    feas = await _publish(server, 
         _iter(server, "agentA", FEASIBLE_BASELINE, True, "feasible baseline"))
     assert feas.beats_trajectory_best is True, feas
     assert feas.is_new_best is True, feas
 
-    infeas = await server.create_iteration(
+    infeas = await _publish(server, 
         _iter(server, "agentA", INFEASIBLE_FLOOR, False, "infeasible cheat (higher score)"))
     assert infeas.beats_trajectory_best is False, (
         "infeasible run must not beat a feasible trajectory best", infeas)
@@ -105,11 +111,11 @@ async def test_feasible_recovery_after_infeasible_is_accepted():
     await db.init_db()
     await _register_agent(db)
 
-    await server.create_iteration(
+    await _publish(server, 
         _iter(server, "agentA", FEASIBLE_BASELINE, True, "feasible baseline"))
-    await server.create_iteration(
+    await _publish(server, 
         _iter(server, "agentA", INFEASIBLE_FLOOR, False, "infeasible"))
-    recover = await server.create_iteration(
+    recover = await _publish(server, 
         _iter(server, "agentA", FEASIBLE_BETTER, True, "feasible improvement"))
     assert recover.beats_trajectory_best is True, (
         "a real feasible improvement must beat the (feasible) best", recover)
@@ -124,7 +130,7 @@ async def test_first_infeasible_run_sets_no_anchor():
     await db.init_db()
     await _register_agent(db)
 
-    first = await server.create_iteration(
+    first = await _publish(server, 
         _iter(server, "agentA", INFEASIBLE_FLOOR, False, "infeasible first"))
     assert first.beats_trajectory_best is False, first
     assert first.is_new_best is False, first
@@ -147,10 +153,18 @@ async def test_tig_adapter_infeasible_floor_below_feasible():
     finite. Per-track score is the MEDIAN of per-nonce quality, infeasible nonces
     counted at the infeasible floor."""
     import importlib.util
+    scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
     spec = importlib.util.spec_from_file_location(
-        "bm", os.path.join(os.path.dirname(__file__), "..", "scripts", "benchmark.py"))
+        "bm", os.path.join(scripts_dir, "benchmark.py"))
     bm = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bm)
+    # benchmark.py imports its sibling scripts/ modules (swarm_client) at
+    # module level; make them resolvable while it loads, without leaving
+    # scripts/ on the path for the rest of this test run.
+    sys.path.insert(0, scripts_dir)
+    try:
+        spec.loader.exec_module(bm)
+    finally:
+        sys.path.remove(scripts_dir)
 
     assert bm.INFEASIBLE_QUALITY == -bm.QUALITY_CLAMP, bm.INFEASIBLE_QUALITY
     cfg = {"challenge": CHALLENGE}

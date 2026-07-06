@@ -1,6 +1,8 @@
 [package]
 name = "tig-challenges"
 version = "0.1.0"
+description = "Self-hostable swarm that runs AI coding agents in parallel to improve Rust solvers for TIG challenges"
+repository = "https://github.com/Aoibheannmurray/tig-swarm-demo"
 readme = "README.md"
 license = "https://github.com/tig-foundation/tig-monorepo/tree/main/docs/agreements/end_user_license_agreement.pdf"
 edition = "2021"
@@ -26,7 +28,9 @@ base64 = "0.21"
 bincode = "1.3"
 flate2 = "1.0"
 nalgebra = "0.33"
-cudarc = { git = "https://github.com/tig-foundation/cudarc.git", branch = "runtime-fuel/cudnn-cublas", features = [
+# Pinned to the exact commit Cargo.lock resolved from the
+# runtime-fuel/cudnn-cublas branch, so upstream rebases can't orphan the lock.
+cudarc = { git = "https://github.com/tig-foundation/cudarc.git", rev = "325f9f5928df09f9a383e88c4ed6a24dae47711b", features = [
     "cuda-version-from-build-system",
 ], optional = true }
 

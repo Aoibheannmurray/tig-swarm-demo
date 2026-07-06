@@ -15,9 +15,13 @@ export async function startReplay(
   let history: any[];
   let numInstances = 1;
   try {
+    // Scope both fetches to the viewed challenge — the events below are
+    // stamped with getViewedChallenge(), so unscoped fetches would replay
+    // another challenge's history under this challenge's label.
+    const q = `?challenge=${encodeURIComponent(getViewedChallenge())}`;
     const [historyRes, stateRes] = await Promise.all([
-      fetch(`${apiUrl}/api/replay`),
-      fetch(`${apiUrl}/api/state`),
+      fetch(`${apiUrl}/api/replay${q}`),
+      fetch(`${apiUrl}/api/state${q}`),
     ]);
     history = await historyRes.json();
     if (stateRes.ok) {

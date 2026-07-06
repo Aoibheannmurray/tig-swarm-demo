@@ -1,6 +1,7 @@
 import "../../style.css";
 import { SwarmWebSocket } from "../../lib/websocket";
 import { getDashboardUrls, installKeyboardNav } from "../../lib/bootstrap";
+import { renderPageHeader } from "../../lib/pageChrome";
 import { LeaderboardPanel } from "../../panels/leaderboard";
 import { ChallengeSelectorPanel } from "../../panels/challenge-selector";
 import { loadSwarmConfig, handleWsEvent as handleSwarmConfigEvent } from "../../lib/swarmConfig";
@@ -18,20 +19,7 @@ if (selectorMount) challengeSelector.init(selectorMount);
 const panelEl = document.getElementById("panel-leaderboard-page")!;
 panelEl.innerHTML = `
   <div class="page-flex">
-    <div class="ideas-header">
-      <div class="ideas-title">
-        <img class="stats-mark" src="/prometheus-icon.png" alt="" draggable="false" />
-        <span class="ideas-title-text">Leaderboard</span>
-      </div>
-      <div class="ideas-nav">
-        <a href="/" class="ideas-nav-link">Dashboard</a>
-        <a href="/ideas.html" class="ideas-nav-link">Ideas</a>
-        <a href="/diversity.html" class="ideas-nav-link">Diversity</a>
-        <a href="/benchmark.html" class="ideas-nav-link">Benchmark</a>
-        <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
-        <span class="ideas-nav-active">Leaderboard</span>
-      </div>
-    </div>
+    ${renderPageHeader("leaderboard", "Leaderboard")}
     <div class="page-body leaderboard-page" id="panel-leaderboard-body"></div>
   </div>
 `;

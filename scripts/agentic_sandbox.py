@@ -33,9 +33,19 @@ _AGENTIC_BRANCH_PREFIX = "agentic"
 
 
 def _git(args: list[str]) -> str:
-    result = subprocess.run(
-        ["git"] + args, cwd=ROOT, capture_output=True, text=True,
-    )
+    # Timeout: a wedged git (stale index.lock, hung credential/askpass helper,
+    # dead network filesystem) would otherwise block the agent loop forever.
+    # 60s is far above any healthy worktree/branch operation on this repo.
+    try:
+        result = subprocess.run(
+            ["git"] + args, cwd=ROOT, capture_output=True, text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"git {' '.join(args)} timed out after 60s — git may be blocked "
+            f"on a lock file or a hung credential helper in {ROOT}"
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed:\n{result.stderr.strip()}")
     return result.stdout.strip()

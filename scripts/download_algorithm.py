@@ -97,17 +97,6 @@ def _decode_blob(blob: object) -> str:
     raise DownloadError(f"unsupported blob encoding: {encoding!r}")
 
 
-# ── Cleaning ──────────────────────────────────────────────────────────
-
-
-def _clean(rel_path: str, challenge: str, content: str) -> str:
-    """Mainnet code is used verbatim — the swarm's algorithm format IS the
-    mainnet format. `use tig_challenges::<ch>::*;` compiles unchanged in the
-    swarm crate (src/lib.rs's `extern crate self as tig_challenges`), so the
-    old import rewriting (→ `use super::*;`) is retired."""
-    return content
-
-
 # ── Staging ───────────────────────────────────────────────────────────
 
 
@@ -124,18 +113,16 @@ def _is_simple_layout(files: dict[str, str]) -> bool:
 
 
 def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
-    """Drop the cleaned files into initial_algorithms/. Returns the staged
+    """Drop the fetched files into initial_algorithms/. Returns the staged
     path (file or directory)."""
     INITIAL_DIR.mkdir(parents=True, exist_ok=True)
     legacy_rs = INITIAL_DIR / f"{challenge}.rs"
     legacy_cu = INITIAL_DIR / f"{challenge}.cu"
     bundle_dir = INITIAL_DIR / challenge
 
-    cleaned = {p: _clean(p, challenge, c) for p, c in files.items()}
-
-    if _is_simple_layout(cleaned):
+    if _is_simple_layout(files):
         target = legacy_rs
-        cu_target = legacy_cu if any(p.endswith(".cu") for p in cleaned) else None
+        cu_target = legacy_cu if any(p.endswith(".cu") for p in files) else None
         existing = [p for p in (target, cu_target, bundle_dir) if p and p.exists()]
         if existing and not force:
             raise DownloadError(
@@ -144,16 +131,16 @@ def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
         # Clean stale directory if we're switching from multi-file to single-file.
         if bundle_dir.exists():
             shutil.rmtree(bundle_dir)
-        target.write_text(cleaned["mod.rs"], encoding="utf-8")
+        target.write_text(files["mod.rs"], encoding="utf-8")
         if cu_target is not None:
-            cu_path = next(p for p in cleaned if p.endswith(".cu"))
-            cu_target.write_text(cleaned[cu_path], encoding="utf-8")
+            cu_path = next(p for p in files if p.endswith(".cu"))
+            cu_target.write_text(files[cu_path], encoding="utf-8")
         elif legacy_cu.exists() and force:
             legacy_cu.unlink()
         return target
 
     # Multi-file directory layout.
-    if "mod.rs" not in cleaned:
+    if "mod.rs" not in files:
         raise DownloadError("upstream algorithm has no mod.rs; refusing to seed")
     existing = [p for p in (legacy_rs, legacy_cu, bundle_dir) if p.exists()]
     if existing and not force:
@@ -167,7 +154,7 @@ def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
     if legacy_cu.exists():
         legacy_cu.unlink()
     bundle_dir.mkdir(parents=True)
-    for rel, body in cleaned.items():
+    for rel, body in files.items():
         out = bundle_dir / rel
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(body, encoding="utf-8")
@@ -180,9 +167,10 @@ def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
 def fetch_algorithm(
     challenge: str, algorithm: str, *, ref: str | None = None,
 ) -> dict[str, str]:
-    """Fetch + clean an algorithm from upstream. Returns
-    ``{relative_path: cleaned_content}``. Does NOT write to disk — use
-    ``download_algorithm`` for that.
+    """Fetch an algorithm from upstream. Returns ``{relative_path: content}``
+    (mainnet code is used verbatim — the swarm's algorithm format IS the
+    mainnet format). Does NOT write to disk — use ``download_algorithm``
+    for that.
 
     Separated from ``download_algorithm`` so callers that want to inspect
     or transmit the source without persisting it locally (e.g. the swarm's
@@ -195,18 +183,18 @@ def fetch_algorithm(
     files = _walk_contents(challenge, algorithm, branch)
     if not files:
         raise DownloadError(f"upstream returned no files for {challenge}/{algorithm}")
-    return {p: _clean(p, challenge, c) for p, c in files.items()}
+    return files
 
 
 def download_algorithm(
     challenge: str, algorithm: str, *, force: bool, ref: str | None = None,
 ) -> Path:
-    """Fetch + stage (mainnet code is used verbatim — see `_clean`). Returns
-    the path written under initial_algorithms/."""
-    cleaned = fetch_algorithm(challenge, algorithm, ref=ref)
-    staged = _stage(challenge, cleaned, force)
+    """Fetch + stage (mainnet code is used verbatim). Returns the path
+    written under initial_algorithms/."""
+    files = fetch_algorithm(challenge, algorithm, ref=ref)
+    staged = _stage(challenge, files, force)
     rel = staged.relative_to(ROOT)
-    print(f"    staged {len(cleaned)} file(s) -> {rel}")
+    print(f"    staged {len(files)} file(s) -> {rel}")
     return staged
 
 
