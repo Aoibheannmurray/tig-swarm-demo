@@ -587,11 +587,17 @@ timeout to catch true hangs — but fuel already bounds all instrumented compute
   Verified: `cargo check --features solver,knapsack` + all script/server tests green.
 - ⚠️ **Consequence — TIG is now the only path, so C3 needs its images.** With no custom
   fallback, C3 benchmarking of a challenge REQUIRES its Docker Hub image to exist.
-  Still outstanding (now blocking full C3 coverage, not optional):
-  1. **Run task 14** (mirror workflow — set Docker Hub secrets + dispatch) → all 8
-     challenge images on Docker Hub.
-  2. **Widen `_SUPPORTED_TIG_C3_CHALLENGES` to all 8** + re-mirror neuralnet as
-     `tig-dev-neuralnet_optimizer` (the workflow already uses the full name).
+  Still outstanding:
+  1. **Run task 14** (mirror workflow — set Docker Hub secrets + `workflow_dispatch`)
+     → publishes every challenge image to Docker Hub (baked `tig-bench-<ch>` for the 5
+     CPU challenges; raw `tig-dev-<ch>` mirrors for `vector_search`, `hypergraph`,
+     `neuralnet_optimizer`). This is the one remaining user action for full C3 coverage.
+- ✅ **`_SUPPORTED_TIG_C3_CHALLENGES` widened to all 8 (done).** Added
+  `neuralnet_optimizer` to `_TIG_RAW_CHALLENGES` (raw path: its C3 runner patches the
+  pinned tig-challenges source to blind the optimizer seed + assembles the harness
+  boilerplate, so it needs the uploaded source, not a baked slot). `_tig_c3_image` now
+  resolves it to `tig-dev-neuralnet_optimizer`; the `mirror-raw` CI matrix includes it;
+  the image-resolution test covers all 8 + the unknown-challenge reject path.
   (Local docker benchmarking works for any challenge whose image is built locally.
   Optional later: production warm-cache custom images via CI — Option B.)
 

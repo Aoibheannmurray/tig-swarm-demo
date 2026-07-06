@@ -102,23 +102,27 @@ def test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
     print("PASS test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge")
 
 
-def test_tig_c3_default_image_rejects_unmirrored_challenge():
-    # neuralnet_optimizer is the one challenge the TIG backend doesn't support
-    # (harness-owned solve_challenge; no baked/mirrored image). CPU challenges
-    # resolve to baked tig-bench-<ch> images; GPU to raw tig-dev-<ch> mirrors.
+def test_tig_c3_default_image_resolution():
+    # All 8 challenges are C3-supported: CPU resolve to baked tig-bench-<ch>
+    # images; GPU + neuralnet_optimizer to raw tig-dev-<ch> mirrors. An unknown
+    # challenge still raises with the supported list.
+    ver = c3_compute._bm_tig_version()
+    assert c3_compute._tig_c3_image({"challenge": "satisfiability"}).endswith(
+        "tig-bench-satisfiability:" + ver
+    )
+    assert c3_compute._tig_c3_image({"challenge": "hypergraph"}).endswith(
+        "tig-dev-hypergraph:" + ver
+    )
+    assert c3_compute._tig_c3_image({"challenge": "neuralnet_optimizer"}).endswith(
+        "tig-dev-neuralnet_optimizer:" + ver
+    )
     try:
-        c3_compute._tig_c3_image({"challenge": "neuralnet_optimizer"})
+        c3_compute._tig_c3_image({"challenge": "not_a_challenge"})
     except ValueError as exc:
         assert "currently supported" in str(exc)
     else:
-        raise AssertionError("expected unsupported default TIG C3 image to fail")
-    assert c3_compute._tig_c3_image({"challenge": "satisfiability"}).endswith(
-        "tig-bench-satisfiability:" + c3_compute._bm_tig_version()
-    )
-    assert c3_compute._tig_c3_image({"challenge": "hypergraph"}).endswith(
-        "tig-dev-hypergraph:" + c3_compute._bm_tig_version()
-    )
-    print("PASS test_tig_c3_default_image_rejects_unmirrored_challenge")
+        raise AssertionError("expected unsupported TIG C3 image to raise")
+    print("PASS test_tig_c3_default_image_resolution")
 
 
 def test_tig_source_upload_excludes_generated_outputs():
@@ -137,7 +141,7 @@ def _main():
     test_unknown_when_no_identity()
     test_benchmark_id_is_fresh_10_char_hex()
     test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge()
-    test_tig_c3_default_image_rejects_unmirrored_challenge()
+    test_tig_c3_default_image_resolution()
     test_tig_source_upload_excludes_generated_outputs()
     print("\nAll benchmark run-id tests passed.")
 

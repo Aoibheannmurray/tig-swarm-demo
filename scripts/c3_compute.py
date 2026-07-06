@@ -49,9 +49,13 @@ _TIG_BAKED_CHALLENGES = frozenset({
     "energy_arbitrage",
 })
 # GPU challenges still use the raw dev image + per-job source upload (Option A).
+# neuralnet_optimizer is raw too: its C3 runner patches the pinned tig-challenges
+# source to blind the optimizer seed (anti-cheat) and assembles the harness
+# boilerplate, so it needs the uploaded source rather than a pre-baked slot.
 _TIG_RAW_CHALLENGES = frozenset({
     "vector_search",
     "hypergraph",
+    "neuralnet_optimizer",
 })
 _SUPPORTED_TIG_C3_CHALLENGES = _TIG_BAKED_CHALLENGES | _TIG_RAW_CHALLENGES
 _TIG_SOURCE_TAR_EXCLUDES = (
