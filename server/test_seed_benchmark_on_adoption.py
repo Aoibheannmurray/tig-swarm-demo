@@ -34,6 +34,12 @@ def _fresh_modules():
     return db, server
 
 
+async def _publish(server, req):
+    """create_iteration requires the caller's token to resolve to
+    req.agent_id; tests bypass HTTP, so pass the resolved id directly."""
+    return await server.create_iteration(req, token_agent_id=req.agent_id)
+
+
 async def _register_agent(db, agent_id="agentA"):
     async with db.connect() as conn:
         await conn.execute(
@@ -48,7 +54,7 @@ async def _stagnate(db, server, agent_id="agentA"):
     """Post one good iteration (creates traj_best + current_trajectory_id), then
     force runs_since_improvement up to the stagnation limit."""
     from models import IterationCreate
-    await server.create_iteration(IterationCreate(
+    await _publish(server, IterationCreate(
         agent_id=agent_id, title="seed", strategy_tag="greedy",
         algorithm_code="// code\n", score=100.0, feasible=True, challenge=CHALLENGE,
         role="explorer",
@@ -80,7 +86,7 @@ async def test_unscored_seed_sets_needs_benchmark():
     await _stagnate(db, server)
     await _deposit_seed(db, score=None)  # admin/mainnet seed, no score
 
-    state = await server.get_state(agent_id="agentA", challenge=CHALLENGE, role="explorer")
+    state = await server.get_state(agent_id="agentA", challenge=CHALLENGE, role="explorer", token_agent_id="agentA")
     reset = state.get("trajectory_reset")
     assert reset is not None, "no trajectory_reset emitted on stagnation"
     assert reset["type"] == "adopted_inactive", f"expected adoption, got {reset}"
@@ -100,7 +106,7 @@ async def test_scored_seed_does_not_set_needs_benchmark():
     await _stagnate(db, server)
     await _deposit_seed(db, score=4242.0)  # already benchmarked
 
-    state = await server.get_state(agent_id="agentA", challenge=CHALLENGE, role="explorer")
+    state = await server.get_state(agent_id="agentA", challenge=CHALLENGE, role="explorer", token_agent_id="agentA")
     reset = state.get("trajectory_reset")
     assert reset is not None and reset["type"] == "adopted_inactive", reset
     assert reset.get("needs_benchmark") is False, f"scored seed must NOT flag benchmark: {reset}"

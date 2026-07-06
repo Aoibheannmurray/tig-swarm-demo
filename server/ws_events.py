@@ -191,13 +191,6 @@ WSEvent = Annotated[
 ]
 
 
-def event_to_payload(event: BaseModel) -> dict[str, Any]:
-    """Serialize an event for `manager.broadcast`. Centralised so any
-    future schema-level wrapping (envelope, schema version, etc.) lives
-    in one place."""
-    return event.model_dump(mode="json")
-
-
 def _dump_schema() -> None:
     """Dump JSON schemas for every WS event as one stable JSON object.
 

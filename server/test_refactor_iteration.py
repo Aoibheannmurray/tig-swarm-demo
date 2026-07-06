@@ -39,6 +39,12 @@ def _fresh_modules():
     return db, server
 
 
+async def _publish(server, req):
+    """create_iteration requires the caller's token to resolve to
+    req.agent_id; tests bypass HTTP, so pass the resolved id directly."""
+    return await server.create_iteration(req, token_agent_id=req.agent_id)
+
+
 async def _register_agent(db, agent_id="agentA", name="Agent A"):
     async with db.connect() as conn:
         await conn.execute(
@@ -75,13 +81,13 @@ async def test_refactor_swaps_code_keeps_score():
     await db.init_db()
     await _register_agent(db)
 
-    await server.create_iteration(_iter(
+    await _publish(server, _iter(
         1000.0, files=FAT_FILES,
         hyperparameters={"n=50,s=JOB_SHOP": {"iters": 7}}, title="parent"))
     acs0 = await _acs(db)
     assert acs0["improvements"] == 1 and acs0["runs_since_improvement"] == 0
 
-    resp = await server.create_iteration(_iter(
+    resp = await _publish(server, _iter(
         990.0, code=LEAN_CODE, files=LEAN_FILES,
         iteration_type="refactor", title="refactor"))
     assert resp.beats_trajectory_best is False, resp
@@ -107,8 +113,8 @@ async def test_refactor_that_beats_is_a_normal_improvement():
     await db.init_db()
     await _register_agent(db)
 
-    await server.create_iteration(_iter(1000.0, title="parent"))
-    resp = await server.create_iteration(_iter(
+    await _publish(server, _iter(1000.0, title="parent"))
+    resp = await _publish(server, _iter(
         1010.0, code=LEAN_CODE, iteration_type="refactor", title="lucky refactor"))
     assert resp.beats_trajectory_best is True
     tb = await _trajectory_best(db)
@@ -122,8 +128,8 @@ async def test_infeasible_refactor_is_a_normal_failure():
     await db.init_db()
     await _register_agent(db)
 
-    await server.create_iteration(_iter(1000.0, title="parent"))
-    await server.create_iteration(_iter(
+    await _publish(server, _iter(1000.0, title="parent"))
+    await _publish(server, _iter(
         995.0, feasible=False, code=LEAN_CODE,
         iteration_type="refactor", title="broken refactor"))
     tb = await _trajectory_best(db)
@@ -140,7 +146,7 @@ async def test_refactor_without_parent_falls_through():
     await db.init_db()
     await _register_agent(db)
 
-    resp = await server.create_iteration(_iter(
+    resp = await _publish(server, _iter(
         500.0, code=LEAN_CODE, iteration_type="refactor", title="orphan refactor"))
     assert resp.beats_trajectory_best is True, \
         "no parent -> first feasible score is just a normal first best"
@@ -154,9 +160,9 @@ async def test_client_hyperparameters_override_parent():
     await db.init_db()
     await _register_agent(db)
 
-    await server.create_iteration(_iter(
+    await _publish(server, _iter(
         1000.0, hyperparameters={"n=50,s=JOB_SHOP": {"iters": 7}}, title="parent"))
-    await server.create_iteration(_iter(
+    await _publish(server, _iter(
         992.0, code=LEAN_CODE, iteration_type="refactor",
         hyperparameters={"n=50,s=JOB_SHOP": {"iters": 9}}, title="refactor"))
     tb = await _trajectory_best(db)

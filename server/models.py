@@ -1,4 +1,5 @@
-from pydantic import BaseModel
+import json
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal, Optional, get_args
 import uuid
 
@@ -32,16 +33,27 @@ def improvement_pct(baseline: float, score: float, direction: str = "min") -> fl
 
 # ── Request models ──
 
+# Size ceilings on client-writable payloads — generous enough that no
+# legitimate client ever hits them (algorithms are a few KB; the biggest
+# solution_data blobs observed are ~100 KB), but they stop a compromised
+# token from ballooning the SQLite file with multi-GB writes.
+MAX_CODE_LEN = 2 * 1024 * 1024        # algorithm_code / solution_data / one file
+MAX_FILES_TOTAL_LEN = 8 * 1024 * 1024  # whole algorithm_files map
+MAX_NOTES_LEN = 64 * 1024
+MAX_LABEL_LEN = 300                    # title / agent_name / llm_type
+MAX_MESSAGE_LEN = 32 * 1024
+
+
 class RegisterRequest(BaseModel):
     client_version: str = "1.0"
     # Optional: contributor's own preferred display name. The server falls
     # back to its built-in name generator when this is omitted or already
     # taken (so the wizard's "use default" path still works).
-    agent_name: Optional[str] = None
+    agent_name: Optional[str] = Field(default=None, max_length=MAX_LABEL_LEN)
     # Optional: free-form label identifying which LLM is driving this agent
     # (e.g. "claude_code", "gemini_api", "gpt-4o"). Surfaced on the dashboard
     # so projected swarms can see what each contributor is running.
-    llm_type: Optional[str] = None
+    llm_type: Optional[str] = Field(default=None, max_length=MAX_LABEL_LEN)
     # Optional structured provider/model. When supplied, used for tier
     # auto-classification (server/tiers.py); otherwise the server falls back
     # to parsing the llm_type label. Both optional for backward compatibility.
@@ -51,19 +63,18 @@ class RegisterRequest(BaseModel):
 
 class HeartbeatRequest(BaseModel):
     status: Literal["idle", "working"] = "working"
-    current_hypothesis_id: Optional[str] = None
 
 
 class RenameRequest(BaseModel):
-    agent_name: str
+    agent_name: str = Field(max_length=MAX_LABEL_LEN)
 
 
 class IterationCreate(BaseModel):
     agent_id: str
-    title: str
+    title: str = Field(max_length=MAX_LABEL_LEN)
     description: str = ""
     strategy_tag: str = "other"
-    algorithm_code: str = ""
+    algorithm_code: str = Field(default="", max_length=MAX_CODE_LEN)
     kernel_code: Optional[str] = None
     # Full multi-file algorithm as a {relpath: content} map (keys relative to the
     # algorithm dir; `mod.rs` is the entry). None/absent for single-file clients,
@@ -72,7 +83,7 @@ class IterationCreate(BaseModel):
     algorithm_files: Optional[dict] = None
     score: float
     feasible: bool = True
-    notes: str = ""
+    notes: str = Field(default="", max_length=MAX_NOTES_LEN)
     solution_data: Optional[dict] = None
     track_scores: Optional[dict] = None
     challenge: Optional["ChallengeName"] = None
@@ -101,6 +112,27 @@ class IterationCreate(BaseModel):
     # score (no ratchet erosion), and counts it as neither an improvement nor
     # stagnation.
     iteration_type: str = "mutation"
+
+    @field_validator("solution_data")
+    @classmethod
+    def _solution_data_size(cls, v):
+        if v is not None and len(json.dumps(v)) > MAX_CODE_LEN:
+            raise ValueError("solution_data too large")
+        return v
+
+    @field_validator("algorithm_files")
+    @classmethod
+    def _algorithm_files_size(cls, v):
+        if v is not None:
+            total = 0
+            for path, content in v.items():
+                size = len(content) if isinstance(content, str) else len(json.dumps(content))
+                if size > MAX_CODE_LEN:
+                    raise ValueError(f"algorithm_files[{path!r}] too large")
+                total += size
+            if total > MAX_FILES_TOTAL_LEN:
+                raise ValueError("algorithm_files too large in total")
+        return v
 
 
 class AdminAuth(BaseModel):
@@ -237,8 +269,8 @@ class SwarmConfigUpdate(AdminAuth):
 
 class MessageCreate(BaseModel):
     agent_id: Optional[str] = None
-    agent_name: str
-    content: str
+    agent_name: str = Field(max_length=MAX_LABEL_LEN)
+    content: str = Field(max_length=MAX_MESSAGE_LEN)
     msg_type: Literal["agent", "milestone"] = "agent"
     challenge: Optional[ChallengeName] = None
 
