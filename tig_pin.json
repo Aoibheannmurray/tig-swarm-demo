@@ -1,5 +1,5 @@
 {
   "tig_version": "0.0.6",
-  "comment": "Single source of truth for the pinned TIG version (see tig_docker_plan.md). base_image_digests are filled in the upstreamed/CI phase for digest-level reproducibility; local builds resolve by tag.",
+  "comment": "Single source of truth for the pinned TIG version (see docs/tig_docker_plan.md). base_image_digests are filled in the upstreamed/CI phase for digest-level reproducibility; local builds resolve by tag.",
   "base_image_digests": {}
 }

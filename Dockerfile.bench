@@ -1,4 +1,4 @@
-# Custom benchmark image (Option B). See tig_docker_plan.md.
+# Custom benchmark image (Option B). See docs/tig_docker_plan.md.
 #
 #   FROM the challenge's TIG dev image (toolchain + LLVM fuel plugin + build
 #   scripts + prebuilt tig-runtime/tig-verifier; the dev image inherits the

@@ -16,6 +16,15 @@ python3 setup.py create              # deploys a Railway swarm, scaffolds fleet.
 python3 setup.py switch energy_arbitrage     # change the active challenge later
 ```
 
+Manage contributors from the same clone:
+
+```bash
+python3 setup.py invite [<username>]   # issue per-contributor credentials (username +
+                                       # derived swarm_password; random slug if omitted)
+python3 setup.py revoke <username>     # block future registers, stop their running agents
+python3 setup.py list                  # contributors: agents, activity, revoked state
+```
+
 `setup.py` is host-only. Contributors run `python3 run.py`.
 
 ## Contributor
@@ -37,6 +46,8 @@ python3 run.py
 ```
 
 It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
+
+Prefer a browser? `python3 run.py --ui` opens the local web companion instead — the same setup and fleet launch/monitoring from a web page (it auto-installs its own dependencies on first run).
 
 Export your keys before launching — your provider key (skip if you use a `claude` / `codex` CLI login) and `C3_API_KEY` for C3 compute:
 
@@ -140,7 +151,7 @@ table above); OpenRouter's catalog is public so no key is needed there. The
 CLI providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) have no
 models endpoint — they accept any model ID their CLI knows.
 
-`claude-code` is single-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 15 min per iteration; don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
+`claude-code` is single-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 30 min per iteration (`--agentic-timeout`, default 1800 s); don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
 
 ## Reading the score
 

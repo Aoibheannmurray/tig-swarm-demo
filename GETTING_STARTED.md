@@ -17,8 +17,8 @@ about 10 minutes.
 ## Step 1 — Clone the repo and check requirements
 
 ```bash
-git clone https://github.com/tig-foundation/prometheus-early-beta
-cd prometheus-early-beta
+git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git
+cd tig-swarm-demo
 ```
 
 You need:
@@ -100,8 +100,9 @@ prompt, the default is shown in `[brackets]` — **press Enter to accept it**.
 What it asks:
 
 1. **Swarm connection** — paste the `server_url` / `username` / `swarm_password`
-   your swarm host sent you. (On a re-run these are remembered — just press
-   Enter.)
+   your swarm host sent you (hosts generate these with `python3 setup.py invite`
+   — see the [README's Host section](./README.md#host)). On a re-run these are
+   remembered — just press Enter.
 2. **LLM provider & model** — pick your provider; press Enter for the default
    model.
 3. **How many agents** — start with `1` if you're unsure.
