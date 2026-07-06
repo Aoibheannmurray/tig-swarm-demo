@@ -52,8 +52,12 @@ def main() -> int:
     init_fleet.FLEET_CONFIG_PATH = fleet_path
 
     app = control_server.create_app()
-    with TestClient(app) as c:
+    # base_url must be loopback: the DNS-rebinding guard rejects any other
+    # Host header (TestClient's default is "testserver").
+    with TestClient(app, base_url="http://127.0.0.1") as c:
         print("read-only endpoints")
+        check(c.get("/local-api/env", headers={"host": "evil.example"}).status_code == 403,
+              "non-loopback Host rejected (403, DNS-rebinding guard)")
         check(c.get("/local-api/env").json()["mode"] == "local", "env reports local mode")
         p = c.get("/local-api/providers").json()
         check(len(p["providers"]) > 0 and len(p["c3_hardware"]) > 0, "providers + hardware listed")
@@ -88,8 +92,26 @@ def main() -> int:
 
         print("fleet status / websocket")
         check(c.get("/local-api/fleet/status").json()["state"] == "idle", "fleet idle before start")
-        with c.websocket_connect("/local-api/stream"):
-            check(True, "event stream websocket connects")
+        # TestClient stamps Host "testserver" on WS handshakes regardless of
+        # base_url, so the accepted cases set a loopback Host explicitly.
+        with c.websocket_connect("/local-api/stream",
+                                 headers={"host": "127.0.0.1",
+                                          "origin": "http://127.0.0.1"}):
+            check(True, "event stream websocket connects (loopback Origin)")
+        with c.websocket_connect("/local-api/stream",
+                                 headers={"host": "127.0.0.1"}):
+            check(True, "event stream websocket connects (no Origin — CLI client)")
+        # The HTTP middleware doesn't cover WebSockets, so the handler itself
+        # must reject a rebinding page's handshake (bad Origin / bad Host).
+        for label, headers in (
+            ("bad Origin", {"host": "127.0.0.1", "origin": "http://evil.example"}),
+            ("bad Host", {"host": "evil.example"}),
+        ):
+            try:
+                with c.websocket_connect("/local-api/stream", headers=headers):
+                    check(False, f"websocket with {label} rejected")
+            except Exception:
+                check(True, f"websocket with {label} rejected")
 
     print()
     if _failures:

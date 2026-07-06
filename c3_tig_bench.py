@@ -14,6 +14,9 @@ Usage:
   python3 c3_tig_bench.py --build cautious_adanw --download neural_extrem_v3 \
       --tracks n_hidden=4 --nonces 100 --seed test --walltime 01:30:00 \
       --out reports/tig_bench_n4.json
+
+Needs a local tig-monorepo checkout: pass --monorepo, set $TIG_MONOREPO, or
+clone it at ./tig-monorepo next to this script.
 """
 
 from __future__ import annotations
@@ -30,7 +33,8 @@ import time
 import uuid
 from pathlib import Path
 
-MONOREPO = Path("/root/tig-monorepo")
+# tig-monorepo checkout to stage from: --monorepo > $TIG_MONOREPO > ./tig-monorepo.
+DEFAULT_MONOREPO = Path(__file__).resolve().parent / "tig-monorepo"
 IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 POLL_SECS = 20
 
@@ -65,21 +69,21 @@ def lf_write(path: Path, text: str, exe: bool = False) -> None:
         path.chmod(0o755)
 
 
-def stage_workspace(stage: Path) -> None:
+def stage_workspace(stage: Path, monorepo: Path) -> None:
     for name in ("Cargo.toml", "Cargo.lock"):
-        shutil.copy2(MONOREPO / name, stage / name)
+        shutil.copy2(monorepo / name, stage / name)
     ignore = shutil.ignore_patterns(
         "target", "lib", "__pycache__", "*.pyc", ".git", "dist", "test_results"
     )
     for crate in WORKSPACE_CRATES:
-        shutil.copytree(MONOREPO / crate, stage / crate, ignore=ignore)
+        shutil.copytree(monorepo / crate, stage / crate, ignore=ignore)
     # build_so expects tig-binary/scripts and monorepo scripts
-    shutil.copytree(MONOREPO / "scripts", stage / "scripts")
-    if (MONOREPO / "tig-binary" / "scripts").exists():
+    shutil.copytree(monorepo / "scripts", stage / "scripts")
+    if (monorepo / "tig-binary" / "scripts").exists():
         pass  # already copied with the crate
     # hyperparameters.py is imported by some monorepo scripts; copy if present
     for extra in ("hyperparameters.py",):
-        src = MONOREPO / extra
+        src = monorepo / extra
         if src.exists():
             shutil.copy2(src, stage / extra)
 
@@ -333,7 +337,22 @@ def main() -> int:
                     help="local JSON file: list of {label, algorithm, hyperparameters}")
     ap.add_argument("--binaries-cache", default=None,
                     help="local tig-binaries.tar.zst from a previous job (skips harness build)")
+    ap.add_argument("--monorepo", default=None,
+                    help="path to a tig-monorepo checkout "
+                         "(default: $TIG_MONOREPO, then ./tig-monorepo)")
     args = ap.parse_args()
+
+    monorepo = Path(
+        args.monorepo or os.environ.get("TIG_MONOREPO") or DEFAULT_MONOREPO
+    ).expanduser()
+    if not (monorepo / "Cargo.toml").is_file():
+        print(
+            f"tig-monorepo not found at {monorepo} — clone "
+            f"https://github.com/tig-foundation/tig-monorepo there, or point "
+            f"--monorepo / $TIG_MONOREPO at an existing checkout.",
+            file=sys.stderr,
+        )
+        return 2
 
     challenge = args.challenge
     challenge_id = args.challenge_id or CHALLENGE_IDS[challenge]
@@ -347,7 +366,7 @@ def main() -> int:
     run_id = uuid.uuid4().hex[:8]
     with tempfile.TemporaryDirectory(prefix="tig-c3-") as tmp:
         stage = Path(tmp)
-        stage_workspace(stage)
+        stage_workspace(stage, monorepo)
         lf_write(stage / "bench_tig.py", BENCH_PY)
         if args.sweep_file:
             shutil.copy2(args.sweep_file, stage / "configs.json")
