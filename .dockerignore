@@ -1,9 +1,9 @@
 target/
 datasets/
-node_modules/
+**/node_modules
 *.db
 *.db-journal
 .git/
 .railway/
-__pycache__/
+**/__pycache__
 dashboard/dist/

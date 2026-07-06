@@ -9,7 +9,8 @@
       "NotebookEdit",
       "Bash",
       "WebSearch",
-      "WebFetch(domain:multi-file-roles-production.up.railway.app)"
+      "WebFetch(domain:multi-file-roles-production.up.railway.app)",
+      "WebFetch(domain:api.venice.ai)"
     ],
     "defaultMode": "acceptEdits"
   }

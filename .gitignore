@@ -36,8 +36,8 @@ datasets/*/generated/
 tacit_knowledge.md
 tacit_knowledge_*.md
 
-src/*/algorithm/mod.rs
-src/*/algorithm/kernels.cu
+# Whole dir: agents may write multi-file helpers (mod.rs, kernels.cu, track_a.rs, …)
+src/*/algorithm/
 tig-monorepo/
 prompts_log/
 feedback/
@@ -49,3 +49,10 @@ SANDBOX_SPEC.md
 
 # Staging area for files pending deletion — never committed
 will_remove_later/
+
+# Per-user Claude Code settings — the swarm writes its own sandbox settings
+# into worktrees (.swarm/sandbox-settings.json), so nothing here is shared.
+.claude/settings.json
+.claude/settings.local.json
+# Local archive of retired internal planning docs
+.claude/plans/
