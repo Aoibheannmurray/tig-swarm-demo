@@ -1,6 +1,7 @@
 import "../../style.css";
 import { SwarmWebSocket } from "../../lib/websocket";
 import { getDashboardUrls, installKeyboardNav } from "../../lib/bootstrap";
+import { renderPageHeader } from "../../lib/pageChrome";
 import { ChartPanel } from "../../panels/chart";
 import { ChallengeSelectorPanel } from "../../panels/challenge-selector";
 import { loadSwarmConfig, handleWsEvent as handleSwarmConfigEvent } from "../../lib/swarmConfig";
@@ -18,20 +19,7 @@ if (selectorMount) challengeSelector.init(selectorMount);
 const panelEl = document.getElementById("panel-chart")!;
 panelEl.innerHTML = `
   <div class="page-flex">
-    <div class="ideas-header">
-      <div class="ideas-title">
-        <img class="stats-mark" src="/prometheus-icon.png" alt="" draggable="false" />
-        <span class="ideas-title-text">Benchmark Performance Graph</span>
-      </div>
-      <div class="ideas-nav">
-        <a href="/" class="ideas-nav-link">Dashboard</a>
-        <a href="/ideas.html" class="ideas-nav-link">Ideas</a>
-        <a href="/diversity.html" class="ideas-nav-link">Diversity</a>
-        <span class="ideas-nav-active">Benchmark</span>
-        <a href="/trajectories.html" class="ideas-nav-link">Trajectories</a>
-        <a href="/leaderboard.html" class="ideas-nav-link">Leaderboard</a>
-      </div>
-    </div>
+    ${renderPageHeader("benchmark", "Benchmark Performance Graph")}
     <div class="page-body" id="panel-chart-body"></div>
   </div>
 `;
@@ -53,7 +41,8 @@ onViewedChallengeChange(() => {
 // ── Hydrate from /api/state + /api/replay ──
 async function loadInitialState(apiUrl: string) {
   try {
-    const q = `?challenge=${encodeURIComponent(getViewedChallenge())}`;
+    const ch = getViewedChallenge();
+    const q = `?challenge=${encodeURIComponent(ch)}`;
     const [stateRes, replayRes] = await Promise.all([
       fetch(`${apiUrl}/api/state${q}`),
       fetch(`${apiUrl}/api/replay${q}`),
@@ -68,12 +57,17 @@ async function loadInitialState(apiUrl: string) {
       created_at: string;
     }> = replayRes.ok ? await replayRes.json() : [];
 
+    // Drop stale responses if the user switched challenges while the
+    // fetches were in flight — otherwise the previous challenge's history
+    // seeds the freshly-reset chart.
+    if (ch !== getViewedChallenge()) return;
+
     chartPanel.seedHistory(replay);
 
     if (state.leaderboard?.length) {
       handleMessage({
         type: "leaderboard_update",
-        challenge: getViewedChallenge(),
+        challenge: ch,
         entries: state.leaderboard,
         timestamp: new Date().toISOString(),
       });

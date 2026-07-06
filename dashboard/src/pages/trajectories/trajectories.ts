@@ -4,6 +4,7 @@ import { format } from "d3-format";
 import { scaleLinear } from "d3-scale";
 import { select } from "d3-selection";
 import { curveStepAfter, line } from "d3-shape";
+import { renderNavLinks } from "../../lib/pageChrome";
 
 interface ScorePoint {
   score: number;
@@ -103,12 +104,7 @@ export class TrajectoriesPanel {
               <span class="traj-title-text">Trajectory Profile</span>
             </div>
             <div class="traj-nav">
-              <a class="ideas-nav-link" href="/">Dashboard</a>
-              <a class="ideas-nav-link" href="/ideas.html">Ideas</a>
-              <a class="ideas-nav-link" href="/diversity.html">Diversity</a>
-              <a class="ideas-nav-link" href="/benchmark.html">Benchmark</a>
-              <span class="ideas-nav-active">Trajectories</span>
-              <a class="ideas-nav-link" href="/leaderboard.html">Leaderboard</a>
+              ${renderNavLinks("trajectories")}
             </div>
           </div>
           <div class="traj-counters" id="traj-counters">

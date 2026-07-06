@@ -1,8 +1,9 @@
 import type { Panel, WSMessage } from "../types";
 import { counterTween, pulseGlow } from "../lib/animate";
-import { formatScore } from "../lib/format";
+import { escapeHTML, formatScore } from "../lib/format";
 import { getViewedChallenge, onViewedChallengeChange } from "../lib/viewedChallenge";
 import { getSwarmType, onSwarmConfigChange } from "../lib/swarmConfig";
+import { getDashboardUrls } from "../lib/bootstrap";
 
 
 // The clickable score lives in different DOM per challenge: CPU panels render
@@ -13,21 +14,6 @@ import { getSwarmType, onSwarmConfigChange } from "../lib/swarmConfig";
 // `.track-breakdown`), so the per-track popover is panel-layout-agnostic.
 const SCORE_VALUE_SELECTOR = ".solution-score-value, [data-track-score]";
 
-
-// Resolve API base URL the same way other panels do (chart.ts, gantt.ts).
-function resolveApiUrl(): string {
-  const params = new URLSearchParams(window.location.search);
-  const explicit = params.get("api");
-  if (explicit) return explicit;
-  const ws = params.get("ws") || "";
-  if (ws) {
-    return ws
-      .replace("ws://", "http://")
-      .replace("wss://", "https://")
-      .replace("/ws/dashboard", "");
-  }
-  return `${window.location.protocol}//${window.location.host}`;
-}
 
 function resolveViewedChallenge(): string {
   return getViewedChallenge();
@@ -103,7 +89,7 @@ export class StatsPanel implements Panel {
     this.updateSwarmTypeBadge();
     onSwarmConfigChange(() => this.updateSwarmTypeBadge());
 
-    this.apiUrl = resolveApiUrl();
+    this.apiUrl = getDashboardUrls().apiUrl;
     this.viewedChallenge = resolveViewedChallenge();
     this.attachScoreClick();
 
@@ -297,11 +283,4 @@ export class StatsPanel implements Panel {
       this.attachScoreClick();
     }
   }
-}
-
-function escapeHTML(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }

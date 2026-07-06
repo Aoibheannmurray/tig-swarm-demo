@@ -1,5 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { formatScore, shortenModel } from "./format";
+import { escapeHTML, formatScore, shortenModel } from "./format";
+
+describe("escapeHTML", () => {
+  it("escapes all five HTML-significant characters", () => {
+    expect(escapeHTML("&")).toBe("&amp;");
+    expect(escapeHTML("<")).toBe("&lt;");
+    expect(escapeHTML(">")).toBe("&gt;");
+    expect(escapeHTML('"')).toBe("&quot;");
+    expect(escapeHTML("'")).toBe("&#39;");
+  });
+
+  it("escapes them together, ampersand first (no double-escaping)", () => {
+    expect(escapeHTML(`<img src="x" onerror='alert(1)'> & more`)).toBe(
+      "&lt;img src=&quot;x&quot; onerror=&#39;alert(1)&#39;&gt; &amp; more",
+    );
+  });
+
+  it("passes plain text through unchanged", () => {
+    expect(escapeHTML("hello world")).toBe("hello world");
+  });
+
+  it("handles empty / nullish input", () => {
+    expect(escapeHTML("")).toBe("");
+    expect(escapeHTML(null)).toBe("");
+    expect(escapeHTML(undefined)).toBe("");
+  });
+});
 
 describe("shortenModel", () => {
   it("keeps the final segment of a provider-prefixed id", () => {

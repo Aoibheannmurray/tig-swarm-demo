@@ -5,6 +5,7 @@ import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
 import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform, type D3ZoomEvent } from "d3-zoom";
 import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
+import { getDashboardUrls } from "../lib/bootstrap";
 import { isBetter } from "../lib/swarmConfig";
 import { AgentProgressStore, type AgentExperiment } from "./agentProgressStore";
 import type { Panel, WSMessage } from "../types";
@@ -144,21 +145,7 @@ export class ChartPanel implements Panel {
     this.svg.on("dblclick.zoom", null);
     this.svg.on("dblclick", () => this.resetZoom());
 
-    // Resolve API base URL the same way other panels do.
-    const params = new URLSearchParams(window.location.search);
-    const explicit = params.get("api");
-    if (explicit) this.apiUrl = explicit;
-    else {
-      const ws = params.get("ws") || "";
-      if (ws) {
-        this.apiUrl = ws
-          .replace("ws://", "http://")
-          .replace("wss://", "https://")
-          .replace("/ws/dashboard", "");
-      } else {
-        this.apiUrl = `${window.location.protocol}//${window.location.host}`;
-      }
-    }
+    this.apiUrl = getDashboardUrls().apiUrl;
 
     const observer = new ResizeObserver(() => {
       const newRect = svgEl.getBoundingClientRect();
