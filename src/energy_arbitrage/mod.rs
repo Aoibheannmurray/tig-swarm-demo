@@ -12,14 +12,10 @@ mod utils;
 
 use crate::QUALITY_PRECISION;
 use anyhow::{anyhow, Result};
-use battery::*;
-use market::*;
-use network::*;
 use rand::{
     rngs::{SmallRng, StdRng},
     Rng, SeedableRng,
 };
-use scenarios::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -112,6 +108,11 @@ impl Challenge {
             num_steps,
         );
         Ok(Self {
+            // Deliberately NOT the input seed (unlike the other challenges):
+            // the whole instance — `hidden_seed` and hence the RT price path
+            // included — is a deterministic replay of the generation seed, so
+            // echoing that seed here would hand solvers perfect price
+            // foresight. Store a fresh draw instead.
             seed: rng.r#gen(),
             hidden_seed: rng.r#gen(),
             num_steps,
@@ -368,6 +369,9 @@ impl Challenge {
         fn evaluate_solution(&self, solution: &Solution) -> Result<i32> {
             let total_profit = self.evaluate_total_profit(solution)?;
             let (_, baseline_total_profit) = self.compute_baseline()?;
+            if baseline_total_profit <= 0.0 {
+                return Ok(0);
+            }
             let quality = (total_profit as f64 - baseline_total_profit as f64)
                 / (baseline_total_profit as f64 + 1e-6);
             let quality = quality.clamp(-10.0, 10.0) * QUALITY_PRECISION as f64;

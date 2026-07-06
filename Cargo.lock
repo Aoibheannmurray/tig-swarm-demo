@@ -240,7 +240,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 [[package]]
 name = "cudarc"
 version = "0.16.4"
-source = "git+https://github.com/tig-foundation/cudarc.git?branch=runtime-fuel%2Fcudnn-cublas#325f9f5928df09f9a383e88c4ed6a24dae47711b"
+source = "git+https://github.com/tig-foundation/cudarc.git?rev=325f9f5928df09f9a383e88c4ed6a24dae47711b#325f9f5928df09f9a383e88c4ed6a24dae47711b"
 dependencies = [
  "libloading",
 ]

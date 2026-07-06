@@ -155,6 +155,9 @@ impl Challenge {
             let mut current_node = 0;
             let mut curr_time = 0;
             for &node in &route[1..route.len() - 1] {
+                if node >= self.num_nodes {
+                    return Err(anyhow!("Node ({}) is out of bounds", node));
+                }
                 if visited[node] {
                     return Err(anyhow!(
                         "The same non-depot node cannot be visited more than once"

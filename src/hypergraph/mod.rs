@@ -490,6 +490,9 @@ impl Challenge {
             let connectivity_metric =
                 self.evaluate_connectivity_metric(solution, module, stream, _prop)?;
             let baseline_connectivity_metric = self.greedy_baseline_connectivity_metric;
+            if baseline_connectivity_metric == 0 {
+                return Ok(0);
+            }
             let quality = (baseline_connectivity_metric as f64 - connectivity_metric as f64)
                 / baseline_connectivity_metric as f64;
             let quality = quality.clamp(-10.0, 10.0) * QUALITY_PRECISION as f64;

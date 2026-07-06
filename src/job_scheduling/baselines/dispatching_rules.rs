@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 const DEFAULT_EFFORT: usize = 0;
 const WORK_MIN_WEIGHT: f64 = 0.3;
 
@@ -316,6 +317,10 @@ fn run_dispatch_rule(
     })
 }
 
+// Upstream baseline entry point; the swarm demo drives the baselines via
+// `solve_challenge_with_effort` instead, so this wrapper (and its default
+// effort) go unused in lib builds.
+#[allow(dead_code)]
 pub fn solve_challenge(
     challenge: &Challenge,
     save_solution: &dyn Fn(&Solution) -> Result<()>,

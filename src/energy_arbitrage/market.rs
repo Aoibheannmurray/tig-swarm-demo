@@ -1,10 +1,6 @@
 use super::constants;
 use super::utils::*;
-use rand::{
-    distributions::Distribution,
-    rngs::{SmallRng, StdRng},
-    Rng, SeedableRng,
-};
+use rand::{distributions::Distribution, Rng};
 use rand_distr::Normal;
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
