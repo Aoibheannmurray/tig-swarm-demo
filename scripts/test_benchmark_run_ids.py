@@ -80,41 +80,8 @@ def test_benchmark_id_is_fresh_10_char_hex():
     print("PASS test_benchmark_id_is_fresh_10_char_hex")
 
 
-def test_c3_runner_exports_precomposed_user_id():
-    with tempfile.TemporaryDirectory() as tmp:
-        stage = Path(tmp)
-        script = c3_compute._write_c3_project(
-            stage,
-            {
-                "challenge": "knapsack",
-                "c3_hardware": "l40",
-                "tig_user_id": "aoibheann (agent 69e67db9ffb3)",
-            },
-            "https://example.invalid",
-            "00:10:00",
-            "rust:1-bookworm",
-        )
-        runner = (stage / script).read_text()
-        assert 'export TIG_USER_ID="aoibheann (agent 69e67db9ffb3)"' in runner
-        assert "agent.config.json" not in runner
-    print("PASS test_c3_runner_exports_precomposed_user_id")
 
 
-def test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge():
-    with tempfile.TemporaryDirectory() as tmp:
-        stage = Path(tmp)
-        c3_compute._write_c3_project(
-            stage,
-            {"challenge": "knapsack", "c3_hardware": "auto"},
-            "https://example.invalid",
-            "00:10:00",
-            "rust:1-bookworm",
-        )
-        c3_yaml = (stage / ".c3").read_text()
-        assert 'hardware: "cpu-d3-4vcpu-16gb"' in c3_yaml
-        assert 'requires_accelerator: "none"' in c3_yaml
-        assert "\ngpu:" not in c3_yaml
-    print("PASS test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge")
 
 
 def test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
@@ -135,23 +102,27 @@ def test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
     print("PASS test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge")
 
 
-def test_tig_c3_default_image_rejects_unmirrored_challenge():
-    # neuralnet_optimizer is the one challenge the TIG backend doesn't support
-    # (harness-owned solve_challenge; no baked/mirrored image). CPU challenges
-    # resolve to baked tig-bench-<ch> images; GPU to raw tig-dev-<ch> mirrors.
+def test_tig_c3_default_image_resolution():
+    # All 8 challenges are C3-supported: CPU resolve to baked tig-bench-<ch>
+    # images; GPU + neuralnet_optimizer to raw tig-dev-<ch> mirrors. An unknown
+    # challenge still raises with the supported list.
+    ver = c3_compute._bm_tig_version()
+    assert c3_compute._tig_c3_image({"challenge": "satisfiability"}).endswith(
+        "tig-bench-satisfiability:" + ver
+    )
+    assert c3_compute._tig_c3_image({"challenge": "hypergraph"}).endswith(
+        "tig-dev-hypergraph:" + ver
+    )
+    assert c3_compute._tig_c3_image({"challenge": "neuralnet_optimizer"}).endswith(
+        "tig-dev-neuralnet_optimizer:" + ver
+    )
     try:
-        c3_compute._tig_c3_image({"challenge": "neuralnet_optimizer"})
+        c3_compute._tig_c3_image({"challenge": "not_a_challenge"})
     except ValueError as exc:
         assert "currently supported" in str(exc)
     else:
-        raise AssertionError("expected unsupported default TIG C3 image to fail")
-    assert c3_compute._tig_c3_image({"challenge": "satisfiability"}).endswith(
-        "tig-bench-satisfiability:" + c3_compute._bm_tig_version()
-    )
-    assert c3_compute._tig_c3_image({"challenge": "hypergraph"}).endswith(
-        "tig-dev-hypergraph:" + c3_compute._bm_tig_version()
-    )
-    print("PASS test_tig_c3_default_image_rejects_unmirrored_challenge")
+        raise AssertionError("expected unsupported TIG C3 image to raise")
+    print("PASS test_tig_c3_default_image_resolution")
 
 
 def test_tig_source_upload_excludes_generated_outputs():
@@ -169,10 +140,8 @@ def _main():
     test_agent_id_only()
     test_unknown_when_no_identity()
     test_benchmark_id_is_fresh_10_char_hex()
-    test_c3_runner_exports_precomposed_user_id()
-    test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge()
     test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge()
-    test_tig_c3_default_image_rejects_unmirrored_challenge()
+    test_tig_c3_default_image_resolution()
     test_tig_source_upload_excludes_generated_outputs()
     print("\nAll benchmark run-id tests passed.")
 

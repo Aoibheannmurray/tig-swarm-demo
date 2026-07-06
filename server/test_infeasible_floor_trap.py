@@ -19,7 +19,7 @@ Three fixes, all exercised here:
   3. The stagnation deposit into the inactive/adoption pool is feasibility-gated
      so infeasible code can never seed a fresh agent.
 A fourth (benchmark.INFEASIBLE_QUALITY = -QUALITY_CLAMP) is covered separately in
-the benchmark aggregate smoke test.
+the benchmark `_tig_adapter` smoke test.
 """
 
 import asyncio
@@ -141,9 +141,11 @@ async def test_first_infeasible_run_sets_no_anchor():
     print("PASS test_first_infeasible_run_sets_no_anchor")
 
 
-async def test_aggregate_infeasible_floor_below_feasible():
-    """benchmark.aggregate: an all-infeasible run must score strictly below any
-    realistic feasible run, and the geomean must stay defined."""
+async def test_tig_adapter_infeasible_floor_below_feasible():
+    """benchmark._tig_adapter (the fuel-path scorer): an all-infeasible run must
+    score strictly below any realistic feasible run, and the geomean must stay
+    finite. Per-track score is the MEDIAN of per-nonce quality, infeasible nonces
+    counted at the infeasible floor."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "bm", os.path.join(os.path.dirname(__file__), "..", "scripts", "benchmark.py"))
@@ -151,24 +153,29 @@ async def test_aggregate_infeasible_floor_below_feasible():
     spec.loader.exec_module(bm)
 
     assert bm.INFEASIBLE_QUALITY == -bm.QUALITY_CLAMP, bm.INFEASIBLE_QUALITY
-    infeasible = bm.aggregate([{"track": "t", "feasible": False}])["score"]
-    feasible = bm.aggregate([{"track": "t", "feasible": True, "score": FEASIBLE_BASELINE}])["score"]
+    cfg = {"challenge": CHALLENGE}
+
+    def _score(tracks):
+        return bm._tig_adapter({"challenge": CHALLENGE, "tracks": tracks}, cfg)["score"]
+
+    infeasible = _score({"t": {"nonces": [{"feasible": False}]}})
+    feasible = _score({"t": {"nonces": [{"feasible": True, "quality": FEASIBLE_BASELINE}]}})
     assert feasible > infeasible, (feasible, infeasible)
     # Two-track run with one fully-infeasible track stays finite (geomean shift
     # keeps the infeasible floor at exactly +1 after shifting → log defined).
-    mixed = bm.aggregate([
-        {"track": "a", "feasible": True, "score": 5_000_000.0},
-        {"track": "b", "feasible": False},
-    ])["score"]
+    mixed = _score({
+        "a": {"nonces": [{"feasible": True, "quality": 5_000_000.0}]},
+        "b": {"nonces": [{"feasible": False}]},
+    })
     assert mixed == mixed, "geomean must be finite (not NaN)"
-    print("PASS test_aggregate_infeasible_floor_below_feasible")
+    print("PASS test_tig_adapter_infeasible_floor_below_feasible")
 
 
 async def _main():
     await test_infeasible_does_not_beat_feasible_best()
     await test_feasible_recovery_after_infeasible_is_accepted()
     await test_first_infeasible_run_sets_no_anchor()
-    await test_aggregate_infeasible_floor_below_feasible()
+    await test_tig_adapter_infeasible_floor_below_feasible()
     print("\nAll infeasible-floor-trap tests passed.")
 
 

@@ -17,7 +17,6 @@ rand = { version = "0.8.6", default-features = false, features = [
     "small_rng",
 ] }
 rand_distr = "0.4.3"
-rayon = {version= "1.10", optional = true}
 serde = { version = "1.0.196", features = ["derive"] }
 serde_json = { version = "1.0.113" }
 statrs = "0.18.0"
@@ -31,26 +30,6 @@ cudarc = { git = "https://github.com/tig-foundation/cudarc.git", branch = "runti
     "cuda-version-from-build-system",
 ], optional = true }
 
-[[bin]]
-name = "tig_generator"
-path = "src/main_generator.rs"
-required-features = ["generator"]
-
-[[bin]]
-name = "tig_solver"
-path = "src/main_solver.rs"
-required-features = ["solver"]
-
-[[bin]]
-name = "tig_evaluator"
-path = "src/main_evaluator.rs"
-required-features = ["evaluator"]
-
-[[bin]]
-name = "tig_gpu_benchmark"
-path = "src/main_gpu_benchmark.rs"
-required-features = ["gpu_benchmark"]
-
 [features]
 satisfiability = []
 vehicle_routing = []
@@ -61,10 +40,9 @@ hypergraph = ["cudarc"]
 neuralnet_optimizer = ["cudarc", "cudarc/cublas", "cudarc/cudnn"]
 vector_search = ["cudarc"]
 
-# Convenience feature sets for the bins. Each binary needs at least one
-# challenge feature enabled — pick e.g. `--features solver,knapsack`.
-generator = ["rayon"]
-evaluator = []
+# `solver` is a no-op feature kept for the agent/dev compile-check command
+# (`cargo check --features solver,<challenge>`); it gates nothing itself —
+# algorithm modules are gated by the per-challenge features above. `baseline`
+# gates the cfg-only verification baselines used by `conditional_pub!`.
 solver = []
 baseline = []
-gpu_benchmark = []

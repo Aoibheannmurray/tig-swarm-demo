@@ -122,6 +122,7 @@ jobs:
         challenge:
           - vector_search
           - hypergraph
+          - neuralnet_optimizer
     steps:
       - uses: actions/checkout@v4
 
