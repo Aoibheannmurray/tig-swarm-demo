@@ -40,6 +40,45 @@ def _stem(name: str) -> str:
     return name.rsplit("/", 1)[-1].rsplit(".", 1)[0]
 
 
+def _dir(name: str) -> str:
+    """Directory part of a relative POSIX path ('' for top-level files)."""
+    return name.rsplit("/", 1)[0] if "/" in name else ""
+
+
+def _module_dir(name: str) -> str:
+    """Directory a `mod x;` declared in `name` pulls its file from: `d/` for
+    `d/mod.rs` (and lib.rs/main.rs), `d/f/` for a non-mod file `d/f.rs`."""
+    d = _dir(name)
+    stem = _stem(name)
+    if stem in ("mod", "lib", "main"):
+        return d
+    return f"{d}/{stem}" if d else stem
+
+
+def _mod_candidates(declaring: str, mod_name: str) -> list[str]:
+    """Relative paths a `mod <name>;` in `declaring` can resolve to.
+
+    Keyed on the full relative path (not the bare basename) so same-named
+    files in different subdirectories can't be confused for each other.
+    Rust resolves the declaration under the declaring file's module dir
+    (`d/f.rs` -> `d/f/<name>.rs`); we also accept the declaring file's own
+    directory (`d/<name>.rs`) — the layout flattened algorithm maps use.
+    Over-matching is safe here: an extra candidate can only *keep* a file
+    during unreachable-removal, never drop one."""
+    dirs = [_module_dir(declaring)]
+    sibling_dir = _dir(declaring)
+    if sibling_dir != dirs[0]:
+        dirs.append(sibling_dir)
+    candidates = []
+    for d in dirs:
+        prefix = f"{d}/" if d else ""
+        candidates += [
+            f"{prefix}{mod_name}.rs",
+            f"{prefix}{mod_name}/mod.rs",
+        ]
+    return candidates
+
+
 def _body_lines(code: str) -> list[str]:
     """Lines with the leading `//` comment header (and blank lines) stripped —
     the two byte-identical files in the wild differed only in a generated
@@ -60,7 +99,6 @@ def remove_unreachable_files(
     not `mod`) are always kept.
     """
     rs = {n for n in file_map if n.endswith(".rs")}
-    by_stem = {_stem(n): n for n in rs}
     reachable: set[str] = set()
     frontier = [entry] if entry in file_map else []
     while frontier:
@@ -69,9 +107,9 @@ def remove_unreachable_files(
             continue
         reachable.add(name)
         for m in _declared_mods(file_map[name]):
-            child = by_stem.get(m)
-            if child and child not in reachable:
-                frontier.append(child)
+            for child in _mod_candidates(name, m):
+                if child in rs and child not in reachable:
+                    frontier.append(child)
     dropped = sorted(rs - reachable)
     if not dropped:
         return dict(file_map), []
@@ -83,13 +121,21 @@ def merge_identical_files(
     file_map: dict[str, str], entry: str,
 ) -> tuple[dict[str, str], list[str]]:
     """Collapse non-entry `.rs` files with identical bodies (modulo leading
-    comment headers) into one module, rewiring all references."""
+    comment headers) into one module, rewiring all references.
+
+    Grouping and rewiring are keyed on the full relative path: only files in
+    the SAME directory are merge candidates (identical bodies in different
+    subdirs are different modules with different `mod`/path wiring), and only
+    files that can actually reference the dropped module — its directory
+    siblings plus the file that declares that directory — get their
+    `mod dup;` declarations and `dup::` paths rewired. A same-named module
+    in another subdir is never touched."""
     names = sorted(n for n in file_map if n.endswith(".rs") and n != entry)
     bodies = {n: _body_lines(file_map[n]) for n in names}
-    # Group by identical body; keep the alphabetically-first of each group.
+    # Group by (directory, identical body); keep the alphabetically-first.
     groups: dict[tuple, list[str]] = {}
     for n in names:
-        groups.setdefault(tuple(bodies[n]), []).append(n)
+        groups.setdefault((_dir(n), tuple(bodies[n])), []).append(n)
 
     out = dict(file_map)
     actions: list[str] = []
@@ -100,10 +146,14 @@ def merge_identical_files(
         keep_stem = _stem(keep)
         for d in drops:
             d_stem = _stem(d)
+            d_dir = _dir(d)
             del out[d]
             actions.append(f"merged duplicate file {d} into {keep}")
             for name in list(out):
                 if not name.endswith(".rs"):
+                    continue
+                # Same-dir siblings + the declarer of this dir's modules.
+                if _dir(name) != d_dir and _module_dir(name) != d_dir:
                     continue
                 code = out[name]
                 # Drop the `mod dup;` declaration line…

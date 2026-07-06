@@ -24,19 +24,14 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
-import os
 import sys
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-SERVER = os.environ.get("TIG_SWARM_SERVER") or "https://t1-production-0047.up.railway.app///"
-if SERVER.startswith("$"):
-    sys.exit(
-        "dump_trajectories.py: server URL not configured. Run "
-        "`python setup.py join <swarm-url>` (or set TIG_SWARM_SERVER)."
-    )
-SERVER = SERVER.rstrip("/")
+from swarm_client import resolve_server_url
+
+SERVER = resolve_server_url("dump_trajectories.py")
 
 
 def fetch(path: str) -> dict:

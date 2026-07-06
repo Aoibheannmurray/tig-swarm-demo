@@ -31,6 +31,12 @@ from benchmark import (
 )
 
 _POLL_INTERVAL_SECS = 15
+# Hard ceilings for c3 CLI subcommands so a hung CLI (network stall, auth
+# prompt, dead endpoint) can't wedge the polling loop forever. `c3 pull`
+# downloads artifacts, so it gets a much larger budget than metadata queries.
+_C3_CLI_TIMEOUT_SECS = 60
+_C3_LOGS_TIMEOUT_SECS = 120
+_C3_PULL_TIMEOUT_SECS = 600
 _DEFAULT_CPU_IMAGE = "rust:1-bookworm"
 _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 _DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
@@ -222,22 +228,14 @@ def _create_workspace(stage: Path, config: dict, server: str) -> dict:
     return staged_config
 
 
-def _write_c3_project(
-    stage: Path,
-    config: dict,
-    server: str,
-    c3_time: str,
-    image: str,
-    seed: str | None = None,
-    hyperparameters: str | None = None,
+def _c3_project_yaml(
+    config: dict, script_name: str, c3_time: str, image: str, run_id: str,
 ) -> str:
-    run_id = uuid.uuid4().hex[:10]
+    """The `.c3` project file shared by the custom and TIG benchmark paths."""
     challenge = config.get("challenge", "unknown")
-    script_name = f"run-benchmark-{run_id}.sh"
     hardware = _resolve_c3_hardware(config)
     requires_accelerator = _docker_requires_accelerator(config)
-
-    c3_config = f"""\
+    return f"""\
 project: tig-swarm-benchmark
 script: {_yaml_quote(script_name)}
 hardware: {_yaml_quote(hardware)}
@@ -251,7 +249,23 @@ docker:
 output:
   - ./c3-artifacts
 """
-    _write_container_file(stage / ".c3", c3_config)
+
+
+def _write_c3_project(
+    stage: Path,
+    config: dict,
+    server: str,
+    c3_time: str,
+    image: str,
+    seed: str | None = None,
+    hyperparameters: str | None = None,
+) -> str:
+    run_id = uuid.uuid4().hex[:10]
+    script_name = f"run-benchmark-{run_id}.sh"
+
+    _write_container_file(
+        stage / ".c3", _c3_project_yaml(config, script_name, c3_time, image, run_id)
+    )
 
     gpu_check = ""
     if _is_gpu_config(config):
@@ -364,17 +378,30 @@ _TERMINAL_BAD = ("FAILED", "CANCELLED", "CANCELED", "ERROR", "TIMED_OUT", "TIMEO
 _NON_TERMINAL = ("PENDING", "SCHEDULING", "RUNNING", "QUEUED", "SUBMITTED")
 
 
+def _run_c3(
+    cmd: list[str], env: dict, cwd: Path, timeout_secs: int,
+) -> subprocess.CompletedProcess | None:
+    """Run a c3 CLI command with a hard timeout. Returns None on timeout so
+    callers treat a hung CLI like a query that produced no output."""
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            env=env,
+            timeout=timeout_secs,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"    [C3] `{' '.join(cmd)}` timed out after {timeout_secs}s")
+        return None
+
+
 def _read_job_status(job_id: str, env: dict, cwd: Path) -> str | None:
-    result = subprocess.run(
-        ["c3", "squeue", "--json"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=cwd,
-        env=env,
-    )
-    raw = (result.stdout or "").strip()
+    result = _run_c3(["c3", "squeue", "--json"], env, cwd, _C3_CLI_TIMEOUT_SECS)
+    raw = (result.stdout or "").strip() if result else ""
     if raw:
         try:
             data = json.loads(raw)
@@ -387,15 +414,9 @@ def _read_job_status(job_id: str, env: dict, cwd: Path) -> str | None:
         except json.JSONDecodeError:
             pass
 
-    table = subprocess.run(
-        ["c3", "squeue", "-n", "50"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=cwd,
-        env=env,
-    )
+    table = _run_c3(["c3", "squeue", "-n", "50"], env, cwd, _C3_CLI_TIMEOUT_SECS)
+    if table is None:
+        return None
     for line in (table.stdout or "").splitlines():
         if job_id not in line:
             continue
@@ -433,7 +454,7 @@ def _poll_c3_job(
     return "timeout"
 
 
-def _c3_poll_timeout(args: argparse.Namespace, walltime_secs: int) -> int | None:
+def _c3_poll_timeout(args: argparse.Namespace) -> int | None:
     value = _arg_value(args, "c3_poll_timeout", None)
     if value in (None, ""):
         return None
@@ -445,41 +466,64 @@ def _c3_poll_timeout(args: argparse.Namespace, walltime_secs: int) -> int | None
 
 
 def _read_logs(job_id: str, env: dict, cwd: Path) -> str:
-    result = subprocess.run(
-        ["c3", "logs", job_id],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=cwd,
-        env=env,
-    )
+    result = _run_c3(["c3", "logs", job_id], env, cwd, _C3_LOGS_TIMEOUT_SECS)
+    if result is None:
+        return ""
     return (result.stdout or "") + (result.stderr or "")
 
 
 def _cancel_c3_job(job_id: str, env: dict, cwd: Path) -> str:
-    result = subprocess.run(
-        ["c3", "cancel", job_id],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=cwd,
-        env=env,
-    )
+    result = _run_c3(["c3", "cancel", job_id], env, cwd, _C3_CLI_TIMEOUT_SECS)
+    if result is None:
+        return f"[C3] c3 cancel {job_id} timed out"
     return (result.stdout or "") + (result.stderr or "")
 
 
+def _cancel_deployed_job(stage: Path, env: dict) -> None:
+    """Best-effort cancel of a job whose deploy succeeded but whose ID we
+    could not parse from the deploy output.
+
+    Without this the orphaned job burns compute until its walltime. The
+    staged `.c3` config carries a unique per-deploy `job_name` (contains a
+    fresh run_id), so look the job up by name in `c3 squeue --json` and
+    cancel by ID. Silently gives up on any failure — this is cleanup, not
+    correctness."""
+    try:
+        text = (stage / ".c3").read_text(encoding="utf-8")
+        m = re.search(r'^job_name:\s*"?([^"\n]+)"?\s*$', text, re.MULTILINE)
+        job_name = m.group(1).strip() if m else ""
+    except OSError:
+        job_name = ""
+    if not job_name:
+        return
+    result = _run_c3(["c3", "squeue", "--json"], env, stage, _C3_CLI_TIMEOUT_SECS)
+    if result is None or not (result.stdout or "").strip():
+        return
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return
+    for job in _iter_job_dicts(data):
+        names = {str(job.get(k, "")) for k in ("name", "job_name", "jobName")}
+        if job_name not in names:
+            continue
+        job_id = next(
+            (str(job[k]) for k in ("id", "job_id", "jobId") if job.get(k)), "",
+        )
+        if job_id:
+            _cancel_c3_job(job_id, env, stage)
+            print(f"    [C3] canceled orphaned job {job_id} ({job_name})")
+        return
+
+
 def _check_c3_auth(env: dict) -> str:
-    result = subprocess.run(
-        ["c3", "whoami"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=ROOT,
-        env=env,
-    )
+    result = _run_c3(["c3", "whoami"], env, ROOT, _C3_CLI_TIMEOUT_SECS)
+    if result is None:
+        return (
+            "[C3] `c3 whoami` timed out — the CLI may be waiting on an "
+            "interactive login or an unreachable endpoint. Run `c3 login` "
+            "manually, or export C3_API_KEY."
+        )
     if result.returncode == 0:
         return ""
     detail = ((result.stdout or "") + (result.stderr or "")).strip()
@@ -492,27 +536,17 @@ def _check_c3_auth(env: dict) -> str:
 
 
 def _pull_artifacts(job_id: str, env: dict, cwd: Path) -> str:
-    result = subprocess.run(
-        ["c3", "pull", job_id],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=cwd,
-        env=env,
-    )
+    result = _run_c3(["c3", "pull", job_id], env, cwd, _C3_PULL_TIMEOUT_SECS)
+    if result is None:
+        return f"[C3] c3 pull {job_id} timed out"
     if result.returncode == 0:
         return (result.stdout or "") + (result.stderr or "")
 
-    fallback = subprocess.run(
-        ["c3", "squeue", "pull", job_id],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=cwd,
-        env=env,
+    fallback = _run_c3(
+        ["c3", "squeue", "pull", job_id], env, cwd, _C3_PULL_TIMEOUT_SECS,
     )
+    if fallback is None:
+        return (result.stdout or "") + (result.stderr or "")
     return (
         (result.stdout or "")
         + (result.stderr or "")
@@ -605,6 +639,9 @@ def _tig_c3_image(cfg: dict) -> str:
             f"TIG C3 Docker image is not configured for {challenge!r}; "
             f"currently supported: {supported}"
         )
+    # Default namespace points at the TIG dev's public Docker Hub images
+    # (the prebuilt tig-bench-*/tig-dev-* mirrors); override with the
+    # `tig_dockerhub` config key or the TIG_DOCKERHUB env var.
     ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB", "danieltiagoadams")
     if challenge in _TIG_BAKED_CHALLENGES:
         return f"docker.io/{ns}/tig-bench-{challenge}:{_bm_tig_version()}"
@@ -627,10 +664,17 @@ def _create_tig_workspace(stage: Path, cfg: dict) -> None:
         exclude_args = " ".join(
             f"--exclude={shlex.quote(path)}" for path in _TIG_SOURCE_TAR_EXCLUDES
         )
+        # `bash -c` with pipefail so a failure in the *first* tar (missing
+        # source, permission error) fails the pipeline instead of silently
+        # staging a truncated tree.
         subprocess.run(
-            f"tar -C {shlex.quote(str(monorepo))} {exclude_args} -cf - . "
-            f"| tar -C {shlex.quote(str(src))} -xf -",
-            shell=True, check=True,
+            [
+                "bash", "-c",
+                "set -o pipefail; "
+                f"tar -C {shlex.quote(str(monorepo))} {exclude_args} -cf - . "
+                f"| tar -C {shlex.quote(str(src))} -xf -",
+            ],
+            check=True,
         )
     _copy_required(ROOT / "scripts" / "tig_bench_driver.py", stage / "tig_bench_driver.py")
     _copy_required(ROOT / "scripts" / "modified_test_algorithm", stage / "modified_test_algorithm")
@@ -658,13 +702,44 @@ def _stage_tig_algorithm(stage: Path, cfg: dict) -> None:
             _copy_required(kernel_path, dst / "kernels.cu")
 
 
-def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str:
-    challenge = cfg["challenge"]
+def _tig_runner_prologue(challenge: str) -> str:
+    """Shared head of both TIG runner scripts (baked and raw)."""
+    return f"""#!/bin/bash
+set -euo pipefail
+cd "${{C3_JOB_WORKDIR:-/workspace}}"
+OUT="${{C3_ARTIFACTS_DIR:-./c3-artifacts}}"; mkdir -p "$OUT" c3-artifacts
+export CHALLENGE={challenge}
+cp modified_test_algorithm /usr/local/bin/tig-scripts/modified_test_algorithm
+chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
+"""
+
+
+def _tig_runner_epilogue(
+    cfg: dict, seed: str, hyperparameters: str | None, workdir_expr: str,
+) -> str:
+    """Shared tail of both TIG runner scripts: env exports + driver run +
+    artifact copy. `workdir_expr` is the shell expression for TIG_WORKDIR
+    (`/app` baked, `"$PWD/tig-source"` raw)."""
     tracks = {
         k: v for k, v in (cfg.get("tracks") or {}).items()
         if k != "seed" and isinstance(v, int) and v > 0
     }
     fuel = int(cfg.get("max_fuel_budget", _BM_DEFAULT_FUEL))
+    hp_export = ""
+    if hyperparameters is not None:
+        hp_export = f"export TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}\n"
+    return f"""export TIG_WORKDIR={workdir_expr}
+export TIG_TRACKS={_yaml_quote(json.dumps(tracks))}
+export TIG_SEED={_yaml_quote(seed)}
+export TIG_FUEL={fuel}
+{hp_export}python3 tig_bench_driver.py > "$OUT/combined.json" 2> "$OUT/driver.stderr" || echo "driver rc=$?" >> "$OUT/driver.stderr"
+cp "$OUT/combined.json" c3-artifacts/ 2>/dev/null || true
+cp "$OUT/driver.stderr" c3-artifacts/ 2>/dev/null || true
+"""
+
+
+def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str:
+    challenge = cfg["challenge"]
     is_nn = challenge == "neuralnet_optimizer"
     baked = challenge in _TIG_BAKED_CHALLENGES
 
@@ -673,28 +748,15 @@ def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str
     # source re-add, no `pub mod swarm_algo` append (baked), no nn blinding (nn
     # is a raw/GPU challenge, never baked).
     if baked:
-        hp_export = ""
-        if hyperparameters is not None:
-            hp_export = f"export TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}\n"
-        return f"""#!/bin/bash
-set -euo pipefail
-cd "${{C3_JOB_WORKDIR:-/workspace}}"
-OUT="${{C3_ARTIFACTS_DIR:-./c3-artifacts}}"; mkdir -p "$OUT" c3-artifacts
-export CHALLENGE={challenge}
-cp modified_test_algorithm /usr/local/bin/tig-scripts/modified_test_algorithm
-chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
-SLOT=/app/tig-algorithms/src/{challenge}/swarm_algo
+        return (
+            _tig_runner_prologue(challenge)
+            + f"""SLOT=/app/tig-algorithms/src/{challenge}/swarm_algo
 mkdir -p "$SLOT"
 cp algorithm/mod.rs "$SLOT/mod.rs"
 cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
-export TIG_WORKDIR=/app
-export TIG_TRACKS={_yaml_quote(json.dumps(tracks))}
-export TIG_SEED={_yaml_quote(seed)}
-export TIG_FUEL={fuel}
-{hp_export}python3 tig_bench_driver.py > "$OUT/combined.json" 2> "$OUT/driver.stderr" || echo "driver rc=$?" >> "$OUT/driver.stderr"
-cp "$OUT/combined.json" c3-artifacts/ 2>/dev/null || true
-cp "$OUT/driver.stderr" c3-artifacts/ 2>/dev/null || true
 """
+            + _tig_runner_epilogue(cfg, seed, hyperparameters, "/app")
+        )
 
     # neuralnet anti-cheat: blind the seed handed to optimizer_init_state.
     patch = ""
@@ -715,53 +777,26 @@ cp "$OUT/driver.stderr" c3-artifacts/ 2>/dev/null || true
         )
     assemble = ('cat algorithm/mod.rs boilerplate.rs > "$SLOT/mod.rs"'
                 if is_nn else 'cp algorithm/mod.rs "$SLOT/mod.rs"')
-    hp_export = ""
-    if hyperparameters is not None:
-        hp_export = f"export TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}\n"
 
-    return f"""#!/bin/bash
-set -euo pipefail
-cd "${{C3_JOB_WORKDIR:-/workspace}}"
-OUT="${{C3_ARTIFACTS_DIR:-./c3-artifacts}}"; mkdir -p "$OUT" c3-artifacts
-export CHALLENGE={challenge}
-cp modified_test_algorithm /usr/local/bin/tig-scripts/modified_test_algorithm
-chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
-{patch}SLOT=tig-source/tig-algorithms/src/{challenge}/swarm_algo
+    return (
+        _tig_runner_prologue(challenge)
+        + f"""{patch}SLOT=tig-source/tig-algorithms/src/{challenge}/swarm_algo
 mkdir -p "$SLOT"
 {assemble}
 cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
 grep -q "pub mod swarm_algo;" tig-source/tig-algorithms/src/{challenge}/mod.rs || echo "pub mod swarm_algo;" >> tig-source/tig-algorithms/src/{challenge}/mod.rs
-export TIG_WORKDIR="$PWD/tig-source"
-export TIG_TRACKS={_yaml_quote(json.dumps(tracks))}
-export TIG_SEED={_yaml_quote(seed)}
-export TIG_FUEL={fuel}
-{hp_export}python3 tig_bench_driver.py > "$OUT/combined.json" 2> "$OUT/driver.stderr" || echo "driver rc=$?" >> "$OUT/driver.stderr"
-cp "$OUT/combined.json" c3-artifacts/ 2>/dev/null || true
-cp "$OUT/driver.stderr" c3-artifacts/ 2>/dev/null || true
 """
+        + _tig_runner_epilogue(cfg, seed, hyperparameters, '"$PWD/tig-source"')
+    )
 
 
 def _write_tig_c3_project(stage: Path, cfg: dict, c3_time: str, image: str,
                           seed: str, hyperparameters: str | None) -> str:
-    challenge = cfg.get("challenge", "unknown")
     run_id = uuid.uuid4().hex[:10]
     script_name = f"run-tig-{run_id}.sh"
-    hardware = _resolve_c3_hardware(cfg)
-    requires_accelerator = _docker_requires_accelerator(cfg)
-    c3_config = f"""project: tig-swarm-benchmark
-script: {_yaml_quote(script_name)}
-hardware: {_yaml_quote(hardware)}
-time: {_yaml_quote(c3_time)}
-job_name: {_yaml_quote(f"tig-{challenge}-{run_id}")}
-
-docker:
-  image: {_yaml_quote(image)}
-  requires_accelerator: {_yaml_quote(requires_accelerator)}
-
-output:
-  - ./c3-artifacts
-"""
-    _write_container_file(stage / ".c3", c3_config)
+    _write_container_file(
+        stage / ".c3", _c3_project_yaml(cfg, script_name, c3_time, image, run_id)
+    )
     script_path = stage / script_name
     _write_container_file(script_path, _tig_runner_script(cfg, seed, hyperparameters))
     script_path.chmod(0o755)
@@ -769,7 +804,14 @@ output:
 
 
 def _load_tig_combined(stage: Path) -> tuple[dict | None, str]:
-    candidates = list(stage.rglob("combined.json"))
+    # Newest-mtime-first, like the sibling benchmark.json/benchmark.stderr
+    # loaders — rglob order is filesystem-dependent, and a stale artifact
+    # from a previous pull must not shadow the fresh one.
+    candidates = sorted(
+        stage.rglob("combined.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not candidates:
         return None, "combined.json not found in pulled artifacts"
     try:
@@ -819,12 +861,15 @@ def _run_tig_benchmark_c3(
 
         job_id = _parse_c3_id(combined)
         if not job_id:
+            # Deploy succeeded, so a job may be running that we can no longer
+            # track — best-effort cancel it by its unique job_name.
+            _cancel_deployed_job(stage, env)
             return None, f"[C3] Could not parse job ID:\n{combined[-2000:]}"
 
         walltime_secs = _parse_walltime(args.c3_time)
         print(f"    [C3] TIG job {job_id} — polling for completion...")
         status = _poll_c3_job(
-            job_id, env, stage, walltime_secs, _c3_poll_timeout(args, walltime_secs)
+            job_id, env, stage, walltime_secs, _c3_poll_timeout(args)
         )
         cancel_output = ""
         if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
@@ -922,6 +967,9 @@ def run_benchmark_c3(
 
         job_id = _parse_c3_id(combined)
         if not job_id:
+            # Deploy succeeded, so a job may be running that we can no longer
+            # track — best-effort cancel it by its unique job_name.
+            _cancel_deployed_job(stage, env)
             err = f"[C3] Could not parse job ID from c3 deploy output:\n{combined[-2000:]}"
             print(f"    {err}")
             return None, err
@@ -929,7 +977,7 @@ def run_benchmark_c3(
         walltime_secs = _parse_walltime(args.c3_time)
         print(f"    [C3] Job submitted: {job_id} — polling for completion...")
         status = _poll_c3_job(
-            job_id, env, stage, walltime_secs, _c3_poll_timeout(args, walltime_secs)
+            job_id, env, stage, walltime_secs, _c3_poll_timeout(args)
         )
         cancel_output = ""
         if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):

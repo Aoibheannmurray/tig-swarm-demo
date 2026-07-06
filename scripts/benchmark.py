@@ -111,20 +111,11 @@ INFEASIBLE_QUALITY = -QUALITY_CLAMP
 # positive in [1, 20M+1] before geo mean, then unshift the result.
 GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 
-def _resolve_server_url() -> str:
-    if os.environ.get("TIG_SWARM_SERVER"):
-        return os.environ["TIG_SWARM_SERVER"].rstrip("/")
-    cfg_path = ROOT_DIR / ".swarm-cache.json"
-    if cfg_path.exists():
-        try:
-            url = json.loads(cfg_path.read_text()).get("server_url", "")
-            if url and not url.startswith("$"):
-                return url.rstrip("/")
-        except Exception:
-            pass
-    return ""
+from swarm_client import resolve_server_url
 
-SERVER = _resolve_server_url()
+# required=False: benchmark.py can run fully offline (the server probe is
+# advisory), so "" is a valid resolution rather than a fatal error.
+SERVER = resolve_server_url("benchmark.py", required=False)
 
 
 # ── Config loading ──────────────────────────────────────────────────
@@ -546,7 +537,7 @@ def _chown_worktree_back(image: str, cfg: dict) -> None:
 # Runs the agent's algorithm through the real TIG toolchain (fuel-instrumented
 # compile + tig-runtime/tig-verifier) inside the custom image, instead of the
 # swarm's own solver/evaluator. Selected by config `benchmark_backend: "tig"`
-# (or env TIG_BENCH_BACKEND=tig). See tig_docker_plan.md.
+# (or env TIG_BENCH_BACKEND=tig). See docs/tig_docker_plan.md.
 
 DEFAULT_MAX_FUEL_BUDGET = 5_000_000_000_000  # per-challenge max_fuel_budget (5e12)
 
@@ -610,7 +601,16 @@ def _tig_adapter(combined: dict, cfg: dict) -> dict:
             if r.get("feasible"):
                 feasible_total += 1
                 q = r.get("quality")
-                qualities.append(float(q) if q is not None else float(INFEASIBLE_QUALITY))
+                if q is None:
+                    qualities.append(float(INFEASIBLE_QUALITY))
+                else:
+                    # The real TIG toolchain reports raw (unclamped) quality;
+                    # clamp to the same ±QUALITY_CLAMP band the custom path's
+                    # vendored evaluators enforce, so a very negative quality
+                    # can't push the shifted geomean below its log() domain.
+                    qualities.append(
+                        max(-float(QUALITY_CLAMP), min(float(QUALITY_CLAMP), float(q)))
+                    )
             else:
                 infeasible_total += 1
                 qualities.append(float(INFEASIBLE_QUALITY))
@@ -1461,6 +1461,10 @@ def _is_per_track_hyperparameters(parsed: object) -> bool:
     Disambiguation is by value type: a flat config's values are scalars
     (int/float/str/bool — see hpo.sample_config), while a per-track map's values
     are all dicts. An empty dict is treated as flat (the default config).
+
+    CANONICAL COPY — `hp_for`/`_is_per_track` in scripts/tig_bench_driver.py
+    mirror this logic and must be kept in sync (the driver runs inside the
+    benchmark image with nothing staged next to it, so it can't import us).
     """
     return (
         isinstance(parsed, dict)
@@ -1478,6 +1482,9 @@ def _track_hyperparameters(raw: str | None, track_key: str) -> str | None:
     per-track map (a winner per track — see docs/hyperparameter-search-plan.md).
     For a per-track map this selects the track's own config (a missing track =>
     the default config {}). Flat configs and unparseable strings pass through.
+
+    CANONICAL COPY — keep `hp_for` in scripts/tig_bench_driver.py in sync
+    (it can't import us; it runs alone inside the benchmark image).
     """
     if not raw:
         return None

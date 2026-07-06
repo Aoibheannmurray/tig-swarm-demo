@@ -7,12 +7,16 @@ heartbeats, chat messages, and result publishing.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from challenge_files import read_algorithm, read_optional, kernel_path, read_files
+
+_ROOT = Path(__file__).resolve().parent.parent
 
 # Network-level errors that we'll log-and-swallow on fire-and-forget calls
 # like heartbeats/messages. Programmer errors (KeyError, TypeError, etc.)
@@ -50,9 +54,41 @@ def server_post(
         return json.load(resp)
 
 
-def server_get(url: str, timeout: int = 10) -> dict:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+def server_get(
+    url: str, timeout: int = 10,
+    *, headers: dict[str, str] | None = None,
+) -> dict:
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def resolve_server_url(script: str = "swarm_client", *, required: bool = True) -> str:
+    """Resolve the swarm server URL: $TIG_SWARM_SERVER wins, then the
+    `server_url` persisted in .swarm-cache.json by `setup.py sync`.
+
+    Values starting with `$` (an unexpanded template placeholder) are
+    rejected. When nothing resolves: exits with a clear message naming the
+    calling `script`, or returns "" when `required=False` (callers that can
+    run offline, e.g. benchmark.py's advisory server probe).
+    """
+    env = os.environ.get("TIG_SWARM_SERVER", "")
+    if env and not env.startswith("$"):
+        return env.rstrip("/")
+    cfg_path = _ROOT / ".swarm-cache.json"
+    if cfg_path.exists():
+        try:
+            url = json.loads(cfg_path.read_text()).get("server_url", "")
+            if url and not url.startswith("$"):
+                return url.rstrip("/")
+        except Exception:
+            pass
+    if not required:
+        return ""
+    sys.exit(
+        f"{script}: server URL not configured. "
+        "Run `python setup.py sync` (or set TIG_SWARM_SERVER)."
+    )
 
 
 # ── Agent API ──────────────────────────────────────────────────────
@@ -124,23 +160,34 @@ def register_agent(
     return data["agent_id"], data["agent_name"], data["agent_token"]
 
 
-def get_state(server: str, agent_id: str, role: str | None = None) -> dict:
+def get_state(
+    server: str, agent_id: str, role: str | None = None,
+    *, agent_token: str | None = None,
+) -> dict:
+    # /api/state?agent_id=X is authenticated: the server requires an
+    # X-Agent-Token header resolving to agent X (403 otherwise). The
+    # agent_id-less form of /api/state stays public.
     url = f"{server}/api/state?agent_id={urllib.parse.quote(agent_id)}"
     if role:
         url += f"&role={urllib.parse.quote(role)}"
-    return server_get(url)
+    headers = {"X-Agent-Token": agent_token} if agent_token else None
+    return server_get(url, headers=headers)
 
 
-def agent_exists(server: str, agent_id: str) -> bool:
+def agent_exists(server: str, agent_id: str, agent_token: str | None) -> bool:
     """True if the server still has an `agents` row for this id.
 
     Probes via /api/state — the server returns `agent_name="unknown"`
     when there's no row for the supplied id (see `get_agent_name` in the
-    server package). On transport failure we return True so a flaky
+    server package). A 403 means the token no longer resolves to this
+    agent (revoked, or the row is gone), so we return False to trigger a
+    re-register. On other transport failures we return True so a flaky
     network doesn't trigger a spurious re-register.
     """
     try:
-        state = get_state(server, agent_id)
+        state = get_state(server, agent_id, agent_token=agent_token)
+    except urllib.error.HTTPError as e:
+        return e.code != 403
     except _NET_ERRORS:
         return True
     return (state.get("agent_name") or "").strip() != "unknown"

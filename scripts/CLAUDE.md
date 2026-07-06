@@ -29,6 +29,9 @@ multi-agent fleet, benchmarking, and publishing results to the server.
   the per-worktree `CLAUDE.md` / `AGENTS.md` and permission settings** — see
   `_build_sandbox_settings`.
 - `llm_backends.py` / `prompts.py` — single-shot (non-agentic) LLM mode.
+- `swarm_client.py` — HTTP client for the coordination server (register, state,
+  heartbeat, publish, `resolve_server_url`). Named to avoid shadowing the
+  top-level `server/` package on `sys.path`.
 - `c3_compute.py` — cloud (C3) path for benchmarking.
 - `challenge_files.py`, `download_algorithm.py`, `init_fleet.py`,
   `sync_identity.py`, `build_ptx.py` — supporting helpers.
@@ -45,8 +48,8 @@ TIG toolchain** (fuel-instrumented; `tig-runtime`/`tig-verifier`), gated by
 - `tig_bench_driver.py` — runs inside the image: `build_algorithm` + per-track
   `modified_test_algorithm` → one combined JSON.
 - `build_bench_image.sh` — builds the custom image from `../tig-monorepo` + the pin.
-- Repo root: `Dockerfile.bench`, `tig_pin.json` (pinned TIG version),
-  `tig_docker_plan.md` (design + status). Algorithms author against
+- Repo root: `Dockerfile.bench`, `tig_pin.json` (pinned TIG version);
+  `docs/tig_docker_plan.md` (design + status). Algorithms author against
   `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases the crate as `tig_challenges`).
 
 ## Tests

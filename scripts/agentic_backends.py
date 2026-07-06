@@ -19,12 +19,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+from proc_utils import run_tree
 
 
 # ── CLI resolution ─────────────────────────────────────────────────
@@ -78,6 +79,28 @@ def _wrap_for_windows(argv: list[str]) -> list[str]:
     if first.lower().endswith((".cmd", ".bat")):
         return ["cmd.exe", "/d", "/c"] + argv
     return argv
+
+
+# Secrets the coding-agent subprocess must not inherit. Both backends allow
+# Bash(cargo …), and build.rs runs agent-controlled code — anything left in
+# the environment is exfiltratable. Neither CLI needs any of these: claude
+# uses its own stored login, codex its own `codex login` credentials.
+# Everything else (PATH, HOME, CLAUDE_CLI/CODEX_CLI, proxy vars, …) passes
+# through untouched.
+_SENSITIVE_ENV_KEYS = frozenset({"ADMIN_KEY", "SWARM_PASSWORD", "C3_API_KEY"})
+_SENSITIVE_ENV_PREFIXES = (
+    "OPENAI_", "ANTHROPIC_", "GOOGLE_", "OPENROUTER_", "VENICE_",
+)
+
+
+def _scrubbed_env() -> dict[str, str]:
+    """A copy of os.environ with provider API keys and swarm secrets removed."""
+    return {
+        k: v for k, v in os.environ.items()
+        if k not in _SENSITIVE_ENV_KEYS
+        and not k.endswith("_API_KEY")
+        and not k.startswith(_SENSITIVE_ENV_PREFIXES)
+    }
 
 
 @dataclass
@@ -239,56 +262,15 @@ def _build_sandbox_settings(config: dict, workdir: Path, *, extraction: bool = F
     return {"permissions": {"allow": allow, "deny": deny}}
 
 
-def _build_claude_md(challenge_md: str, config: dict) -> str:
-    """Stable, per-iteration rules dropped into the worktree's CLAUDE.md.
+# ── Shared worktree-doc prose ──────────────────────────────────────
+# CLAUDE.md (_build_claude_md) and AGENTS.md (_build_agents_md) are the same
+# document modulo the backend-specific sandbox/tooling sections. The shared
+# sections live here once; each builder composes them around its own
+# backend-specific chunks. Keep the rendered output stable — the wording is
+# part of the agents' operating contract.
 
-    Claude Code auto-discovers CLAUDE.md from the cwd and adds it to the
-    system prompt — so this is where the "rules of the game" live. The
-    per-iteration variable state (current best score, prior hypotheses,
-    inspiration code) goes in the user prompt instead.
-    """
-    challenge = config.get("challenge", "unknown")
-    algo_relpath = config["algorithm_path"]
-    kernel_relpath = config.get("kernel_path")
-    timeout = config.get("timeout", 30)
-
-    from prompts import get_strategy_tags
-    strategy_tags = ", ".join(f"`{t}`" for t in get_strategy_tags(config))
-
-    files_section = f"- `{algo_relpath}` — the algorithm file. EDIT this."
-    if kernel_relpath:
-        files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
-
-    # GPU challenges: the kernel is NOT compiled by cargo (it's compiled to
-    # PTX separately), so give the agent the compile-check command for it.
-    kernel_bash = (
-        f", and `python3 scripts/build_ptx.py {challenge}` to compile-check "
-        f"your CUDA kernel (cargo does NOT compile `.cu` files)"
-        if kernel_relpath else ""
-    )
-
-    # Optimizer-hook challenges (neuralnet_optimizer): the training loop owns
-    # save_solution, and the agent gets the full optimizer-hook contract.
-    opt_hooks = challenge in {"neuralnet_optimizer"}
-    if opt_hooks:
-        from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
-        time_bullet = (
-            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
-            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
-            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
-            f"for you (do NOT call it yourself, and do NOT write your own loop)."
-        )
-    else:
-        opt_contract = ""
-        time_bullet = (
-            f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
-            f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
-            f"  `save_solution()` early with your first feasible solution, then keep\n"
-            f"  improving and re-saving. The last saved solution is what gets scored."
-        )
-
-    return f"""\
-# Swarm contributor — agentic mode
+_DOC_INTRO_TEMPLATE = """\
+# {title}
 
 You are one autonomous contributor in a swarm trying to improve a Rust solver
 for the **{challenge}** TIG challenge. The driver loop (Python) handles all
@@ -309,14 +291,9 @@ communication with the coordination server — your job is bounded.
 
 {files_section}
 - `.swarm/hypothesis.json` — write your hypothesis here before stopping.
+"""
 
-You may **read** only what you need to write the algorithm: this challenge's
-own directory, the root `CHALLENGE.md`, and `Cargo.toml`. Other challenges,
-`scripts/`, `server/`, git history, and this challenge's `README.md` /
-`baselines/` are out of scope — the sandbox rejects reads of them. You may
-NOT edit anything outside the list above either; only the algorithm file (and
-kernel) are scored, so keep your change self-contained in those files.
-
+_HYPOTHESIS_SCHEMA_TEMPLATE = """\
 ## Hypothesis file schema
 
 Write `.swarm/hypothesis.json` with exactly this shape:
@@ -331,19 +308,9 @@ Write `.swarm/hypothesis.json` with exactly this shape:
 ```
 
 Strategy tags (pick the closest match): {strategy_tags}.
+"""
 
-## Tools you have
-
-- `Read`, `Glob`, `Grep` — explore this challenge's directory + `CHALLENGE.md`
-  + `Cargo.toml` (other paths are blocked).
-- `Edit` — modify allowed files.
-- `Bash` — only `cargo check`, `cargo build`, `cargo fmt`, `cargo clippy`{kernel_bash}.
-
-You do NOT have network access, you cannot run `git`, `curl`, `wget`, `rm`,
-or any shell command outside the allowlist. You do NOT publish results
-yourself — the driver loop runs the official benchmark after you exit and
-publishes the score paired with your hypothesis.
-
+_SOLVER_CONSTRAINTS_TEMPLATE = """\
 ## Solver constraints
 
 - The existing `use` imports at the top of the starting file must remain
@@ -356,7 +323,109 @@ publishes the score paired with your hypothesis.
 {time_bullet}
 - Do not remove `unsafe` blocks that are already there; do not add new
   `unsafe` unless you understand the invariants.
+"""
 
+_CHALLENGE_DETAILS_TEMPLATE = """\
+## Challenge-specific details
+
+{challenge_md}
+{opt_contract}
+"""
+
+
+def _editable_files_section(config: dict) -> str:
+    """The bullet list of algorithm files the agent may edit."""
+    files_section = f"- `{config['algorithm_path']}` — the algorithm file. EDIT this."
+    kernel_relpath = config.get("kernel_path")
+    if kernel_relpath:
+        files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
+    return files_section
+
+
+def _strategy_tags_line(config: dict) -> str:
+    from prompts import get_strategy_tags
+    return ", ".join(f"`{t}`" for t in get_strategy_tags(config))
+
+
+def _time_budget_parts(challenge: str, timeout) -> tuple[str, str]:
+    """(time_bullet, opt_contract) for the solver-constraints section.
+
+    Optimizer-hook challenges (neuralnet_optimizer): the training loop owns
+    save_solution, and the agent gets the full optimizer-hook contract.
+    """
+    if challenge in {"neuralnet_optimizer"}:
+        from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
+        time_bullet = (
+            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
+            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
+            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+        )
+        return time_bullet, opt_contract
+    time_bullet = (
+        f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
+        f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
+        f"  `save_solution()` early with your first feasible solution, then keep\n"
+        f"  improving and re-saving. The last saved solution is what gets scored."
+    )
+    return time_bullet, ""
+
+
+def _build_claude_md(challenge_md: str, config: dict) -> str:
+    """Stable, per-iteration rules dropped into the worktree's CLAUDE.md.
+
+    Claude Code auto-discovers CLAUDE.md from the cwd and adds it to the
+    system prompt — so this is where the "rules of the game" live. The
+    per-iteration variable state (current best score, prior hypotheses,
+    inspiration code) goes in the user prompt instead.
+    """
+    challenge = config.get("challenge", "unknown")
+    kernel_relpath = config.get("kernel_path")
+    timeout = config.get("timeout", 30)
+    time_bullet, opt_contract = _time_budget_parts(challenge, timeout)
+
+    # GPU challenges: the kernel is NOT compiled by cargo (it's compiled to
+    # PTX separately), so give the agent the compile-check command for it.
+    kernel_bash = (
+        f", and `python3 scripts/build_ptx.py {challenge}` to compile-check "
+        f"your CUDA kernel (cargo does NOT compile `.cu` files)"
+        if kernel_relpath else ""
+    )
+
+    return (
+        _DOC_INTRO_TEMPLATE.format(
+            title="Swarm contributor — agentic mode",
+            challenge=challenge,
+            files_section=_editable_files_section(config),
+        )
+        + """
+You may **read** only what you need to write the algorithm: this challenge's
+own directory, the root `CHALLENGE.md`, and `Cargo.toml`. Other challenges,
+`scripts/`, `server/`, git history, and this challenge's `README.md` /
+`baselines/` are out of scope — the sandbox rejects reads of them. You may
+NOT edit anything outside the list above either; only the algorithm file (and
+kernel) are scored, so keep your change self-contained in those files.
+
+"""
+        + _HYPOTHESIS_SCHEMA_TEMPLATE.format(
+            strategy_tags=_strategy_tags_line(config),
+        )
+        + f"""
+## Tools you have
+
+- `Read`, `Glob`, `Grep` — explore this challenge's directory + `CHALLENGE.md`
+  + `Cargo.toml` (other paths are blocked).
+- `Edit` — modify allowed files.
+- `Bash` — only `cargo check`, `cargo build`, `cargo fmt`, `cargo clippy`{kernel_bash}.
+
+You do NOT have network access, you cannot run `git`, `curl`, `wget`, `rm`,
+or any shell command outside the allowlist. You do NOT publish results
+yourself — the driver loop runs the official benchmark after you exit and
+publishes the score paired with your hypothesis.
+
+"""
+        + _SOLVER_CONSTRAINTS_TEMPLATE.format(time_bullet=time_bullet)
+        + """
 ## When to stop
 
 Stop as soon as your edit compiles AND you have written
@@ -364,11 +433,11 @@ Stop as soon as your edit compiles AND you have written
 Don't run `scripts/benchmark.py` yourself — that's the driver's job and
 self-running it wastes time.
 
-## Challenge-specific details
-
-{challenge_md}
-{opt_contract}
 """
+        + _CHALLENGE_DETAILS_TEMPLATE.format(
+            challenge_md=challenge_md, opt_contract=opt_contract,
+        )
+    )
 
 
 class ClaudeCodeAgent:
@@ -434,26 +503,19 @@ class ClaudeCodeAgent:
             cmd += ["--model", model]
 
         t0 = time.time()
-        try:
-            result = subprocess.run(
-                cmd, input=user_prompt,
-                capture_output=True, text=True,
-                cwd=workdir, timeout=timeout_s,
-            )
-        except subprocess.TimeoutExpired as e:
-            return AgenticResult(
-                stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
-                stderr=(e.stderr or "") if isinstance(e.stderr, str) else "",
-                exit_code=-1,
-                duration_s=time.time() - t0,
-                timed_out=True,
-            )
+        # run_tree: the CLI gets its own process group (POSIX) so a timeout
+        # kills its cargo/nvcc/tool grandchildren too, not just the CLI.
+        stdout, stderr, exit_code, timed_out = run_tree(
+            cmd, input_text=user_prompt,
+            cwd=workdir, timeout_s=timeout_s,
+            env=_scrubbed_env(),
+        )
         return AgenticResult(
-            stdout=result.stdout,
-            stderr=result.stderr,
-            exit_code=result.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=-1 if timed_out else (exit_code if exit_code is not None else -1),
             duration_s=time.time() - t0,
-            timed_out=False,
+            timed_out=timed_out,
         )
 
 
@@ -477,58 +539,16 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     sandbox.
     """
     challenge = config.get("challenge", "unknown")
-    algo_relpath = config["algorithm_path"]
-    kernel_relpath = config.get("kernel_path")
     timeout = config.get("timeout", 30)
+    time_bullet, opt_contract = _time_budget_parts(challenge, timeout)
 
-    from prompts import get_strategy_tags
-    strategy_tags = ", ".join(f"`{t}`" for t in get_strategy_tags(config))
-
-    files_section = f"- `{algo_relpath}` — the algorithm file. EDIT this."
-    if kernel_relpath:
-        files_section += f"\n- `{kernel_relpath}` — CUDA kernels. EDIT this if needed."
-
-    opt_hooks = challenge in {"neuralnet_optimizer"}
-    if opt_hooks:
-        from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
-        time_bullet = (
-            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
-            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
-            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
-            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+    return (
+        _DOC_INTRO_TEMPLATE.format(
+            title="Swarm contributor — Codex agentic mode",
+            challenge=challenge,
+            files_section=_editable_files_section(config),
         )
-    else:
-        opt_contract = ""
-        time_bullet = (
-            f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
-            f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
-            f"  `save_solution()` early with your first feasible solution, then keep\n"
-            f"  improving and re-saving. The last saved solution is what gets scored."
-        )
-
-    return f"""\
-# Swarm contributor — Codex agentic mode
-
-You are one autonomous contributor in a swarm trying to improve a Rust solver
-for the **{challenge}** TIG challenge. The driver loop (Python) handles all
-communication with the coordination server — your job is bounded.
-
-## Your job each iteration
-
-1. Read the user prompt for the current state: your best score, prior
-   hypotheses you've already tried, inspiration code (if any), and any
-   stagnation hints.
-2. Decide on ONE specific improvement to try.
-3. Edit ONLY the algorithm file(s) listed below to implement it.
-4. Validate it compiles with `cargo check --features solver,{challenge}`.
-5. Before stopping, write your hypothesis as JSON to `.swarm/hypothesis.json`
-   (schema below). This is how the driver loop knows what you tried.
-
-## Files you may edit
-
-{files_section}
-- `.swarm/hypothesis.json` — write your hypothesis here before stopping.
-
+        + """
 The sandbox is `workspace-write` — you technically have write access to
 the whole worktree. **Do not use it.** The driver only copies the
 algorithm file(s) back to the main checkout when scoring — any other
@@ -536,21 +556,11 @@ edits you make get silently discarded, so editing Cargo.toml, src/lib.rs,
 or any other file is a waste of your turns and will cause your
 hypothesis to underperform.
 
-## Hypothesis file schema
-
-Write `.swarm/hypothesis.json` with exactly this shape:
-
-```json
-{{
-  "title": "short title under 80 chars",
-  "description": "2-3 sentences describing what you changed and why",
-  "strategy_tag": "one of the strategy tags below",
-  "notes": "brief implementation notes"
-}}
-```
-
-Strategy tags (pick the closest match): {strategy_tags}.
-
+"""
+        + _HYPOTHESIS_SCHEMA_TEMPLATE.format(
+            strategy_tags=_strategy_tags_line(config),
+        )
+        + """
 ## Sandbox
 
 - Sandbox mode: `workspace-write` (rooted at this worktree).
@@ -560,30 +570,20 @@ Strategy tags (pick the closest match): {strategy_tags}.
 - Approval policy is `never` — there's nobody to approve prompts. If you
   hit a permission wall, work around it within these rules.
 
-## Solver constraints
-
-- The existing `use` imports at the top of the starting file must remain
-  (e.g. `use tig_challenges::<challenge>::*;`).
-- Keep the harness entry points and their signatures unchanged: for most
-  challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
-  `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
-  hooks (the training loop and `solve_challenge` are harness-owned — do not add
-  or rename them). The harness calls these by name.
-{time_bullet}
-- Do not remove `unsafe` blocks that are already there; do not add new
-  `unsafe` unless you understand the invariants.
-
+"""
+        + _SOLVER_CONSTRAINTS_TEMPLATE.format(time_bullet=time_bullet)
+        + """
 ## When to stop
 
 Stop as soon as your edit compiles AND you have written
 `.swarm/hypothesis.json`. The driver runs the official benchmark after
 you stop — don't run `scripts/benchmark.py` yourself, that wastes time.
 
-## Challenge-specific details
-
-{challenge_md}
-{opt_contract}
 """
+        + _CHALLENGE_DETAILS_TEMPLATE.format(
+            challenge_md=challenge_md, opt_contract=opt_contract,
+        )
+    )
 
 
 class CodexAgent:
@@ -653,31 +653,19 @@ class CodexAgent:
             cmd += ["--model", model]
 
         t0 = time.time()
-        try:
-            result = subprocess.run(
-                cmd, input=user_prompt,
-                capture_output=True, text=True,
-                cwd=workdir, timeout=timeout_s,
-            )
-        except subprocess.TimeoutExpired as e:
-            stdout = (e.stdout or "") if isinstance(e.stdout, str) else ""
-            stderr = (e.stderr or "") if isinstance(e.stderr, str) else ""
-            # Even on timeout, the agent may have written the last-message
-            # file before the deadline — surface it for fallback hypothesis.
-            if last_msg_path.exists():
-                try:
-                    stdout = last_msg_path.read_text() or stdout
-                except OSError:
-                    pass
-            return AgenticResult(
-                stdout=stdout, stderr=stderr, exit_code=-1,
-                duration_s=time.time() - t0, timed_out=True,
-            )
+        # run_tree: the CLI gets its own process group (POSIX) so a timeout
+        # kills its cargo/tool grandchildren too, not just the CLI.
+        stdout, stderr, exit_code, timed_out = run_tree(
+            cmd, input_text=user_prompt,
+            cwd=workdir, timeout_s=timeout_s,
+            env=_scrubbed_env(),
+        )
 
         # Prefer the agent's final message over the full event trace. The
         # trace is verbose tool-call JSONL; the last_message is the
-        # human-readable summary the agent wrote on its last turn.
-        stdout = result.stdout
+        # human-readable summary the agent wrote on its last turn. Even on
+        # timeout the agent may have written it before the deadline —
+        # surface it for fallback hypothesis synthesis.
         if last_msg_path.exists():
             try:
                 final = last_msg_path.read_text()
@@ -687,9 +675,9 @@ class CodexAgent:
                 pass
 
         return AgenticResult(
-            stdout=stdout, stderr=result.stderr,
-            exit_code=result.returncode,
-            duration_s=time.time() - t0, timed_out=False,
+            stdout=stdout, stderr=stderr,
+            exit_code=-1 if timed_out else (exit_code if exit_code is not None else -1),
+            duration_s=time.time() - t0, timed_out=timed_out,
         )
 
 
