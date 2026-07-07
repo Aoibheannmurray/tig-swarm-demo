@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -171,7 +172,29 @@ def get_state(
     if role:
         url += f"&role={urllib.parse.quote(role)}"
     headers = {"X-Agent-Token": agent_token} if agent_token else None
-    return server_get(url, headers=headers)
+    # /api/state does real work server-side (stagnation resets, seed
+    # selection, pool deposits) and shares the SQLite writer with every
+    # other agent's publish, so >10s stalls are routine on a busy swarm.
+    # A failed fetch costs the caller a whole iteration slot, so retry
+    # with a generous timeout before giving up. Safe to repeat: a reset
+    # triggered by the first (timed-out) call zeroes the stagnation
+    # counter, so the retry just reads the post-reset state.
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            return server_get(url, timeout=60, headers=headers)
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                # A 4xx is a real answer, not a stall — e.g. agent_exists
+                # depends on seeing the 403 immediately to trigger
+                # re-registration.
+                raise
+            last_err = e
+        except _NET_ERRORS as e:
+            last_err = e
+        if attempt < 2:
+            time.sleep(5 * (attempt + 1))
+    raise last_err
 
 
 def agent_exists(server: str, agent_id: str, agent_token: str | None) -> bool:

@@ -54,6 +54,17 @@ SWARM_DEFAULTS: dict[str, int] = {
     "inactive_minutes": 60,
     "stagnation_threshold": 2,
     "stagnation_limit": 5,
+    # Kill-switch for trajectories that never turn positive: when > 0, a
+    # trajectory whose best is still not better than 0 (= the baseline)
+    # after this many edits is reset on the next state poll, exactly like a
+    # stagnation_limit trip. Catches lines stagnation_limit can't: small
+    # improvements below zero reset runs_since_improvement every time, yet
+    # the pool refuses negative deposits, so such a line can grind forever
+    # and never yield anything adoptable. 0 (default) disables. Leave it
+    # disabled on challenges whose feasible scores are inherently negative
+    # (e.g. neuralnet_optimizer) — there "positive" is unreachable and this
+    # would cull every trajectory.
+    "negative_trajectory_limit": 0,
     "hypothesis_recall_threshold": 3,
     # Seed-pool diversity (server-side; see server/seed_diversity.py).
     # K: max seeds kept per challenge. max_loc: simplicity ceiling — algorithms
@@ -1078,11 +1089,33 @@ async def _agent_state(agent_id: str, challenge: str, role: str | None) -> dict:
         seed_start = None
         reset = None
         stagnation_limit = swarm_setting(config, "stagnation_limit")
-        if stagnation_limit > 0 and runs_since >= stagnation_limit and traj_best is not None:
+        negative_limit = swarm_setting(config, "negative_trajectory_limit")
+        stagnated = (stagnation_limit > 0 and runs_since >= stagnation_limit
+                     and traj_best is not None)
+
+        # ── … or cull a trajectory that never turned positive ──
+        # A line inching upward while still below zero resets
+        # runs_since_improvement on every small win, so it never trips
+        # stagnation_limit — yet deposit_inactive refuses negative scores,
+        # so nothing harvestable can ever come out of it. After
+        # `negative_trajectory_limit` edits without crossing zero, treat it
+        # exactly like a stagnation trip. This is only the cheap pre-check
+        # (mirroring the stagnation one above); the machine re-checks both
+        # conditions under its write lock.
+        negative_cull = False
+        if not stagnated and traj_best is not None and negative_limit > 0:
+            cull_traj_id = acs["current_trajectory_id"] if acs else None
+            if cull_traj_id and not db.is_better(direction, traj_best["score"], 0.0):
+                traj_row = await db.get_trajectory(conn, cull_traj_id)
+                if traj_row and (traj_row["num_edits"] or 0) >= negative_limit:
+                    negative_cull = True
+
+        if stagnated or negative_cull:
             reset = await maybe_reset_trajectory(
                 conn, agent_id=agent_id, challenge=challenge,
                 direction=direction, cutoff_ts=cutoff_ts,
                 stagnation_limit=stagnation_limit,
+                negative_trajectory_limit=negative_limit,
                 agent_tier=agent_tier, agent_role=agent_role,
                 seed_fn=seed_for_agent, timestamp=now(),
             )
@@ -2867,6 +2900,9 @@ async def get_swarm_config():
         "swarm_type": config.get("swarm_type", "cpu"),
         "stagnation_threshold": swarm_setting(config, "stagnation_threshold"),
         "stagnation_limit": swarm_setting(config, "stagnation_limit"),
+        "negative_trajectory_limit": swarm_setting(
+            config, "negative_trajectory_limit",
+        ),
         "hypothesis_recall_threshold": swarm_setting(
             config, "hypothesis_recall_threshold",
         ),
@@ -2924,6 +2960,7 @@ async def update_swarm_config(req: SwarmConfigUpdate):
             ("swarm_type", req.swarm_type),
             ("stagnation_threshold", str(req.stagnation_threshold) if req.stagnation_threshold is not None else None),
             ("stagnation_limit", str(req.stagnation_limit) if req.stagnation_limit is not None else None),
+            ("negative_trajectory_limit", str(req.negative_trajectory_limit) if req.negative_trajectory_limit is not None else None),
             ("hypothesis_recall_threshold", str(req.hypothesis_recall_threshold) if req.hypothesis_recall_threshold is not None else None),
         ):
             if value is not None:

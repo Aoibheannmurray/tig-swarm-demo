@@ -4,8 +4,10 @@ Lifecycle
 ---------
 An agent's work on a challenge is organised into *trajectories*: lineages of
 code that improve (or stall) publish by publish. When an agent has gone
-`stagnation_limit` publishes without beating its trajectory best, the agent
-view of GET /api/state (server._agent_state) invokes this machine, which:
+`stagnation_limit` publishes without beating its trajectory best — or, with
+`negative_trajectory_limit` > 0, when its best is still not better than 0
+after that many edits (the "negative cull") — the agent view of
+GET /api/state (server._agent_state) invokes this machine, which:
 
   1. Deactivates the agent's current trajectory (`trajectories.status` →
      'inactive', num_deactivations += 1).
@@ -81,6 +83,7 @@ async def maybe_reset_trajectory(
     direction: str,
     cutoff_ts: str,
     stagnation_limit: int,
+    negative_trajectory_limit: int = 0,
     agent_tier: str,
     agent_role: str,
     seed_fn,
@@ -104,11 +107,28 @@ async def maybe_reset_trajectory(
     acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
     runs_since = acs["runs_since_improvement"] if acs else 0
     traj_best = await db.get_trajectory_best(conn, agent_id, challenge)
-    if runs_since < stagnation_limit or traj_best is None:
+    stagnated = (stagnation_limit > 0 and runs_since >= stagnation_limit
+                 and traj_best is not None)
+
+    # Negative cull: the trajectory's best never crossed zero after
+    # `negative_trajectory_limit` edits (see server._agent_state for the
+    # rationale). Re-checked here under the lock like stagnation: a
+    # concurrent reset swaps current_trajectory_id to a fresh line with
+    # few edits, so the loser fails this check and returns None.
+    negative_cull = False
+    if not stagnated and traj_best is not None and negative_trajectory_limit > 0:
+        cull_traj_id = acs["current_trajectory_id"] if acs else None
+        if cull_traj_id and not db.is_better(direction, traj_best["score"], 0.0):
+            traj_row = await db.get_trajectory(conn, cull_traj_id)
+            if traj_row and (traj_row["num_edits"] or 0) >= negative_trajectory_limit:
+                negative_cull = True
+
+    if not (stagnated or negative_cull):
         # Lost the race: a concurrent call already reset (zeroing
         # runs_since_improvement) or cleared the trajectory best.
         await conn.rollback()
         return None
+    reset_reason = "stagnation" if stagnated else "negative_cull"
 
     # Deactivate the current trajectory.
     cur_traj_id = acs["current_trajectory_id"] if acs else None
@@ -143,7 +163,8 @@ async def maybe_reset_trajectory(
             direction=direction, cutoff_ts=cutoff_ts,
         )
         new_program_id = new_id()
-        reset_info = {"type": "fresh_start", "start": _start}
+        reset_info = {"type": "fresh_start", "start": _start,
+                      "reason": reset_reason}
         seed_start = _start
     else:
         picked = random.choice(inactive_pool)
@@ -155,6 +176,7 @@ async def maybe_reset_trajectory(
         await db.remove_inactive(conn, picked["id"])
         reset_info = {
             "type": "adopted_inactive",
+            "reason": reset_reason,
             "prior_score": adopted_score,
             # Seeds deposited without a benchmark (admin/mainnet
             # seeds) have no score, so there's no floor to inherit.
