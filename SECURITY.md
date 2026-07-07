@@ -2,9 +2,10 @@
 
 ## Reporting a vulnerability
 
-Please **do not** open a public issue for security problems. Email
-signup@tig.foundation with a description and reproduction steps, and we'll
-respond as quickly as we can.
+Please **do not** open a public issue for security problems. Report them
+privately via GitHub: **Security tab → Report a vulnerability** on this
+repository. This project is provided as-is; reports are reviewed on a
+best-effort basis with no response-time commitment.
 
 ## Scope notes for self-hosters
 
