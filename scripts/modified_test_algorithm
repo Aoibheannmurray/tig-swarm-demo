@@ -271,10 +271,15 @@ f"""Library not found at {so_path}:
                 assert line.startswith("quality: ")
                 quality = int(line[len("quality: "):])
 
-            # ── Additive: a feasible nonce is one the runtime solved AND the
-            # verifier accepted. failure_reason explains why it didn't (runtime
-            # code first, else a verifier rejection).
-            feasible = ret.returncode == 0 and ok
+            # ── Additive: feasibility is the VERIFIER's verdict on the last
+            # saved solution — NOT the runtime exit code. TIG scores the last
+            # saved solution even when the algorithm runs out of fuel (exit 87):
+            # an anytime solver saves-and-improves until the fuel cap, so
+            # out_of_fuel WITH a verifier-accepted solution is a SUCCESS. This
+            # matches upstream `test_algorithm`, which counts a nonce solved on
+            # `ok` alone. `failure_reason` still records why a run ended
+            # abnormally, but only when the verifier did NOT accept a solution.
+            feasible = ok
             if feasible:
                 failure_reason = None
             elif ret.returncode != 0:
