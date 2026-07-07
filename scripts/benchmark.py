@@ -137,7 +137,6 @@ def load_swarm_config() -> dict:
     data = {
         "challenge": ch,
         "tracks": local.get("tracks", {}),
-        "timeout": local.get("timeout", 30),
         "scoring_direction": local.get("scoring_direction", "min"),
         "is_gpu": local.get("is_gpu", False),
         "synced_at": local.get("synced_at"),

@@ -156,7 +156,6 @@ async def get_challenge_config_cached(challenge: str) -> dict:
         cfg = {
             "challenge": challenge,
             "tracks": "{}",
-            "timeout": ch_def.default_timeout if ch_def else 30,
             "scoring_direction": ch_def.scoring_direction if ch_def else "max",
             "initial_algorithm_code": "",
             "initial_kernel_code": "",
@@ -2846,7 +2845,6 @@ async def get_swarm_config():
         ch_def = challenges.CHALLENGES.get(ch_name)
         available[ch_name] = {
             "tracks": tracks,
-            "timeout": row.get("timeout") or (ch_def.default_timeout if ch_def else 30),
             "scoring_direction": row.get("scoring_direction") or (
                 ch_def.scoring_direction if ch_def else "max"
             ),
@@ -2910,7 +2908,6 @@ async def update_swarm_config(req: SwarmConfigUpdate):
             await db.upsert_challenge_config(
                 conn, ch,
                 tracks=json.dumps(sub["tracks"]) if sub.get("tracks") is not None else None,
-                timeout=sub.get("timeout"),
                 scoring_direction=sub.get("scoring_direction"),
                 initial_algorithm_code=sub.get("initial_algorithm_code"),
                 initial_kernel_code=sub.get("initial_kernel_code"),

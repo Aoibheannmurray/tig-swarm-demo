@@ -1201,7 +1201,7 @@ def parse_hyperparameter_response(response: str) -> dict:
 # ── Error recovery prompts ─────────────────────────────────────────
 
 
-def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", timeout: int = 30) -> str:
+def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "") -> str:
     errors = bench.get("errors") or []
     error_lines = "\n".join(f"  - {e}" for e in errors)
     score = bench.get("score", 0)

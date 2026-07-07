@@ -211,7 +211,6 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
 CREATE TABLE IF NOT EXISTS challenge_configs (
     challenge TEXT PRIMARY KEY,
     tracks TEXT NOT NULL DEFAULT '{}',
-    timeout INTEGER NOT NULL DEFAULT 30,
     scoring_direction TEXT NOT NULL DEFAULT 'max',
     initial_algorithm_code TEXT NOT NULL DEFAULT '',
     initial_kernel_code TEXT NOT NULL DEFAULT '',
@@ -348,7 +347,6 @@ async def _apply_env_swarm_config(db: aiosqlite.Connection) -> None:
         await upsert_challenge_config(
             db, ch,
             tracks=json.dumps(sub["tracks"]) if sub.get("tracks") is not None else None,
-            timeout=sub.get("timeout"),
             scoring_direction=sub.get("scoring_direction"),
             initial_algorithm_code=sub.get("initial_algorithm_code"),
             initial_kernel_code=sub.get("initial_kernel_code"),
@@ -1152,7 +1150,7 @@ async def increment_agent_challenge_counters(
 
 
 _CHALLENGE_CONFIG_COLS = (
-    "challenge, tracks, timeout, scoring_direction, "
+    "challenge, tracks, scoring_direction, "
     "initial_algorithm_code, initial_kernel_code, strategy_tags"
 )
 
@@ -1182,7 +1180,6 @@ async def upsert_challenge_config(
     challenge: str,
     *,
     tracks: str | None = None,
-    timeout: int | None = None,
     scoring_direction: str | None = None,
     initial_algorithm_code: str | None = None,
     initial_kernel_code: str | None = None,
@@ -1200,9 +1197,6 @@ async def upsert_challenge_config(
     if tracks is not None:
         sets.append("tracks = ?")
         params.append(tracks)
-    if timeout is not None:
-        sets.append("timeout = ?")
-        params.append(int(timeout))
     if scoring_direction is not None:
         sets.append("scoring_direction = ?")
         params.append(scoring_direction)

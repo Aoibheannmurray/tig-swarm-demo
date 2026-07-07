@@ -1193,7 +1193,7 @@ def _fix_runtime_errors(
                 "runtime_fix", config,
                 args.provider, model, api_key,
                 build_code_system_prompt(challenge_md, config),
-                build_runtime_fix_prompt(current_code, bench, current_kernel, config.get("timeout", 30)),
+                build_runtime_fix_prompt(current_code, bench, current_kernel),
                 args.api_base,
             )
             input_tokens += usage["input_tokens"]
