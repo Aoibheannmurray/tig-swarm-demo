@@ -48,6 +48,17 @@ SWARM_DEFAULTS: dict[str, int] = {
     "inactive_minutes": 60,
     "stagnation_threshold": 2,
     "stagnation_limit": 5,
+    # Kill-switch for trajectories that never turn positive: when > 0, a
+    # trajectory whose best is still not better than 0 (= the baseline)
+    # after this many edits is reset on the next state poll, exactly like a
+    # stagnation_limit trip. Catches lines stagnation_limit can't: small
+    # improvements below zero reset runs_since_improvement every time, yet
+    # the pool refuses negative deposits, so such a line can grind forever
+    # and never yield anything adoptable. 0 (default) disables. Leave it
+    # disabled on challenges whose feasible scores are inherently negative
+    # (e.g. neuralnet_optimizer) — there "positive" is unreachable and this
+    # would cull every trajectory.
+    "negative_trajectory_limit": 0,
     "hypothesis_recall_threshold": 3,
     # Seed-pool diversity (server-side; see server/seed_diversity.py).
     # K: max seeds kept per challenge. max_loc: simplicity ceiling — algorithms
@@ -835,7 +846,28 @@ async def get_state(
             # stub. None when the agent continued its own existing best.
             seed_start = None
             stagnation_limit = swarm_setting(config, "stagnation_limit")
-            if stagnation_limit > 0 and runs_since >= stagnation_limit and traj_best is not None:
+            stagnated = (stagnation_limit > 0 and runs_since >= stagnation_limit
+                         and traj_best is not None)
+
+            # ── … or cull a trajectory that never turned positive ──
+            # A line inching upward while still below zero resets
+            # runs_since_improvement on every small win, so it never trips
+            # stagnation_limit — yet deposit_inactive refuses negative
+            # scores, so nothing harvestable can ever come out of it. After
+            # `negative_trajectory_limit` edits without crossing zero, treat
+            # it exactly like a stagnation trip.
+            negative_cull = False
+            if not stagnated and traj_best is not None:
+                negative_limit = swarm_setting(config, "negative_trajectory_limit")
+                cull_traj_id = acs["current_trajectory_id"] if acs else None
+                if (negative_limit > 0 and cull_traj_id
+                        and not db.is_better(direction, traj_best["score"], 0.0)):
+                    traj_row = await db.get_trajectory(conn, cull_traj_id)
+                    if traj_row and (traj_row["num_edits"] or 0) >= negative_limit:
+                        negative_cull = True
+
+            if stagnated or negative_cull:
+                reset_reason = "stagnation" if stagnated else "negative_cull"
                 timestamp = now()
                 # Deactivate the current trajectory.
                 cur_traj_id = acs["current_trajectory_id"] if acs else None
@@ -869,7 +901,8 @@ async def get_state(
                         direction=direction, cutoff_ts=cutoff_ts,
                     )
                     new_program_id = new_id()
-                    trajectory_reset = {"type": "fresh_start", "start": _start}
+                    trajectory_reset = {"type": "fresh_start", "start": _start,
+                                        "reason": reset_reason}
                     seed_start = _start
                 else:
                     picked = random.choice(inactive_pool)
@@ -881,6 +914,7 @@ async def get_state(
                     await db.remove_inactive(conn, picked["id"])
                     trajectory_reset = {
                         "type": "adopted_inactive",
+                        "reason": reset_reason,
                         "prior_score": adopted_score,
                         # Seeds deposited without a benchmark (admin/mainnet
                         # seeds) have no score, so there's no floor to inherit.
@@ -2604,6 +2638,9 @@ async def get_swarm_config():
         "swarm_type": config.get("swarm_type", "cpu"),
         "stagnation_threshold": swarm_setting(config, "stagnation_threshold"),
         "stagnation_limit": swarm_setting(config, "stagnation_limit"),
+        "negative_trajectory_limit": swarm_setting(
+            config, "negative_trajectory_limit",
+        ),
         "hypothesis_recall_threshold": swarm_setting(
             config, "hypothesis_recall_threshold",
         ),
@@ -2661,6 +2698,7 @@ async def update_swarm_config(req: SwarmConfigUpdate):
             ("swarm_type", req.swarm_type),
             ("stagnation_threshold", str(req.stagnation_threshold) if req.stagnation_threshold is not None else None),
             ("stagnation_limit", str(req.stagnation_limit) if req.stagnation_limit is not None else None),
+            ("negative_trajectory_limit", str(req.negative_trajectory_limit) if req.negative_trajectory_limit is not None else None),
             ("hypothesis_recall_threshold", str(req.hypothesis_recall_threshold) if req.hypothesis_recall_threshold is not None else None),
         ):
             if value is not None:

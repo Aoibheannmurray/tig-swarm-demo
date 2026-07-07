@@ -1363,6 +1363,16 @@ async def create_trajectory(
     )
 
 
+async def get_trajectory(
+    conn: aiosqlite.Connection, trajectory_id: str
+) -> dict | None:
+    cur = await conn.execute(
+        "SELECT * FROM trajectories WHERE id = ?", (trajectory_id,)
+    )
+    row = await cur.fetchone()
+    return dict(row) if row else None
+
+
 async def deactivate_trajectory(
     conn: aiosqlite.Connection, trajectory_id: str, deactivated_at: str
 ) -> None:

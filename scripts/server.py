@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -128,7 +129,22 @@ def get_state(server: str, agent_id: str, role: str | None = None) -> dict:
     url = f"{server}/api/state?agent_id={urllib.parse.quote(agent_id)}"
     if role:
         url += f"&role={urllib.parse.quote(role)}"
-    return server_get(url)
+    # /api/state does real work server-side (stagnation resets, seed
+    # selection, pool deposits) and shares the SQLite writer with every
+    # other agent's publish, so >10s stalls are routine on a busy swarm.
+    # A failed fetch costs the caller a whole iteration slot, so retry
+    # with a generous timeout before giving up. Safe to repeat: a reset
+    # triggered by the first (timed-out) call zeroes the stagnation
+    # counter, so the retry just reads the post-reset state.
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            return server_get(url, timeout=60)
+        except _NET_ERRORS as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
+    raise last_err
 
 
 def agent_exists(server: str, agent_id: str) -> bool:

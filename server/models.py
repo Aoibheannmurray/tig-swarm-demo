@@ -232,6 +232,9 @@ class SwarmConfigUpdate(AdminAuth):
     swarm_type: Optional[Literal["cpu", "gpu"]] = None
     stagnation_threshold: Optional[int] = None
     stagnation_limit: Optional[int] = None
+    # Edits a trajectory may accumulate while its best is still not better
+    # than 0 before it gets reset. 0 = disabled (see SWARM_DEFAULTS).
+    negative_trajectory_limit: Optional[int] = None
     hypothesis_recall_threshold: Optional[int] = None
 
 

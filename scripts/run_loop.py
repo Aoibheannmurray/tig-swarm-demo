@@ -1958,9 +1958,14 @@ def main() -> int:
         if reset:
             start = reset.get("start")
             start_str = f" (start: {start})" if start else ""
-            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')}{start_str} **")
+            # Why the server reset us: "stagnation" (runs_since_improvement
+            # hit stagnation_limit) or "negative_cull" (trajectory best still
+            # not positive after negative_trajectory_limit edits).
+            reason = reset.get("reason")
+            reason_str = f" [{reason}]" if reason else ""
+            print(f"  [STATE] ** TRAJECTORY RESET — {reset.get('type')}{reason_str}{start_str} **")
             post_message(server, agent_name, agent_id,
-                         f"Trajectory reset: {reset.get('type')}",
+                         f"Trajectory reset: {reset.get('type')}{reason_str}",
                          challenge=iter_challenge,
                          agent_token=agent_token)
 
