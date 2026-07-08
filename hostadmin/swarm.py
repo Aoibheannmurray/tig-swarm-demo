@@ -288,7 +288,7 @@ def push_config_to_server(
     to `deadline_s`. Returns True once verified-stable, False if the deadline
     passes.
 
-    `cfg["challenges"]` is a dict of {challenge: {tracks, timeout,
+    `cfg["challenges"]` is a dict of {challenge: {tracks,
     scoring_direction, initial_algorithm_code, ...}}; `cfg["active_challenge"]`
     selects which one contributors auto-follow.
     """
@@ -457,10 +457,6 @@ def collect_per_challenge_configs(
     for ch, meta in target.items():
         ch_def = _load_challenge_registry()[ch]
         tracks: dict = {"seed": "test"}
-        # Per-instance wall-clock timeout retired — the TIG backend bounds by
-        # fuel (max_fuel_budget), not the clock. `default_timeout` is kept only
-        # as harmless metadata for backward compat; it is no longer prompted.
-        timeout = ch_def.default_timeout
         if use_defaults:
             default_tracks = DEFAULT_TRACKS_PER_CHALLENGE.get(ch)
             if default_tracks:
@@ -481,7 +477,6 @@ def collect_per_challenge_configs(
         algo_data = initial_algorithms.get(ch, {})
         sub: dict = {
             "tracks": tracks,
-            "timeout": timeout,
             "scoring_direction": meta["scoring_direction"],
             "initial_algorithm_code": algo_data.get("algorithm_code", ""),
             "strategy_tags": meta.get("strategy_tags", []),
@@ -628,7 +623,6 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         "hypothesis_recall_threshold": hypothesis_recall_threshold,
         "scoring_direction": challenge_meta["scoring_direction"],
         "tracks": active_sub["tracks"],
-        "timeout": active_sub["timeout"],
         "algorithm_path": f"src/{active_challenge}/algorithm/mod.rs",
     }
     if active_def.is_gpu:
@@ -981,7 +975,6 @@ def switch_challenge(challenge: str) -> dict:
         refreshed["is_gpu"] = True
     if sub:
         refreshed["tracks"] = sub.get("tracks", {})
-        refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Carry the stagnation knobs into the host's cache too (switch doesn't
     # fetch /api/swarm_config, so source them from swarm.admin.json).
@@ -1080,7 +1073,6 @@ def run_sync() -> int:
         refreshed["is_gpu"] = True
     if sub:
         refreshed["tracks"] = sub.get("tracks", {})
-        refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Mirror the client-relevant stagnation knobs so the driver can time
     # tacit-knowledge distillation (see _CACHE_FIELDS).
