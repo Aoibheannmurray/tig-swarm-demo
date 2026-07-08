@@ -225,6 +225,51 @@ def run_revoke(username: str) -> int:
     return 0
 
 
+def run_set_runner(runner_url: str) -> int:
+    """Point the swarm at its hosted fleet runner (the zero-install Tier-1
+    service). Two effects:
+      1. Sets the server's `runner_url` config, which makes the contributor
+         join page show the "Run in the cloud" tab.
+      2. Mirrors it into swarm.admin.json so `setup.py revoke` also tears
+         down a contributor's hosted fleet + purges their stored keys.
+    Pass an empty string to unset (hides the tab; stops revoke teardown)."""
+    import urllib.parse
+
+    runner_url = (runner_url or "").strip().rstrip("/")
+    if runner_url and not runner_url.startswith(("http://", "https://")):
+        print("set-runner: runner URL must start with http:// or https://",
+              file=sys.stderr)
+        return 1
+    creds = _admin_creds("set-runner")
+    if creds is None:
+        return 1
+    admin, admin_key, server_url = creds
+    endpoint = (
+        f"{server_url.rstrip('/')}/api/admin/config"
+        f"?key=runner_url&value={urllib.parse.quote(runner_url, safe='')}"
+    )
+    try:
+        post_json(endpoint, {"admin_key": admin_key})
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:200]
+        print(f"set-runner: server returned {e.code}: {body}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        print(f"set-runner: failed to reach {server_url} ({e})", file=sys.stderr)
+        return 1
+    admin["runner_url"] = runner_url
+    write_swarm_admin(admin)
+    print()
+    if runner_url:
+        print(f"  Hosted runner set: {runner_url}")
+        print('  Contributors now see a "Run in the cloud" tab on the join page.')
+        print("  `setup.py revoke` will also tear down a contributor's hosted fleet.")
+    else:
+        print('  Hosted runner unset — the "Run in the cloud" tab is now hidden.')
+    print()
+    return 0
+
+
 def _revoke_hosted_fleet(admin: dict, admin_key: str, username: str) -> str | None:
     """Best-effort teardown of a contributor's hosted (Tier-1) fleet via the
     runner's admin webhook. Returns a human status string, or None when no

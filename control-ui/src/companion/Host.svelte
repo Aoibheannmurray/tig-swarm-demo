@@ -235,6 +235,30 @@
         <li><span>Admin key</span><code>{r.admin_key}</code></li>
         <li><span>Base password</span><code>{r.swarm_password}</code></li>
       </ul>
+      <p class="lede" style="margin-top:14px">
+        <b>Next:</b> open the Admin Console to create a <b>join link</b> for each
+        contributor — they configure agents in the browser, then run one command
+        (<span class="mono">python run.py --join "&lt;link&gt;"</span>) or a no-clone
+        path from the README.
+      </p>
+      <details style="margin-top:8px">
+        <summary>Optional: let contributors run with <b>zero install</b> (hosted runner)</summary>
+        <div class="lede" style="margin-top:10px">
+          Deploy the runner as a <b>second</b> Railway service so contributors run
+          their agents on your infrastructure — they just paste API keys in the
+          web console. Steps (detail in <span class="mono">runner/README.md</span>):
+          <ol style="margin:8px 0 0; padding-left:20px">
+            <li>In Railway, add a service in this project from
+              <span class="mono">runner/Dockerfile</span>.</li>
+            <li>Set its variables — <span class="mono">RUNNER_SECRET_KEY</span>
+              (<span class="mono">python -m runner.vault --generate</span>),
+              <span class="mono">COORDINATION_SERVER_URL={r.server_url}</span>,
+              <span class="mono">RUNNER_ADMIN_KEY</span> = the admin key above.</li>
+            <li>Point the swarm at it (adds the “Run in the cloud” tab):
+              <span class="mono">python setup.py set-runner &lt;runner-url&gt;</span></li>
+          </ol>
+        </div>
+      </details>
       <div class="actions">
         <div class="spacer"></div>
         <a class="btn primary" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>

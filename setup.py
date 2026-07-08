@@ -66,7 +66,7 @@ from hostadmin import swarm as _swarm
 from hostadmin import tacit as _tacit
 
 from hostadmin.challenges_bridge import get_challenges
-from hostadmin.contributors import run_invite, run_list, run_revoke
+from hostadmin.contributors import run_invite, run_list, run_revoke, run_set_runner
 from hostadmin.railway import RailwayError
 from hostadmin.swarm import run_create, run_switch, run_sync
 from hostadmin.tacit import run_tacit
@@ -178,6 +178,16 @@ def main() -> int:
         "list",
         help="Host: list contributors (joined agents, active count, revoked state).",
     )
+    set_runner = sub.add_parser(
+        "set-runner",
+        help="Host: enable the zero-install cloud tier by pointing the swarm "
+             "at its hosted runner service (empty URL unsets it).",
+    )
+    set_runner.add_argument(
+        "runner_url",
+        help="Public URL of the deployed runner service (see runner/README.md); "
+             "pass \"\" to unset.",
+    )
     args = parser.parse_args()
 
     if args.mode == "create":
@@ -203,6 +213,8 @@ def main() -> int:
         return run_revoke(args.username)
     if args.mode == "list":
         return run_list()
+    if args.mode == "set-runner":
+        return run_set_runner(args.runner_url)
 
     print(
         "setup.py is the host-admin tool.\n"
@@ -213,6 +225,7 @@ def main() -> int:
         "  revoke a contributor:  `python setup.py revoke <username>`.\n"
         "  list contributors:     `python setup.py list`.\n"
         "  switch challenge:      `python setup.py switch <challenge>`.\n"
+        "  enable cloud tier:     `python setup.py set-runner <runner-url>`.\n"
         "  edit tacit knowledge:  `python setup.py tacit [<agent-name>]`.",
         file=sys.stderr,
     )
