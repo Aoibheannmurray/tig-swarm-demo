@@ -403,10 +403,23 @@ def create_app(allow_remote: bool = False) -> FastAPI:
 
     @app.get("/local-api/challenges")
     def challenges() -> dict:
+        # track_defaults powers the host UI's "customize instances" editor:
+        # per challenge, the track keys and the instance count `create` would
+        # use by default (mirrors collect_per_challenge_configs).
+        # Same seed values the CLI wizard's per-track prompts use: the
+        # DEFAULT_TRACKS_PER_CHALLENGE count where one exists, else 0.
+        track_defaults = {
+            ch: {
+                key: setup_mod.DEFAULT_TRACKS_PER_CHALLENGE.get(ch, {}).get(key, 0)
+                for key in meta["track_keys"]
+            }
+            for ch, meta in setup_mod.CHALLENGES.items()
+        }
         return {
             "cpu": list(setup_mod.CPU_CHALLENGES.keys()),
             "gpu": list(setup_mod.GPU_CHALLENGES.keys()),
             "all": list(setup_mod.CHALLENGES.keys()),
+            "track_defaults": track_defaults,
         }
 
     # ── Contributor: fleet config + tacit ──
@@ -509,7 +522,11 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         try:
             user = setup_mod._railway_check_auth()
             who = user.get("email") or user.get("name") or "unknown"
-            return {"available": True, "authed": True, "user": who}
+            workspaces = [
+                w["name"] for w in (user.get("workspaces") or []) if w.get("name")
+            ]
+            return {"available": True, "authed": True, "user": who,
+                    "workspaces": workspaces}
         except (Exception, SystemExit) as exc:
             # _railway_check_installed / _check_auth raise RailwayError on
             # failure (SystemExit kept for belt-and-braces) — translate to a
@@ -542,13 +559,71 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                 {"error": f"{active_challenge} not available in a {swarm_type} swarm"},
                 status_code=400,
             )
+        # Resolve the Railway workspace BEFORE starting the deploy thread.
+        # With multiple workspaces and none chosen, `railway init` (run with
+        # captured output, i.e. non-interactive) fails after "Provisioning on
+        # Railway…" with a message the UI never used to surface — fail fast
+        # with an actionable error instead.
+        workspace = payload.get("workspace") or None
+        try:
+            whoami = setup_mod._railway_check_auth()
+        except (Exception, SystemExit) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        ws_names = [
+            w["name"] for w in (whoami.get("workspaces") or []) if w.get("name")
+        ]
+        if workspace is None and len(ws_names) > 1:
+            return JSONResponse(
+                {"error": "your Railway account has multiple workspaces — "
+                          f"pick one of: {', '.join(ws_names)}"},
+                status_code=400,
+            )
+        if workspace is not None and ws_names and workspace not in ws_names:
+            return JSONResponse(
+                {"error": f"unknown Railway workspace {workspace!r} — "
+                          f"pick one of: {', '.join(ws_names)}"},
+                status_code=400,
+            )
+
         initial_algorithms = setup_mod.read_initial_algorithms()
         challenges_cfg = setup_mod.collect_per_challenge_configs(
             initial_algorithms, use_defaults=True, challenge_set=challenge_set,
         )
+        # Optional per-challenge instance overrides from the UI's "customize
+        # instances" editor: {challenge: {track_key: count}}. Mirrors the CLI
+        # wizard's non-defaults path — a challenge with an override gets its
+        # tracks rebuilt from the submitted counts (seed track preserved);
+        # unknown challenges/track keys and negative counts are rejected.
+        overrides = payload.get("tracks") or {}
+        for ch, track_counts in overrides.items():
+            if ch not in challenges_cfg:
+                return JSONResponse(
+                    {"error": f"tracks override for unknown challenge {ch!r}"},
+                    status_code=400,
+                )
+            valid_keys = set(challenge_set[ch]["track_keys"])
+            new_tracks: dict = {"seed": "test"}
+            for key, count in track_counts.items():
+                if key not in valid_keys:
+                    return JSONResponse(
+                        {"error": f"unknown track {key!r} for {ch}"},
+                        status_code=400,
+                    )
+                try:
+                    n = int(count)
+                except (TypeError, ValueError):
+                    n = -1
+                if n < 0:
+                    return JSONResponse(
+                        {"error": f"invalid instance count for {ch}/{key}: {count!r}"},
+                        status_code=400,
+                    )
+                new_tracks[key] = n
+            challenges_cfg[ch]["tracks"] = new_tracks
+
         params = {
             "swarm_name": payload.get("swarm_name", "my-tig-swarm"),
-            "workspace": payload.get("workspace"),
+            "workspace": workspace,
             "swarm_type": swarm_type,
             "active_challenge": active_challenge,
             "challenges_cfg": challenges_cfg,

@@ -12,11 +12,16 @@
   // ── Create form ──
   let swarmType = $state("cpu");
   let swarmName = $state("my-tig-swarm");
+  let workspace = $state("");
   let activeChallenge = $state("");
   let stagThreshold = $state(2);
   let stagLimit = $state(10);
   let recallThreshold = $state(3);
   let seedInactive = $state(false);
+  let useDefaults = $state(true);
+  // Per-challenge {track_key: instances} edits for the customize view,
+  // seeded from the server's track_defaults (same values the CLI wizard uses).
+  let trackEdits: Record<string, Record<string, number>> = $state({});
   let deploying = $state(false);
 
   let challengeList = $derived(swarmType === "gpu" ? challenges.gpu : challenges.cpu);
@@ -32,8 +37,12 @@
 
   onMount(async () => {
     try {
-      railway = await localApi.railwayStatus();
+      await refreshRailway();
       challenges = await localApi.challenges();
+      const defaults = challenges.track_defaults ?? {};
+      const edits: Record<string, Record<string, number>> = {};
+      for (const c of challenges.all ?? []) edits[c] = { ...(defaults[c] ?? {}) };
+      trackEdits = edits;
       admin = await localApi.swarmAdmin();
       if (admin?.active_challenge) switchTo = admin.active_challenge;
     } catch (e: any) {
@@ -41,11 +50,26 @@
     }
   });
 
+  async function refreshRailway() {
+    railway = await localApi.railwayStatus();
+    const ws: string[] = railway?.workspaces ?? [];
+    if (ws.length && !ws.includes(workspace)) workspace = ws[0];
+  }
+
+  async function recheckRailway() {
+    error = "";
+    try {
+      await refreshRailway();
+    } catch (e: any) {
+      error = e.message;
+    }
+  }
+
   async function createSwarm() {
     error = ""; deploying = true;
     try {
       ensureStream();
-      await localApi.swarmCreate({
+      const payload: any = {
         swarm_type: swarmType,
         swarm_name: swarmName,
         active_challenge: activeChallenge,
@@ -53,7 +77,14 @@
         stagnation_limit: stagLimit,
         hypothesis_recall_threshold: recallThreshold,
         seed_inactive_pool: seedInactive,
-      });
+      };
+      if (workspace) payload.workspace = workspace;
+      if (!useDefaults) {
+        payload.tracks = Object.fromEntries(
+          challengeList.map((c: string) => [c, trackEdits[c] ?? {}]),
+        );
+      }
+      await localApi.swarmCreate(payload);
     } catch (e: any) {
       error = e.message;
       deploying = false;
@@ -93,12 +124,13 @@
       <span class="pill ok">authed · {railway.user}</span>
     {:else}
       <span class="pill warn">not connected</span>
+      <button onclick={recheckRailway}>Recheck</button>
     {/if}
   </div>
   {#if !railway?.authed}
     <p class="lede">
       Provisioning needs the Railway CLI, logged in. In your terminal run
-      <code>railway login</code>, then reload this page.
+      <code>railway login</code>, complete the browser flow, then hit Recheck.
       {#if railway?.message}<br /><span class="muted mono">{railway.message}</span>{/if}
     </p>
   {/if}
@@ -121,6 +153,15 @@
       <input id="name" type="text" bind:value={swarmName} placeholder="my-tig-swarm" />
     </div>
   </div>
+  {#if (railway?.workspaces?.length ?? 0) > 1}
+    <div class="field">
+      <label for="ws">Railway workspace</label>
+      <select id="ws" bind:value={workspace}>
+        {#each railway.workspaces as w}<option value={w}>{w}</option>{/each}
+      </select>
+      <div class="hint">Your Railway account has multiple workspaces — the new project is created in this one.</div>
+    </div>
+  {/if}
   <div class="field">
     <label for="ach">Active challenge</label>
     <select id="ach" bind:value={activeChallenge}>
@@ -145,6 +186,25 @@
   <div class="field">
     <label class="check"><input type="checkbox" bind:checked={seedInactive} /> Seed the inactive pool from the top TIG mainnet algorithm</label>
   </div>
+  <div class="field">
+    <label class="check"><input type="checkbox" bind:checked={useDefaults} /> Use recommended benchmark instance counts for every challenge</label>
+  </div>
+  {#if !useDefaults}
+    <div class="tracks">
+      {#each challengeList as c}
+        <div class="trackgroup">
+          <div class="trackname">{c}</div>
+          {#each Object.keys(trackEdits[c] ?? {}) as key}
+            <div class="trackrow">
+              <span class="mono">{key}</span>
+              <input type="number" min="0" bind:value={trackEdits[c][key]} />
+            </div>
+          {/each}
+        </div>
+      {/each}
+      <div class="hint">Benchmark instances per track for each challenge. 0 disables a track.</div>
+    </div>
+  {/if}
   <div class="actions">
     <div class="spacer"></div>
     <button class="primary" disabled={deploying || !railway?.authed} onclick={createSwarm}>
@@ -162,6 +222,9 @@
       <span class="pill {$deployStatus.state === 'done' ? 'ok' : $deployStatus.state === 'error' ? 'err' : 'info'}">{$deployStatus.state}</span>
     </div>
     <LogStream lines={$deployLog} height="300px" />
+    {#if $deployStatus.state === "error" && $deployStatus.error}
+      <div class="banner err" style="margin-top:16px">{$deployStatus.error}</div>
+    {/if}
     {#if $deployStatus.state === "done" && $deployStatus.result}
       {@const r = $deployStatus.result}
       <div class="banner ok" style="margin-top:16px">
@@ -213,4 +276,10 @@
   .creds { list-style: none; margin: 6px 0 4px; }
   .creds li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }
   .creds li span { color: var(--ink-dim); }
+  .tracks { margin: 4px 0 14px; }
+  .trackgroup { padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
+  .trackname { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .trackrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: 13px; }
+  .trackrow input { width: 90px; flex: 0 0 auto; }
+  .tracks .hint { font-size: 12.5px; color: var(--ink-dim); margin-top: 8px; }
 </style>
