@@ -62,6 +62,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
 
 import init_fleet
 import run_fleet
+import secrets_local
 import setup as setup_mod
 
 UI_DIST = ROOT / "control-ui" / "dist"
@@ -648,6 +649,30 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return setup_mod.switch_challenge(challenge)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # ── Local secrets (API keys) — no `export` needed ──
+    @app.get("/local-api/secrets")
+    def secrets_status() -> dict:
+        """Which API-key env vars are set and where they win from (env vs the
+        local secrets.local.json). Values are never returned."""
+        return {"secrets": secrets_local.status()}
+
+    @app.post("/local-api/secrets")
+    async def secrets_set(payload: dict) -> dict:
+        """Store (or clear, with an empty value) one API key locally. Keyed by
+        environment-variable NAME so the runner injects it the same way an
+        `export` would. Loopback-only surface (see the DNS-rebinding guard),
+        so a plaintext value over localhost is acceptable — it lands in a 0600
+        file, not the shell history an `export` leaves behind."""
+        name = (payload.get("name") or "").strip()
+        value = payload.get("value") or ""
+        if not name or not name.replace("_", "").isalnum() or not name.isupper():
+            return JSONResponse(
+                {"error": "name must be an ENV_VAR_NAME (e.g. ANTHROPIC_API_KEY)"},
+                status_code=400,
+            )
+        secrets_local.store(name, value)
+        return {"ok": True, "secrets": secrets_local.status()}
 
     # ── Invite (host, local): derive per-contributor password ──
     @app.post("/local-api/invite")

@@ -25,6 +25,8 @@ server/static/
 .swarm-cache.json
 swarm.admin.json
 fleet.config.json
+.fleet-cache.json
+secrets.local.json
 agent.config.json
 swarm.config.json
 worktrees/

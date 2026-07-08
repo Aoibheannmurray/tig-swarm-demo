@@ -109,6 +109,58 @@ def _launch_ui() -> int:
     return control_server.main()
 
 
+def _apply_join_link(link: str) -> None:
+    """`python run.py --join "<join-link>"` — one-command onboarding.
+
+    A join link (`https://<server>/join#u=<username>&p=<password>`, issued by
+    `setup.py invite` / the Admin Console) carries the server URL and the
+    contributor's credentials. We write a minimal fleet.config.json that points
+    at the server-hosted fleet plan (`config_source: server`); the agents are
+    then authored in the swarm's web console and fetched at launch (see
+    run_fleet._load_server_config). An existing local `agents` array is
+    preserved — only the top-level credentials are refreshed.
+    """
+    import json
+    import os
+    import urllib.parse
+
+    parsed = urllib.parse.urlsplit(link.strip())
+    if not parsed.scheme or not parsed.netloc:
+        sys.exit(
+            "That doesn't look like a join link. Expected something like:\n"
+            "    https://your-swarm.up.railway.app/join#u=you&p=<password>"
+        )
+    frag = urllib.parse.parse_qs(parsed.fragment)
+    username = (frag.get("u") or [""])[0]
+    password = (frag.get("p") or [""])[0]
+    if not username or not password:
+        sys.exit(
+            "Join link is missing credentials (the #u=…&p=… part). Ask the "
+            "host to resend the full link."
+        )
+    server_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    fleet_path = ROOT / "fleet.config.json"
+    existing: dict = {}
+    if fleet_path.exists():
+        try:
+            existing = json.loads(fleet_path.read_text(encoding="utf-8-sig"))
+        except (ValueError, OSError):
+            existing = {}
+    existing["server_url"] = server_url
+    existing["username"] = username
+    existing["swarm_password"] = password
+    # Only default to server-hosted config when the contributor hasn't already
+    # authored a local fleet — a hand-written agents array stays authoritative.
+    if not existing.get("agents"):
+        existing["config_source"] = "server"
+    tmp = fleet_path.with_name(fleet_path.name + ".tmp")
+    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, fleet_path)
+    print(f"Joined {server_url} as {username}.")
+    print("Saved fleet.config.json — launching your fleet.\n")
+
+
 def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
     """Tacit-knowledge phase.
 
@@ -184,6 +236,17 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
 
 
 def main() -> int:
+    # `--join <link>` writes fleet.config.json from an invite link and then
+    # launches — the one-command onboarding path. Consume the flag + its value
+    # before anything else so the wizard/launch below sees a ready config.
+    if "--join" in sys.argv:
+        idx = sys.argv.index("--join")
+        link = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
+        if not link:
+            sys.exit("Usage: python run.py --join \"<join-link>\"")
+        del sys.argv[idx:idx + 2]
+        _apply_join_link(link)
+
     # `--ui` opens the web companion instead of the terminal flow. Strip the
     # flag so control_server's own argparse sees only its options (--port etc.).
     if "--ui" in sys.argv:

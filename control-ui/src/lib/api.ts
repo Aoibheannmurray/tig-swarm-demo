@@ -42,6 +42,10 @@ export const localApi = {
     fetch(`${LOCAL}/fleet/start`, post({ only })).then(jsonOrThrow),
   fleetStop: () => fetch(`${LOCAL}/fleet/stop`, post({})).then(jsonOrThrow),
 
+  secretsStatus: () => fetch(`${LOCAL}/secrets`).then(jsonOrThrow),
+  secretSet: (name: string, value: string) =>
+    fetch(`${LOCAL}/secrets`, post({ name, value })).then(jsonOrThrow),
+
   railwayStatus: () => fetch(`${LOCAL}/railway/status`).then(jsonOrThrow),
   swarmAdmin: () => fetch(`${LOCAL}/swarm/admin`).then(jsonOrThrow),
   swarmCreate: (params: any) =>

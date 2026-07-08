@@ -44,9 +44,13 @@ import time
 from pathlib import Path
 
 from proc_utils import group_kwargs, kill_tree, term_tree
+import secrets_local
 
 ROOT = Path(__file__).resolve().parent.parent
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
+# Last-known server-hosted fleet plan, so `config_source: server` runners can
+# restart while the coordination server is briefly unreachable. Gitignored.
+FLEET_CACHE_PATH = ROOT / ".fleet-cache.json"
 WORKTREES_DIR = ROOT / "worktrees"
 
 # Windows PowerShell `Set-Content` writes UTF-8 with a BOM by default. Strict
@@ -175,6 +179,66 @@ def _resolve_tacit_source(
     return path, bool(explicit_rel)
 
 
+def _fetch_server_config(
+    server_url: str, username: str, swarm_password: str, *, timeout: int = 20,
+) -> dict | None:
+    """GET /api/contributor/config with the contributor's credentials.
+
+    Returns the stored `{agents, tacit, …}` plan, {} when the contributor has
+    saved nothing yet (server 404), or None on any transport/HTTP error so the
+    caller can fall back to the on-disk cache. Stdlib-only HTTP to keep the
+    launcher dependency-free."""
+    import urllib.error
+    import urllib.request
+
+    url = f"{server_url.rstrip('/')}/api/contributor/config"
+    req = urllib.request.Request(url, headers={
+        "X-Username": username,
+        "X-Swarm-Password": swarm_password,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.load(resp)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}  # authenticated, just nothing saved yet
+        print(f"  [fleet] server config fetch failed (HTTP {e.code})", file=sys.stderr)
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        print(f"  [fleet] server config fetch failed ({e})", file=sys.stderr)
+        return None
+    cfg = body.get("config") or {}
+    if body.get("tacit"):
+        cfg["tacit"] = body["tacit"]
+    return cfg
+
+
+def _load_server_config(
+    server_url: str, username: str, swarm_password: str,
+) -> dict:
+    """Server-hosted fleet plan for `config_source: server`, with a durable
+    cache. On a successful fetch the plan is cached to `.fleet-cache.json`;
+    when the server is unreachable the cache is used so a restart still
+    launches. Returns {} only when both the server and the cache are empty."""
+    fetched = _fetch_server_config(server_url, username, swarm_password)
+    if fetched is not None:
+        if fetched.get("agents"):
+            try:
+                _write_json_atomic(FLEET_CACHE_PATH, fetched)
+            except OSError:
+                pass  # cache is best-effort; the fetched plan still launches
+        return fetched
+    # Fetch failed — fall back to the last good plan.
+    if FLEET_CACHE_PATH.exists():
+        try:
+            cached = _read_json(FLEET_CACHE_PATH)
+            print("  [fleet] using cached fleet config (server unreachable)")
+            return cached
+        except (OSError, ValueError):
+            pass
+    return {}
+
+
 def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
     if not FLEET_CONFIG_PATH.exists():
         sys.exit(
@@ -185,9 +249,6 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
             f"    cp fleet.config.example.json fleet.config.json"
         )
     data = _read_json(FLEET_CONFIG_PATH)
-    agents = data.get("agents") or []
-    if not agents:
-        sys.exit("fleet.config.json has no agents.")
 
     server_url = data.get("server_url") or ""
     if not server_url:
@@ -212,6 +273,28 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
             "they'll send you a derived password to paste here."
         )
 
+    # Resolve the fleet plan. A local `agents` array always wins (escape hatch
+    # + full back-compat). Otherwise, when the config opts into server-hosted
+    # mode (`"config_source": "server"`, written by `run.py --join`), fetch the
+    # plan authored in the hosted contributor console — falling back to the
+    # last-cached copy when the server is unreachable.
+    agents = data.get("agents") or []
+    if not agents and data.get("config_source") == "server":
+        server_cfg = _load_server_config(server_url, username, swarm_password)
+        agents = server_cfg.get("agents") or []
+        # Surface the server's fleet-wide knobs + tacit as if they were local
+        # top-level keys, so the merge logic below is source-agnostic.
+        for key, value in server_cfg.items():
+            if key not in ("agents",):
+                data.setdefault(key, value)
+    if not agents:
+        if data.get("config_source") == "server":
+            sys.exit(
+                "No fleet configured yet. Open your swarm's join page and add "
+                "agents under “My fleet”, then re-run `python run.py`."
+            )
+        sys.exit("fleet.config.json has no agents.")
+
     names: list[str] = []
     for entry in agents:
         name = entry.get("name")
@@ -222,6 +305,20 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
         sys.exit("fleet.config.json has duplicate agent names.")
 
     fleet_tacit = data.get("tacit_knowledge") or None
+
+    # Server-hosted tacit knowledge (from the contributor console) materializes
+    # into the default shared file so agents see it on stagnation exactly like
+    # locally-authored notes. Only in server mode, and only when the console
+    # actually holds notes — never clobber a non-empty local file.
+    server_tacit = data.get("tacit")
+    if data.get("config_source") == "server" and server_tacit:
+        tacit_path = ROOT / SHARED_TACIT_DEFAULT
+        try:
+            if not (tacit_path.exists() and tacit_path.read_text(
+                    encoding="utf-8-sig").strip()):
+                tacit_path.write_text(server_tacit, encoding="utf-8")
+        except OSError:
+            pass
 
     # Top-level `c3_api_key` is a fleet-wide default: every agent that doesn't
     # set its own inherits it. setdefault() (not overwrite) keeps per-agent keys
@@ -374,8 +471,12 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
 
     Returns (None, None) for claude-code, claude-code-agentic, and
     codex-agentic — all three use their respective CLI's local auth
-    (OAuth / subscription / `codex login`). Exits with a clear message if
-    a required env var is missing for an API-key provider.
+    (OAuth / subscription / `codex login`).
+
+    Key source order: a set environment variable, then the local
+    `secrets.local.json` store, then (on an interactive terminal only) a
+    one-time prompt that saves the pasted key to that store. Exits with an
+    actionable message when none of those yields a key.
     """
     provider = agent.get("provider") or "anthropic"
     if provider in ("claude-code", "claude-code-agentic", "codex-agentic"):
@@ -385,11 +486,15 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
 
     target = _PROVIDER_TO_DEFAULT_ENV[provider]
     source = agent.get("api_key_env") or target
-    value = os.environ.get(source, "")
+    value = secrets_local.prompt_and_store(
+        source, label=f"{source} for agent {agent['name']}",
+    )
     if not value:
         sys.exit(
-            f"Agent {agent['name']}: environment variable {source} is unset or empty.\n"
-            f"  To fix: export {source}=<your-key> and re-run `python run.py`."
+            f"Agent {agent['name']}: no API key for {source}.\n"
+            f"  Fix any one of: export {source}=<your-key>; add it in the\n"
+            f"  web setup (python run.py --ui → Keys); or re-run in a terminal\n"
+            f"  to be prompted for it once (saved to secrets.local.json)."
         )
     return target, value
 
@@ -587,23 +692,30 @@ def cmd_clean(agents: list[dict]) -> int:
     return 0
 
 
-def _sync_hot_reload_to_worktrees(agents: list[dict]) -> None:
-    """Patch hot-reloadable fields (role) from fleet.config.json into each
-    running worktree's agent.config.json when they've changed.
+def _sync_hot_reload_to_worktrees(
+    agents: list[dict], entries: dict[str, dict] | None = None,
+) -> None:
+    """Patch hot-reloadable fields (role) into each running worktree's
+    agent.config.json when they've changed.
+
+    Desired values come from `entries` (name→entry) when provided — the
+    server-hosted plan in `config_source: server` mode — otherwise from the
+    local fleet.config.json, the classic behavior.
 
     Best-effort: a transient read/parse/write error on one agent is logged and
     skipped, never crashing the fleet monitor. Only fields in _HOT_RELOAD_KEYS
     are touched; everything else in agent.config.json (identity, provider,
     runtime defaults run_loop wrote) is preserved."""
-    try:
-        fleet = _read_json(FLEET_CONFIG_PATH)
-    except Exception:
-        return
-    entries = {
-        a.get("name"): a
-        for a in (fleet.get("agents") or [])
-        if a.get("name")
-    }
+    if entries is None:
+        try:
+            fleet = _read_json(FLEET_CONFIG_PATH)
+        except Exception:
+            return
+        entries = {
+            a.get("name"): a
+            for a in (fleet.get("agents") or [])
+            if a.get("name")
+        }
     for agent in agents:
         name = agent.get("name")
         entry = entries.get(name)
@@ -694,6 +806,14 @@ def cmd_run(
         target, value = key_envs[i]
         if target and value:
             env[target] = value
+        # C3 cloud benchmarking reads C3_API_KEY from the environment (a raw
+        # per-agent `c3_api_key` in config still wins downstream). Inject it
+        # from the local secrets store when the launching shell didn't export
+        # it, so `--join` contributors never have to `export C3_API_KEY`.
+        if (agent.get("compute") or "local") == "c3" and not agent.get("c3_api_key"):
+            c3_key = secrets_local.resolve("C3_API_KEY")
+            if c3_key:
+                env["C3_API_KEY"] = c3_key
         # Stdout is piped (not a TTY), so Python would block-buffer the child's
         # output and the fleet would look silent until buffers fill. Force
         # line-buffered I/O so [BENCH]/registration prints stream live.
@@ -761,11 +881,24 @@ def cmd_run(
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
 
-    # Re-sync hot-reloadable fields (role) from fleet.config.json into each
-    # running worktree's agent.config.json on a cadence, so a contributor can
-    # change an agent's role mid-run by editing fleet.config.json. run_loop.py
-    # re-reads agent.config.json every iteration and picks the change up.
+    # Is this a server-hosted fleet? In that mode the source of truth for
+    # hot-reloadable fields is the contributor console, not the local file.
+    try:
+        server_sourced = (
+            _read_json(FLEET_CONFIG_PATH).get("config_source") == "server"
+        )
+    except Exception:
+        server_sourced = False
+
+    # Re-sync hot-reloadable fields (role) into each running worktree's
+    # agent.config.json on a cadence, so a contributor can change an agent's
+    # role mid-run — by editing fleet.config.json locally, or in the hosted
+    # console when server-sourced. run_loop.py re-reads agent.config.json every
+    # iteration and picks the change up. The server is polled on a slower
+    # cadence than the local file sync to keep request volume modest.
     _SYNC_EVERY_S = 5
+    _SERVER_REFETCH_EVERY_S = 60
+    server_entries: dict[str, dict] | None = None
     ticks = 0
     while any(p.poll() is None for _, p, _ in procs):
         if stop_event is not None and stop_event.is_set():
@@ -773,8 +906,15 @@ def cmd_run(
             break
         time.sleep(1)
         ticks += 1
+        if server_sourced and ticks % _SERVER_REFETCH_EVERY_S == 0:
+            fresh = _fetch_server_config(server_url, username, swarm_password)
+            if fresh and fresh.get("agents"):
+                server_entries = {
+                    a.get("name"): a
+                    for a in fresh["agents"] if a.get("name")
+                }
         if ticks % _SYNC_EVERY_S == 0:
-            _sync_hot_reload_to_worktrees(agents)
+            _sync_hot_reload_to_worktrees(agents, server_entries)
 
     for name, p, t in procs:
         t.join(timeout=2)

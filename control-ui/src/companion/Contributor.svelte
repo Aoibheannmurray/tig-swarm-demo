@@ -47,6 +47,11 @@
   let compute = $state("c3");
   let hardware = $state("auto");
   let c3ApiKey = $state("");
+  // API keys stored locally in secrets.local.json (no `export` needed).
+  // Declared here (before c3Ready reads it) so the rune graph resolves.
+  let secrets: Record<string, { set: boolean; source: string }> = $state({});
+  let keyDraft: Record<string, string> = $state({});
+  let keyMsg = $state("");
   let supportsC3 = $derived(selectedProvider?.supports_c3 ?? false);
   // Keep `compute` valid for the chosen provider: if it can't do C3, force local.
   $effect(() => { if (!supportsC3 && compute === "c3") compute = "local"; });
@@ -54,9 +59,32 @@
   // Capability probe (Docker / C3) so we can guide instead of failing mid-run.
   let preflight: any = $state(null);
   const c3Ready = $derived(
-    !!preflight && (preflight.c3.key_in_env || preflight.c3.cli_installed || !!c3ApiKey.trim()),
+    (!!preflight && (preflight.c3.key_in_env || preflight.c3.cli_installed))
+      || !!c3ApiKey.trim() || !!secrets["C3_API_KEY"]?.set,
   );
   const dockerInstalled = $derived(!!preflight && preflight.docker.installed);
+
+  // ── API keys (stored locally in secrets.local.json — no `export` needed) ──
+  async function refreshSecrets() {
+    try { secrets = (await localApi.secretsStatus()).secrets ?? {}; }
+    catch { /* companion may predate the endpoint — hide the panel */ }
+  }
+  async function saveKey(name: string) {
+    keyMsg = "";
+    const value = (keyDraft[name] ?? "").trim();
+    if (!value) return;
+    try {
+      secrets = (await localApi.secretSet(name, value)).secrets ?? secrets;
+      keyDraft[name] = "";
+      keyMsg = `Saved ${name}.`;
+    } catch (e: any) { keyMsg = e.message; }
+  }
+  // The env-var names this fleet will need: the chosen provider's key (if any)
+  // plus C3 when benchmarking in the cloud.
+  let neededKeys = $derived([
+    ...(selectedProvider?.api_key_env ? [selectedProvider.api_key_env] : []),
+    ...(compute === "c3" ? ["C3_API_KEY"] : []),
+  ]);
 
   // ── Tacit ──
   let tacitText = $state("");
@@ -72,6 +100,7 @@
       c3hw = p.c3_hardware;
       // Probe capabilities for the readiness panel (non-blocking best-effort).
       localApi.preflight().then((pf) => (preflight = pf)).catch(() => {});
+      refreshSecrets();
       // Prefill connection from an existing fleet.config.json, if any.
       const fc = await localApi.getFleetConfig();
       if (fc.exists && fc.config) {
@@ -132,6 +161,7 @@
 
 <Stepper steps={STEPS} current={step} />
 {#if error}<div class="banner err">{error}</div>{/if}
+{#if keyMsg}<div class="banner ok">{keyMsg}</div>{/if}
 
 {#if step === 0}
   <div class="card">
@@ -173,7 +203,24 @@
       <label for="model">Model</label>
       <input id="model" type="text" bind:value={model} placeholder={selectedProvider?.default_model || "model id"} />
       {#if selectedProvider?.api_key_env}
-        <div class="hint">Needs <code>{selectedProvider.api_key_env}</code> exported in the shell that runs the fleet.</div>
+        {@const kn = selectedProvider.api_key_env}
+        <div class="hint">
+          Needs <code>{kn}</code>.
+          {#if secrets[kn]?.set}
+            <span class="pill ok">set ({secrets[kn].source})</span>
+          {:else}
+            <span class="pill info">not set</span> — paste it below (stored
+            locally in <code>secrets.local.json</code>, never uploaded).
+          {/if}
+        </div>
+        {#if !secrets[kn]?.set || secrets[kn]?.source === "file"}
+          <div class="row" style="align-items:flex-end;margin-top:8px">
+            <div class="field" style="margin-bottom:0;flex:1">
+              <input type="password" bind:value={keyDraft[kn]} placeholder={`paste ${kn}`} />
+            </div>
+            <button onclick={() => saveKey(kn)}>{secrets[kn]?.set ? "Update" : "Save key"}</button>
+          </div>
+        {/if}
       {/if}
     </div>
 
@@ -249,8 +296,24 @@
         </select>
       </div>
       <div class="field">
-        <label for="c3k">C3 API key (optional)</label>
-        <input id="c3k" type="password" bind:value={c3ApiKey} placeholder="leave blank to use C3_API_KEY / c3 login" />
+        <label for="c3k">C3 API key</label>
+        {#if secrets["C3_API_KEY"]?.set}
+          <div class="hint"><span class="pill ok">C3_API_KEY set ({secrets["C3_API_KEY"].source})</span></div>
+        {:else}
+          <div class="row" style="align-items:flex-end">
+            <div class="field" style="margin-bottom:0;flex:1">
+              <input type="password" bind:value={keyDraft["C3_API_KEY"]}
+                placeholder="paste C3_API_KEY (stored locally)" />
+            </div>
+            <button onclick={() => saveKey("C3_API_KEY")}>Save key</button>
+          </div>
+          <div class="hint">
+            Create one at
+            <span class="mono">cthree.cloud/dashboard/settings</span>.
+            Or leave blank and set <code>c3_api_key</code> per agent / use
+            <span class="mono">c3 login</span>.
+          </div>
+        {/if}
       </div>
     {:else if compute === "local"}
       {#if preflight && !dockerInstalled}

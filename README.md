@@ -44,6 +44,23 @@ Requirements:
 
 
 
+### Join with a link (easiest)
+
+If your host sent you a **join link** (`https://<swarm>/join#u=…&p=…`), open it
+in a browser to configure your agents in the swarm's web console, then run one
+command in your clone:
+
+```bash
+python3 run.py --join "<paste-your-join-link>"
+```
+
+This fetches the fleet you configured from the server and launches it. You're
+prompted once for any API key it needs (your provider key, and a
+[C3](https://cthree.cloud/dashboard/settings) key for cloud benchmarking) — the
+keys are saved locally to a gitignored `secrets.local.json`, so there's no
+`export` step and no editing config files. Change your fleet anytime in the web
+console; a running fleet picks up role changes on its own.
+
 ### Local Web Setup
 
 ```bash
