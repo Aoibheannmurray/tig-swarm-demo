@@ -12,7 +12,7 @@
   import FleetEditor from "./FleetEditor.svelte";
   import AgentsPanel from "./AgentsPanel.svelte";
   import CloudRunner from "./CloudRunner.svelte";
-  import { hostedApi } from "../lib/api";
+  import { hostedApi, buildJoinLink } from "../lib/api";
 
   // Public repo contributors clone to run a local fleet. Hosts running a
   // fork should update this to point at theirs.
@@ -99,6 +99,20 @@
   const serverUrl = () => location.origin;
   const configBlock = () =>
     `"server_url": "${serverUrl()}",\n"username": "${username}",\n"swarm_password": "${password}"`;
+
+  // Rebuild the join link from the validated credentials (the URL fragment was
+  // scrubbed on load) so it can be baked into copy-paste commands. Raw base is
+  // derived from REPO_URL so a fork's own bootstrap URL works.
+  const RAW_BASE = REPO_URL.replace("github.com", "raw.githubusercontent.com");
+  const joinLink = () => buildJoinLink(serverUrl(), username, password);
+  const bootstrapCmd = () =>
+    `curl -fsSL ${RAW_BASE}/main/deploy/get-swarm.py | python3 - join "${joinLink()}"`;
+  const cloneCmd = () => `git clone ${REPO_URL}.git && cd tig-swarm-demo`;
+  const runJoinCmd = () => `python3 run.py --join "${joinLink()}"`;
+  const dockerCmd = () =>
+    `docker run --rm -e TIG_JOIN_LINK="${joinLink()}" ` +
+    `-e ANTHROPIC_API_KEY=sk-… -e C3_API_KEY=c3-… ` +
+    `ghcr.io/Aoibheannmurray/tig-swarm-contributor`;
 
   async function copy(text: string, tag: string) {
     await navigator.clipboard.writeText(text);
@@ -205,34 +219,55 @@
          hidden={tab !== "start"}>
       <h2>Run agents on your machine</h2>
       <p class="lede">
-        You'll need Python 3 and Git. An LLM API key (Anthropic / OpenAI /
-        Google / OpenRouter) pays for your agents' thinking; a
+        First set up your agents in the <b>My fleet</b> tab. Then start them
+        with <b>one command</b> — no cloning, no editing files. You'll need
+        Python 3 and Git, and you'll be prompted once for your API keys (an LLM
+        provider key, and a
         <a href="https://cthree.cloud/dashboard/settings" target="_blank" rel="noopener">C3
-        API key</a> pays for cloud benchmarking (no Docker needed).
+        key</a> for cloud benchmarking — no Docker needed).
       </p>
-      <ol class="steps">
-        <li>
-          <div>Get the swarm code</div>
-          <div class="cmd mono">git clone {REPO_URL}.git &amp;&amp; cd tig-swarm-demo</div>
-          <button class="ghost" onclick={() => copy(`git clone ${REPO_URL}.git && cd tig-swarm-demo`, "clone")}>
-            {copied === "clone" ? "Copied ✓" : "Copy"}
-          </button>
-        </li>
-        <li>
-          <div>Copy your credentials — the setup will ask you to paste them</div>
-          <div class="cmd mono" style="white-space:pre">{configBlock()}</div>
-          <button class="ghost" onclick={() => copy(configBlock(), "creds")}>
-            {copied === "creds" ? "Copied ✓" : "Copy"}
-          </button>
-        </li>
-        <li>
-          <div>Launch the web setup and follow it</div>
-          <div class="cmd mono">python3 run.py --ui</div>
-          <button class="ghost" onclick={() => copy("python3 run.py --ui", "run")}>
-            {copied === "run" ? "Copied ✓" : "Copy"}
-          </button>
-        </li>
-      </ol>
+      <div class="field">
+        <label for="boot">Paste this into a terminal</label>
+        <div id="boot" class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{bootstrapCmd()}</div>
+        <button class="ghost" onclick={() => copy(bootstrapCmd(), "boot")}>
+          {copied === "boot" ? "Copied ✓" : "Copy command"}
+        </button>
+      </div>
+      <p class="lede" style="margin-top:6px">
+        Your join link is already in the command — it fetches the swarm code,
+        loads the fleet you set up here, and launches.
+      </p>
+
+      <details style="margin-top:12px">
+        <summary>Run in a container instead (Docker)</summary>
+        <p class="lede" style="margin-top:8px">
+          Pass your keys as environment variables (a container can't prompt):
+        </p>
+        <div class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{dockerCmd()}</div>
+        <button class="ghost" onclick={() => copy(dockerCmd(), "docker")}>
+          {copied === "docker" ? "Copied ✓" : "Copy"}
+        </button>
+      </details>
+
+      <details style="margin-top:8px">
+        <summary>Prefer to clone the repo?</summary>
+        <ol class="steps" style="margin-top:10px">
+          <li>
+            <div>Get the code</div>
+            <div class="cmd mono" style="word-break:break-all">{cloneCmd()}</div>
+            <button class="ghost" onclick={() => copy(cloneCmd(), "clone")}>
+              {copied === "clone" ? "Copied ✓" : "Copy"}
+            </button>
+          </li>
+          <li>
+            <div>Launch with your join link</div>
+            <div class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{runJoinCmd()}</div>
+            <button class="ghost" onclick={() => copy(runJoinCmd(), "run")}>
+              {copied === "run" ? "Copied ✓" : "Copy"}
+            </button>
+          </li>
+        </ol>
+      </details>
     </div>
 
     <div class="card" style="max-width:640px;margin:16px auto 0"
