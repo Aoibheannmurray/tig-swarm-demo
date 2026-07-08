@@ -17,7 +17,7 @@ Three contribution tiers, built in order:
 |------|---------------|-----------------|---------------------|
 | **1 — hosted fleet** | novices; API-mode + C3 agents | none (browser only) | the whole clone/wizard flow |
 | **2 — local runner** | Docker / agentic-CLI / trust-sensitive users | one pasted command | the wizard (config comes from the server) |
-| **3 — desktop app** | novices who need local compute (rare) | signed download | deferred until demanded; see §12 |
+| **3 — desktop app** | novices who need local compute (rare) | signed download | deferred until demanded; see §13 |
 
 Nothing here removes the existing CLI/wizard flow; every phase is additive.
 
@@ -37,12 +37,14 @@ Nothing here removes the existing CLI/wizard flow; every phase is additive.
 
 ### Non-goals (this plan)
 
-- No desktop app build (that's a later, evidence-driven decision — §12).
+- No desktop app build (that's a later, evidence-driven decision — §13).
 - No change to agent-facing APIs (`/api/state`, `/api/iterations`, register,
   tokens) or to scoring/trajectory mechanics.
-- No change to the host provisioning flow (`setup.py create` / local
-  companion): Railway credentials live on the host's machine and should stay
-  there.
+- Host provisioning is a prerequisite, not a phase: every tier assumes a
+  Railway swarm server already exists, and creating one stays on the host's
+  machine in P0–P3 (Railway credentials are host-local by design). It is
+  already UI-driven there, not terminal-only — and §9 sketches the optional
+  browser-only "Deploy on Railway" path.
 - Not a multi-swarm account system; credentials remain per-swarm.
 
 ## 3. Current state (what we build on)
@@ -76,6 +78,13 @@ Nothing here removes the existing CLI/wizard flow; every phase is additive.
   root. Anything that needs the full repo (git worktrees, `run_loop.py`, the
   `c3` CLI) belongs in the separate Tier-1 runner service (§8), not the
   coordination server.
+- **Boot-time self-configuration**: on the first boot of a fresh DB the
+  server applies swarm config from environment variables
+  (`server/db.py:_apply_env_swarm_config`), with `INSERT OR IGNORE` defaults
+  behind it; `setup.py create` sets those vars and *also* pushes config over
+  the admin API as belt-and-braces (`hostadmin/swarm.py:push_config_to_server`).
+  Load-bearing for §9: a deploy that only sets env vars already boots
+  configured.
 
 ## 4. Target architecture
 
@@ -112,7 +121,7 @@ Credentials ride in the **URL fragment**, which browsers never send to the
 server — they stay out of Railway/proxy logs. The link is exactly as secret
 as the values the host already shares out-of-band today; this changes the
 packaging, not the trust model. No server-side invite state is needed for P0
-(single-use/expiring invites are a later upgrade, §13).
+(single-use/expiring invites are a later upgrade, §14).
 
 Work items:
 
@@ -236,7 +245,49 @@ coordination server stays self-contained and never holds raw LLM keys.
 - **Observability**: runner streams per-agent logs (ring buffer) to the
   contributor console over WS; the dashboard remains the scoreboard.
 
-## 9. Security notes
+## 9. Host provisioning: what this plan assumes, and the browser-only path
+
+Everything in §5–§8 assumes a provisioned swarm server. Creating one is a
+**host-machine** operation today and stays that way through P0–P3 — but it is
+already UI-driven, not terminal-locked:
+
+- `python3 run.py --ui` → the Host surface drives the full deploy
+  (`hostadmin/swarm.py:create_swarm`: Railway provision → env vars → volume →
+  deploy → domain → push config → seed pools → write local files), with a
+  workspace picker, per-challenge instance editor, and in-UI deploy errors.
+- The residual terminal steps are installing the Railway CLI and running
+  `railway login` (a browser OAuth kicked off from the CLI) — one-time,
+  host-only, and a far smaller ask than what contributors face today.
+
+**Optional endgame — "Deploy on Railway" button (P5).** Railway templates
+can define the service, volume, and env vars — including generated secrets —
+from a repo, entirely in the browser. Because the server self-configures
+from env on first boot (§3), a template deploy already yields a working,
+configured swarm. Closing the remaining gaps would make host setup fully
+browser-only:
+
+1. **Seed pools**: `setup.py create` reads `initial_algorithms/` from the
+   host's clone and POSTs `/api/admin/seed_pool`. A template deploy has no
+   clone — bake the seed sources into the server image and seed on first
+   boot (they are small text files), or add a "seed now" action to the
+   hosted admin console.
+2. **Per-challenge config**: the env blob (`encode_challenges_blob`) must be
+   optional — first boot falls back to the `INSERT OR IGNORE` defaults, and
+   the admin console (which already exists hosted) becomes the place to tune
+   challenges post-deploy, replacing `setup.py switch` for button-deployed
+   swarms.
+3. **Credential surfacing**: the generated `admin_key` / base
+   `swarm_password` live in Railway's variables view; the admin console's
+   first-login flow should tell the host where to find them and immediately
+   offer join-link creation (§5), so "create swarm → invite a friend" never
+   leaves the browser.
+
+This is deliberately last: it's independent of the contributor tiers, and
+the template must track repo releases (a maintenance commitment), so it
+should land once the hosted surfaces it depends on (§5, §6, admin console
+config editing) are stable.
+
+## 10. Security notes
 
 - Join fragments keep credentials out of server/proxy logs; the link is
   handled like the password it wraps (the invite message should say so).
@@ -253,18 +304,20 @@ coordination server stays self-contained and never holds raw LLM keys.
 - Config PUT validation must reject secrets so contributors can't
   accidentally persist raw keys into `contributor_configs` (§6).
 
-## 10. Compatibility & migration
+## 11. Compatibility & migration
 
 - All phases are additive. The wizard, `fleet.config.json` hand-editing,
   `run.py --ui`, and `scripts/run_fleet.py` keep working unchanged.
 - `setup.py invite` output gains a link; the raw values remain printed.
-- The local companion keeps the host-provisioning surface indefinitely
-  (Railway creds are host-local by design). Its *contributor* pages become
-  redundant after P2 and can thin out later — no removal in this plan.
+- The local companion keeps the host-provisioning surface for as long as
+  hosts deploy from their machines (Railway creds are host-local; §9's P5
+  button is the only thing that could eventually supersede it). Its
+  *contributor* pages become redundant after P2 and can thin out later — no
+  removal in this plan.
 - Docs: README "Contributor" section gains the join-link path as the primary
   flow once P2 lands; existing sections stay as the manual flow.
 
-## 11. Phasing
+## 12. Phasing
 
 | Phase | Deliverable | Size | Ships value alone? |
 |-------|-------------|------|--------------------|
@@ -273,11 +326,12 @@ coordination server stays self-contained and never holds raw LLM keys.
 | P2 | `run.py --join`, server-config fetch + cache, local secrets file (+ keys UI in companion) | M | yes — one-command setup; kills `export` for everyone |
 | P3 | hosted runner service (multi-fleet supervisor, encrypted keys, caps, revoke hook) | L | yes — zero-install tier |
 | P4 | PWA manifest for the hosted UI; `uvx`/`docker` runner packaging | S–M | cosmetic / packaging |
+| P5 *(optional)* | "Deploy on Railway" template + first-boot seeding + admin-console config editing (§9) | M | yes — browser-only host setup |
 
-Suggested order is strict: each phase stands on the previous one's auth and
-config plumbing.
+Suggested order is strict for P0–P3: each phase stands on the previous one's
+auth and config plumbing. P5 is independent and can land any time after P1.
 
-## 12. The desktop app, revisited
+## 13. The desktop app, revisited
 
 Deliberately deferred. Tier 1 serves novices; Tier 2's audience owns a
 terminal. An unsigned app is novice-hostile on macOS 15 (Settings-buried
@@ -286,7 +340,7 @@ If demand materializes, the earlier launcher design (thin shell + managed
 checkout + bundled uv/git) sits cleanly on top of P2's `--join` runner: the
 app is then "Tier 2 in a window", and nothing in this plan is thrown away.
 
-## 13. Open questions
+## 14. Open questions
 
 1. **C3 key minting without a terminal** — can contributors create an API
    key from a C3 web console, or only via `c3 login` + `c3 apikey create`?
@@ -305,3 +359,7 @@ app is then "Tier 2 in a window", and nothing in this plan is thrown away.
 6. **Runner placement for self-hosters without Railway** — the runner should
    also run bare (`python runner/service.py`) next to a self-hosted server;
    keep it container-optional.
+7. **Railway template mechanics (P5)** — confirm template support for the
+   volume + generated secrets this deploy needs, and how template updates
+   track repo releases (pin to a release branch/tag). Also decide the
+   first-boot seeding trigger (image-baked seeds vs admin-console action).
