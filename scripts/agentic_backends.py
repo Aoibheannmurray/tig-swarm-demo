@@ -315,11 +315,7 @@ _SOLVER_CONSTRAINTS_TEMPLATE = """\
 
 - The existing `use` imports at the top of the starting file must remain
   (e.g. `use tig_challenges::<challenge>::*;`).
-- Keep the harness entry points and their signatures unchanged: for most
-  challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
-  `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
-  hooks (the training loop and `solve_challenge` are harness-owned — do not add
-  or rename them). The harness calls these by name.
+{entry_points_bullet}
 {time_bullet}
 - Do not remove `unsafe` blocks that are already there; do not add new
   `unsafe` unless you understand the invariants.
@@ -345,6 +341,28 @@ def _editable_files_section(config: dict) -> str:
 def _strategy_tags_line(config: dict) -> str:
     from prompts import get_strategy_tags
     return ", ".join(f"`{t}`" for t in get_strategy_tags(config))
+
+
+def _entry_points_bullet(challenge: str) -> str:
+    """The harness-entry-point constraint, specialized per challenge.
+
+    Only the entry point(s) the active challenge actually has are named — a
+    knapsack agent shouldn't be told about neuralnet optimizer hooks it will
+    never touch.
+    """
+    if challenge in {"neuralnet_optimizer"}:
+        return (
+            "- Keep the harness entry points and their signatures unchanged: the\n"
+            "  `pub fn optimizer_init_state` / `optimizer_query_at_params` /\n"
+            "  `optimizer_step` hooks. The training loop and `solve_challenge` are\n"
+            "  harness-owned — do not add or rename them. The harness calls these\n"
+            "  hooks by name."
+        )
+    return (
+        "- Keep the harness entry point and its signature unchanged: `fn\n"
+        "  solve_challenge(`. Do not rename it or add a competing entry point —\n"
+        "  the harness calls it by name."
+    )
 
 
 def _time_budget_parts(challenge: str) -> tuple[str, str]:
@@ -384,6 +402,7 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     """
     challenge = config.get("challenge", "unknown")
     kernel_relpath = config.get("kernel_path")
+    entry_points_bullet = _entry_points_bullet(challenge)
     time_bullet, opt_contract = _time_budget_parts(challenge)
 
     # GPU challenges: the kernel is NOT compiled by cargo (it's compiled to
@@ -426,7 +445,9 @@ yourself — the driver loop runs the official benchmark after you exit and
 publishes the score paired with your hypothesis.
 
 """
-        + _SOLVER_CONSTRAINTS_TEMPLATE.format(time_bullet=time_bullet)
+        + _SOLVER_CONSTRAINTS_TEMPLATE.format(
+            entry_points_bullet=entry_points_bullet, time_bullet=time_bullet,
+        )
         + """
 ## When to stop
 
@@ -541,6 +562,7 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     sandbox.
     """
     challenge = config.get("challenge", "unknown")
+    entry_points_bullet = _entry_points_bullet(challenge)
     time_bullet, opt_contract = _time_budget_parts(challenge)
 
     return (
@@ -572,7 +594,9 @@ hypothesis to underperform.
   hit a permission wall, work around it within these rules.
 
 """
-        + _SOLVER_CONSTRAINTS_TEMPLATE.format(time_bullet=time_bullet)
+        + _SOLVER_CONSTRAINTS_TEMPLATE.format(
+            entry_points_bullet=entry_points_bullet, time_bullet=time_bullet,
+        )
         + """
 ## When to stop
 
