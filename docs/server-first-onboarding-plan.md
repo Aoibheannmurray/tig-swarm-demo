@@ -219,7 +219,8 @@ the full repo image (python + git + `c3` CLI + repo checkout). The
 coordination server stays self-contained and never holds raw LLM keys.
 
 - **Enablement flow**: contributor picks "run in the cloud" in the console →
-  pastes LLM + C3 keys into a write-only form → runner stores them encrypted
+  pastes LLM + C3 keys into a write-only form (C3 keys are web-mintable at
+  `cthree.cloud/dashboard/settings` — link it) → runner stores them encrypted
   (Fernet; key from a Railway env secret, e.g. `RUNNER_SECRET_KEY`) in its
   own SQLite on its own volume. UI thereafter shows provider + key last-4
   only. Delete = destroy row + stop fleet.
@@ -342,10 +343,16 @@ app is then "Tier 2 in a window", and nothing in this plan is thrown away.
 
 ## 14. Open questions
 
-1. **C3 key minting without a terminal** — can contributors create an API
-   key from a C3 web console, or only via `c3 login` + `c3 apikey create`?
-   Determines how smooth Tier-1/Tier-2 onboarding copy can be. (Also:
-   is there a Windows `c3` binary? Affects Tier-2 Windows guidance.)
+1. ~~**C3 key minting without a terminal**~~ **Resolved:** contributors can
+   create/manage API keys from the C3 web dashboard at
+   `https://cthree.cloud/dashboard/settings` (docs: *"Create and manage API
+   keys for programmatic access"*) — onboarding copy links there; no `c3
+   login` needed to obtain a key. Job submission and data transfer remain
+   **CLI-only** (the dashboard explicitly excludes `c3 deploy` / `c3 data
+   cp`), so the `c3` binary stays required wherever fleets execute — Tier-2
+   machines and the Tier-1 runner image alike. Still open: whether a Windows
+   `c3` binary exists (`install.sh` is sh-only) — affects Tier-2 Windows
+   guidance.
 2. **`c3` CLI in the runner image** — redistribution/licensing and version
    pinning (`cthree.cloud/install.sh` at build vs vendored binary).
 3. **Provider/tier defaults sharing** (§6) — generated shared JSON vs

@@ -1,11 +1,12 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 
-// Two entries, one shared codebase (see plan):
+// Three entries, one shared codebase (see plan):
 //   index.html        → local companion (contributor + host setup)   [mode local]
 //   admin/index.html  → admin console served by the hosted server      [mode hosted]
-// The hosted FastAPI server mounts the built dist as static (html=true), so the
-// admin console is reachable at /admin/  (admin/index.html).
+//   join/index.html   → contributor join page served by the hosted server [mode hosted]
+// The hosted FastAPI server mounts the built dist as static (html=true), so
+// the admin console is reachable at /admin/ and the join page at /join/.
 export default defineConfig({
   plugins: [svelte()],
   build: {
@@ -14,6 +15,7 @@ export default defineConfig({
       input: {
         main: "index.html",
         admin: "admin/index.html",
+        join: "join/index.html",
       },
     },
   },

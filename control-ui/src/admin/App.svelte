@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import Masthead from "../components/Masthead.svelte";
-  import { hostedApi, hostedBase, deriveInvitePassword, localApi } from "../lib/api";
+  import { hostedApi, hostedBase, deriveInvitePassword, buildJoinLink, localApi } from "../lib/api";
 
   let adminKey = $state(sessionStorage.getItem("prom_admin_key") ?? "");
   let basePassword = $state(sessionStorage.getItem("prom_base_pw") ?? "");
@@ -64,6 +64,7 @@
   // ── Invite ──
   let inviteName = $state("");
   let inviteBlock = $state("");
+  let inviteLink = $state("");
   async function makeInvite() {
     error = "";
     if (!basePassword) { error = "Enter the base swarm password (from create) to generate invites."; return; }
@@ -71,6 +72,7 @@
     try {
       const pw = await deriveInvitePassword(inviteName.trim(), basePassword);
       inviteBlock = `"server_url": "${serverLabel()}",\n"username": "${inviteName.trim()}",\n"swarm_password": "${pw}"`;
+      inviteLink = buildJoinLink(serverLabel(), inviteName.trim(), pw);
     } catch (e: any) { error = e.message; }
   }
 
@@ -192,9 +194,16 @@
           <div class="field" style="margin-bottom:0"><label for="iv">Username</label><input id="iv" type="text" bind:value={inviteName} /></div>
           <div style="flex:0 0 auto"><button class="primary" onclick={makeInvite}>Create invite</button></div>
         </div>
+        {#if inviteLink}
+          <div class="field" style="margin-top:16px">
+            <label for="il">Join link — share this one line (it contains their password)</label>
+            <textarea id="il" readonly rows="2">{inviteLink}</textarea>
+            <button class="ghost" onclick={() => navigator.clipboard.writeText(inviteLink)}>Copy link</button>
+          </div>
+        {/if}
         {#if inviteBlock}
           <div class="field" style="margin-top:16px">
-            <label for="ib">Share these lines</label>
+            <label for="ib">Or the manual config lines</label>
             <textarea id="ib" readonly rows="3">{inviteBlock}</textarea>
             <button class="ghost" onclick={() => navigator.clipboard.writeText(inviteBlock)}>Copy</button>
           </div>

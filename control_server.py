@@ -666,7 +666,10 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return JSONResponse({"error": "username is required"}, status_code=400)
         derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
         return {"server_url": server_url, "username": username,
-                "swarm_password": derived}
+                "swarm_password": derived,
+                # One-link form of the same credentials (fragment-encoded so
+                # they never reach server logs); None without a server_url.
+                "join_link": setup_mod.build_join_link(server_url, username, derived)}
 
     # ── Proxy /api/* to the swarm's hosted server ──
     #

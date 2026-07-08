@@ -842,6 +842,28 @@ async def register_agent(
     )
 
 
+@app.get("/api/contributor/me")
+async def contributor_me(
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """Validate a contributor credential pair and describe the swarm.
+
+    The first `/api/contributor/*` endpoint (see
+    docs/server-first-onboarding-plan.md): the hosted /join page calls it to
+    turn a pasted/clicked invite into "✓ valid invite for <name> — this swarm
+    is optimizing <challenge>". Auth (and its rate limiting) is exactly the
+    register path's verify_swarm_password, so a revoked or mistyped invite
+    fails here the same way registration would.
+    """
+    config = await get_config_cached()
+    return {
+        "username": contributor_username,
+        "swarm_name": config.get("swarm_name") or "",
+        "swarm_type": config.get("swarm_type", "cpu"),
+        "active_challenge": config.get("active_challenge") or DEFAULT_CHALLENGE,
+    }
+
+
 @app.post("/api/agents/{agent_id}/rename")
 async def rename_agent(
     agent_id: str,

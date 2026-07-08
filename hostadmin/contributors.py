@@ -39,6 +39,27 @@ def _generate_invite_slug(taken: set[str]) -> str:
     return f"contrib-{random.randint(10000, 99999)}"
 
 
+def build_join_link(server_url: str | None, username: str, derived: str) -> str | None:
+    """One-link invite: `<server>/join#u=<username>&p=<derived>`.
+
+    The credentials ride in the URL *fragment*, which browsers never send to
+    the server — they stay out of Railway/proxy logs. The hosted /join page
+    reads the fragment client-side (see docs/server-first-onboarding-plan.md
+    §5). Returns None when no usable server URL is known (fresh host machine
+    before `setup.py create`), so callers can skip the link line rather than
+    print a broken one.
+    """
+    import urllib.parse
+    url = (server_url or "").strip().rstrip("/")
+    if not url or url.startswith("<") or url.startswith("$"):
+        return None
+    return (
+        f"{url}/join"
+        f"#u={urllib.parse.quote(username, safe='')}"
+        f"&p={urllib.parse.quote(derived, safe='')}"
+    )
+
+
 def run_invite(username: str | None) -> int:
     """Issue a per-contributor swarm password by computing
     sha256(username + ':' + base_password). Prints the username + derived
@@ -81,14 +102,22 @@ def run_invite(username: str | None) -> int:
         issued.append(username)
         admin["issued_contributors"] = issued
         write_swarm_admin(admin)
+    join_link = build_join_link(server_url, username, derived)
+    if join_link:
+        print()
+        print(f"  Join link (share this one line):")
+        print(f"    {join_link}")
+        print()
+        print("  It opens the swarm's join page with these credentials —")
+        print("  treat it like the password it contains.")
     print()
     print(f'  "server_url": {json.dumps(server_url)},')
     print(f'  "username": {json.dumps(username)},')
     print(f'  "swarm_password": {json.dumps(derived)},')
     print()
-    print("  Share the three lines above with the contributor.")
-    print("  They paste them into their fleet.config.json (replacing the")
-    print("  matching keys), then run `python scripts/run_fleet.py`.")
+    print("  Or share the three lines above for the manual flow: the")
+    print("  contributor pastes them into their fleet.config.json (replacing")
+    print("  the matching keys), then runs `python scripts/run_fleet.py`.")
     print()
     return 0
 
