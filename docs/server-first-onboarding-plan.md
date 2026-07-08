@@ -336,8 +336,16 @@ config editing) are stable.
 | P1 | contributor console + `contributor_configs` + config API + tacit editor | M | yes — config authored once, visible fleet status |
 | P2 | `run.py --join`, server-config fetch + cache, local secrets file (+ keys UI in companion) | M | yes — one-command setup; kills `export` for everyone |
 | P3 | hosted runner service (multi-fleet supervisor, encrypted keys, caps, revoke hook) | L | yes — zero-install tier |
-| P4 | PWA manifest for the hosted UI; `uvx`/`docker` runner packaging | S–M | cosmetic / packaging |
-| P5 *(optional)* | "Deploy on Railway" template + first-boot seeding + admin-console config editing (§9) | M | yes — browser-only host setup |
+| P4 | PWA manifest for the hosted join page; no-clone contributor packaging (curl bootstrap `deploy/get-swarm.py` + `Dockerfile.contributor`) | S–M | cosmetic / packaging |
+| P5 *(optional)* | "Deploy on Railway" (`deploy/DEPLOY_ON_RAILWAY.md`) + first-boot seeding (`server/first_boot.py`, image-baked snapshot) | M | yes — browser-only host setup |
+
+**P4/P5 note — `uvx` dropped.** Standard Python packaging (needed for
+`uvx tig-swarm …`) is incompatible with this repo: the load-bearing root
+`setup.py` is a host CLI, not setuptools, and the build backend executes it
+during a wheel build (it imports `hostadmin`, absent in an isolated build
+env → build fails). The no-clone goal is met instead by a stdlib curl-pipe
+bootstrap (`deploy/get-swarm.py`, managed checkout → `run.py`) and a
+contributor Docker image — neither needs the repo to be a package.
 
 Suggested order is strict for P0–P3: each phase stands on the previous one's
 auth and config plumbing. P5 is independent and can land any time after P1.

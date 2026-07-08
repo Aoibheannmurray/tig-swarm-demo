@@ -1,0 +1,31 @@
+# Contributor runner image (onboarding P4) — run a fleet with no local clone:
+#
+#   docker run --rm \
+#     -e TIG_JOIN_LINK="https://<swarm>/join#u=…&p=…" \
+#     -e ANTHROPIC_API_KEY=sk-… -e C3_API_KEY=c3-… \
+#     ghcr.io/<owner>/tig-swarm-contributor
+#
+# Agents benchmark on C3 (no Docker-in-Docker), so configure C3 compute in the
+# swarm's web console. Provider/C3 keys are passed as env vars (env wins over
+# the local secrets store, so no prompt is needed in a container).
+#
+# Persist agent identities across restarts by mounting a volume at
+# /app/worktrees.
+FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# c3 CLI for cloud benchmark submission.
+RUN curl -fsSL https://cthree.cloud/install.sh | sh || \
+    echo "WARNING: c3 CLI install failed at build; C3 benchmarks will fail until fixed"
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+# TIG_JOIN_LINK is required at run time; run.py --join writes fleet.config.json
+# (server-sourced) and launches the fleet.
+ENTRYPOINT ["sh", "-c", "exec python3 run.py --join \"$TIG_JOIN_LINK\""]

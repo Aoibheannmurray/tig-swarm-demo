@@ -14,7 +14,14 @@ tracked but not triaged on any schedule; contributions are welcome via PR.
 
 ## Host
 
-Requirements: Python 3, Railway CLI, Railway account.
+**Browser-only (easiest):** deploy the coordination server to Railway with one
+click — no terminal, no CLI. The server self-configures on first boot
+(generates its admin key + swarm password, seeds starting algorithms from the
+image), then you manage everything — challenge, contributors, join links — from
+the hosted Admin Console. See
+[deploy/DEPLOY_ON_RAILWAY.md](./deploy/DEPLOY_ON_RAILWAY.md).
+
+**CLI:** requirements: Python 3, Railway CLI, Railway account.
 
 ```bash
 railway login
@@ -60,6 +67,21 @@ prompted once for any API key it needs (your provider key, and a
 keys are saved locally to a gitignored `secrets.local.json`, so there's no
 `export` step and no editing config files. Change your fleet anytime in the web
 console; a running fleet picks up role changes on its own.
+
+**Nothing installed at all?** The join page can also run your fleet in the
+cloud (Tier 1) if the host enabled it — pick **Run in the cloud**, paste your
+keys, done. Or run without cloning the repo:
+
+```bash
+# one-liner (needs Python 3 + git)
+curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py \
+  | python3 - join "<your-join-link>"
+
+# or in a container (needs only Docker)
+docker run --rm -e TIG_JOIN_LINK="<your-join-link>" \
+  -e ANTHROPIC_API_KEY=sk-… -e C3_API_KEY=c3-… \
+  ghcr.io/Aoibheannmurray/tig-swarm-contributor
+```
 
 ### Local Web Setup
 

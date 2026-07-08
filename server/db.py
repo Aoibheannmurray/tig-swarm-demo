@@ -579,6 +579,18 @@ async def init_db() -> None:
                 await _apply_env_swarm_config(db)
             except Exception as e:  # noqa: BLE001 — boot must survive any bad var
                 print(f"init_db: could not apply env swarm config: {e!r}")
+            # Browser-only ("Deploy on Railway") host setup has no clone to run
+            # `setup.py create`, so populate initial algorithm code + the seed
+            # pool from a snapshot baked into the image, if present. No-op when
+            # the bundle is absent or the code is already set (see first_boot).
+            try:
+                import first_boot
+                summary = await first_boot.seed_from_bundle(db)
+                if summary.get("initial_code") or summary.get("seeds"):
+                    print(f"init_db: first-boot seeding {summary}")
+                await db.commit()
+            except Exception as e:  # noqa: BLE001 — never block boot on seeding
+                print(f"init_db: first-boot seeding skipped: {e!r}")
             await db.execute(
                 "INSERT OR REPLACE INTO config (key, value) VALUES ('env_config_applied', '1')"
             )

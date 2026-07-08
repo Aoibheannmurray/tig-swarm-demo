@@ -21,6 +21,11 @@ WORKDIR /app
 COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server/ .
+# Algorithm snapshot for browser-only ("Deploy on Railway") deploys: the
+# server seeds initial code + the pool from these on first boot when no host
+# clone ran `setup.py create` (server/first_boot.py). Text sources; harmless
+# for normal deploys (first-boot fill only touches empty slots).
+COPY initial_algorithms/ ./initial_algorithms/
 COPY --from=dashboard /dashboard/dist ./static/
 # Admin Console served at /admin/, contributor join page at /join/. Copy only
 # those entries + the content-hashed asset chunks — NOT the companion's
@@ -28,6 +33,11 @@ COPY --from=dashboard /dashboard/dist ./static/
 COPY --from=controlui /control-ui/dist/admin ./static/admin/
 COPY --from=controlui /control-ui/dist/join ./static/join/
 COPY --from=controlui /control-ui/dist/assets ./static/assets/
+# Public assets the admin/join pages reference at root (icon, fonts) + the
+# join page's PWA manifest & service worker. Copied individually so the
+# companion's dist/index.html never lands at / (it would shadow the dashboard).
+COPY --from=controlui /control-ui/dist/prometheus-icon.png /control-ui/dist/prometheus.png /control-ui/dist/fonts.css /control-ui/dist/manifest.webmanifest /control-ui/dist/sw.js ./static/
+COPY --from=controlui /control-ui/dist/fonts ./static/fonts/
 
 RUN chmod +x /app/entrypoint.sh
 
