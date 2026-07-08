@@ -1,15 +1,15 @@
 # Files irrelevant to the agent optimization loop
 # (infra, inactive challenges, build artifacts)
 #
-# WARNING: Do NOT add Dockerfile*, dashboard/, or server/ here.
-# Railway CLI respects .ignore when building its upload snapshot,
-# so excluding them breaks `railway up` deploys.
+# WARNING: Do NOT add Dockerfile*, dashboard/, server/, or initial_algorithms/
+# here. Railway CLI respects .ignore when building its upload snapshot, so
+# excluding them breaks `railway up` deploys — the server Dockerfile COPYs
+# each into the image (initial_algorithms/ feeds first-boot seeding).
 
 docs/
 tig-monorepo/
 target/
 datasets/
-initial_algorithms/
 
 scripts/run_loop.py
 scripts/llm_backends.py
