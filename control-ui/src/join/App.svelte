@@ -88,6 +88,7 @@
       me = await hostedApi.contributorMe(username, password);
       localStorage.setItem(CREDS_KEY, JSON.stringify({ username, password }));
       phase = "ok";
+      loadNeededKeys();  // which key fields to show on Get started (best-effort)
     } catch (e: any) {
       error = e.message;
       phase = "bad";
@@ -109,19 +110,64 @@
   // below then falls away automatically) and drop the /server-onboarding raw
   // URL in the README.
   const BOOTSTRAP_REF: string = "server-onboarding";
-  const branchEnv = BOOTSTRAP_REF === "main" ? "" : `TIG_SWARM_BRANCH=${BOOTSTRAP_REF} `;
   const joinLink = () => buildJoinLink(serverUrl(), username, password);
+
+  // ── Optional local API keys ──
+  // Typed here purely to weave into the copy-paste command below — they run on
+  // the contributor's OWN machine and must NEVER be sent to this (host-owned)
+  // server. Left blank, run.py prompts once and saves them to a local 0600
+  // file instead (no shell-history exposure). The env-var names come from the
+  // fleet the contributor configured (their agents' api_key_env) + C3.
+  let neededEnv: string[] = $state(["C3_API_KEY"]);
+  let localKeys: Record<string, string> = $state({});
+  let fleetConfigured = $state(false);
+  async function loadNeededKeys() {
+    try {
+      const stored = await hostedApi.contributorConfigGet(username, password);
+      const envs = new Set<string>(["C3_API_KEY"]);
+      for (const a of stored?.config?.agents ?? []) {
+        if (a.api_key_env) envs.add(a.api_key_env);
+      }
+      neededEnv = [...envs];
+      fleetConfigured = !!stored?.config?.agents?.length;
+    } catch {
+      /* keep the C3 default; the fields still work */
+    }
+  }
+  // Single-quoted `NAME='value'` env prefixes for the filled keys (API keys are
+  // quote-free, so single-quoting is safe and shell-robust).
+  const keyPrefix = () =>
+    neededEnv
+      .filter((n) => (localKeys[n] ?? "").trim())
+      .map((n) => `${n}='${localKeys[n].trim()}'`)
+      .join(" ");
+  // Env prefix for the piped bootstrap: branch pin (temp) + any filled keys.
+  const bootPrefix = () => {
+    const parts: string[] = [];
+    if (BOOTSTRAP_REF !== "main") parts.push(`TIG_SWARM_BRANCH=${BOOTSTRAP_REF}`);
+    if (keyPrefix()) parts.push(keyPrefix());
+    return parts.length ? parts.join(" ") + " " : "";
+  };
+
   const bootstrapCmd = () =>
-    `curl -fsSL ${RAW_BASE}/${BOOTSTRAP_REF}/deploy/get-swarm.py | ${branchEnv}python3 - join "${joinLink()}"`;
+    `curl -fsSL ${RAW_BASE}/${BOOTSTRAP_REF}/deploy/get-swarm.py | ${bootPrefix()}python3 - join "${joinLink()}"`;
   const cloneCmd = () =>
     BOOTSTRAP_REF === "main"
       ? `git clone ${REPO_URL}.git && cd tig-swarm-demo`
       : `git clone -b ${BOOTSTRAP_REF} ${REPO_URL}.git && cd tig-swarm-demo`;
-  const runJoinCmd = () => `python3 run.py --join "${joinLink()}"`;
-  const dockerCmd = () =>
-    `docker run --rm -e TIG_JOIN_LINK="${joinLink()}" ` +
-    `-e ANTHROPIC_API_KEY=sk-… -e C3_API_KEY=c3-… ` +
-    `ghcr.io/Aoibheannmurray/tig-swarm-contributor`;
+  const runJoinCmd = () =>
+    `${keyPrefix() ? keyPrefix() + " " : ""}python3 run.py --join "${joinLink()}"`;
+  const dockerCmd = () => {
+    const kv = neededEnv
+      .filter((n) => (localKeys[n] ?? "").trim())
+      .map((n) => `-e ${n}='${localKeys[n].trim()}'`)
+      .join(" ");
+    return (
+      `docker run --rm -e TIG_JOIN_LINK="${joinLink()}" ` +
+      `${kv || "-e ANTHROPIC_API_KEY=sk-… -e C3_API_KEY=c3-…"} ` +
+      `ghcr.io/Aoibheannmurray/tig-swarm-contributor`
+    );
+  };
 
   async function copy(text: string, tag: string) {
     await navigator.clipboard.writeText(text);
@@ -230,11 +276,32 @@
       <p class="lede">
         First set up your agents in the <b>My fleet</b> tab. Then start them
         with <b>one command</b> — no cloning, no editing files. You'll need
-        Python 3 and Git, and you'll be prompted once for your API keys (an LLM
-        provider key, and a
-        <a href="https://cthree.cloud/dashboard/settings" target="_blank" rel="noopener">C3
-        key</a> for cloud benchmarking — no Docker needed).
+        Python 3 and Git.
       </p>
+
+      <div class="field" style="margin-top:4px">
+        <div class="lede" style="margin-bottom:6px">
+          <b>Your API keys</b> — an LLM provider key, and a
+          <a href="https://cthree.cloud/dashboard/settings" target="_blank" rel="noopener">C3
+          key</a> for benchmarking. Optional: fill them to include them in the
+          command below, or leave blank and you'll be prompted once when it runs.
+        </div>
+        {#each neededEnv as name}
+          <div class="field" style="margin-bottom:8px">
+            <label for={"lk-" + name}>{name}</label>
+            <input id={"lk-" + name} type="password" bind:value={localKeys[name]}
+              placeholder={name === "C3_API_KEY" ? "from cthree.cloud/dashboard/settings" : `paste ${name}`} />
+          </div>
+        {/each}
+        {#if !fleetConfigured}
+          <div class="hint">Set up your agents in <b>My fleet</b> to see exactly which provider keys you need.</div>
+        {/if}
+        <div class="hint">
+          🔒 Keys stay in your browser — woven into the command below, never sent
+          to this server. They run on your machine.
+        </div>
+      </div>
+
       <div class="field">
         <label for="boot">Paste this into a terminal</label>
         <div id="boot" class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{bootstrapCmd()}</div>
@@ -245,6 +312,11 @@
       <p class="lede" style="margin-top:6px">
         Your join link is already in the command — it fetches the swarm code,
         loads the fleet you set up here, and launches.
+        {#if keyPrefix()}
+          Your keys are set for this run only; they'll be in your shell history.
+          To avoid that, clear the fields above and let it prompt you (it saves
+          them to a local <span class="mono">0600</span> file instead).
+        {/if}
       </p>
 
       <details style="margin-top:12px">
