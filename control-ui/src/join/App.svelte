@@ -104,10 +104,19 @@
   // scrubbed on load) so it can be baked into copy-paste commands. Raw base is
   // derived from REPO_URL so a fork's own bootstrap URL works.
   const RAW_BASE = REPO_URL.replace("github.com", "raw.githubusercontent.com");
+  // TEMP: the bootstrap + fleet code live on this branch until it merges to
+  // main. When merged, set BOOTSTRAP_REF back to "main" (the branch-pinning
+  // below then falls away automatically) and drop the /server-onboarding raw
+  // URL in the README.
+  const BOOTSTRAP_REF: string = "server-onboarding";
+  const branchEnv = BOOTSTRAP_REF === "main" ? "" : `TIG_SWARM_BRANCH=${BOOTSTRAP_REF} `;
   const joinLink = () => buildJoinLink(serverUrl(), username, password);
   const bootstrapCmd = () =>
-    `curl -fsSL ${RAW_BASE}/main/deploy/get-swarm.py | python3 - join "${joinLink()}"`;
-  const cloneCmd = () => `git clone ${REPO_URL}.git && cd tig-swarm-demo`;
+    `curl -fsSL ${RAW_BASE}/${BOOTSTRAP_REF}/deploy/get-swarm.py | ${branchEnv}python3 - join "${joinLink()}"`;
+  const cloneCmd = () =>
+    BOOTSTRAP_REF === "main"
+      ? `git clone ${REPO_URL}.git && cd tig-swarm-demo`
+      : `git clone -b ${BOOTSTRAP_REF} ${REPO_URL}.git && cd tig-swarm-demo`;
   const runJoinCmd = () => `python3 run.py --join "${joinLink()}"`;
   const dockerCmd = () =>
     `docker run --rm -e TIG_JOIN_LINK="${joinLink()}" ` +

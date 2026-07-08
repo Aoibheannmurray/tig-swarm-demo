@@ -74,8 +74,10 @@ keys, done. Or run without cloning the repo:
 
 ```bash
 # one-liner (needs Python 3 + git)
-curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py \
-  | python3 - join "<your-join-link>"
+# NOTE: pinned to the server-onboarding branch until it merges to main —
+# then use .../main/deploy/get-swarm.py and drop TIG_SWARM_BRANCH.
+curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py \
+  | TIG_SWARM_BRANCH=server-onboarding python3 - join "<your-join-link>"
 
 # or in a container (needs only Docker)
 docker run --rm -e TIG_JOIN_LINK="<your-join-link>" \
