@@ -9,6 +9,8 @@
   // docs/server-first-onboarding-plan.md §5.
   import { onMount } from "svelte";
   import Masthead from "../components/Masthead.svelte";
+  import FleetEditor from "./FleetEditor.svelte";
+  import AgentsPanel from "./AgentsPanel.svelte";
   import { hostedApi } from "../lib/api";
 
   // Public repo contributors clone to run a local fleet. Hosts running a
@@ -24,6 +26,36 @@
   let password = $state("");
   let showManual = $state(false);
   let copied = $state("");
+  let tab: "start" | "fleet" | "agents" | "tacit" = $state("start");
+
+  // ── Tacit knowledge (stored server-side alongside the fleet config) ──
+  let tacit = $state("");
+  let tacitLoaded = $state(false);
+  let tacitSaving = $state(false);
+  let tacitMsg = $state("");
+
+  async function loadTacit() {
+    if (tacitLoaded) return;
+    try {
+      const stored = await hostedApi.contributorConfigGet(username, password);
+      tacit = stored?.tacit ?? "";
+    } catch {
+      /* leave empty — saving still works */
+    }
+    tacitLoaded = true;
+  }
+
+  async function saveTacit() {
+    tacitMsg = ""; tacitSaving = true;
+    try {
+      await hostedApi.contributorConfigPut(username, password, { tacit });
+      tacitMsg = "Saved.";
+    } catch (e: any) {
+      tacitMsg = e.message;
+    } finally {
+      tacitSaving = false;
+    }
+  }
 
   onMount(async () => {
     const frag = new URLSearchParams(location.hash.slice(1));
@@ -124,7 +156,45 @@
       </p>
     </div>
 
-    <div class="card" style="max-width:640px;margin:16px auto 0">
+    <nav class="tabs" style="max-width:640px;margin:16px auto 0">
+      <button class:active={tab === "start"} onclick={() => (tab = "start")}>Get started</button>
+      <button class:active={tab === "fleet"} onclick={() => (tab = "fleet")}>My fleet</button>
+      <button class:active={tab === "agents"} onclick={() => (tab = "agents")}>My agents</button>
+      <button class:active={tab === "tacit"} onclick={() => { tab = "tacit"; loadTacit(); }}>Tacit knowledge</button>
+    </nav>
+
+    {#if tab === "fleet"}
+      <div style="max-width:900px;margin:0 auto">
+        <FleetEditor {username} {password} />
+      </div>
+    {:else if tab === "agents"}
+      <div style="max-width:760px;margin:0 auto">
+        <AgentsPanel {username} {password} />
+      </div>
+    {:else if tab === "tacit"}
+      <div class="card" style="max-width:640px;margin:0 auto">
+        <h2>Tacit knowledge</h2>
+        <p class="lede">
+          Hints your agents see when they stagnate — strategies to try, dead
+          ends to avoid. Stored with your fleet plan on the swarm server.
+        </p>
+        <div class="field">
+          <label for="tk">Notes (one hint per line, `- ` bullets)</label>
+          <textarea id="tk" rows="10" bind:value={tacit}
+            placeholder="- try simulated annealing before giving up on a neighborhood"></textarea>
+        </div>
+        <div class="actions">
+          {#if tacitMsg}<span class="muted">{tacitMsg}</span>{/if}
+          <div class="spacer"></div>
+          <button class="primary" disabled={tacitSaving} onclick={saveTacit}>
+            {tacitSaving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    <div class="card" style="max-width:640px;margin:16px auto 0"
+         hidden={tab !== "start"}>
       <h2>Run agents on your machine</h2>
       <p class="lede">
         You'll need Python 3 and Git. An LLM API key (Anthropic / OpenAI /
@@ -157,7 +227,8 @@
       </ol>
     </div>
 
-    <div class="card" style="max-width:640px;margin:16px auto 0">
+    <div class="card" style="max-width:640px;margin:16px auto 0"
+         hidden={tab !== "start"}>
       <button class="ghost" onclick={() => (showManual = !showManual)}>
         {showManual ? "▾" : "▸"} Manual / power-user flow
       </button>

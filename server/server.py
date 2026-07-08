@@ -4,6 +4,7 @@ import contextvars
 import logging
 import os
 import random
+import re
 import secrets
 import sqlite3
 import time
@@ -20,6 +21,7 @@ from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
     AdminRevoke, AdminSeedInactive, AdminSeedPool, AdminClearInactive,
+    ContributorConfigPut, MAX_CONTRIB_CONFIG_LEN,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
@@ -862,6 +864,205 @@ async def contributor_me(
         "swarm_type": config.get("swarm_type", "cpu"),
         "active_challenge": config.get("active_challenge") or DEFAULT_CHALLENGE,
     }
+
+
+# ── Contributor fleet config (server-first onboarding P1) ──
+#
+# The hosted contributor console authors a fleet plan here; the local runner
+# fetches it in --join mode (P2). Stored configs are sanitized fleet.config
+# material: whitelisted keys only, raw secrets hard-rejected — LLM keys are
+# referenced by env-var NAME (`api_key_env`), never by value.
+
+# Per-agent keys a stored config may carry. Mirrors the fleet-entry fields
+# scripts/run_fleet.py materializes into worktrees (_AGENT_CONFIG_KEYS + the
+# entry's `name`), MINUS anything secret or locally-owned: `c3_api_key` (raw
+# secret), `agent_id`/`agent_name` (runner-persisted identity).
+_CONTRIB_AGENT_KEYS = frozenset({
+    "name", "provider", "model", "api_base", "api_key_env",
+    "compute", "hardware", "c3_hardware", "c3_time", "c3_cloud_provider",
+    "c3_no_build", "c3_nonces_per_shard", "c3_max_parallel_jobs",
+    "log_prompts", "detailed_prompts", "tacit_write", "role", "edit_mode",
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
+    "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
+    "cleaner_cooldown_iters",
+})
+# Top-level keys: the agents array + the fleet-wide default knobs run_fleet
+# inherits into every agent. Credentials (server_url/username/swarm_password)
+# are deliberately absent — the runner already has them; storing them here
+# would just duplicate secrets.
+_CONTRIB_TOP_KEYS = frozenset({
+    "agents",
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
+    "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
+    "cleaner_cooldown_iters",
+    "c3_nonces_per_shard", "c3_max_parallel_jobs",
+})
+_CONTRIB_MAX_AGENTS = 32
+# Agent names become worktree directory names and git branch segments on the
+# runner — restrict hard rather than sanitize.
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# `api_key_env` must be an environment-variable NAME. A pasted raw key
+# ("sk-…") fails this shape check, which is the point.
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,63}$")
+
+
+def _validate_contributor_config(config: dict) -> None:
+    """Raise HTTPException(422) unless `config` is a storable fleet plan."""
+    def bad(msg: str):
+        raise HTTPException(status_code=422, detail=msg)
+
+    if not isinstance(config, dict):
+        bad("config must be an object")
+    unknown = set(config) - _CONTRIB_TOP_KEYS
+    if unknown:
+        bad(f"unknown top-level keys: {sorted(unknown)} — secrets and "
+            "credentials must not be stored in the hosted config")
+    agents = config.get("agents")
+    if not isinstance(agents, list) or not agents:
+        bad("config.agents must be a non-empty array")
+    if len(agents) > _CONTRIB_MAX_AGENTS:
+        bad(f"too many agents (max {_CONTRIB_MAX_AGENTS})")
+    seen_names: set[str] = set()
+    for i, agent in enumerate(agents):
+        if not isinstance(agent, dict):
+            bad(f"agents[{i}] must be an object")
+        unknown = set(agent) - _CONTRIB_AGENT_KEYS
+        if unknown:
+            bad(f"agents[{i}] has unsupported keys: {sorted(unknown)} — "
+                "raw secrets (c3_api_key, …) are not storable; LLM keys are "
+                "referenced by env-var name via api_key_env")
+        name = agent.get("name")
+        if not isinstance(name, str) or not _AGENT_NAME_RE.match(name):
+            bad(f"agents[{i}].name must match {_AGENT_NAME_RE.pattern} "
+                "(it becomes a worktree directory / git branch on the runner)")
+        if name in seen_names:
+            bad(f"duplicate agent name {name!r}")
+        seen_names.add(name)
+        env_name = agent.get("api_key_env")
+        if env_name is not None and (
+            not isinstance(env_name, str) or not _ENV_NAME_RE.match(env_name)
+        ):
+            bad(f"agents[{i}].api_key_env must be an environment-variable "
+                "NAME like OPENROUTER_API_KEY — never paste the key itself")
+        for key, value in agent.items():
+            if isinstance(value, str):
+                if len(value) > 200:
+                    bad(f"agents[{i}].{key} is too long")
+            elif not isinstance(value, (int, float, bool, type(None))):
+                bad(f"agents[{i}].{key} must be a JSON scalar")
+    for key, value in config.items():
+        if key == "agents":
+            continue
+        if isinstance(value, str):
+            if len(value) > 200:
+                bad(f"{key} is too long")
+        elif not isinstance(value, (int, float, bool, type(None))):
+            bad(f"{key} must be a JSON scalar")
+
+
+@app.get("/api/contributor/config")
+async def get_contributor_config(
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """The caller's stored fleet plan; 404 before the first save (the console
+    offers a starter config on 404 rather than treating it as an error)."""
+    async with db.connect() as conn:
+        row = await db.get_contributor_config(conn, contributor_username)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No stored config yet")
+    try:
+        config = json.loads(row["config_json"]) if row["config_json"] else None
+    except (ValueError, TypeError):
+        config = None
+    return {
+        "config": config,
+        "tacit": row["tacit_text"] or "",
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.put("/api/contributor/config")
+async def put_contributor_config(
+    req: ContributorConfigPut,
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """Save the caller's fleet plan and/or tacit notes. Partial-update: a
+    body with only `config` keeps the stored tacit text, and vice versa."""
+    if req.config is None and req.tacit is None:
+        raise HTTPException(status_code=422, detail="Provide config and/or tacit")
+    config_json: str | None = None
+    if req.config is not None:
+        _validate_contributor_config(req.config)
+        config_json = json.dumps(req.config)
+        if len(config_json) > MAX_CONTRIB_CONFIG_LEN:
+            raise HTTPException(status_code=422, detail="config too large")
+    timestamp = now()
+    async with db.connect() as conn:
+        existing = await db.get_contributor_config(conn, contributor_username)
+        await db.set_contributor_config(
+            conn, contributor_username,
+            config_json=config_json if req.config is not None
+                else (existing or {}).get("config_json"),
+            tacit_text=req.tacit if req.tacit is not None
+                else (existing or {}).get("tacit_text"),
+            updated_at=timestamp,
+        )
+        await conn.commit()
+    return {"saved": True, "updated_at": timestamp}
+
+
+@app.get("/api/contributor/agents")
+async def contributor_agents(
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """The caller's registered agents — the console's "my agents" strip.
+    Same activity window as the dashboard's counters."""
+    cutoff = await inactive_cutoff()
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT name, llm_type, status, last_heartbeat, tier "
+            "FROM agents WHERE contributor_username = ? ORDER BY name",
+            (contributor_username,),
+        )
+        rows = [dict(r) for r in await cursor.fetchall()]
+    for r in rows:
+        r["active"] = bool(r["last_heartbeat"] and r["last_heartbeat"] >= cutoff)
+    return {"agents": rows}
+
+
+@app.get("/api/contributor/agent_defaults")
+async def contributor_agent_defaults(
+    provider: str | None = None,
+    model: str | None = None,
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """Tier-derived defaults for a provider/model pick — the same rules the
+    local wizard applies (scripts/init_fleet.py:_build_agent), computed from
+    server/tiers.py so the console can't drift from registration-time
+    classification."""
+    tier = tiers.classify_tier(provider, model)
+    return {
+        "tier": tier,
+        "role": tiers.role_for_tier(tier),
+        "detailed_prompts": tier == "standard",
+    }
+
+
+# The provider catalog the console's agent editor offers. Duplicated from
+# scripts/init_fleet.py (the server image is self-contained and cannot import
+# scripts/) — scripts/test_provider_catalog_parity.py asserts the two stay
+# identical.
+_PROVIDERS_PATH = Path(__file__).parent / "providers.json"
+
+
+@app.get("/api/providers")
+async def list_providers():
+    try:
+        return {"providers": json.loads(_PROVIDERS_PATH.read_text())}
+    except (OSError, ValueError):
+        return {"providers": []}
 
 
 @app.post("/api/agents/{agent_id}/rename")

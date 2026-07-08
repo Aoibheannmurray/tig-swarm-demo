@@ -170,11 +170,11 @@ instead of three pasted values, and the join page teaches the current flow.
   today. The tier-derived defaults (`frontier → explorer`,
   `standard → detailed_prompts`) currently live in
   `scripts/init_fleet.py:_build_agent`; the server can't import that
-  (§3, self-contained image), so extract the provider/tier tables into a
-  small shared JSON (generated into both the server image and `scripts/` at
-  build, or duplicated with a test that asserts they match — decide in
-  review; the tier logic itself already exists server-side in
-  `server/tiers.py`).
+  (§3, self-contained image). **Decided:** the provider catalog is
+  duplicated as `server/providers.json` (served at `GET /api/providers`)
+  with `scripts/test_provider_catalog_parity.py` as the drift alarm, and
+  the tier logic is computed server-side from the existing
+  `server/tiers.py` (`GET /api/contributor/agent_defaults`).
 - "My agents" status strip: the dashboard state filtered by
   `contributor_username` — data the server already has.
 - Per-contributor tacit-knowledge editor (stored alongside the config; the
@@ -355,8 +355,9 @@ app is then "Tier 2 in a window", and nothing in this plan is thrown away.
    guidance.
 2. **`c3` CLI in the runner image** — redistribution/licensing and version
    pinning (`cthree.cloud/install.sh` at build vs vendored binary).
-3. **Provider/tier defaults sharing** (§6) — generated shared JSON vs
-   duplicated-with-test. Small, but decides a build step.
+3. ~~**Provider/tier defaults sharing**~~ **Resolved** (§6):
+   duplicated-with-test — `server/providers.json` +
+   `scripts/test_provider_catalog_parity.py`; no build step.
 4. **Invite hardening** — upgrade P0's stateless links to server-side
    single-use/expiring invite tokens (new table + redemption endpoint)?
    Cheap once `/join` exists; decide after P0 usage.
