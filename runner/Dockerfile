@@ -26,6 +26,15 @@ RUN pip install --no-cache-dir -r runner/requirements.txt -r requirements.txt
 # The whole repo (run.py, scripts/, setup.py, hostadmin/, src/, …).
 COPY . .
 
+# Make /app a git repo so the supervisor can `git clone --local` it into an
+# isolated per-contributor workspace (the image ships without .git — both
+# .dockerignore and .ignore drop it). run_fleet needs each workspace to be a
+# git repo for its per-agent worktrees.
+RUN git init -q \
+ && git -c user.email=runner@tig.local -c user.name=tig-runner add -A \
+ && git -c user.email=runner@tig.local -c user.name=tig-runner commit -qm "runner base image" \
+ && git config --global --add safe.directory '*'
+
 # RUNNER_DATA_DIR (enrollment DB) and RUNNER_WORKSPACES (per-contributor
 # clones) should be mounted on a persistent Railway volume in production.
 ENV RUNNER_DATA_DIR=/data \

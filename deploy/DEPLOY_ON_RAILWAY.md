@@ -64,14 +64,22 @@ button-deployed swarms.
 ## Optional: hosted fleet runner (Tier 1)
 
 To let contributors run **zero-install** (agents run on your infrastructure),
-deploy the runner as a **second** Railway service in the same project:
+deploy the runner and point the swarm at it. This adds a "Run in the cloud"
+tab to the join page.
 
-1. Add a service from `runner/Dockerfile`.
+**From a clone (one command):**
+```bash
+python setup.py create-runner
+```
+It deploys `runner/Dockerfile` as its own Railway service (generated
+`RUNNER_SECRET_KEY`, your swarm URL + admin key wired in, a `/data` volume),
+waits for it, and enables the tab.
+
+**From the Railway dashboard (no clone):**
+1. Add a service from `runner/Dockerfile` (set `RAILWAY_DOCKERFILE_PATH=runner/Dockerfile`).
 2. Set its variables (detail in [../runner/README.md](../runner/README.md)):
    `RUNNER_SECRET_KEY` (`python -m runner.vault --generate`),
    `COORDINATION_SERVER_URL` = your swarm URL, `RUNNER_ADMIN_KEY` = the swarm's
-   `ADMIN_KEY`.
-3. Point the swarm at it — this adds the "Run in the cloud" tab to the join
-   page. From a clone: `python setup.py set-runner <runner-url>`. Without a
-   clone: `POST <server>/api/admin/config?key=runner_url&value=<runner-url>`
+   `ADMIN_KEY`; add a volume at `/data`.
+3. Enable the tab: `POST <server>/api/admin/config?key=runner_url&value=<runner-url>`
    with body `{"admin_key": "<admin-key>"}`.

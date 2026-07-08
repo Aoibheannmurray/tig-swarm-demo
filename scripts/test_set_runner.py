@@ -58,8 +58,20 @@ def test_rejects_non_http_url():
     print("PASS test_rejects_non_http_url")
 
 
+def test_runner_url_actually_persists():
+    # Guard: write_swarm_admin slices by _ADMIN_FIELDS, so runner_url must be
+    # listed there or `revoke`'s hosted-fleet teardown never finds it.
+    from hostadmin import config_io
+    assert "runner_url" in config_io._ADMIN_FIELDS, config_io._ADMIN_FIELDS
+    kept = {k: "x" for k in ("admin_key", "runner_url")}
+    payload = {k: kept[k] for k in config_io._ADMIN_FIELDS if k in kept}
+    assert payload.get("runner_url") == "x", payload
+    print("PASS test_runner_url_actually_persists")
+
+
 if __name__ == "__main__":
     test_set_runner_posts_and_mirrors()
     test_unset_with_empty_url()
     test_rejects_non_http_url()
+    test_runner_url_actually_persists()
     print("ALL PASS")

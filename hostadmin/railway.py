@@ -398,17 +398,20 @@ def _ensure_https(domain: str) -> str:
     return f"https://{domain}".rstrip("/")
 
 
-def _wait_for_server(url: str, timeout: int = 240) -> bool:
-    """Poll <url>/api/swarm_config until it answers *stably* or timeout passes.
+def _wait_for_server(
+    url: str, timeout: int = 240, probe_path: str = "/api/swarm_config",
+) -> bool:
+    """Poll <url><probe_path> until it answers *stably* or timeout passes.
 
     `railway up --ci` returns when the build succeeds, but the container's
     health-rollout lags and DNS/TLS for a brand-new public domain can take a
     while — a GPU image with the CUDA toolchain is slow to its first byte. We
     therefore wait generously (default 4 min) and require two consecutive 200s
     a couple seconds apart, so we don't hand off to the config push the instant
-    a transient/rolling container first answers."""
+    a transient/rolling container first answers. `probe_path` lets the runner
+    deploy poll its own health endpoint instead of the server's config."""
     deadline = time.time() + timeout
-    probe = f"{url.rstrip('/')}/api/swarm_config"
+    probe = f"{url.rstrip('/')}{probe_path}"
     ok = 0
     while time.time() < deadline:
         try:
