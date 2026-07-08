@@ -1435,18 +1435,13 @@ def build_agentic_user_prompt(
     is_gpu = bool(config.get("is_gpu"))
     challenge = config.get("challenge", "unknown")
 
-    my_score = state.get("current_trajectory_best")
-    global_best = state.get("best_score")
+    # `stagnation` still gates the tacit-knowledge distillation trigger below.
     stagnation = state.get("my_runs_since_improvement", 0)
-    runs = state.get("my_runs", 0)
-    improvements = state.get("my_improvements", 0)
 
     parts.append(
         f"## Iteration context\n"
-        f"- Challenge: {challenge}{' (GPU)' if is_gpu else ''}\n"
-        f"- Your best score: {my_score}\n"
-        f"- Global best score: {global_best}\n"
-        f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}"
+        f"- Your best score: {state.get('current_trajectory_best')}\n"
+        f"- Global best score: {state.get('best_score')}"
     )
 
     if role == "exploiter":
