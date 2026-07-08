@@ -768,7 +768,7 @@ def _load_tig_combined(stage: Path) -> tuple[dict | None, str]:
         return None, f"combined.json not parseable: {e}"
 
 
-def _run_one_c3_shard(
+def _run_one_c3_shard_inner(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
 ) -> tuple[dict | None, str]:
     """Deploy one already-staged shard job, poll it, pull artifacts, and return
@@ -824,6 +824,20 @@ def _run_one_c3_shard(
     return comb, ""
 
 
+def _run_one_c3_shard(
+    args: argparse.Namespace, env: dict, stage: Path, label: str,
+    job_slots=None,
+) -> tuple[dict | None, str]:
+    """Global-cap wrapper around one shard's deploy+poll. When parallel HPO
+    passes a shared `job_slots` semaphore, hold a slot for this shard's entire
+    lifetime, so concurrent config evaluations never exceed c3_max_parallel_jobs
+    total live C3 jobs (respecting the account concurrency limit)."""
+    if job_slots is None:
+        return _run_one_c3_shard_inner(args, env, stage, label)
+    with job_slots:
+        return _run_one_c3_shard_inner(args, env, stage, label)
+
+
 def _merge_combined(results: list, challenge: str, fuel: int) -> dict:
     """Reassemble per-shard ``combined.json`` dicts into one, concatenating each
     track's nonce records across shards. Shaped exactly like a single-job
@@ -846,7 +860,7 @@ def _merge_combined(results: list, challenge: str, fuel: int) -> dict:
 
 def _run_tig_benchmark_c3(
     args: argparse.Namespace, cfg: dict, server: str, env: dict,
-    seed: str | None, hyperparameters: str | None,
+    seed: str | None, hyperparameters: str | None, job_slots=None,
 ) -> tuple[dict | None, str]:
     challenge = cfg.get("challenge", "unknown")
     image = _tig_c3_image(cfg)
@@ -900,9 +914,12 @@ def _run_tig_benchmark_c3(
 
         results: list[dict | None] = [None] * len(jobs)
         errs: list[str] = [""] * len(jobs)
-        with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        # With a shared job_slots semaphore (parallel HPO), the semaphore is the
+        # global cap; let this config submit all its shards and block on slots.
+        pool_workers = len(jobs) if job_slots is not None else max_parallel
+        with ThreadPoolExecutor(max_workers=pool_workers) as pool:
             futures = {
-                pool.submit(_run_one_c3_shard, args, env, stage, label): idx
+                pool.submit(_run_one_c3_shard, args, env, stage, label, job_slots): idx
                 for idx, stage, label in jobs
             }
             for future in as_completed(futures):
@@ -928,7 +945,7 @@ def _run_tig_benchmark_c3(
 
 def run_benchmark_c3(
     args: argparse.Namespace, config: dict, server: str,
-    seed: str | None = None, hyperparameters: str | None = None,
+    seed: str | None = None, hyperparameters: str | None = None, job_slots=None,
 ) -> tuple[dict | None, str]:
     if shutil.which("c3") is None:
         return None, "[C3] c3 CLI not found. Install from https://cthree.cloud/install.sh"
@@ -966,6 +983,6 @@ def run_benchmark_c3(
     # Fuel-instrumented TIG-docker backend (TIG image + driver → combined.json →
     # benchmark.json) is the ONLY C3 benchmarking path. The custom wall-clock
     # staging path (_create_workspace / _write_c3_project) has been retired.
-    return _run_tig_benchmark_c3(args, cfg, server, env, seed, hyperparameters)
+    return _run_tig_benchmark_c3(args, cfg, server, env, seed, hyperparameters, job_slots)
 
 
