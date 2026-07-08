@@ -166,6 +166,33 @@ Each iteration prints a `[BENCH]` line — the aggregate `Score`, `Feasible`, an
 
 The aggregate is a **shifted geometric mean** across tracks, and a failed or infeasible track is assigned a large fixed penalty. Because of that penalty, **a single bad track can drag the whole aggregate negative** even when the other tracks scored well. 
 
+## Inspecting agentic prompts
+
+In agentic mode (`claude-code-agentic` / `codex-agentic`) each iteration runs
+`claude -p` inside `worktrees/<agent>/`, and Claude Code logs the full session.
+To see exactly what an agent was told and did:
+
+```bash
+python3 scripts/show_agent_session.py <agent> --list   # list that agent's sessions, newest first
+python3 scripts/show_agent_session.py <agent>          # render the newest one
+python3 scripts/show_agent_session.py <agent> --index 3  # an older run
+python3 scripts/show_agent_session.py <agent> --full   # don't truncate long blocks
+```
+
+A session is a full agentic trace, not just input→output text. You see, in order:
+
+- **SYSTEM** — the swarm's stable rules (`worktrees/<agent>/CLAUDE.md`). These
+  aren't in the raw session log — the harness folds them into the system prompt —
+  so the script prints the on-disk copy for you. (Claude Code's own base system
+  prompt isn't recoverable from a log; capture it with `claude --debug` on a live run.)
+- **USER** — the per-iteration prompt the swarm piped in (score, role, niche,
+  inspiration, task).
+- **thinking** — Claude's private reasoning before it acts (scratchpad
+  chain-of-thought, not shown to end users normally; surfaced here).
+- **ASSISTANT** — the text replies.
+- **⚙ TOOL CALL / └─ TOOL RESULT** — each `Read`/`Edit`/`Bash` the agent made and
+  what came back.
+
 ## Local files
 
 Swarm state lives on the server. Local files only tell this clone how to connect and run:
