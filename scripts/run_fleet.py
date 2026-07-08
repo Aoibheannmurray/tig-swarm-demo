@@ -109,6 +109,12 @@ _AGENT_CONFIG_KEYS = (
     # spawn AND re-synced live by the monitor loop so editing it in
     # fleet.config.json takes effect on the agent's next iteration.
     "role",
+    # Contributor-owned seeding override (true/false; omit for auto). true:
+    # fresh trajectories start from working code (seed pool → best peer →
+    # stub); false: always the bare stub. Absent, the server decides by model
+    # tier/role (frontier explorers get the stub on CPU challenges, everyone
+    # else a seed). Hot-reloads like `role`.
+    "seeded_start",
     # API-mode edit strategy for SINGLE-FILE algorithms: "full" (default,
     # whole-file replacement) or "search_replace" (soft SEARCH/REPLACE blocks).
     # Multi-file algorithms and exploiters always use search/replace regardless.
@@ -138,9 +144,10 @@ _FLEET_WIDE_DEFAULT_KEYS = (
 )
 
 # Fleet-entry fields the monitor loop re-syncs into a running worktree's
-# agent.config.json when they change. Only role is hot-reloadable today —
-# identity/provider/model are fixed for the life of a process.
-_HOT_RELOAD_KEYS = ("role",)
+# agent.config.json when they change. Only role and seeded_start are
+# hot-reloadable today — identity/provider/model are fixed for the life of
+# a process.
+_HOT_RELOAD_KEYS = ("role", "seeded_start")
 
 _PROVIDER_TO_DEFAULT_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -695,8 +702,8 @@ def cmd_clean(agents: list[dict]) -> int:
 def _sync_hot_reload_to_worktrees(
     agents: list[dict], entries: dict[str, dict] | None = None,
 ) -> None:
-    """Patch hot-reloadable fields (role) into each running worktree's
-    agent.config.json when they've changed.
+    """Patch hot-reloadable fields (role, seeded_start) into each running
+    worktree's agent.config.json when they've changed.
 
     Desired values come from `entries` (name→entry) when provided — the
     server-hosted plan in `config_source: server` mode — otherwise from the
@@ -728,13 +735,13 @@ def _sync_hot_reload_to_worktrees(
             continue
         if not isinstance(current, dict):
             continue
-        changed = False
+        changed_keys = []
         for key in _HOT_RELOAD_KEYS:
             desired = entry.get(key)
             if desired is not None and current.get(key) != desired:
                 current[key] = desired
-                changed = True
-        if changed:
+                changed_keys.append(key)
+        if changed_keys:
             try:
                 # run_loop may have registered and persisted agent_id/name/
                 # token between our read above and this write — re-read and
@@ -749,9 +756,12 @@ def _sync_hot_reload_to_worktrees(
                         if latest.get(ident_key) and not current.get(ident_key):
                             current[ident_key] = latest[ident_key]
                 _write_json_atomic(wt_cfg_path, current)
-                print(f"  [fleet] {name}: role -> {current.get('role')}")
+                synced = ", ".join(
+                    f"{k} -> {current.get(k)}" for k in changed_keys
+                )
+                print(f"  [fleet] {name}: {synced}")
             except OSError as e:
-                print(f"  [fleet] {name}: role sync failed: {e}", file=sys.stderr)
+                print(f"  [fleet] {name}: hot-reload sync failed: {e}", file=sys.stderr)
 
 
 def cmd_run(

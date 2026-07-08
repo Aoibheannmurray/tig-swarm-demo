@@ -145,6 +145,24 @@ def _normalize_role(value: object) -> str:
     worktree's agent.config.json) and re-read every iteration so edits take
     effect live. Anything unrecognized is an explorer — today's behavior."""
     return "exploiter" if str(value or "").strip().lower() == "exploiter" else "explorer"
+
+
+def _normalize_seeded_start(value: object) -> bool | None:
+    """Map a config `seeded_start` value to True / False / None (= auto).
+
+    Contributor-owned like `role` (fleet.config.json, hot-reloads) and re-read
+    every iteration. True forces fresh trajectories to start from working code
+    (seed pool → best peer → stub), False forces the bare stub, absent/None
+    leaves the server's tier/role policy in charge. JSON booleans arrive as
+    bool; be forgiving about "true"/"false" strings too."""
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    return None
 # Skip the LLM re-describe call when the post-fix code is this similar to
 # the pre-fix code — the fix was almost certainly cosmetic (bounds checks,
 # error wrappers) and not worth a round-trip to confirm "no change".
@@ -1918,6 +1936,12 @@ def main() -> int:
     role = _normalize_role(agent_config.get("role"))
     print(f"Role: {role}")
 
+    # Contributor-owned seeding override, same lifecycle as role (hot-reloads
+    # from fleet.config.json via run_fleet's sync). None = server auto policy.
+    seeded_start = _normalize_seeded_start(agent_config.get("seeded_start"))
+    if seeded_start is not None:
+        print(f"Seeded start: {seeded_start}")
+
     # The hyperparameter-search gate's inputs (improvement history + parent
     # config) come from /api/state each iteration — keyed by trajectory_id, so
     # they survive restarts and adoption out of the inactive pool. See
@@ -1958,6 +1982,10 @@ def main() -> int:
         if live_role != role:
             print(f"  [ROLE] role changed: {role} -> {live_role}")
             role = live_role
+        live_seeded = _normalize_seeded_start(_agent_cfg.get("seeded_start"))
+        if live_seeded != seeded_start:
+            print(f"  [SEED] seeded_start changed: {seeded_start} -> {live_seeded}")
+            seeded_start = live_seeded
 
         # Surface host-tunable HPO + cleaner knobs (materialized into
         # agent.config.json from fleet.config.json) onto `config`, which the
@@ -1980,7 +2008,10 @@ def main() -> int:
         # ── Get state ──────────────────────────────────────────
         print("  [STATE] Fetching agent state…")
         try:
-            state = get_state(server, agent_id, role=role, agent_token=agent_token)
+            state = get_state(
+                server, agent_id, role=role,
+                seeded_start=seeded_start, agent_token=agent_token,
+            )
         except Exception as e:
             print(f"  [STATE] FAILED: {e}")
             time.sleep(_ITERATION_BACKOFF_SECS)

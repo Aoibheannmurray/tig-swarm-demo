@@ -1,6 +1,7 @@
 import json
 import asyncio
 import contextvars
+import functools
 import logging
 import os
 import random
@@ -209,7 +210,7 @@ _row_files = db.row_files
 
 async def seed_for_agent(
     conn, agent_id: str, challenge: str, tier: str, role: str,
-    *, direction: str, cutoff_ts: str,
+    *, direction: str, cutoff_ts: str, seeded: bool | None = None,
 ) -> tuple[str, str, dict | None, str]:
     """Pick the starting code for an agent on a fresh trajectory.
 
@@ -221,6 +222,11 @@ async def seed_for_agent(
     working-code path is a fallback chain:
       seed pool (diverse per-agent assignment) → best active peer → stub.
 
+    `seeded` is the contributor-owned per-agent override (`seeded_start` in
+    fleet.config.json, reported on each /api/state poll like `role`): True
+    forces the working-code chain, False forces the stub, None (absent)
+    keeps the tier/role/GPU policy above.
+
     Returns (algorithm_code, kernel_code, algorithm_files, start) where
     `algorithm_files` is the multi-file map (or None for single-file) and
     `start` is one of 'seed' | 'peer' | 'stub' for the dashboard.
@@ -230,7 +236,10 @@ async def seed_for_agent(
     # handing them a working seed gets the whole fleet off the ground faster.
     ch_def = challenges.CHALLENGES.get(challenge)
     is_gpu = ch_def.is_gpu if ch_def else False
-    needs_seed = is_gpu or (tier == "standard") or (role == "exploiter")
+    if seeded is None:
+        needs_seed = is_gpu or (tier == "standard") or (role == "exploiter")
+    else:
+        needs_seed = seeded
     if not needs_seed:
         code, kernel = await load_initial_algorithm(challenge)
         return code, kernel, None, "stub"
@@ -1174,6 +1183,7 @@ async def get_state(
     agent_id: str | None = None,
     challenge: str | None = None,
     role: str | None = None,
+    seeded_start: str | None = None,
     token_agent_id: str | None = Depends(optional_agent_token),
 ):
     """Return current swarm state for the given challenge.
@@ -1204,7 +1214,7 @@ async def get_state(
         require_token_matches(token_agent_id, agent_id)
     challenge = await resolve_challenge(challenge)
     if agent_id is not None:
-        return await _agent_state(agent_id, challenge, role)
+        return await _agent_state(agent_id, challenge, role, seeded_start)
     return await _dashboard_state(challenge)
 
 
@@ -1252,7 +1262,9 @@ async def _recent_hypotheses(
     return [dict(row) for row in await cursor.fetchall()]
 
 
-async def _agent_state(agent_id: str, challenge: str, role: str | None) -> dict:
+async def _agent_state(
+    agent_id: str, challenge: str, role: str | None, seeded_start: str | None = None,
+) -> dict:
     """Authenticated per-agent view of /api/state.
 
     Mutates state: bumps the agent's heartbeat / per-challenge
@@ -1299,6 +1311,12 @@ async def _agent_state(agent_id: str, challenge: str, role: str | None) -> dict:
         # anything unrecognized (or absent) is an explorer — today's
         # default behavior.
         agent_role = "exploiter" if (role or "").strip().lower() == "exploiter" else "explorer"
+        # Like role, `seeded_start` is contributor-owned and reported each
+        # poll: 'true'/'false' override the tier/role seeding policy in
+        # seed_for_agent; anything else (or absent) means "auto".
+        agent_seeded = {"true": True, "false": False}.get(
+            (seeded_start or "").strip().lower()
+        )
 
         # ── Trajectory reset on stagnation_limit ──
         # The state machine itself (deactivate → adopt/fresh-start →
@@ -1343,7 +1361,8 @@ async def _agent_state(agent_id: str, challenge: str, role: str | None) -> dict:
                 stagnation_limit=stagnation_limit,
                 negative_trajectory_limit=negative_limit,
                 agent_tier=agent_tier, agent_role=agent_role,
-                seed_fn=seed_for_agent, timestamp=now(),
+                seed_fn=functools.partial(seed_for_agent, seeded=agent_seeded),
+                timestamp=now(),
             )
             if reset is None:
                 # Lost the reset race: a concurrent /api/state call already
@@ -1382,7 +1401,7 @@ async def _agent_state(agent_id: str, challenge: str, role: str | None) -> dict:
             else:
                 traj_best_code, traj_best_kernel_code, traj_best_files, _start = await seed_for_agent(
                     conn, agent_id, challenge, agent_tier, agent_role,
-                    direction=direction, cutoff_ts=cutoff_ts,
+                    direction=direction, cutoff_ts=cutoff_ts, seeded=agent_seeded,
                 )
                 seed_start = _start
             current_trajectory_best = traj_best["score"] if traj_best else None

@@ -126,6 +126,7 @@ Per-agent fields:
 | `api_base`         | Optional override of the provider's base URL, e.g. `https://openrouter.ai/api/v1`.                                                                                                                                         |
 | `detailed_prompts` | Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile.                                                                                                |
 | `role`             | `explorer` writes novel/ambitious algorithms; `exploiter` makes small focused localized edits. **Hot-editable** — change it in `fleet.config.json` while the fleet runs and it takes effect on the agent's next iteration. |
+| `seeded_start`     | Optional `true`/`false` override of where the agent starts a fresh trajectory. `true`: start from working code (server seed pool → best active peer → stub as fallback); `false`: always start from the bare stub. Omit for the default policy: frontier explorers bootstrap from the stub on CPU challenges, everyone else (and all GPU challenges) gets working code. **Hot-editable** like `role`; applies at the next fresh trajectory (registration or stagnation reset), not mid-trajectory. |
 
 
 
