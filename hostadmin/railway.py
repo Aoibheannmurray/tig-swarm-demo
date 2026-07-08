@@ -343,8 +343,24 @@ def _railway_add_volume(service: str, mount_path: str) -> None:
     raise RailwayError(f"railway volume add failed: {msg}")
 
 
+def _ensure_upload_snapshot_targets() -> None:
+    """Make sure `railway up` can pack the repo into its upload snapshot.
+
+    `server/static` is a git-tracked symlink to `../dashboard/dist` (so a
+    locally-run server serves the built dashboard). On a fresh clone the
+    dashboard has never been built, the symlink dangles, and the Railway
+    CLI's snapshot packer aborts with "IO error ... No such file or
+    directory (os error 2)". An empty dir is enough — the Docker build
+    compiles the real dashboard inside the image."""
+    dist = ROOT / "dashboard" / "dist"
+    if not dist.exists():
+        print(f"  creating empty {dist.relative_to(ROOT)}/ (server/static symlink target)")
+        dist.mkdir(parents=True, exist_ok=True)
+
+
 def _railway_up(service: str) -> None:
     """Deploy. --ci streams build logs and blocks until SUCCESS / FAILED."""
+    _ensure_upload_snapshot_targets()
     # Inherit stdout/stderr so the user sees build logs as they stream.
     result = sp.run(
         ["railway", "up", "--service", service, "--ci"],
