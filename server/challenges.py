@@ -32,7 +32,6 @@ class ChallengeDef:
     scoring_direction: Literal["min", "max"]
     track_keys: tuple[str, ...]
     strategy_tags: tuple[str, ...]
-    default_timeout: int = 30
     is_gpu: bool = False
 
 
@@ -51,7 +50,6 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=300,
     ),
     "vehicle_routing": ChallengeDef(
         name="vehicle_routing",
@@ -68,7 +66,6 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "constraint_relaxation", "decomposition", "hybrid",
             "data_structure", "other",
         ),
-        default_timeout=260,
     ),
     "knapsack": ChallengeDef(
         name="knapsack",
@@ -84,7 +81,6 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "dp", "branch_and_bound", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
     ),
     "job_scheduling": ChallengeDef(
         name="job_scheduling",
@@ -101,7 +97,6 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "constraint_relaxation", "decomposition", "hybrid",
             "data_structure", "other",
         ),
-        default_timeout=260,
     ),
     "energy_arbitrage": ChallengeDef(
         name="energy_arbitrage",
@@ -132,7 +127,6 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
         is_gpu=True,
     ),
     "neuralnet_optimizer": ChallengeDef(
@@ -150,7 +144,6 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "lookahead", "second_order", "kernel_optimization", "hyperparameters",
             "code_optimization", "hybrid", "other",
         ),
-        default_timeout=120,
         is_gpu=True,
     ),
     "vector_search": ChallengeDef(
@@ -167,7 +160,6 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
         is_gpu=True,
     ),
 }
