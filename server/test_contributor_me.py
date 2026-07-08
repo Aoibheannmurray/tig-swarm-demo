@@ -68,6 +68,9 @@ async def test_valid_invite():
     assert me["swarm_name"] == "test-swarm", me
     assert me["active_challenge"] == "satisfiability", me
     assert me["swarm_type"] in ("cpu", "gpu"), me
+    # runner_url is present (empty when no hosted runner is configured), so the
+    # join page can decide whether to offer the cloud tier.
+    assert me["runner_url"] == "", me
     print("PASS test_valid_invite")
 
 

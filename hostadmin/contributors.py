@@ -208,12 +208,47 @@ def run_revoke(username: str) -> int:
         revoked.append(username)
         admin["revoked_contributors"] = revoked
         write_swarm_admin(admin)
+
+    # If a hosted runner is configured, tear down the contributor's cloud fleet
+    # and purge their stored keys too (best-effort — a revoke on the
+    # coordination server already stops their agents authenticating). The
+    # admin_key doubles as the runner's RUNNER_ADMIN_KEY.
+    runner_teardown = _revoke_hosted_fleet(admin, admin_key, username)
+
     print()
     print(f"  Revoked:        {username}")
     print(f"  Agents stopped: {result.get('agents_invalidated', 0)}")
+    if runner_teardown is not None:
+        print(f"  Hosted fleet:   {runner_teardown}")
     print(f"  Future register attempts under this username will be rejected.")
     print()
     return 0
+
+
+def _revoke_hosted_fleet(admin: dict, admin_key: str, username: str) -> str | None:
+    """Best-effort teardown of a contributor's hosted (Tier-1) fleet via the
+    runner's admin webhook. Returns a human status string, or None when no
+    runner is configured (the common case). Never fails the revoke."""
+    runner_url = (admin.get("runner_url") or "").strip().rstrip("/")
+    if not runner_url:
+        return None
+    import json
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        f"{runner_url}/api/runner/admin/revoke",
+        data=json.dumps({"username": username}).encode(),
+        headers={"Content-Type": "application/json", "X-Admin-Key": admin_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.load(resp)
+        return "stopped + keys purged" if body.get("was_running") else "no active fleet"
+    except urllib.error.HTTPError as e:
+        return f"runner returned HTTP {e.code}"
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        return f"runner unreachable ({e})"
 
 
 def run_list() -> int:

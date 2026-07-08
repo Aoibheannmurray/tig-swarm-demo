@@ -243,8 +243,18 @@ coordination server stays self-contained and never holds raw LLM keys.
 - **Revocation**: `setup.py revoke` already blocks registration and stops
   agents server-side; add a runner hook so revoke also tears down the hosted
   fleet and deletes stored keys.
-- **Observability**: runner streams per-agent logs (ring buffer) to the
-  contributor console over WS; the dashboard remains the scoreboard.
+- **Observability**: runner keeps a per-fleet log ring the console polls
+  (`GET /api/runner/logs`); the dashboard remains the scoreboard.
+- **Discovery + CORS**: the coordination server advertises the runner via a
+  `runner_url` config key, surfaced in `/api/contributor/me`; the join page
+  shows the cloud tier only when it's set. The browser calls the runner
+  cross-origin with the contributor header pair, so the runner allows the
+  coordination origin via CORS (custom headers, no cookies).
+
+Implemented as the `runner/` package (`runner.service:app`): `vault`
+(Fernet), `store` (own SQLite), `validation` (C3-only / no-agentic / caps),
+`auth` (delegates to `/api/contributor/me`), `supervisor` (keyed multi-fleet,
+`git clone --local` isolation, injectable launcher). See `runner/README.md`.
 
 ## 9. Host provisioning: what this plan assumes, and the browser-only path
 

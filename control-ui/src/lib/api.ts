@@ -124,6 +124,24 @@ export const hostedApi = {
     ).then(jsonOrThrow),
   providers: () => fetch(`${hostedBase()}/api/providers`).then(jsonOrThrow),
 
+  // Hosted runner (Tier 1) — a SEPARATE service at `runnerUrl`, called
+  // cross-origin with the same contributor credentials.
+  runnerStatus: (runnerUrl: string, username: string, password: string) =>
+    fetch(`${runnerUrl.replace(/\/$/, "")}/api/runner/status`, {
+      headers: contribHeaders(username, password),
+    }).then(jsonOrThrow),
+  runnerEnroll: (runnerUrl: string, username: string, password: string, keys: Record<string, string>) =>
+    fetch(`${runnerUrl.replace(/\/$/, "")}/api/runner/enroll`, {
+      method: "POST",
+      headers: { ...contribHeaders(username, password), "Content-Type": "application/json" },
+      body: JSON.stringify({ keys }),
+    }).then(jsonOrThrow),
+  runnerUnenroll: (runnerUrl: string, username: string, password: string) =>
+    fetch(`${runnerUrl.replace(/\/$/, "")}/api/runner/enroll`, {
+      method: "DELETE",
+      headers: contribHeaders(username, password),
+    }).then(jsonOrThrow),
+
   // admin_key-gated POSTs
   contributors: (adminKey: string) =>
     fetch(`${hostedBase()}/api/admin/contributors`, post({ admin_key: adminKey })).then(jsonOrThrow),

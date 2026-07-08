@@ -295,6 +295,10 @@ DEFAULT_CONFIG = {
     "owner_name": "",
     "swarm_type": "cpu",
     "hypothesis_recall_threshold": "3",
+    # Public URL of this swarm's hosted fleet runner (Tier 1), if the host
+    # deployed one. Empty = no cloud-run option; the join page then only
+    # offers the local runner. Set via POST /api/swarm_config (admin).
+    "runner_url": "",
 }
 
 

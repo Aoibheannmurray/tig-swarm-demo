@@ -863,6 +863,9 @@ async def contributor_me(
         "swarm_name": config.get("swarm_name") or "",
         "swarm_type": config.get("swarm_type", "cpu"),
         "active_challenge": config.get("active_challenge") or DEFAULT_CHALLENGE,
+        # Public URL of the hosted fleet runner, when the host deployed one —
+        # lets the join page offer the zero-install "run in the cloud" tier.
+        "runner_url": config.get("runner_url") or "",
     }
 
 
