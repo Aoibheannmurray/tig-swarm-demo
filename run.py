@@ -158,7 +158,12 @@ def _apply_join_link(link: str) -> None:
     tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, fleet_path)
     print(f"Joined {server_url} as {username}.")
-    print("Saved fleet.config.json — launching your fleet.\n")
+    # `--join <link> --ui` is the guided flow: credentials saved, then the
+    # local setup app opens (configure agents + keys there, launch from it).
+    if "--ui" in sys.argv:
+        print("Saved fleet.config.json — opening the setup app in your browser.\n")
+    else:
+        print("Saved fleet.config.json — launching your fleet.\n")
 
 
 def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:

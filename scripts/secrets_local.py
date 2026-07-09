@@ -99,7 +99,11 @@ def prompt_and_store(name: str, *, label: str | None = None) -> str | None:
     existing = resolve(name)
     if existing:
         return existing
-    if not sys.stdin.isatty():
+    # No prompting when stdin isn't interactive, OR when we're running under
+    # the web companion (TIG_SWARM_NO_PROMPT, set by control_server): its
+    # process often HAS a terminal, but the user is in the browser — an
+    # input() here would hang the fleet launch on an invisible prompt.
+    if not sys.stdin.isatty() or os.environ.get("TIG_SWARM_NO_PROMPT"):
         return None
     what = label or name
     try:

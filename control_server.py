@@ -201,7 +201,11 @@ class FleetController:
                     on_output=self._on_output,
                     on_status=self._on_status,
                 )
-            except Exception as exc:  # surface, don't crash the server
+            except (Exception, SystemExit) as exc:  # surface, don't crash the server
+                # SystemExit too: cmd_run's key resolution (_resolve_api_key)
+                # exits with an actionable message when a key is missing — a
+                # bare `except Exception` would let that kill this thread
+                # silently and leave the UI stuck on "starting".
                 self._on_status("error", {"error": f"{type(exc).__name__}: {exc}"})
 
         self._thread = threading.Thread(target=_target, daemon=True)
@@ -512,6 +516,11 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return fleet.start(only=only)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
+        except SystemExit as exc:
+            # run_fleet._load_fleet is CLI-oriented and exits with an
+            # actionable message (e.g. server-sourced config with no agents
+            # saved yet). Surface it as a 400, not a 500 traceback.
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     @app.post("/local-api/fleet/stop")
     async def fleet_stop() -> dict:
@@ -788,6 +797,12 @@ def main() -> int:
     p.add_argument("--no-browser", action="store_true",
                    help="Don't auto-open a browser tab.")
     args = p.parse_args()
+
+    # The user drives everything from the browser; this process's terminal may
+    # exist but nobody is watching it. Tell secrets_local never to input() —
+    # a missing key must fail fast with "add it in the Keys panel", not hang
+    # the fleet launch on an invisible terminal prompt.
+    os.environ["TIG_SWARM_NO_PROMPT"] = "1"
 
     # Binding anything other than loopback exposes host credentials and fleet
     # controls to the network. Treat it as an explicit opt-out of the

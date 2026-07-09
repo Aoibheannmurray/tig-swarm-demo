@@ -54,34 +54,35 @@ Requirements:
 ### Join with a link (easiest)
 
 If your host sent you a **join link** (`https://<swarm>/join#u=…&p=…`), open it
-in a browser to configure your agents in the swarm's web console, then run one
-command in your clone:
+in a browser — the join page hands you a single command with the link already
+baked in. It fetches the swarm code (no manual clone) and opens the local
+**setup app** in your browser, where you pick your provider/models, paste your
+API keys (LLM + [C3](https://cthree.cloud/dashboard/settings); stored locally in
+a gitignored `secrets.local.json`, never uploaded), and click **Launch fleet**.
 
 ```bash
-python3 run.py --join "<paste-your-join-link>"
+# macOS / Linux (needs Python 3 + git)
+# NOTE: pinned to the server-onboarding branch until it merges to main —
+# then use .../main/deploy/get-swarm.py and drop --branch.
+curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py \
+  | python3 - join "<your-join-link>" --ui --branch server-onboarding
 ```
 
-This fetches the fleet you configured from the server and launches it. You're
-prompted once for any API key it needs (your provider key, and a
-[C3](https://cthree.cloud/dashboard/settings) key for cloud benchmarking) — the
-keys are saved locally to a gitignored `secrets.local.json`, so there's no
-`export` step and no editing config files. Change your fleet anytime in the web
-console; a running fleet picks up role changes on its own.
+```powershell
+# Windows (PowerShell or cmd; try `py` if `python` isn't recognized)
+curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py | python - join "<your-join-link>" --ui --branch server-onboarding
+```
 
-**Nothing installed at all?** The join page can also run your fleet in the
-cloud (Tier 1) if the host enabled it — pick **Run in the cloud**, paste your
-keys, done. Or run without cloning the repo:
+Headless variants (no setup app — configure your fleet in the swarm's web
+console under **My fleet** first):
 
 ```bash
-# one-liner (needs Python 3 + git)
-# NOTE: pinned to the server-onboarding branch until it merges to main —
-# then use .../main/deploy/get-swarm.py and drop TIG_SWARM_BRANCH.
-curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py \
-  | TIG_SWARM_BRANCH=server-onboarding python3 - join "<your-join-link>"
+# same command without --ui: fetches your server-side fleet config and launches
+curl -fsSL .../get-swarm.py | python3 - join "<your-join-link>" --branch server-onboarding
 
-# or in a container (needs only Docker)
+# or in a container (needs only Docker; keys as env vars)
 docker run --rm -e TIG_JOIN_LINK="<your-join-link>" \
-  -e ANTHROPIC_API_KEY=sk-… -e C3_API_KEY=c3-… \
+  -e OPENROUTER_API_KEY=sk-… -e C3_API_KEY=c3-… \
   ghcr.io/Aoibheannmurray/tig-swarm-contributor
 ```
 

@@ -58,10 +58,19 @@
 
   // Capability probe (Docker / C3) so we can guide instead of failing mid-run.
   let preflight: any = $state(null);
-  const c3Ready = $derived(
-    (!!preflight && (preflight.c3.key_in_env || preflight.c3.cli_installed))
-      || !!c3ApiKey.trim() || !!secrets["C3_API_KEY"]?.set,
+  // The `c3` binary is REQUIRED for C3 compute — it performs the deploys; an
+  // API key only authenticates it. So "ready" needs the CLI installed, plus
+  // some auth source (env key, stored key, key typed here, or `c3 login`).
+  const c3CliInstalled = $derived(!!preflight?.c3?.cli_installed);
+  const c3HasAuth = $derived(
+    !!preflight?.c3?.key_in_env || !!c3ApiKey.trim() || !!secrets["C3_API_KEY"]?.set,
   );
+  // `c3 login` sessions aren't detectable, so CLI-installed counts as ready
+  // (the banner still nudges toward a key / login); CLI-missing never does.
+  const c3Ready = $derived(c3CliInstalled);
+  async function recheckPreflight() {
+    try { preflight = await localApi.preflight(); } catch { /* keep last */ }
+  }
   const dockerInstalled = $derived(!!preflight && preflight.docker.installed);
 
   // ── API keys (stored locally in secrets.local.json — no `export` needed) ──
@@ -271,22 +280,26 @@
     <!-- Readiness: guide the user to the prerequisites for the chosen backend
          instead of letting the fleet fail mid-run. -->
     {#if compute === "c3"}
-      {#if c3Ready}
+      {#if preflight && !c3CliInstalled}
+        <div class="banner warn">
+          <b>Install the c3 CLI</b> — C3 benchmarking needs it even with an API
+          key (the CLI submits the jobs). Run this in a terminal, then Recheck:
+          <div class="mono" style="margin:8px 0;padding:8px 10px;border-radius:6px;background:var(--bg-sunken,rgba(127,127,127,.12))">curl -fsSL https://cthree.cloud/install.sh | sh</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button onclick={recheckPreflight}>↻ Recheck</button>
+            <span class="hint" style="margin:0">Windows: no native c3 CLI — use WSL, or
+              {#if dockerInstalled}switch to <b>Local Docker</b> above.{:else}install Docker Desktop and switch to <b>Local Docker</b>.{/if}
+            </span>
+          </div>
+        </div>
+      {:else if c3Ready}
         <div class="banner ok">
           C3 is ready — {preflight?.c3.key_in_env
             ? "C3_API_KEY detected in your environment."
-            : c3ApiKey.trim()
-              ? "using the key you entered below."
-              : "the c3 CLI is installed (log in with c3 login if you haven't)."}
+            : c3HasAuth
+              ? "using your saved/entered key."
+              : "the c3 CLI is installed (paste a key below, or run c3 login)."}
           No local Docker needed.
-        </div>
-      {:else if preflight}
-        <div class="banner warn">
-          C3 isn't set up yet. Paste a C3 API key below, <em>or</em> install the
-          c3 CLI (<span class="mono">https://cthree.cloud/install.sh</span>) and run
-          <span class="mono">c3 login</span>.
-          {#if dockerInstalled}<br />Docker <em>is</em> installed here, so you could
-            switch to <b>Local Docker</b> above instead.{/if}
         </div>
       {/if}
       <div class="field">
