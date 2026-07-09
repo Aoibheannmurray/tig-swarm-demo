@@ -382,12 +382,16 @@ def _time_budget_parts(challenge: str) -> tuple[str, str]:
         )
         return time_bullet, opt_contract
     time_bullet = (
-        "- Bounding is by FUEL, not wall-clock: your solver runs until it exhausts the\n"
-        "  challenge's fuel budget (instruction-counted, deterministic) or returns. Call\n"
-        "  `save_solution()` early with your first feasible solution, then keep improving\n"
-        "  and re-saving — the last saved solution is scored, and the runtime stops you\n"
-        "  at the fuel cap. Do NOT gate the loop on `std::time::Instant` / a wall-clock\n"
-        "  deadline: clock-based control flow makes fuel usage nondeterministic."
+        "- Bounding is by FUEL, not wall-clock: the solver runs until it exhausts the\n"
+        "  challenge's fuel budget (instruction-counted, deterministic) or returns. Have\n"
+        "  it call `save_solution()` early with the first feasible solution, then keep\n"
+        "  improving and re-saving — the last saved solution is scored, and the runtime\n"
+        "  stops it at the fuel cap. Returning early is fine when an algorithmic stopping\n"
+        "  condition shows the search has converged (a proven-optimal exact solution, or\n"
+        "  no improvement over many iterations) — but base that on the solution state,\n"
+        "  not on `std::time::Instant` / a wall-clock deadline, which makes fuel usage\n"
+        "  nondeterministic. Otherwise, letting it keep refining until the fuel cap is\n"
+        "  usually the safer default."
     )
     return time_bullet, ""
 

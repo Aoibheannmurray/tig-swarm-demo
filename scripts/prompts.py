@@ -716,13 +716,16 @@ def _fuel_budget_guidance(config: dict) -> str:
             "deterministic."
         )
     return (
-        "\nBounding is by FUEL, not wall-clock: your solver runs until it exhausts the "
-        "challenge's fuel budget (instruction-counted, deterministic) or returns. Call "
-        "save_solution() early with your first feasible solution, then keep improving and "
-        "re-saving — the last saved solution is scored. Do NOT self-terminate on a wall-clock "
-        "deadline and do NOT branch on std::time::Instant / SystemTime: clock-based control "
-        "flow makes fuel usage nondeterministic. If nothing is saved before fuel runs out, "
-        "the instance counts as infeasible."
+        "\nBounding is by FUEL, not wall-clock: the solver runs until it exhausts the "
+        "challenge's fuel budget (instruction-counted, deterministic) or returns. Have it call "
+        "save_solution() early with the first feasible solution, then keep improving and "
+        "re-saving — the last saved solution is scored. Returning early is fine when an "
+        "algorithmic stopping condition shows the search has converged (a proven-optimal exact "
+        "solution, or no improvement over many iterations), but base that on the solution "
+        "state, not on a wall-clock deadline / std::time::Instant / SystemTime, which makes "
+        "fuel usage nondeterministic. Otherwise, letting it keep refining until the fuel cap is "
+        "usually the safer default. If nothing is saved before fuel runs out, the instance "
+        "counts as infeasible."
     )
 
 
