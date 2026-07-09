@@ -768,6 +768,30 @@ def _load_tig_combined(stage: Path) -> tuple[dict | None, str]:
         return None, f"combined.json not parseable: {e}"
 
 
+def _stale_cli_error(output: str) -> str | None:
+    """Detect a `.c3` schema rejection from an OUTDATED c3 CLI (e.g. `field
+    hardware not found in type data.C3Config`, `field requires_accelerator not
+    found in type data.DockerConfig`).
+
+    This is an environment problem, not a code problem — without this
+    translation the raw YAML unmarshal error looks like a build failure, the
+    loop wastes LLM calls "fixing" Rust that isn't broken, and the contributor
+    is left decoding Go struct names. The returned message starts with a
+    marker run_loop's infra_markers matches, so the LLM-fix retry is skipped.
+    The c3 binary is NOT a Python dependency: no requirements.txt updates it —
+    only re-running C3's own installer does."""
+    if "not found in type data." not in output:
+        return None
+    return (
+        "c3 CLI is out of date — it doesn't understand this project's .c3 "
+        "config fields.\n"
+        "  Update it:    curl -fsSL https://cthree.cloud/install.sh | sh\n"
+        "  Then verify:  which -a c3    (an old copy earlier on PATH wins —\n"
+        "                remove it or re-open your terminal), then relaunch.\n"
+        f"  The CLI said: {output[-400:]}"
+    )
+
+
 def _run_one_c3_shard(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
 ) -> tuple[dict | None, str]:
@@ -791,6 +815,9 @@ def _run_one_c3_shard(
     proc.wait()
     combined = "\n".join(lines)
     if proc.returncode != 0:
+        stale = _stale_cli_error(combined)
+        if stale:
+            return None, stale
         return None, f"c3 deploy failed ({proc.returncode}):\n{combined[-2000:]}"
 
     job_id = _parse_c3_id(combined)

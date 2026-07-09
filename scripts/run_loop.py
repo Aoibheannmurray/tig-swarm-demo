@@ -837,7 +837,8 @@ def _benchmark_with_compile_fix(
         if bench is not None:
             return bench, "", code_changed, input_tokens, output_tokens
 
-        infra_markers = ["401", "API Error", "c3 CLI not found", "Docker image",
+        infra_markers = ["401", "API Error", "c3 CLI not found",
+                         "c3 CLI is out of date", "Docker image",
                          "Could not parse job ID", "timeout", "403", "500"]
         if any(m in build_err for m in infra_markers):
             print(f"  [BENCH] INFRASTRUCTURE ERROR (not a code problem):")
