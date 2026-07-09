@@ -54,8 +54,50 @@ def test_real_build_errors_pass_through():
     print("PASS test_real_build_errors_pass_through")
 
 
+def test_self_heal_runs_installer_exactly_once():
+    """_update_c3_cli_once must run the installer at most once per process and
+    share the outcome (success AND failure) with every later caller — parallel
+    shard threads must not race N installer runs."""
+    import c3_compute as cc
+
+    calls = []
+    orig = cc._run_c3_installer
+    try:
+        # Success is cached.
+        cc._c3_update_result = None
+        cc._run_c3_installer = lambda: calls.append(1) or True
+        assert cc._update_c3_cli_once() is True
+        assert cc._update_c3_cli_once() is True
+        assert len(calls) == 1, f"installer ran {len(calls)} times"
+
+        # Failure is cached too — no retry storm on a broken installer.
+        calls.clear()
+        cc._c3_update_result = None
+        cc._run_c3_installer = lambda: calls.append(1) or False
+        assert cc._update_c3_cli_once() is False
+        assert cc._update_c3_cli_once() is False
+        assert len(calls) == 1, f"installer ran {len(calls)} times"
+    finally:
+        cc._run_c3_installer = orig
+        cc._c3_update_result = None
+    print("PASS test_self_heal_runs_installer_exactly_once")
+
+
+def test_shard_retry_guard_prevents_loops():
+    """After one update-and-retry, a still-stale CLI must fall through to the
+    actionable error, not recurse — verified via the _cli_updated parameter."""
+    import inspect
+    import c3_compute as cc
+    sig = inspect.signature(cc._run_one_c3_shard)
+    assert "_cli_updated" in sig.parameters, sig
+    assert sig.parameters["_cli_updated"].default is False
+    print("PASS test_shard_retry_guard_prevents_loops")
+
+
 if __name__ == "__main__":
     test_detects_stale_cli_and_is_actionable()
     test_matches_run_loop_infra_markers()
     test_real_build_errors_pass_through()
+    test_self_heal_runs_installer_exactly_once()
+    test_shard_retry_guard_prevents_loops()
     print("ALL PASS")

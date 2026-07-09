@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
 import re
 import shlex
 import shutil
@@ -792,12 +793,58 @@ def _stale_cli_error(output: str) -> str | None:
     )
 
 
+# ── Stale-CLI self-heal ──
+# When _stale_cli_error fires, run C3's official installer once and retry the
+# deploy in place, instead of failing the benchmark and telling the user to do
+# it. Shards deploy from parallel threads, so the outcome is computed once
+# under a lock and shared — later callers reuse it rather than racing the
+# installer.
+_c3_update_lock = threading.Lock()
+_c3_update_result: bool | None = None  # None = not attempted this process
+
+
+def _run_c3_installer() -> bool:
+    """Run C3's official installer (`curl … install.sh | sh`) to update the
+    CLI in place. macOS/Linux only — there's no Windows c3 — and needs curl +
+    sh on PATH. Returns True when the installer exits 0."""
+    if os.name == "nt" or shutil.which("curl") is None or shutil.which("sh") is None:
+        return False
+    print("    [C3] c3 CLI is out of date — running the official installer to update it…")
+    try:
+        result = subprocess.run(
+            ["sh", "-c", "curl -fsSL https://cthree.cloud/install.sh | sh"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"    [C3] installer failed to run ({e})")
+        return False
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip()[-300:]
+        print(f"    [C3] installer exited {result.returncode}: {tail}")
+        return False
+    print("    [C3] c3 CLI updated — retrying the deploy.")
+    return True
+
+
+def _update_c3_cli_once() -> bool:
+    global _c3_update_result
+    with _c3_update_lock:
+        if _c3_update_result is None:
+            _c3_update_result = _run_c3_installer()
+        return _c3_update_result
+
+
 def _run_one_c3_shard(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
+    _cli_updated: bool = False,
 ) -> tuple[dict | None, str]:
     """Deploy one already-staged shard job, poll it, pull artifacts, and return
     its raw ``combined.json`` dict (unadapted — the orchestrator merges + scores
-    all shards together). ``stage`` must already contain the `.c3` + runner."""
+    all shards together). ``stage`` must already contain the `.c3` + runner.
+
+    `_cli_updated` is the self-heal recursion guard: after one
+    update-and-retry, a still-stale CLI falls through to the actionable error
+    (the likely cause then is an old copy shadowing the new one on PATH)."""
     cmd = ["c3", "deploy"]
     provider = _arg_value(args, "c3_provider")
     if provider:
@@ -817,6 +864,10 @@ def _run_one_c3_shard(
     if proc.returncode != 0:
         stale = _stale_cli_error(combined)
         if stale:
+            # Self-heal: update the CLI and retry this shard once. The stage
+            # dir is untouched by a failed deploy, so a straight re-run is safe.
+            if not _cli_updated and _update_c3_cli_once():
+                return _run_one_c3_shard(args, env, stage, label, _cli_updated=True)
             return None, stale
         return None, f"c3 deploy failed ({proc.returncode}):\n{combined[-2000:]}"
 
