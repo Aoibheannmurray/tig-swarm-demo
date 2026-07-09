@@ -46,6 +46,12 @@
   // when the provider can't use C3.
   let compute = $state("c3");
   let hardware = $state("auto");
+  // Behavior picks (both hot-editable later in fleet.config.json):
+  // role: how agents edit (explorer = novel rewrites, exploiter = focused
+  // tweaks); seeding: where a fresh trajectory starts (working code vs stub).
+  // "auto" defers to the tier/server defaults.
+  let role = $state("auto");
+  let seeding = $state("auto");
   let c3ApiKey = $state("");
   // API keys stored locally in secrets.local.json (no `export` needed).
   // Declared here (before c3Ready reads it) so the rune graph resolves.
@@ -140,6 +146,8 @@
         provider, model, count, prefix: prefix || undefined,
         compute, hardware: compute === "c3" ? hardware : undefined,
         c3_api_key: compute === "c3" ? c3ApiKey : undefined,
+        role: role === "auto" ? undefined : role,
+        seeded_start: seeding === "auto" ? undefined : seeding,
       };
       const res = await localApi.setFleetConfig(params);
       writtenConfig = res.config;
@@ -275,6 +283,31 @@
         <option value="local">Local Docker — runs benchmarks on this machine</option>
       </select>
       {#if !supportsC3}<div class="hint">This provider runs benchmarks locally (Docker).</div>{/if}
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="role">Agent role</label>
+        <select id="role" bind:value={role}>
+          <option value="auto">Auto — by model tier (recommended)</option>
+          <option value="explorer">Explorer — writes novel, ambitious algorithms</option>
+          <option value="exploiter">Exploiter — small focused edits to working code</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="seeding">Starting point</label>
+        <select id="seeding" bind:value={seeding}>
+          <option value="auto">Auto — server decides (recommended)</option>
+          <option value="seed">Seed — start from working code</option>
+          <option value="stub">Stub — start from scratch</option>
+        </select>
+      </div>
+    </div>
+    <div class="hint">
+      Both are hot-editable later in <code>fleet.config.json</code>
+      (<code>role</code> / <code>seeded_start</code>) — changes apply on the
+      agent's next iteration. “Starting point” takes effect when a fresh
+      trajectory begins, not mid-run.
     </div>
 
     <!-- Readiness: guide the user to the prerequisites for the chosen backend
