@@ -719,13 +719,14 @@ def _fuel_budget_guidance(config: dict) -> str:
         "\nBounding is by FUEL, not wall-clock: the solver runs until it exhausts the "
         "challenge's fuel budget (instruction-counted, deterministic) or returns. Have it call "
         "save_solution() early with the first feasible solution, then keep improving and "
-        "re-saving — the last saved solution is scored. Returning early is fine when an "
-        "algorithmic stopping condition shows the search has converged (a proven-optimal exact "
-        "solution, or no improvement over many iterations), but base that on the solution "
-        "state, not on a wall-clock deadline / std::time::Instant / SystemTime, which makes "
-        "fuel usage nondeterministic. Otherwise, letting it keep refining until the fuel cap is "
-        "usually the safer default. If nothing is saved before fuel runs out, the instance "
-        "counts as infeasible."
+        "re-saving — the last saved solution is scored. IMPLEMENT A STOPPING CONDITION — do NOT "
+        "just loop until the fuel cap: exhausting the whole budget to chase negligible gains "
+        "wastes compute and slows the swarm's iteration rate. Decide when the search has "
+        "effectively converged and return then; how you detect convergence is up to you. Judge "
+        "it from the solution state and the search's own progress, never from a wall-clock "
+        "deadline / std::time::Instant / SystemTime (that makes fuel usage nondeterministic). "
+        "Don't stop so eagerly that you leave real improvement on the table. If nothing is "
+        "saved before fuel runs out, the instance counts as infeasible."
     )
 
 
