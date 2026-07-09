@@ -4,13 +4,13 @@
   // (`<server>/join#u=<username>&p=<derived-password>`, built by
   // `setup.py invite` / the Admin Console). The credentials ride in the URL
   // fragment so they never reach server logs; we read them client-side,
-  // validate them against /api/contributor/me, then walk the contributor
-  // through getting their fleet running. See
+  // validate them against /api/contributor/me, and hand over ONE per-OS
+  // command. This page is deliberately just the doorway — everything after
+  // (fleet config, API keys, launch) happens in the LOCAL setup app the
+  // command opens, so keys and config never touch the host's server. See
   // docs/server-first-onboarding-plan.md §5.
   import { onMount } from "svelte";
   import Masthead from "../components/Masthead.svelte";
-  import FleetEditor from "./FleetEditor.svelte";
-  import AgentsPanel from "./AgentsPanel.svelte";
   import { hostedApi, buildJoinLink } from "../lib/api";
 
   // Public repo contributors clone to run a local fleet. Hosts running a
@@ -26,36 +26,6 @@
   let password = $state("");
   let showManual = $state(false);
   let copied = $state("");
-  let tab: "start" | "fleet" | "agents" | "tacit" = $state("start");
-
-  // ── Tacit knowledge (stored server-side alongside the fleet config) ──
-  let tacit = $state("");
-  let tacitLoaded = $state(false);
-  let tacitSaving = $state(false);
-  let tacitMsg = $state("");
-
-  async function loadTacit() {
-    if (tacitLoaded) return;
-    try {
-      const stored = await hostedApi.contributorConfigGet(username, password);
-      tacit = stored?.tacit ?? "";
-    } catch {
-      /* leave empty — saving still works */
-    }
-    tacitLoaded = true;
-  }
-
-  async function saveTacit() {
-    tacitMsg = ""; tacitSaving = true;
-    try {
-      await hostedApi.contributorConfigPut(username, password, { tacit });
-      tacitMsg = "Saved.";
-    } catch (e: any) {
-      tacitMsg = e.message;
-    } finally {
-      tacitSaving = false;
-    }
-  }
 
   onMount(async () => {
     const frag = new URLSearchParams(location.hash.slice(1));
@@ -135,10 +105,6 @@
       : `git clone -b ${BOOTSTRAP_REF} ${REPO_URL}.git && cd tig-swarm-demo`;
   const runJoinCmd = () =>
     `${osTab === "windows" ? "python" : "python3"} run.py --join "${joinLink()}" --ui`;
-  const dockerCmd = () =>
-    `docker run --rm -e TIG_JOIN_LINK="${joinLink()}" ` +
-    `-e OPENROUTER_API_KEY=sk-… -e C3_API_KEY=c3-… ` +
-    `ghcr.io/Aoibheannmurray/tig-swarm-contributor`;
 
   async function copy(text: string, tag: string) {
     await navigator.clipboard.writeText(text);
@@ -197,45 +163,7 @@
       </p>
     </div>
 
-    <nav class="tabs" style="max-width:640px;margin:16px auto 0">
-      <button class:active={tab === "start"} onclick={() => (tab = "start")}>Get started</button>
-      <button class:active={tab === "fleet"} onclick={() => (tab = "fleet")}>My fleet</button>
-      <button class:active={tab === "agents"} onclick={() => (tab = "agents")}>My agents</button>
-      <button class:active={tab === "tacit"} onclick={() => { tab = "tacit"; loadTacit(); }}>Tacit knowledge</button>
-    </nav>
-
-    {#if tab === "fleet"}
-      <div style="max-width:900px;margin:0 auto">
-        <FleetEditor {username} {password} />
-      </div>
-    {:else if tab === "agents"}
-      <div style="max-width:760px;margin:0 auto">
-        <AgentsPanel {username} {password} />
-      </div>
-    {:else if tab === "tacit"}
-      <div class="card" style="max-width:640px;margin:0 auto">
-        <h2>Tacit knowledge</h2>
-        <p class="lede">
-          Hints your agents see when they stagnate — strategies to try, dead
-          ends to avoid. Stored with your fleet plan on the swarm server.
-        </p>
-        <div class="field">
-          <label for="tk">Notes (one hint per line, `- ` bullets)</label>
-          <textarea id="tk" rows="10" bind:value={tacit}
-            placeholder="- try simulated annealing before giving up on a neighborhood"></textarea>
-        </div>
-        <div class="actions">
-          {#if tacitMsg}<span class="muted">{tacitMsg}</span>{/if}
-          <div class="spacer"></div>
-          <button class="primary" disabled={tacitSaving} onclick={saveTacit}>
-            {tacitSaving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </div>
-    {/if}
-
-    <div class="card" style="max-width:640px;margin:16px auto 0"
-         hidden={tab !== "start"}>
+    <div class="card" style="max-width:640px;margin:16px auto 0">
       <h2>Run agents on your machine</h2>
       <p class="lede">
         One command sets everything up: it fetches the swarm code, then opens a
@@ -290,22 +218,9 @@
           </li>
         </ol>
       </details>
-
-      <details style="margin-top:8px">
-        <summary>Run headless in Docker instead</summary>
-        <p class="lede" style="margin-top:8px">
-          No setup app: configure your agents in the <b>My fleet</b> tab first,
-          and pass your keys as environment variables (a container can't prompt):
-        </p>
-        <div class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{dockerCmd()}</div>
-        <button class="ghost" onclick={() => copy(dockerCmd(), "docker")}>
-          {copied === "docker" ? "Copied ✓" : "Copy"}
-        </button>
-      </details>
     </div>
 
-    <div class="card" style="max-width:640px;margin:16px auto 0"
-         hidden={tab !== "start"}>
+    <div class="card" style="max-width:640px;margin:16px auto 0">
       <button class="ghost" onclick={() => (showManual = !showManual)}>
         {showManual ? "▾" : "▸"} Manual / power-user flow
       </button>

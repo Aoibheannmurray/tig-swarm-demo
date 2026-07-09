@@ -39,6 +39,24 @@ def _generate_invite_slug(taken: set[str]) -> str:
     return f"contrib-{random.randint(10000, 99999)}"
 
 
+# Where contributors' machines fetch the bootstrap + code from. TEMP: pinned
+# to this branch until it merges to main — then set _BOOTSTRAP_REF = "main".
+# Keep in sync with BOOTSTRAP_REF in control-ui/src/join/App.svelte.
+_BOOTSTRAP_REF = "server-onboarding"
+_RAW_BASE = "https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo"
+
+
+def build_join_command(join_link: str) -> str:
+    """The ready-to-send macOS/Linux one-liner: fetches the code and opens the
+    local setup app with the contributor's credentials baked in. Mirrors what
+    the hosted /join page renders (which also carries the Windows variant)."""
+    branch = "" if _BOOTSTRAP_REF == "main" else f" --branch {_BOOTSTRAP_REF}"
+    return (
+        f"curl -fsSL {_RAW_BASE}/{_BOOTSTRAP_REF}/deploy/get-swarm.py | "
+        f'python3 - join "{join_link}" --ui{branch}'
+    )
+
+
 def build_join_link(server_url: str | None, username: str, derived: str) -> str | None:
     """One-link invite: `<server>/join#u=<username>&p=<derived>`.
 
@@ -108,8 +126,12 @@ def run_invite(username: str | None) -> int:
         print(f"  Join link (share this one line):")
         print(f"    {join_link}")
         print()
-        print("  It opens the swarm's join page with these credentials —")
-        print("  treat it like the password it contains.")
+        print("  It opens the swarm's join page, which hands them a one-paste")
+        print("  command for their OS. Treat it like the password it contains.")
+        print()
+        print("  Or send them the command directly (macOS/Linux; the join page")
+        print("  has the Windows variant):")
+        print(f"    {build_join_command(join_link)}")
     print()
     print(f'  "server_url": {json.dumps(server_url)},')
     print(f'  "username": {json.dumps(username)},')

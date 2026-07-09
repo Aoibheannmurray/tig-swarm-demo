@@ -88,41 +88,13 @@ export const hostedApi = {
 
   // Contributor-credential-gated (X-Username / X-Swarm-Password — the same
   // pair that gates agent registration). Used by the hosted /join page to
-  // validate an invite and describe the swarm.
+  // validate an invite and describe the swarm. (The wider /api/contributor/*
+  // config endpoints still exist server-side for headless runs, but the UI
+  // no longer surfaces them — config lives in the LOCAL setup app.)
   contributorMe: (username: string, password: string) =>
     fetch(`${hostedBase()}/api/contributor/me`, {
       headers: contribHeaders(username, password),
     }).then(jsonOrThrow),
-
-  // Server-stored fleet config (contributor console). GET resolves to null
-  // before the first save (the 404 is an expected state, not an error).
-  contributorConfigGet: async (username: string, password: string) => {
-    const res = await fetch(`${hostedBase()}/api/contributor/config`, {
-      headers: contribHeaders(username, password),
-    });
-    if (res.status === 404) return null;
-    return jsonOrThrow(res);
-  },
-  contributorConfigPut: (
-    username: string, password: string,
-    body: { config?: any; tacit?: string },
-  ) =>
-    fetch(`${hostedBase()}/api/contributor/config`, {
-      method: "PUT",
-      headers: { ...contribHeaders(username, password), "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(jsonOrThrow),
-  contributorAgents: (username: string, password: string) =>
-    fetch(`${hostedBase()}/api/contributor/agents`, {
-      headers: contribHeaders(username, password),
-    }).then(jsonOrThrow),
-  agentDefaults: (username: string, password: string, provider: string, model: string) =>
-    fetch(
-      `${hostedBase()}/api/contributor/agent_defaults` +
-        `?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
-      { headers: contribHeaders(username, password) },
-    ).then(jsonOrThrow),
-  providers: () => fetch(`${hostedBase()}/api/providers`).then(jsonOrThrow),
 
   // admin_key-gated POSTs
   contributors: (adminKey: string) =>

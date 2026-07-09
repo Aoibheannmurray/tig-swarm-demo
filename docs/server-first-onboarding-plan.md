@@ -150,6 +150,14 @@ instead of three pasted values, and the join page teaches the current flow.
 
 ## 6. P1 — hosted contributor console + server-stored fleet config
 
+> **Status update (2026-07-09):** after the cloud tier was disabled in the UI
+> and the local setup app (`run.py --join <link> --ui`) became the primary
+> contributor flow, the hosted console tabs built here (My fleet / My agents /
+> tacit editor) were removed from `/join` — two config surfaces where the
+> local one wins caused silent-no-op confusion. `/join` is now a slim landing
+> page (validate invite → per-OS command). The `/api/contributor/config`
+> endpoints remain as a dormant capability for headless runs.
+
 **Storage**: new table
 `contributor_configs(username TEXT PRIMARY KEY, config_json TEXT, updated_at TEXT)`.
 

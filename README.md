@@ -73,18 +73,9 @@ curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/serv
 curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py | python - join "<your-join-link>" --ui --branch server-onboarding
 ```
 
-Headless variants (no setup app — configure your fleet in the swarm's web
-console under **My fleet** first):
-
-```bash
-# same command without --ui: fetches your server-side fleet config and launches
-curl -fsSL .../get-swarm.py | python3 - join "<your-join-link>" --branch server-onboarding
-
-# or in a container (needs only Docker; keys as env vars)
-docker run --rm -e TIG_JOIN_LINK="<your-join-link>" \
-  -e OPENROUTER_API_KEY=sk-… -e C3_API_KEY=c3-… \
-  ghcr.io/Aoibheannmurray/tig-swarm-contributor
-```
+(Advanced: dropping `--ui` runs headless instead, fetching a fleet config
+stored server-side via the `/api/contributor/config` API — there's no UI for
+authoring that anymore, so most people want the setup-app flow above.)
 
 ### Local Web Setup
 
