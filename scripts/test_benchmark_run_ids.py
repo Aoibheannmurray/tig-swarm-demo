@@ -87,7 +87,7 @@ def test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
             stage,
             {"challenge": "hypergraph", "is_gpu": True, "c3_hardware": "auto"},
             "00:10:00",
-            "docker.io/danieltiagoadams/tig-dev-hypergraph:0.0.6",
+            "docker.io/danieltiagoadams/tig-bench-hypergraph:0.0.6",
             "test",
             None,
         )
@@ -99,19 +99,14 @@ def test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
 
 
 def test_tig_c3_default_image_resolution():
-    # All 8 challenges are C3-supported: CPU resolve to baked tig-bench-<ch>
-    # images; GPU + neuralnet_optimizer to raw tig-dev-<ch> mirrors. An unknown
-    # challenge still raises with the supported list.
+    # All 8 challenges are C3-supported and now resolve to the baked
+    # tig-bench-<ch> image — CPU and GPU alike (the raw tig-dev-<ch> path is
+    # retired). An unknown challenge still raises with the supported list.
     ver = c3_compute._bm_tig_version()
-    assert c3_compute._tig_c3_image({"challenge": "satisfiability"}).endswith(
-        "tig-bench-satisfiability:" + ver
-    )
-    assert c3_compute._tig_c3_image({"challenge": "hypergraph"}).endswith(
-        "tig-dev-hypergraph:" + ver
-    )
-    assert c3_compute._tig_c3_image({"challenge": "neuralnet_optimizer"}).endswith(
-        "tig-dev-neuralnet_optimizer:" + ver
-    )
+    for ch in ("satisfiability", "hypergraph", "neuralnet_optimizer", "vector_search"):
+        assert c3_compute._tig_c3_image({"challenge": ch}).endswith(
+            f"tig-bench-{ch}:" + ver
+        ), ch
     try:
         c3_compute._tig_c3_image({"challenge": "not_a_challenge"})
     except ValueError as exc:
@@ -121,12 +116,18 @@ def test_tig_c3_default_image_resolution():
     print("PASS test_tig_c3_default_image_resolution")
 
 
-def test_tig_source_upload_excludes_generated_outputs():
-    excludes = c3_compute._TIG_SOURCE_TAR_EXCLUDES
-    assert "./target" in excludes
-    assert "./.git" in excludes
-    assert "./tig-algorithms/lib" in excludes
-    print("PASS test_tig_source_upload_excludes_generated_outputs")
+def test_neuralnet_runner_assembles_boilerplate_without_source_upload():
+    # neuralnet is baked: the runner must concat the harness boilerplate onto the
+    # agent's hooks (local join, no monorepo upload) and inject into the /app slot.
+    # No runtime blinding (that is baked into the image) and no tig-source tree.
+    script = c3_compute._tig_runner_script(
+        {"challenge": "neuralnet_optimizer"}, "test", None
+    )
+    assert 'cat algorithm/mod.rs boilerplate.rs > "$SLOT/mod.rs"' in script
+    assert "SLOT=/app/tig-algorithms/src/neuralnet_optimizer/swarm_algo" in script
+    assert "blinded optimizer seed" not in script  # blinding is baked, not runtime
+    assert "tig-source" not in script               # no per-job source upload
+    print("PASS test_neuralnet_runner_assembles_boilerplate_without_source_upload")
 
 
 def _main():
@@ -138,7 +139,7 @@ def _main():
     test_benchmark_id_is_fresh_10_char_hex()
     test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge()
     test_tig_c3_default_image_resolution()
-    test_tig_source_upload_excludes_generated_outputs()
+    test_neuralnet_runner_assembles_boilerplate_without_source_upload()
     print("\nAll benchmark run-id tests passed.")
 
 

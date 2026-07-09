@@ -23,7 +23,6 @@ import argparse
 import json
 import os
 import re
-import shlex
 import shutil
 import random
 import subprocess
@@ -80,32 +79,27 @@ _DEPLOY_RETRY_SIGNATURES = (
 # image (see Dockerfile.bench / build_bench_image.sh). C3 pulls it (cached per
 # pool), injects ONLY the algorithm into the pre-baked swarm_algo slot, and
 # incremental-builds (seconds) — no per-job source upload, no cold compile.
+# Every challenge — CPU and GPU — is served by a *baked* custom image
+# (tig-bench-<ch>): the monorepo source + warm cargo cache + modified_test_algorithm
+# are pre-built into the image (see Dockerfile.bench / build_bench_image.sh). C3
+# pulls it (cached per pool), injects ONLY the algorithm into the pre-baked
+# swarm_algo slot, and incremental-builds in seconds — no per-job source upload, no
+# cold compile. The GPU challenges (vector_search, hypergraph, neuralnet_optimizer)
+# bake too: nvcc pre-builds their PTX at image-build time, and neuralnet's
+# seed-blinding anti-cheat is baked into tig-challenges by Dockerfile.bench (see
+# _NN_BOILERPLATE) rather than patched per job. The raw dev-image path (Option A,
+# per-job monorepo upload + cold compile) has been fully retired.
 _TIG_BAKED_CHALLENGES = frozenset({
     "satisfiability",
     "vehicle_routing",
     "knapsack",
     "job_scheduling",
     "energy_arbitrage",
-})
-# GPU challenges still use the raw dev image + per-job source upload (Option A).
-# neuralnet_optimizer is raw too: its C3 runner patches the pinned tig-challenges
-# source to blind the optimizer seed (anti-cheat) and assembles the harness
-# boilerplate, so it needs the uploaded source rather than a pre-baked slot.
-_TIG_RAW_CHALLENGES = frozenset({
     "vector_search",
     "hypergraph",
     "neuralnet_optimizer",
 })
-_SUPPORTED_TIG_C3_CHALLENGES = _TIG_BAKED_CHALLENGES | _TIG_RAW_CHALLENGES
-_TIG_SOURCE_TAR_EXCLUDES = (
-    "./target",
-    "./.git",
-    "./tig-algorithms/lib",
-)
-# Pinned TIG monorepo source (re-added into the uploaded workspace for the raw
-# Option-A path only; the dev image strips it). Baked challenges don't need this.
-# Default sibling dir; override with cfg["tig_monorepo_path"].
-_TIG_MONOREPO = ROOT.parent / "tig-monorepo"
+_SUPPORTED_TIG_C3_CHALLENGES = _TIG_BAKED_CHALLENGES
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -573,42 +567,18 @@ def _tig_c3_image(cfg: dict) -> str:
             f"currently supported: {supported}"
         )
     # Default namespace points at the TIG dev's public Docker Hub images
-    # (the prebuilt tig-bench-*/tig-dev-* mirrors); override with the
-    # `tig_dockerhub` config key or the TIG_DOCKERHUB env var.
+    # (the prebuilt tig-bench-* baked images); override with the `tig_dockerhub`
+    # config key or the TIG_DOCKERHUB env var.
     ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB", "danieltiagoadams")
-    if challenge in _TIG_BAKED_CHALLENGES:
-        return f"docker.io/{ns}/tig-bench-{challenge}:{_bm_tig_version()}"
-    return f"docker.io/{ns}/tig-dev-{challenge}:{_bm_tig_version()}"
+    return f"docker.io/{ns}/tig-bench-{challenge}:{_bm_tig_version()}"
 
 
 def _create_tig_workspace(stage: Path, cfg: dict) -> None:
     challenge = cfg["challenge"]
-    # Baked (Option B): the source is already in the image at /app; upload only
-    # the small driver + the agent's algorithm. No per-job source tar.
-    if challenge not in _TIG_BAKED_CHALLENGES:
-        monorepo = Path(cfg.get("tig_monorepo_path") or _TIG_MONOREPO)
-        if not (monorepo / "tig-algorithms").exists():
-            raise FileNotFoundError(f"pinned TIG monorepo source not found at {monorepo}")
-        src = stage / "tig-source"
-        src.mkdir(parents=True, exist_ok=True)
-        # Use tar to copy the source: it preserves symlinks (the monorepo has
-        # self-referential symlinks under tig-benchmarker that shutil.copytree
-        # follows into a loop) and excludes build/generated artifacts.
-        exclude_args = " ".join(
-            f"--exclude={shlex.quote(path)}" for path in _TIG_SOURCE_TAR_EXCLUDES
-        )
-        # `bash -c` with pipefail so a failure in the *first* tar (missing
-        # source, permission error) fails the pipeline instead of silently
-        # staging a truncated tree.
-        subprocess.run(
-            [
-                "bash", "-c",
-                "set -o pipefail; "
-                f"tar -C {shlex.quote(str(monorepo))} {exclude_args} -cf - . "
-                f"| tar -C {shlex.quote(str(src))} -xf -",
-            ],
-            check=True,
-        )
+    # Every challenge is baked (Option B): the monorepo source + warm cargo cache
+    # live in the image at /app. Upload only the small driver + the agent's
+    # algorithm (and, for neuralnet, the harness boilerplate solve_challenge). No
+    # per-job source tar.
     _copy_required(ROOT / "scripts" / "tig_bench_driver.py", stage / "tig_bench_driver.py")
     _copy_required(ROOT / "scripts" / "modified_test_algorithm", stage / "modified_test_algorithm")
     _stage_tig_algorithm(stage, cfg)
@@ -681,52 +651,28 @@ cp "$OUT/driver.stderr" c3-artifacts/ 2>/dev/null || true
 def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str:
     challenge = cfg["challenge"]
     is_nn = challenge == "neuralnet_optimizer"
-    baked = challenge in _TIG_BAKED_CHALLENGES
 
-    # Baked (Option B): source + warm cache live in the image at /app. Inject the
-    # algorithm into the pre-baked swarm_algo slot and incremental-build. No
-    # source re-add, no `pub mod swarm_algo` append (baked), no nn blinding (nn
-    # is a raw/GPU challenge, never baked).
-    if baked:
-        return (
-            _tig_runner_prologue(challenge)
-            + f"""SLOT=/app/tig-algorithms/src/{challenge}/swarm_algo
-mkdir -p "$SLOT"
-cp algorithm/mod.rs "$SLOT/mod.rs"
-cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
-"""
-            + _tig_runner_epilogue(cfg, seed, hyperparameters, "/app")
-        )
-
-    # neuralnet anti-cheat: blind the seed handed to optimizer_init_state.
-    patch = ""
-    if is_nn:
-        patch = (
-            "python3 - <<'PYEOF'\n"
-            "p = 'tig-source/tig-challenges/src/neuralnet_optimizer/mod.rs'\n"
-            "t = open(p).read()\n"
-            "old = \"    let mut optimizer_state = optimizer_init_state(\\n        challenge.seed.clone(),\"\n"
-            "new = (\"    let optimizer_seed = { use rand::{RngCore, SeedableRng}; \"\n"
-            "       \"let mut sd = rand::rngs::StdRng::from_seed(challenge.seed); \"\n"
-            "       \"let mut b = [0u8; 32]; sd.fill_bytes(&mut b); b };\\n\"\n"
-            "       \"    let mut optimizer_state = optimizer_init_state(\\n        optimizer_seed,\")\n"
-            "assert old in t, 'blinding anchor not found'\n"
-            "open(p, 'w').write(t.replace(old, new, 1))\n"
-            "print('[run] blinded optimizer seed')\n"
-            "PYEOF\n"
-        )
+    # Baked (Option B, all challenges): the monorepo source + warm cargo cache live
+    # in the image at /app. Inject the algorithm into the pre-baked swarm_algo slot
+    # and incremental-build (seconds). No source re-add, no `pub mod swarm_algo`
+    # append (the Dockerfile already added it), no runtime seed-blinding
+    # (neuralnet's blind is baked into tig-challenges at image-build time — see
+    # Dockerfile.bench).
+    #
+    # neuralnet only: the agent writes just the three optimizer hooks, so the slot
+    # needs the harness boilerplate solve_challenge concatenated on. That's a cheap
+    # local join of two already-staged files (algorithm/mod.rs + boilerplate.rs) —
+    # no source upload, exactly as before.
     assemble = ('cat algorithm/mod.rs boilerplate.rs > "$SLOT/mod.rs"'
                 if is_nn else 'cp algorithm/mod.rs "$SLOT/mod.rs"')
-
     return (
         _tig_runner_prologue(challenge)
-        + f"""{patch}SLOT=tig-source/tig-algorithms/src/{challenge}/swarm_algo
+        + f"""SLOT=/app/tig-algorithms/src/{challenge}/swarm_algo
 mkdir -p "$SLOT"
 {assemble}
 cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
-grep -q "pub mod swarm_algo;" tig-source/tig-algorithms/src/{challenge}/mod.rs || echo "pub mod swarm_algo;" >> tig-source/tig-algorithms/src/{challenge}/mod.rs
 """
-        + _tig_runner_epilogue(cfg, seed, hyperparameters, '"$PWD/tig-source"')
+        + _tig_runner_epilogue(cfg, seed, hyperparameters, "/app")
     )
 
 
