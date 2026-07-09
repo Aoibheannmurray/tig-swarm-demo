@@ -262,10 +262,11 @@ def run_set_runner(runner_url: str) -> int:
     print()
     if runner_url:
         print(f"  Hosted runner set: {runner_url}")
-        print('  Contributors now see a "Run in the cloud" tab on the join page.')
+        print("  NOTE: the join page's cloud tab is currently disabled in the UI —")
+        print("  the runner is reachable via its API only (see runner/README.md).")
         print("  `setup.py revoke` will also tear down a contributor's hosted fleet.")
     else:
-        print('  Hosted runner unset — the "Run in the cloud" tab is now hidden.')
+        print("  Hosted runner unset.")
     print()
     return 0
 

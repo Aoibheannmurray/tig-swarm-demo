@@ -790,6 +790,38 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     return app
 
 
+def _port_free(host: str, port: int) -> bool:
+    """True when nothing is accepting connections on (host, port)."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) != 0
+
+
+def _probe_companion(host: str, port: int) -> dict | None:
+    """If the occupant of (host, port) is a TIG companion, return its
+    /local-api/env payload; None for anything else (or on any error)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/local-api/env", timeout=2
+        ) as resp:
+            body = json.load(resp)
+        return body if isinstance(body, dict) and body.get("mode") == "local" else None
+    except Exception:
+        return None
+
+
+def _same_root(cwd: object) -> bool:
+    """Does a probed companion serve THIS repo checkout? Distinguishes 'reopen
+    the one that's already running' from 'a companion for some other clone is
+    on that port' (which must not be reused — different config, code)."""
+    try:
+        return Path(str(cwd)).resolve() == ROOT.resolve()
+    except (OSError, ValueError):
+        return False
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Local control-plane UI for the TIG swarm.")
     p.add_argument("--host", default="127.0.0.1", help="Bind address (default: localhost).")
@@ -809,7 +841,37 @@ def main() -> int:
     # DNS-rebinding/Host guard, and make the risk loud.
     is_loopback_bind = _host_is_loopback(args.host)
 
-    url = f"http://{args.host}:{args.port}/"
+    # Port collision handling — re-running the join one-liner must be
+    # idempotent, not "[Errno 48] address already in use":
+    #   * if the occupant is a companion serving THIS repo checkout, just
+    #     reopen the browser at it and exit;
+    #   * otherwise (another app, or a companion for a different checkout)
+    #     fall forward to the next free port.
+    port = args.port
+    if not _port_free(args.host, port):
+        occupant = _probe_companion(args.host, port)
+        if occupant and _same_root(occupant.get("cwd")):
+            existing = f"http://{args.host}:{port}/"
+            print(f"TIG Swarm Control is already running — opening {existing}")
+            print("  (Ctrl-C in ITS terminal stops it.)")
+            if not args.no_browser:
+                try:
+                    webbrowser.open(existing)
+                except Exception:
+                    pass
+            return 0
+        for candidate in range(port + 1, port + 21):
+            if _port_free(args.host, candidate):
+                print(f"  port {port} is in use — using {candidate} instead.")
+                port = candidate
+                break
+        else:
+            sys.exit(
+                f"Ports {port}-{port + 20} are all in use. Free one "
+                f"(macOS/Linux: `lsof -ti :{port} | xargs kill`) or pass --port."
+            )
+
+    url = f"http://{args.host}:{port}/"
     print(f"TIG Swarm Control — {url}")
     print("  (Ctrl-C stops the companion; a running fleet stops with it.)")
     if not is_loopback_bind:
@@ -828,7 +890,7 @@ def main() -> int:
     uvicorn.run(
         create_app(allow_remote=not is_loopback_bind),
         host=args.host,
-        port=args.port,
+        port=port,
         log_level="warning",
     )
     return 0

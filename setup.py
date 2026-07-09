@@ -247,8 +247,6 @@ def main() -> int:
         "  revoke a contributor:  `python setup.py revoke <username>`.\n"
         "  list contributors:     `python setup.py list`.\n"
         "  switch challenge:      `python setup.py switch <challenge>`.\n"
-        "  enable cloud tier:     `python setup.py create-runner` (deploys it) or\n"
-        "                         `python setup.py set-runner <runner-url>`.\n"
         "  edit tacit knowledge:  `python setup.py tacit [<agent-name>]`.",
         file=sys.stderr,
     )

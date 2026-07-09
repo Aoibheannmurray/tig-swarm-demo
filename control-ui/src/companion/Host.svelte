@@ -241,19 +241,6 @@
         (<span class="mono">python run.py --join "&lt;link&gt;"</span>) or a no-clone
         path from the README.
       </p>
-      <details style="margin-top:8px">
-        <summary>Optional: let contributors run with <b>zero install</b> (hosted runner)</summary>
-        <div class="lede" style="margin-top:10px">
-          Deploy the runner so contributors run their agents on your
-          infrastructure — they just paste API keys in the web console.
-          One command from your clone does it all (deploys
-          <span class="mono">runner/</span> as its own Railway service, wires in a
-          generated key + this swarm's URL, and flips on the “Run in the cloud” tab):
-          <div class="mono" style="margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--bg-sunken,rgba(127,127,127,.12))">python setup.py create-runner</div>
-          Prefer the Railway dashboard? See
-          <span class="mono">runner/README.md</span> for the manual steps.
-        </div>
-      </details>
       <div class="actions">
         <div class="spacer"></div>
         <a class="btn primary" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>

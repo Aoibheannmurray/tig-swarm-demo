@@ -11,7 +11,6 @@
   import Masthead from "../components/Masthead.svelte";
   import FleetEditor from "./FleetEditor.svelte";
   import AgentsPanel from "./AgentsPanel.svelte";
-  import CloudRunner from "./CloudRunner.svelte";
   import { hostedApi, buildJoinLink } from "../lib/api";
 
   // Public repo contributors clone to run a local fleet. Hosts running a
@@ -27,7 +26,7 @@
   let password = $state("");
   let showManual = $state(false);
   let copied = $state("");
-  let tab: "start" | "fleet" | "cloud" | "agents" | "tacit" = $state("start");
+  let tab: "start" | "fleet" | "agents" | "tacit" = $state("start");
 
   // ── Tacit knowledge (stored server-side alongside the fleet config) ──
   let tacit = $state("");
@@ -201,9 +200,6 @@
     <nav class="tabs" style="max-width:640px;margin:16px auto 0">
       <button class:active={tab === "start"} onclick={() => (tab = "start")}>Get started</button>
       <button class:active={tab === "fleet"} onclick={() => (tab = "fleet")}>My fleet</button>
-      {#if me.runner_url}
-        <button class:active={tab === "cloud"} onclick={() => (tab = "cloud")}>Run in the cloud</button>
-      {/if}
       <button class:active={tab === "agents"} onclick={() => (tab = "agents")}>My agents</button>
       <button class:active={tab === "tacit"} onclick={() => { tab = "tacit"; loadTacit(); }}>Tacit knowledge</button>
     </nav>
@@ -211,10 +207,6 @@
     {#if tab === "fleet"}
       <div style="max-width:900px;margin:0 auto">
         <FleetEditor {username} {password} />
-      </div>
-    {:else if tab === "cloud" && me.runner_url}
-      <div style="max-width:640px;margin:0 auto">
-        <CloudRunner runnerUrl={me.runner_url} {username} {password} />
       </div>
     {:else if tab === "agents"}
       <div style="max-width:760px;margin:0 auto">
