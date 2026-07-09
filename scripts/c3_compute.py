@@ -25,6 +25,7 @@ import os
 import re
 import shlex
 import shutil
+import random
 import subprocess
 import tempfile
 import time
@@ -60,6 +61,20 @@ _AUTO_HARDWARE_VALUES = {"", "auto", "default"}
 # c3_max_parallel_jobs in fleet.config.json).
 _DEFAULT_NONCES_PER_SHARD = 8
 _DEFAULT_MAX_PARALLEL_JOBS = 3
+# Concurrent shards upload byte-identical workspace files (same algorithm/mod.rs,
+# Cargo.toml, …); a content-addressed blob store rejects simultaneous writes to
+# the same object with HTTP 429 ("Reduce your concurrent request rate for the
+# same object"). Retry ONLY that throttle, with exponential + FULL-jitter backoff
+# so the racing shards de-synchronise instead of colliding again in lockstep. A
+# 429 happens during workspace upload, before any job is submitted, so retrying
+# can't orphan a running job. Happy path adds zero latency (only fires on the
+# 429 signature); non-throttle deploy failures still fail fast.
+_DEPLOY_MAX_ATTEMPTS = 5          # 1 initial + up to 4 retries
+_DEPLOY_BACKOFF_BASE_SECS = 1.5   # jitter window for the first retry
+_DEPLOY_BACKOFF_CAP_SECS = 20.0   # per-retry window ceiling
+_DEPLOY_RETRY_SIGNATURES = (
+    "status 429", "ServiceUnavailable", "concurrent request rate",
+)
 # CPU challenges served by a *baked* custom image (tig-bench-<ch>): the monorepo
 # source + warm cargo cache + modified_test_algorithm are pre-built into the
 # image (see Dockerfile.bench / build_bench_image.sh). C3 pulls it (cached per
@@ -778,20 +793,35 @@ def _run_one_c3_shard_inner(
     provider = _arg_value(args, "c3_provider")
     if provider:
         cmd.extend(["-p", provider])
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        encoding="utf-8", errors="replace", cwd=stage, env=env,
-    )
-    lines: list[str] = []
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.rstrip()
-        lines.append(line)
-        print(f"    [C3][{label}]   {line}")
-    proc.wait()
-    combined = "\n".join(lines)
-    if proc.returncode != 0:
-        return None, f"c3 deploy failed ({proc.returncode}):\n{combined[-2000:]}"
+
+    combined = ""
+    for attempt in range(1, _DEPLOY_MAX_ATTEMPTS + 1):
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace", cwd=stage, env=env,
+        )
+        lines: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            lines.append(line)
+            print(f"    [C3][{label}]   {line}")
+        proc.wait()
+        combined = "\n".join(lines)
+        if proc.returncode == 0:
+            break
+        # Retry only the object-store throttle (see _DEPLOY_RETRY_SIGNATURES);
+        # every other deploy failure fails fast.
+        throttled = any(sig in combined for sig in _DEPLOY_RETRY_SIGNATURES)
+        if not throttled or attempt == _DEPLOY_MAX_ATTEMPTS:
+            return None, f"c3 deploy failed ({proc.returncode}):\n{combined[-2000:]}"
+        window = min(_DEPLOY_BACKOFF_CAP_SECS, _DEPLOY_BACKOFF_BASE_SECS * 2 ** (attempt - 1))
+        delay = random.uniform(0, window)
+        print(
+            f"    [C3][{label}]   deploy throttled (429 same-object); "
+            f"retry {attempt}/{_DEPLOY_MAX_ATTEMPTS - 1} in {delay:.1f}s"
+        )
+        time.sleep(delay)
 
     job_id = _parse_c3_id(combined)
     if not job_id:
