@@ -309,6 +309,10 @@ _ENV_CONFIG_KEYS = (
     ("STAGNATION_THRESHOLD", "stagnation_threshold"),
     ("STAGNATION_LIMIT", "stagnation_limit"),
     ("HYPOTHESIS_RECALL_THRESHOLD", "hypothesis_recall_threshold"),
+    ("HPO_FIRST_TUNE_IMPROVEMENTS", "hpo_first_tune_improvements"),
+    ("HPO_MIN_IMPROVEMENTS", "hpo_min_improvements"),
+    ("HPO_SEARCH_BUDGET", "hpo_search_budget"),
+    ("HPO_NUM_SUGGESTED_CONFIGS", "hpo_num_suggested_configs"),
 )
 
 

@@ -107,6 +107,10 @@ def add_create_setup_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--stagnation-threshold", type=int, help="Iterations before hints/inspiration.")
     parser.add_argument("--stagnation-limit", type=int, help="Iterations before trajectory reset; 0 disables.")
     parser.add_argument("--hypothesis-recall-threshold", type=int, help="Iterations before prior failed hypotheses are shown.")
+    parser.add_argument("--hpo-first-tune-improvements", type=int, help="HPO: per-trajectory improvements before a trajectory's first tune.")
+    parser.add_argument("--hpo-min-improvements", type=int, help="HPO: improvements before later tunes (also the tune-band width).")
+    parser.add_argument("--hpo-search-budget", type=int, help="HPO: configs evaluated per tune (default + suggested + random).")
+    parser.add_argument("--hpo-num-suggested-configs", type=int, help="HPO: max LLM-suggested configs folded into the search budget.")
     parser.add_argument("--yes", action="store_true", help="Accept defaults for any optional prompts.")
     parser.add_argument(
         "--seed-inactive-pool", action="store_true",
