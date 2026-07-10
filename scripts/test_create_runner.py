@@ -42,8 +42,20 @@ def _args():
     return types.SimpleNamespace(runner_name=None, workspace=None)
 
 
+def _assert_valid_fernet_key(key: str) -> None:
+    """A Fernet key is urlsafe-base64 of 32 random bytes. Validate with stdlib
+    so this stays runnable in the stdlib-only CI step (and the host CLI's own
+    no-dependency constraint); use the real Fernet check when it's installed."""
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        import base64
+        assert len(base64.urlsafe_b64decode(key.encode())) == 32, key
+        return
+    Fernet(key.encode())
+
+
 def test_happy_path_sets_vars_and_enables_tab():
-    from cryptography.fernet import Fernet
     admin = {"server_url": "https://swarm.up.railway.app", "admin_key": "adm-123",
              "swarm_name": "cool-swarm"}
     cap = _stub(admin)
@@ -59,7 +71,7 @@ def test_happy_path_sets_vars_and_enables_tab():
     assert vars["COORDINATION_SERVER_URL"] == "https://swarm.up.railway.app"
     assert vars["RUNNER_ADMIN_KEY"] == "adm-123"
     # The generated secret is a real Fernet key the runner's vault can load.
-    Fernet(vars["RUNNER_SECRET_KEY"].encode())
+    _assert_valid_fernet_key(vars["RUNNER_SECRET_KEY"])
     # Persistent volume, deploy, and the swarm was pointed at the runner URL.
     assert cap["volume"] == ("cool-swarm-runner", "/data"), cap["volume"]
     assert cap["up"] == ["cool-swarm-runner"], cap["up"]
