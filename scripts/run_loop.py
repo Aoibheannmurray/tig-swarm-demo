@@ -366,9 +366,10 @@ def run_benchmark(
         if args.compute == "local":
             return _run_benchmark_local(seed, hyperparameters, job_slots=job_slots)
         if args.compute == "c3":
+            # C3 self-gates on the fleet-wide FCFS slot pool (c3_pool.py), so it
+            # ignores the local-only job_slots semaphore.
             return run_benchmark_c3(
                 args, config, server, seed=seed, hyperparameters=hyperparameters,
-                job_slots=job_slots,
             )
         return None, f"Unknown compute provider: {args.compute}"
     finally:
@@ -1136,12 +1137,13 @@ def _maybe_tune_hyperparameters(
         return default_bench, None, in_tok, out_tok
 
     # 3. Random search on the (non-test) HPO seed.
-    # Config-parallel HPO: evaluate all candidate configs concurrently, bounded
-    # solely by a shared semaphore of c3_max_parallel_jobs. Every C3 shard deploy
-    # (and each local docker run) acquires a slot, so total live jobs never
-    # exceed the account's concurrent-job cap: below the cap we keep sending
-    # jobs, at the cap they wait. Set c3_max_parallel_jobs=1 for fully serial.
-    job_slots = threading.Semaphore(max(1, int(config.get("c3_max_parallel_jobs", 3))))
+    # Config-parallel HPO: evaluate all candidate configs concurrently. On C3 the
+    # fleet-wide FCFS pool (c3_pool.py) is the real cap, so job_slots stays None
+    # and c3_compute self-gates. On local compute there is no shared pool, so a
+    # per-process semaphore of c3_max_parallel_jobs bounds concurrent docker runs.
+    job_slots = None
+    if args.compute != "c3":
+        job_slots = threading.Semaphore(max(1, int(config.get("c3_max_parallel_jobs", 3))))
 
     def benchmark_fn(seed: str, hp_json: str) -> tuple[dict | None, str]:
         return run_benchmark(args, config, server, seed=seed,
@@ -1614,18 +1616,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional C3 CLI provider passed as `c3 deploy -p ...`",
     )
     p.add_argument(
-        "--c3-nonces-per-shard", type=int,
-        help=(
-            "Distributed C3 benchmarking: nonces per machine/shard (default 8). "
-            "Each track's nonces split into ceil(count/N) concurrent C3 jobs; "
-            "<=0 disables sharding (one job per whole track)."
-        ),
-    )
-    p.add_argument(
         "--c3-max-parallel-jobs", type=int,
         help=(
-            "Max concurrent C3 shard jobs (default 3, the basic C3 plan cap). "
-            "Extra shards queue and run as slots free up."
+            "Fleet-wide C3 concurrent-job cap (default 3, the basic C3 plan cap). "
+            "Also the number of balanced shards each benchmark fans out to. All "
+            "agents sharing one C3 key draw from this pool FCFS; extra shards "
+            "queue and run as slots free up."
         ),
     )
     p.add_argument(
@@ -1745,11 +1741,9 @@ def main() -> int:
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "auto"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
     args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
-    # Distributed C3 benchmarking knobs (default-on when compute=c3). CLI flag
-    # wins, else per-agent agent.config.json, else defaults (8 nonces/shard, 3
-    # concurrent jobs). Falsy CLI (None) falls through; explicit 0 is honored.
-    if args.c3_nonces_per_shard is None:
-        args.c3_nonces_per_shard = agent_config.get("c3_nonces_per_shard", 8)
+    # Distributed C3 benchmarking (default-on when compute=c3). CLI flag wins,
+    # else per-agent agent.config.json, else default (3 = the basic C3 plan cap).
+    # This is both the fleet-wide FCFS pool size and the balanced shard count.
     if args.c3_max_parallel_jobs is None:
         args.c3_max_parallel_jobs = agent_config.get("c3_max_parallel_jobs", 3)
     # Per-agent C3 key from agent.config.json (forwarded by run_fleet from the
@@ -1879,7 +1873,6 @@ def main() -> int:
         "c3_hardware": args.hardware,
         "c3_time": args.c3_time,
         "c3_provider": args.c3_provider,
-        "c3_nonces_per_shard": args.c3_nonces_per_shard,
         "c3_max_parallel_jobs": args.c3_max_parallel_jobs,
         "env": args.env,
     }

@@ -52,18 +52,33 @@ TIG toolchain** (fuel-instrumented; `tig-runtime`/`tig-verifier`), gated by
   `docs/tig_docker_plan.md` (design + status). Algorithms author against
   `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases the crate as `tig_challenges`).
 
-**Distributed C3 (nonce sharding).** On the C3 path (`c3_compute.py`) a
-benchmark's nonces are **bin-packed** into shards of `c3_nonces_per_shard`
-(default 8), packing *across* track boundaries (a shard may carry slices from
-several tracks), so the job count is `ceil(total_nonces/8)` — not one-per-track.
-Each shard runs as its own **concurrent** C3 job (bounded by
-`c3_max_parallel_jobs`, default 3, the basic-plan cap). A job runs one
-`modified_test_algorithm` per track-slice it holds; the per-shard `combined.json`s
-are merged (`_merge_combined`) and scored once by `_tig_adapter`, so the score
-matches a single-job run — only faster. A benchmark whose total nonces fit in one
-shard reproduces the old single-job behavior. Both knobs are per-agent (or
-fleet-wide) in `fleet.config.json`; the driver reads each track's `--start`
-window from `TIG_STARTS`. See `scripts/test_c3_sharding.py`.
+**Distributed C3 (balanced sharding + fleet pool).** On the C3 path
+(`c3_compute.py`) a benchmark's nonces are split into exactly
+`min(c3_max_parallel_jobs, total_nonces)` **balanced** shards (sizes differ by
+≤1 nonce: 22 over 3 → 8,7,7; over 4 → 6,6,5,5), packing *across* track
+boundaries (a shard may carry slices from several tracks). Each shard runs as its
+own C3 job; a job runs one `modified_test_algorithm` per track-slice it holds;
+the per-shard `combined.json`s are merged (`_merge_combined`) and scored once by
+`_tig_adapter`, so the score matches a single-job run — only faster. With
+`c3_max_parallel_jobs=1` a benchmark runs as a single job. The driver reads each
+track's `--start` window from `TIG_STARTS`. See `scripts/test_c3_sharding.py`.
+
+`c3_max_parallel_jobs` (default 3, the basic-plan cap) is the **only** sharding
+knob now — it's both the balanced shard count per benchmark *and* the size of a
+**fleet-wide FCFS slot pool** (`c3_pool.py`). Every agent in a fleet shares ONE
+C3 key, so they all gate on that pool: total live C3 jobs never exceed the plan
+cap, and extra shards queue first-come-first-served. `run_fleet.py` points every
+agent at one pool dir (`.c3-pool/` under the repo/clone root) via `C3_POOL_DIR`
+and injects one agreed `C3_POOL_SIZE`; a lone `run.py` agent (no pool dir) falls
+back to an in-process semaphore.
+
+**The cap is read LIVE from C3, not configured.** At launch `run_fleet.py` queries
+the control plane (`/v2/billing/subscription` + `/v2/billing/tiers`, honoring any
+per-account override) for the concurrency limit C3 actually enforces (free 3 /
+pro 10 / team 50 today) and stamps it onto every agent's `c3_max_parallel_jobs` —
+so pool size and shard count always match the real subscription. A configured
+`c3_max_parallel_jobs` is only a fallback used when the query fails (offline /
+no C3 auth). See `scripts/test_c3_pool.py` and `scripts/test_c3_plan_cap.py`.
 
 ## Tests
 

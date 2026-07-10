@@ -5,16 +5,22 @@ For Docker jobs C3 pulls a public Docker Hub image, uploads the project
 workspace, runs the configured bash script inside the container, then returns
 files written to `$C3_ARTIFACTS_DIR` or configured `output:` directories.
 
-Distributed benchmarking (fan-out): a benchmark's nonces are bin-packed into
-fixed-size shards (``c3_nonces_per_shard``, default 8), packing *across* track
-boundaries so no machine is under-filled — a shard may carry slices from several
-tracks. The job count is ceil(total_nonces / size), not one-per-track. Every
-shard is deployed as its own concurrent C3 job (bounded by
-``c3_max_parallel_jobs``, default 3, the basic C3 plan's concurrent-job cap).
+Distributed benchmarking (fan-out): a benchmark's nonces are split into exactly
+``min(c3_max_parallel_jobs, total_nonces)`` **balanced** shards — the shard sizes
+differ by at most one nonce (e.g. 22 nonces over 3 slots -> 8, 7, 7; over 4 ->
+6, 6, 5, 5) — packing *across* track boundaries so no machine is under-filled (a
+shard may carry slices from several tracks). Each shard is one C3 job.
+
+Fleet-wide slot pool: every agent sharing one C3 key draws from a single FCFS
+pool of ``c3_max_parallel_jobs`` slots (see ``c3_pool.py``), so N agents never
+exceed the C3 plan's concurrent-job cap; extra shards queue first-come-first-
+served. Because a benchmark fans out to at most ``c3_max_parallel_jobs`` shards,
+its own shards fit the pool once and clear in roughly one shard-duration.
+
 The per-shard ``combined.json`` outputs are merged back into a single combined
 dict and scored once by ``_tig_adapter`` — so the score is identical to a
-single-job run, only faster. A benchmark whose total nonces fit in one shard
-reproduces the old single-job behavior exactly.
+single-job run, only faster. With ``c3_max_parallel_jobs = 1`` a benchmark runs
+as a single job (the original single-job behavior).
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
+import c3_pool
 from challenge_files import ROOT, read_optional
 # TIG-docker backend helpers (shared with the local path in benchmark.py).
 from benchmark import (
@@ -55,11 +62,9 @@ _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 _DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
 _DEFAULT_GPU_HARDWARE = "l40"
 _AUTO_HARDWARE_VALUES = {"", "auto", "default"}
-# Distributed benchmarking defaults. Each shard = one C3 machine running up to
-# _DEFAULT_NONCES_PER_SHARD nonces; at most _DEFAULT_MAX_PARALLEL_JOBS shards run
-# concurrently (the basic C3 plan's cap — overridable per-agent via
-# c3_max_parallel_jobs in fleet.config.json).
-_DEFAULT_NONCES_PER_SHARD = 8
+# Distributed benchmarking default. c3_max_parallel_jobs is both the fleet-wide
+# FCFS slot-pool size AND the number of balanced shards a benchmark fans out to
+# (the basic C3 plan's cap — overridable fleet-wide/per-agent in fleet.config.json).
 _DEFAULT_MAX_PARALLEL_JOBS = 3
 # Concurrent shards upload byte-identical workspace files (same algorithm/mod.rs,
 # Cargo.toml, …); a content-addressed blob store rejects simultaneous writes to
@@ -211,16 +216,8 @@ def _copy_optional(src: Path, dst: Path) -> None:
 # ── Nonce sharding (distributed fan-out) ───────────────────────────
 
 
-def _shard_size(cfg: dict) -> int:
-    """Nonces per shard/machine. <= 0 disables sharding (one shard for all nonces)."""
-    try:
-        return int(cfg.get("c3_nonces_per_shard", _DEFAULT_NONCES_PER_SHARD))
-    except (TypeError, ValueError):
-        return _DEFAULT_NONCES_PER_SHARD
-
-
 def _max_parallel(cfg: dict) -> int:
-    """Max concurrent C3 jobs. Clamped to >= 1."""
+    """Fleet-wide C3 slot count = balanced shard count per benchmark. Clamped >= 1."""
     try:
         value = int(cfg.get("c3_max_parallel_jobs", _DEFAULT_MAX_PARALLEL_JOBS))
     except (TypeError, ValueError):
@@ -228,20 +225,33 @@ def _max_parallel(cfg: dict) -> int:
     return max(1, value)
 
 
-def _plan_shards(tracks: dict, shard_size: int) -> list[list[dict]]:
-    """Bin-pack every track's nonces into shards of at most ``shard_size`` nonces
-    each, packing *across* track boundaries so no machine is under-filled.
+def _balanced_sizes(total: int, num_machines: int) -> list[int]:
+    """Split ``total`` nonces across ``min(num_machines, total)`` machines as
+    evenly as possible: no two machines differ by more than one nonce. The
+    ``total % m`` larger shards come first.
+
+    e.g. (22, 3) -> [8, 7, 7]; (22, 4) -> [6, 6, 5, 5]; (2, 3) -> [1, 1]."""
+    m = min(max(1, int(num_machines)), total)
+    base, rem = divmod(total, m)
+    return [base + 1] * rem + [base] * (m - rem)
+
+
+def _plan_shards(tracks: dict, num_machines: int) -> list[list[dict]]:
+    """Split every track's nonces into exactly ``min(num_machines, total)``
+    **balanced** shards (sizes differ by at most one), packing *across* track
+    boundaries so no machine is under-filled.
 
     Returns a list of shards; each shard is a list of ``{track_key, start,
     count}`` slices (a single job runs one ``modified_test_algorithm`` per slice,
-    which the driver already supports). So the job count is
-    ``ceil(total_nonces / shard_size)`` — not one-per-track.
+    which the driver already supports). Shards are filled in order and each is a
+    contiguous ascending window, so iterating them in order keeps every track's
+    nonces ascending for ``_merge_combined``.
 
-    e.g. tracks {9: 10, 16: 8} @ size 8 -> 3 shards:
-        [9[0:8]], [9[8:10], 16[0:6]], [16[6:8]]
-    ``shard_size <= 0`` disables sharding: one shard holds every slice (the
-    original single-job behavior). The ``seed`` key and any non-positive / non-int
-    count are skipped (matches the driver / adapter).
+    e.g. tracks {9: 10, 16: 8} over 3 machines (18 nonces -> [6, 6, 6]):
+        [9[0:6]], [9[6:10], 16[0:2]], [16[2:8]]
+    ``num_machines <= 1`` yields a single job holding every slice (the original
+    single-job behavior). The ``seed`` key and any non-positive / non-int count
+    are skipped (matches the driver / adapter).
     """
     units = [
         (k, v) for k, v in (tracks or {}).items()
@@ -250,16 +260,18 @@ def _plan_shards(tracks: dict, shard_size: int) -> list[list[dict]]:
     total = sum(count for _, count in units)
     if total == 0:
         return []
-    cap = shard_size if (shard_size and shard_size > 0) else total
 
+    sizes = _balanced_sizes(total, num_machines)
     shards: list[list[dict]] = []
     cur: list[dict] = []
     cur_used = 0
+    cap = sizes[0]
     for track_key, count in units:
         pos = 0
         while pos < count:
-            if cur_used == cap:  # current shard full -> start a new one
+            if cur_used == cap:  # current shard full -> start the next one
                 shards.append(cur)
+                cap = sizes[len(shards)]
                 cur, cur_used = [], 0
             take = min(cap - cur_used, count - pos)
             cur.append({"track_key": track_key, "start": pos, "count": take})
@@ -882,15 +894,13 @@ def _run_one_c3_shard_inner(
 
 def _run_one_c3_shard(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
-    job_slots=None,
+    pool,
 ) -> tuple[dict | None, str]:
-    """Global-cap wrapper around one shard's deploy+poll. When parallel HPO
-    passes a shared `job_slots` semaphore, hold a slot for this shard's entire
-    lifetime, so concurrent config evaluations never exceed c3_max_parallel_jobs
-    total live C3 jobs (respecting the account concurrency limit)."""
-    if job_slots is None:
-        return _run_one_c3_shard_inner(args, env, stage, label)
-    with job_slots:
+    """Fleet-wide-cap wrapper around one shard's deploy+poll. Holds a C3 slot
+    from the shared FCFS `pool` for this shard's entire lifetime, so all agents
+    sharing one C3 key never exceed c3_max_parallel_jobs total live C3 jobs
+    (respecting the plan's concurrency limit); extra shards queue FCFS."""
+    with pool.lease():
         return _run_one_c3_shard_inner(args, env, stage, label)
 
 
@@ -916,7 +926,7 @@ def _merge_combined(results: list, challenge: str, fuel: int) -> dict:
 
 def _run_tig_benchmark_c3(
     args: argparse.Namespace, cfg: dict, server: str, env: dict,
-    seed: str | None, hyperparameters: str | None, job_slots=None,
+    seed: str | None, hyperparameters: str | None,
 ) -> tuple[dict | None, str]:
     challenge = cfg.get("challenge", "unknown")
     image = _tig_c3_image(cfg)
@@ -926,13 +936,19 @@ def _run_tig_benchmark_c3(
         seed = str((cfg.get("tracks") or {}).get("seed", "test"))
     fuel = int(cfg.get("max_fuel_budget", _BM_DEFAULT_FUEL))
 
-    shards = _plan_shards(cfg.get("tracks") or {}, _shard_size(cfg))
+    max_parallel = _max_parallel(cfg)
+    shards = _plan_shards(cfg.get("tracks") or {}, max_parallel)
     if not shards:
         return None, f"[C3] No positive-count tracks to benchmark for {challenge}"
-    max_parallel = _max_parallel(cfg)
+    # Fleet-wide FCFS pool: all agents sharing one C3 key gate on it, so total
+    # live jobs never exceed the pool cap. A lone agent (no C3_POOL_DIR) gets an
+    # in-process semaphore instead. run_fleet injects C3_POOL_SIZE so every agent
+    # agrees on one cap; solo, it's this benchmark's own shard count.
+    pool_size = int(os.environ.get("C3_POOL_SIZE") or max_parallel)
+    slot_pool = c3_pool.get_pool(pool_size, os.environ.get("C3_POOL_DIR"))
     print(
-        f"    [C3] (TIG backend) {challenge}: {len(shards)} shard job(s) "
-        f"across ≤{max_parallel} machine(s), image {image}..."
+        f"    [C3] (TIG backend) {challenge}: {len(shards)} balanced shard job(s), "
+        f"fleet pool ≤{max_parallel} machine(s), image {image}..."
     )
 
     with tempfile.TemporaryDirectory(prefix="tig-c3-tig-", ignore_cleanup_errors=True) as tmp:
@@ -970,12 +986,13 @@ def _run_tig_benchmark_c3(
 
         results: list[dict | None] = [None] * len(jobs)
         errs: list[str] = [""] * len(jobs)
-        # With a shared job_slots semaphore (parallel HPO), the semaphore is the
-        # global cap; let this config submit all its shards and block on slots.
-        pool_workers = len(jobs) if job_slots is not None else max_parallel
-        with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+        # Submit every shard at once; the fleet-wide FCFS pool — not this
+        # executor — is the real concurrency cap, so a thread per shard just
+        # parks on the pool until a slot frees. Shards fan out to at most
+        # max_parallel, so this executor never dwarfs the pool.
+        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
             futures = {
-                pool.submit(_run_one_c3_shard, args, env, stage, label, job_slots): idx
+                executor.submit(_run_one_c3_shard, args, env, stage, label, slot_pool): idx
                 for idx, stage, label in jobs
             }
             for future in as_completed(futures):
@@ -1001,7 +1018,7 @@ def _run_tig_benchmark_c3(
 
 def run_benchmark_c3(
     args: argparse.Namespace, config: dict, server: str,
-    seed: str | None = None, hyperparameters: str | None = None, job_slots=None,
+    seed: str | None = None, hyperparameters: str | None = None,
 ) -> tuple[dict | None, str]:
     if shutil.which("c3") is None:
         return None, "[C3] c3 CLI not found. Install from https://cthree.cloud/install.sh"
@@ -1012,12 +1029,8 @@ def run_benchmark_c3(
     cfg = dict(config)
     cfg["server_url"] = server
     cfg["c3_hardware"] = _resolve_c3_hardware(cfg, _arg_value(args, "hardware"))
-    # Distributed sharding knobs come from args (like c3_time/c3_provider);
-    # fall back to any config value, then the module defaults.
-    cfg["c3_nonces_per_shard"] = _arg_value(
-        args, "c3_nonces_per_shard",
-        cfg.get("c3_nonces_per_shard", _DEFAULT_NONCES_PER_SHARD),
-    )
+    # c3_max_parallel_jobs (arg wins, then config, then default) is both the
+    # fleet-wide FCFS pool size and the balanced shard count per benchmark.
     cfg["c3_max_parallel_jobs"] = _arg_value(
         args, "c3_max_parallel_jobs",
         cfg.get("c3_max_parallel_jobs", _DEFAULT_MAX_PARALLEL_JOBS),
@@ -1039,6 +1052,6 @@ def run_benchmark_c3(
     # Fuel-instrumented TIG-docker backend (TIG image + driver → combined.json →
     # benchmark.json) is the ONLY C3 benchmarking path. The custom wall-clock
     # staging path (_create_workspace / _write_c3_project) has been retired.
-    return _run_tig_benchmark_c3(args, cfg, server, env, seed, hyperparameters, job_slots)
+    return _run_tig_benchmark_c3(args, cfg, server, env, seed, hyperparameters)
 
 
