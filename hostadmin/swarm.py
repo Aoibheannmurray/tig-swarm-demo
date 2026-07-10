@@ -393,13 +393,17 @@ def read_authored_seeds() -> list[dict]:
 
 def seed_pool_from_authored(
     server_url: str, admin_key: str, seeds: list[dict],
-) -> None:
-    """POST each host-authored seed to ``/api/admin/seed_pool``. Best-effort:
-    network/server errors are warned-and-skipped rather than aborting setup.
+) -> list[str]:
+    """POST each host-authored seed to ``/api/admin/seed_pool``. Per-seed
+    errors are warned-and-continued so one bad seed doesn't abort setup, but
+    failures are RETURNED (as challenge/tag labels) so the caller can verify
+    and retry — a silently empty pool means seeded agents get the bare stub
+    and nobody notices until the "why is everything a cold start?" hunt.
     Idempotent — the server dedupes by (challenge, strategy_tag, source), so
     re-running create silently ignores seeds already present."""
     if not seeds:
-        return
+        return []
+    failed: list[str] = []
     print(f"Seeding the seed pool with {len(seeds)} authored algorithm(s)…")
     for s in seeds:
         payload = {
@@ -419,9 +423,71 @@ def seed_pool_from_authored(
             print(f"  {label}: seed {status}")
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:200]
-            print(f"  {label}: server rejected seed (HTTP {e.code}: {detail}); skipping.")
+            print(f"  {label}: server rejected seed (HTTP {e.code}: {detail}).")
+            failed.append(label)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            print(f"  {label}: could not reach {server_url} ({e}); skipping seed.")
+            print(f"  {label}: could not reach {server_url} ({e}).")
+            failed.append(label)
+    return failed
+
+
+def verify_seed_pool(
+    server_url: str, admin_key: str, seeds: list[dict], *, deadline_s: int = 90,
+) -> list[str]:
+    """Verify every authored seed is actually IN the server's seed pool,
+    re-depositing missing ones until the deadline. Same belt-and-suspenders
+    rationale as `push_config_to_server`: a POST during the deploy's
+    health-rollout window can land on a doomed container and vanish, leaving
+    the pool empty with create's output looking successful.
+
+    Reads back via ``POST /api/admin/seeds`` (metadata listing). Returns the
+    labels still missing at the deadline — empty list means verified. A
+    server predating the listing endpoint (HTTP 404) can't be verified;
+    that's reported and treated as unverified-but-not-fatal ([] returned)
+    so resumed creates against old images don't hard-fail."""
+    if not seeds:
+        return []
+    wanted: dict[str, set[str]] = {}
+    for s in seeds:
+        wanted.setdefault(s["challenge"], set()).add(s["strategy_tag"])
+    by_label = {f"{s['challenge']}/{s['strategy_tag']}": s for s in seeds}
+
+    deadline = time.time() + deadline_s
+    missing: list[str] = []
+    while True:
+        missing = []
+        for challenge, tags in wanted.items():
+            try:
+                body = post_json(
+                    f"{server_url.rstrip('/')}/api/admin/seeds",
+                    {"admin_key": admin_key, "challenge": challenge},
+                    timeout=10,
+                )
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    print(
+                        "  note: this server predates /api/admin/seeds — "
+                        "cannot verify the seed pool; check it in the Admin "
+                        "Console after redeploying."
+                    )
+                    return []
+                missing.extend(f"{challenge}/{t}" for t in sorted(tags))
+                continue
+            except (urllib.error.URLError, TimeoutError, OSError):
+                missing.extend(f"{challenge}/{t}" for t in sorted(tags))
+                continue
+            present = {
+                s["strategy_tag"] for s in body.get("seeds", [])
+                if s.get("source") == "authored"
+            }
+            missing.extend(f"{challenge}/{t}" for t in sorted(tags - present))
+        if not missing or time.time() >= deadline:
+            return missing
+        print(f"  seed pool incomplete ({len(missing)} missing) — re-depositing…")
+        seed_pool_from_authored(
+            server_url, admin_key, [by_label[m] for m in missing],
+        )
+        time.sleep(3)
 
 
 def fetch_challenge_sub_config(server_url: str, challenge: str) -> dict | None:
@@ -644,6 +710,7 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
 
     # Only seed once the config is verified — seeding a server that's still on
     # bare defaults loads pool entries for challenges nobody is running.
+    seeds_ok = True
     if config_ok:
         if seed_inactive_pool:
             emit("\nSeeding inactive trajectory pool from TIG mainnet…")
@@ -653,6 +720,29 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         if authored_seeds:
             emit("")
             seed_pool_from_authored(server_url, admin_key, authored_seeds)
+            emit("  verifying the seed pool on the server…")
+            still_missing = verify_seed_pool(server_url, admin_key, authored_seeds)
+            if still_missing:
+                seeds_ok = False
+                emit(
+                    "  ERROR: seed pool verification FAILED — missing: "
+                    + ", ".join(still_missing)
+                )
+                emit(
+                    "  Seeded agents will get the bare stub on those challenges. "
+                    "Re-run `python setup.py create` once the server is stable "
+                    "(idempotent), or deposit via the Admin Console."
+                )
+            else:
+                emit(f"  seed pool verified: all {len(authored_seeds)} authored seed(s) present.")
+    else:
+        # Config never verified, so seeding was skipped — the pool is EMPTY,
+        # which historically read as "agents mysteriously start from the stub".
+        seeds_ok = False
+        emit(
+            "  WARNING: skipping seed-pool load (swarm config unverified) — "
+            "the seed pool is EMPTY until you re-run `python setup.py create`."
+        )
 
     emit("\nWriting local files…")
     template_files(
@@ -675,6 +765,7 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         "type_label": type_label,
         "n_challenges": n_challenges,
         "config_ok": config_ok,
+        "seeds_ok": seeds_ok,
     }
 
 
@@ -897,6 +988,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     admin_key = result["admin_key"]
     swarm_password = result["swarm_password"]
     config_ok = result["config_ok"]
+    seeds_ok = result.get("seeds_ok", True)
     repo_url = "<this-repo-url>"
     try:
         result = sp.run(
@@ -924,6 +1016,13 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print(f"  Active challenge:  {active_challenge}")
     if config_ok:
         print(f"  All {n_challenges} {type_label} challenges configured and ready (switch via `setup.py switch <name>`).")
+        if not seeds_ok:
+            print(
+                "  WARNING: the SEED POOL could not be verified — seeded agents "
+                "will start from the bare stub.\n"
+                "  Re-run `python setup.py create` (idempotent) to retry seeding, "
+                "then check Pools → Seed pool in the Admin Console."
+            )
     else:
         print(
             f"  WARNING: the server is still on its DEFAULT config "
@@ -951,10 +1050,10 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     print("  edit the agent entry then run `python scripts/run_fleet.py` to participate.")
     print("\n  Manage the service in Railway: https://railway.com/dashboard")
     print()
-    # Non-zero exit when the config never verified so the failure is loud (CI,
-    # scripts, and the operator all see it) instead of a half-initialised swarm
-    # masquerading as ready.
-    return 0 if config_ok else 1
+    # Non-zero exit when the config OR the seed pool never verified so the
+    # failure is loud (CI, scripts, and the operator all see it) instead of a
+    # half-initialised swarm masquerading as ready.
+    return 0 if (config_ok and seeds_ok) else 1
 
 
 def run_create_runner(args: argparse.Namespace | None = None) -> int:
