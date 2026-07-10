@@ -91,19 +91,11 @@ def main() -> int:
               "invite without username rejected")
 
         print("railway login (device-code flow, stubbed CLI)")
-        import io
         import time as _time
 
-        class _FakePopen:
-            """Stands in for `railway login --browserless`: emits a pairing
-            link + code, then exits 0 as if the pairing completed."""
-            def __init__(self, *a, **kw):
-                self.returncode = 0
-                self.stdout = io.StringIO(
-                    "Sign in from any device:\n"
-                    "  https://railway.com/cli-login?d=abc123\n"
-                    "Your pairing code is: brave-otter-lamp\n"
-                )
+        class _FakeProc:
+            """Stands in for the pty-spawned `railway login --browserless`."""
+            returncode = 0
             def poll(self):
                 return self.returncode
             def wait(self):
@@ -111,8 +103,21 @@ def main() -> int:
             def kill(self):
                 pass
 
-        orig_popen = control_server.subprocess.Popen
-        control_server.subprocess.Popen = _FakePopen
+        def _fake_spawn():
+            # ANSI-colored pty-style output, with the CLI's upgrade notice
+            # (a docs.railway.com URL) BEFORE the real activation link — the
+            # scraper must skip it, not lock it in as "the" URL.
+            import io
+            reader = io.StringIO(
+                "\x1b[33mNew version! https://docs.railway.com/cli\x1b[0m\r\n"
+                "\x1b[1mSign in from any device:\x1b[0m\r\n"
+                "  https://railway.com/cli-login?d=abc123\r\n"
+                "Your pairing code is: \x1b[36mbrave-otter-lamp\x1b[0m\r\n"
+            )
+            return _FakeProc(), reader
+
+        orig_launch = control_server.RailwayLoginController._spawn
+        control_server.RailwayLoginController._spawn = staticmethod(_fake_spawn)
         try:
             rl = c.post("/local-api/railway/login").json()
             check(rl["state"] in ("pending", "done"), "login start accepted")
@@ -124,10 +129,11 @@ def main() -> int:
                 _time.sleep(0.05)
             check(rl["state"] == "done", "login completes when the CLI exits 0")
             check(rl["url"] == "https://railway.com/cli-login?d=abc123",
-                  "pairing link scraped from CLI output")
-            check(rl["code"] == "brave-otter-lamp", "pairing code scraped")
+                  "pairing link scraped (docs.railway upgrade notice skipped)")
+            check(rl["code"] == "brave-otter-lamp",
+                  "pairing code scraped through ANSI color codes")
         finally:
-            control_server.subprocess.Popen = orig_popen
+            control_server.RailwayLoginController._spawn = orig_launch
 
         print("fleet status / websocket")
         check(c.get("/local-api/fleet/status").json()["state"] == "idle", "fleet idle before start")
