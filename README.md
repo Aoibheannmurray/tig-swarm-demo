@@ -290,16 +290,16 @@ finishes, then pulls the `benchmark.json` result back.
 The TIG-native C3 Docker path resolves a per-challenge Docker Hub image
 (`_tig_c3_image` / `_SUPPORTED_TIG_C3_CHALLENGES` in `scripts/c3_compute.py`)
 under the namespace `tig_dockerhub` / `TIG_DOCKERHUB` (default `danieltiagoadams`)
-at the version pinned in `tig_pin.json` (currently `0.0.6`), in two families:
+at the version pinned in `tig_pin.json` (currently `0.0.6`).
 
-- **CPU challenges** — baked images `docker.io/<ns>/tig-bench-<challenge>:<version>`
-  (monorepo source + warm cargo cache pre-built in; C3 injects only the
-  algorithm): `satisfiability`, `vehicle_routing`, `knapsack`, `job_scheduling`,
-  `energy_arbitrage`.
-- **GPU challenges** — raw dev images `docker.io/<ns>/tig-dev-<challenge>:<version>`
-  (C3 uploads the pinned monorepo source per job): `vector_search`, `hypergraph`.
+All 8 challenges — CPU and GPU alike — use **baked images**
+`docker.io/<ns>/tig-bench-<challenge>:<version>` (monorepo source + warm cargo
+cache pre-built in; C3 injects only the algorithm and incremental-builds, so there
+is no per-job source upload or cold compile). GPU challenges (`vector_search`,
+`hypergraph`, `neuralnet_optimizer`) bake too: their PTX is pre-built with `nvcc`
+at image-build time, and `neuralnet_optimizer`'s seed-blinding anti-cheat is baked
+into `tig-challenges` inside `Dockerfile.bench`.
 
-`neuralnet_optimizer` has no default C3 image (the path raises with the supported
-list). Set `tig_c3_image` in config to override any challenge's image explicitly.
-The image must already be published — the mirror workflow
-(`.github/workflows/mirror-tig-images.yml`) pushes these to Docker Hub.
+Set `tig_c3_image` in config to override any challenge's image explicitly. The
+image must already be published — the mirror workflow
+(`.github/workflows/mirror-tig-images.yml`) builds and pushes all 8 to Docker Hub.
