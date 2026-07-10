@@ -302,3 +302,34 @@ c3 --version
 | `c3_provider` | Optional C3 backend passed as `c3 deploy -p ...`.                                                                                                                                   |
 | `c3_api_key`  | Optional per-agent C3 API key (raw value). Omit to inherit the top-level fleet `c3_api_key`, then `C3_API_KEY`, then the `c3 login` session. Lets agents bill C3 to different keys. |
 | `env_image`   | Docker Hub image for the job. Defaults: `rust:1-bookworm` (CPU) or `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (GPU). Use `env_cpu` / `env_gpu` to set each separately.            |
+
+### How your fleet's jobs run on C3
+
+Your whole fleet shares **one C3 subscription** (one C3 key), so all your agents
+share **one pool of C3 machines**. You don't configure how many — at launch the
+fleet reads your subscription's concurrent-job limit straight from C3 (Free 3 /
+Pro 10 / Team 50 today) and uses that as the pool size. Upgrade your C3 plan and
+the fleet automatically uses more machines; no config change needed.
+
+Here's what happens each time an agent benchmarks on C3:
+
+1. **Split.** The benchmark's work (its *nonces*) is divided into as many
+   **balanced** pieces as your pool has slots — sizes differ by at most one, so
+   no machine sits idle. For example, 22 nonces on a 3-slot plan → **8, 7, 7**;
+   on a 4-slot plan → **6, 6, 5, 5**. (If there's less work than slots, you just
+   use fewer machines.)
+2. **Queue.** Each piece is a job that needs a C3 machine slot. Slots are handed
+   out **first-come, first-served** across your whole fleet: when the pool is
+   full, new jobs wait in line, and each freed slot goes to the longest-waiting
+   job. This is what keeps your fleet from ever exceeding the concurrent-job
+   limit your plan allows (and thus from over-spending your C3 budget).
+3. **Merge.** When every piece of a benchmark finishes, the results are stitched
+   back together and scored once — so the score is exactly what a single-machine
+   run would give, just produced faster by running the pieces in parallel.
+
+Practically: with **one** agent benchmarking, its pieces fill the whole pool and
+the benchmark finishes as fast as your plan allows. With **several** agents, jobs
+run in the order they were submitted as slots free up, so agents take turns — a
+burst from one agent (say, a hyperparameter search) can make the others wait
+their turn in line. Either way you never over-subscribe your plan, and there's
+nothing to tune: it scales with your C3 subscription.
