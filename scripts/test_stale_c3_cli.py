@@ -85,10 +85,13 @@ def test_self_heal_runs_installer_exactly_once():
 
 def test_shard_retry_guard_prevents_loops():
     """After one update-and-retry, a still-stale CLI must fall through to the
-    actionable error, not recurse — verified via the _cli_updated parameter."""
+    actionable error, not recurse — verified via the _cli_updated parameter.
+    The guard lives on _run_one_c3_shard_inner: _run_one_c3_shard is the
+    job_slots semaphore wrapper, and the self-heal retry must re-enter _inner
+    directly so the already-held slot isn't re-acquired."""
     import inspect
     import c3_compute as cc
-    sig = inspect.signature(cc._run_one_c3_shard)
+    sig = inspect.signature(cc._run_one_c3_shard_inner)
     assert "_cli_updated" in sig.parameters, sig
     assert sig.parameters["_cli_updated"].default is False
     print("PASS test_shard_retry_guard_prevents_loops")

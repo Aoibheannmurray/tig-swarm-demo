@@ -18,6 +18,11 @@ TS = "2026-06-23T00:00:00Z"
 def _fresh_modules():
     tmp = tempfile.mkdtemp()
     os.environ["DATA_DIR"] = tmp
+    # Running from a repo checkout, first-boot seeding would find the real
+    # initial_algorithms/ tree and deposit authored seeds into the fresh DB,
+    # breaking the exact seed-pool counts below. Point it at an empty dir
+    # (same isolation as test_first_boot.py).
+    os.environ["TIG_INITIAL_ALGORITHMS_DIR"] = tempfile.mkdtemp()
     for mod in ("db", "server"):
         sys.modules.pop(mod, None)
     import db

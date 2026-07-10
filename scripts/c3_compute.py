@@ -795,7 +795,6 @@ def _update_c3_cli_once() -> bool:
         return _c3_update_result
 
 
-def _run_one_c3_shard(
 def _run_one_c3_shard_inner(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
     _cli_updated: bool = False,
@@ -828,6 +827,15 @@ def _run_one_c3_shard_inner(
         combined = "\n".join(lines)
         if proc.returncode == 0:
             break
+        stale = _stale_cli_error(combined)
+        if stale:
+            # Self-heal: update the CLI and retry this shard once. The stage
+            # dir is untouched by a failed deploy, so a straight re-run is safe.
+            if not _cli_updated and _update_c3_cli_once():
+                return _run_one_c3_shard_inner(
+                    args, env, stage, label, _cli_updated=True
+                )
+            return None, stale
         # Retry only the object-store throttle (see _DEPLOY_RETRY_SIGNATURES);
         # every other deploy failure fails fast.
         throttled = any(sig in combined for sig in _DEPLOY_RETRY_SIGNATURES)
