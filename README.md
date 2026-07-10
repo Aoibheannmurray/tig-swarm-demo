@@ -1,10 +1,16 @@
-# TIG Swarm Demo
+# Prometheus TIG Swarm
 
-Multiple LLM agents optimize TIG challenge solvers in Rust, coordinated by a FastAPI server and live dashboard.
+Multiple LLM agents optimize TIG challenge solvers in Rust, coordinated by a server and live dashboard.
 
 Each contributor runs `python3 run.py`, which spawns one or more agents — each calling an LLM (Anthropic, OpenAI, Google, OpenRouter, Venice, or your local `claude` / `codex` CLI) in a loop and contributing to the swarm.
 
 See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for internals.
+
+## Status & support
+
+This project was built largely with Claude Code and is released as-is: no
+support is provided and things may break — use at your own risk. Issues are
+tracked but not triaged on any schedule; contributions are welcome via PR.
 
 ## Host
 
@@ -30,24 +36,25 @@ python3 setup.py list                  # contributors: agents, activity, revoked
 ## Contributor
 
 Requirements:
+
 - Python 3
 - Git (each agent runs in its own git worktree)
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/), running — **only if you benchmark locally** (`"compute": "local"`). Not needed when all agents benchmark on C3, which runs every benchmark remotely. (Windows local Docker also needs WSL 2.)
 - Either an API key for your chosen provider, or a logged-in `claude` / `codex` CLI
 
-> **Windows:** use `python` instead of `python3` in the commands below. On macOS
-> (Homebrew) and most Linux the interpreter is `python3` and there is no bare
-> `python`, so the examples use `python3`.
 
-No terminal handy? Open this repo in [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://docs.claude.com/en/docs/claude-code) and ask it to walk you through setup.
+
+### Local Web Setup
 
 ```bash
-python3 run.py
+python3 run.py --ui
 ```
 
-It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
+Opens the local web companion. It walks you through fleet setup, then lets you launch the fleet and edit it later — add agents, change settings or providers.
 
-Prefer a browser? `python3 run.py --ui` opens the local web companion instead — the same setup and fleet launch/monitoring from a web page (it auto-installs its own dependencies on first run).
+### Terminal setup
+
+`python3 run.py` runs setup through a wizard on the terminal. It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
 
 Export your keys before launching — your provider key (skip if you use a `claude` / `codex` CLI login) and `C3_API_KEY` for C3 compute:
 
@@ -76,30 +83,33 @@ $EDITOR fleet.config.json
 
 Per-agent fields:
 
-| field            | meaning                                                                 |
-|------------------|-------------------------------------------------------------------------|
-| `name`           | Worktree dir + dashboard label.                                         |
-| `provider`       | LLM provider — see [Providers](#providers).                             |
-| `model`          | Model ID. Run `python scripts/list_models.py <provider>` to see what's available; per-provider defaults live in `DEFAULT_MODELS` (`scripts/llm_backends.py`). |
-| `api_key_env`    | Env var holding the API key. Omit for CLI-auth providers.               |
-| `api_base`       | Optional override of the provider's base URL (e.g. an OpenAI-compatible gateway like OpenRouter: `https://openrouter.ai/api/v1`). |
-| `tacit_knowledge`| Optional per-agent override of the shared `tacit_knowledge.md` file.    |
-| `detailed_prompts`| Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile; leave off for frontier models to save tokens. |
-| `role`           | `explorer` (default) writes novel/ambitious algorithms; `exploiter` makes only small localized edits, never a rewrite. **Hot-editable** — change it in `fleet.config.json` while the fleet runs and it takes effect on the agent's next iteration. |
 
-Remember to add your hints to `tacit_knowledge.md` — see [Tacit knowledge](#tacit-knowledge) below.
+| field              | meaning                                                                                                                                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`             | Agent name                                                                                                                                                                                                                 |
+| `provider`         | LLM provider eg: claude-code — see [Providers](#providers).                                                                                                                                                                |
+| `model`            | Model ID. Run `python scripts/list_models.py <provider>` to see what's available; per-provider defaults live in `DEFAULT_MODELS` (`scripts/llm_backends.py`).                                                              |
+| `api_key_env`      | Variable holding the API key, eg: `OPENROUTER_API_KEY`. Omit for CLI-auth providers.                                                                                                                                       |
+| `api_base`         | Optional override of the provider's base URL, e.g. `https://openrouter.ai/api/v1`.                                                                                                                                         |
+| `detailed_prompts` | Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile.                                                                                                |
+| `role`             | `explorer` writes novel/ambitious algorithms; `exploiter` makes small focused localized edits. **Hot-editable** — change it in `fleet.config.json` while the fleet runs and it takes effect on the agent's next iteration. |
 
-Now that you've manually set up your `fleet.config.json` and `tacit_knowledge.md`, you can run the fleet (make sure you've exported your API keys first):
 
-`python3 scripts/run_fleet.py`
+
+
+Then run the fleet (make sure you've exported your API keys first):
+
+```bash
+python3 scripts/run_fleet.py
+```
 
 ### Tacit knowledge
 
-`tacit_knowledge.md` is a private hints file your agents read when they get stuck. It's gitignored and never leaves your machine. All your agents share it by default, so insights accumulate across the whole fleet.
+`tacit_knowledge.md` is a local file containing your domain tacit knowledge, i.e: strategies to use when one gets stuck. It is shown to your agents when they stagnate. It's gitignored and remains local. All your agents share it by default, so insights accumulate across the whole fleet.
 
-Agents also **write back to it**: when one has been failing for a stretch and is about to start over from scratch, it adds a one-line `- LLM:` "what didn't work" note — so future attempts can avoid the same dead end.
+Agents can also optionally **write back to it**: when one has been failing for a stretch and is about to start over from scratch, it adds a one-line `- LLM:` "what didn't work" note — so future attempts can avoid the same dead end.
 
-To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python3 setup.py tacit` directly. Both append rather than overwrite, and the edit menu can open the file in your `$EDITOR`. Deeper detail — when agents append, how files resolve per agent — lives in [ARCHITECTURE.md](./docs/ARCHITECTURE.md#tacit-knowledge).
+To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python3 setup.py tacit` directly. More detail can be found in [ARCHITECTURE.md](./docs/ARCHITECTURE.md#tacit-knowledge).
 
 ### Manual / power-user flow
 
@@ -114,48 +124,41 @@ python3 scripts/run_fleet.py --only claude-1    # run a subset (repeatable)
 python3 scripts/run_fleet.py --clean            # remove every worktree + branch
 ```
 
-## Benchmark image
 
-Build once before the first launch:
+
+## Benchmark image (local compute only)
+
+Only needed if an agent has `"compute": "local"` — the C3 default needs no
+local images. Build once before the first launch:
 
 ```bash
 docker build -f Dockerfile.cpu -t tig-swarm-cpu .
 docker build -f Dockerfile.gpu -t tig-swarm-gpu .       # GPU challenges only
 ```
 
+
+
 ## Providers
 
-| `provider`            | Auth                                                                            |
-|-----------------------|---------------------------------------------------------------------------------|
-| `anthropic`           | `ANTHROPIC_API_KEY`                                                             |
+
+| `provider`            | Auth                                                                             |
+| --------------------- | -------------------------------------------------------------------------------- |
+| `anthropic`           | `ANTHROPIC_API_KEY`                                                              |
 | `openai`              | `OPENAI_API_KEY` (also `"api_base": "<url>"` for any OpenAI-compatible endpoint) |
-| `google`              | `GOOGLE_API_KEY`                                                                |
-| `venice`              | `VENICE_API_KEY` (OpenAI-compatible, base URL baked in)                         |
-| `openrouter`          | `OPENROUTER_API_KEY` (multi-model proxy; model IDs are `publisher/name`)        |
-| `claude-code`         | `claude` CLI login (no API key needed)                                          |
-| `claude-code-agentic` | `claude` CLI login                                                              |
-| `codex-agentic`       | `codex login`                                                                   |
+| `google`              | `GOOGLE_API_KEY`                                                                 |
+| `venice`              | `VENICE_API_KEY` (OpenAI-compatible, base URL baked in)                          |
+| `openrouter`          | `OPENROUTER_API_KEY` (multi-model proxy; model IDs are `publisher/name`)         |
+| `claude-code`         | `claude` CLI login (no API key needed)                                           |
+| `claude-code-agentic` | `claude` CLI login                                                               |
+| `codex-agentic`       | `codex login`                                                                    |
 
-**Which models can I use?** Run `python scripts/list_models.py <provider>` to
-print a provider's live model list — the IDs you can drop into the `model`
-field above:
 
-```bash
-python scripts/list_models.py                 # providers + their defaults
-python scripts/list_models.py anthropic       # Anthropic's models
-python scripts/list_models.py openrouter      # OpenRouter (no key needed)
-```
 
-It reads the provider's API key from the environment (the same var in the
-table above); OpenRouter's catalog is public so no key is needed there. The
-CLI providers (`claude-code`, `claude-code-agentic`, `codex-agentic`) have no
-models endpoint — they accept any model ID their CLI knows.
+`claude-code` is single-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree. More capable per iteration but burn ~5–20× tokens; subscription-only.
 
-`claude-code` is single-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree — far more capable per iteration but burn ~5–20× tokens; subscription-only. They run silently for up to 30 min per iteration (`--agentic-timeout`, default 1800 s); don't kill the terminal if there's no output — heartbeats keep the dashboard alive, and `[BENCH]` lines appear once the agent returns.
+## Interpreting the score
 
-## Reading the score
-
-Each iteration prints a `[BENCH]` line — the aggregate `Score`, `Feasible`, and a per-track breakdown:
+Each iteration prints a `[BENCH]` line: the aggregate `Score`, `Feasible`, and a per-track breakdown:
 
 ```
 [BENCH] Score: -199814  Feasible: False
@@ -197,14 +200,14 @@ A session is a full agentic trace, not just input→output text. You see, in ord
 
 Swarm state lives on the server. Local files only tell this clone how to connect and run:
 
-| file                  | purpose                                                       |
-|-----------------------|---------------------------------------------------------------|
-| `fleet.config.json`   | Your fleet's agents (user-edited).                            |
-| `tacit_knowledge.md`  | Your private hint file (gitignored).                          |
-| `.swarm-cache.json`   | Auto-refreshed mirror of `/api/swarm_config`.                 |
-| `swarm.admin.json`    | Host-only — admin key + swarm tuning.                         |
 
-Secrets stay in environment variables.
+| file                 | purpose                                       |
+| -------------------- | --------------------------------------------- |
+| `fleet.config.json`  | Your fleet's agents (user-edited).            |
+| `tacit_knowledge.md` | Your private hint file (gitignored).          |
+| `.swarm-cache.json`  | Auto-refreshed mirror of `/api/swarm_config`. |
+| `swarm.admin.json`   | Host-only — admin key + swarm tuning.         |
+
 
 ## Remote benchmarking with C3
 
@@ -212,20 +215,20 @@ This swarm benchmarks on [C3](https://cthree.cloud) cloud hardware by default �
 `run.py` wizard and `fleet.config.example.json` both set `"compute": "c3"`, so
 you don't need local compute. To benchmark locally in Docker instead, set
 `"compute": "local"` on an agent in `fleet.config.json`, then launch as usual
-with `python run.py`. 
+with `python3 run.py`. 
 
-First install the `c3` CLI (from `https://cthree.cloud/install.sh`) and
-authenticate, via either:
+First install the `c3` CLI:
 
-- `curl -fsSL https://cthree.cloud/install.sh | sh` to update your version of `c3` 
+```bash
+curl -fsSL https://cthree.cloud/install.sh | sh
+```
+
+Then authenticate, via either:
+
 - `c3 login` (uses your existing session), or
-- `c3 apikey create tig-swarm` then export `C3_API_KEY=...`, or
-- put the key in `fleet.config.json` — a top-level `"c3_api_key"` applies to
-  every agent, and a per-agent `"c3_api_key"` overrides it for that agent.
-  An agent with no key set anywhere falls back to `C3_API_KEY` / `c3 login`.
+- `c3 apikey create tig-swarm` then export `C3_API_KEY=...`
 
-<details>
-<summary><strong>Windows: installing the <code>c3</code> CLI</strong> (the install script above is macOS/Linux only)</summary>
+**Windows: installing the** `c3` **CLI** (the install script above is macOS/Linux only)
 
 The equivalent of `curl -fsSL https://cthree.cloud/install.sh | sh`, in PowerShell:
 
@@ -255,51 +258,13 @@ c3 --version
 - **Arch:** this uses the `amd64` build (correct for most machines, `PROCESSOR_ARCHITECTURE = AMD64`). On an ARM Windows PC, swap the URL to `c3-windows-arm64.exe`.
 - **Updating later:** re-run steps 1–2 to overwrite `c3.exe` with the latest release.
 
-</details>
+### Optional C3 fields in `fleet.config.json`
 
-Then add the C3 keys to the agent:
-
-```jsonc
-{
-  "name": "claude-1",
-  "provider": "anthropic",
-  "model": "claude-opus-4-7",
-  "api_key_env": "ANTHROPIC_API_KEY",
-  "compute": "c3",          // run benchmarks on C3 instead of local Docker
-  "c3_hardware": "auto",    // CPU challenges -> cpu-d3-4vcpu-16gb; GPU -> l40
-  "c3_time": "02:00:00",    // per-job walltime (default: 02:00:00)
-  "c3_provider": null,      // optional C3 backend (c3 deploy -p ...)
-  "c3_api_key": null,       // optional per-agent C3 key; omit to fall back
-  "env_image": null         // Docker Hub image override (see below)
-}
-```
-
-| key            | purpose                                                              |
-|----------------|---------------------------------------------------------------------|
-| `compute`      | `"c3"` for C3 cloud hardware (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`. |
-| `c3_hardware`  | C3 hardware selector. Use `"auto"` to run CPU challenges on `cpu-d3-4vcpu-16gb` and GPU challenges on `l40`; pin an exact profile only when needed. |
-| `c3_time`      | Per-job walltime (default: `02:00:00`).                             |
-| `c3_provider`  | Optional C3 backend passed as `c3 deploy -p ...`.                  |
-| `c3_api_key`   | Optional per-agent C3 API key (raw value). Omit to inherit the top-level fleet `c3_api_key`, then `C3_API_KEY`, then the `c3 login` session. Lets agents bill C3 to different keys. |
-| `env_image`    | Docker Hub image for the job. Defaults: `rust:1-bookworm` (CPU) or `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (GPU). Use `env_cpu` / `env_gpu` to set each separately. |
-
-Each C3 benchmark runs the same `scripts/benchmark.py` inside that Docker Hub
-image: the loop stages a minimal workspace, deploys it, polls until the job
-finishes, then pulls the `benchmark.json` result back.
-
-The TIG-native C3 Docker path resolves a per-challenge Docker Hub image
-(`_tig_c3_image` / `_SUPPORTED_TIG_C3_CHALLENGES` in `scripts/c3_compute.py`)
-under the namespace `tig_dockerhub` / `TIG_DOCKERHUB` (default `danieltiagoadams`)
-at the version pinned in `tig_pin.json` (currently `0.0.6`).
-
-All 8 challenges — CPU and GPU alike — use **baked images**
-`docker.io/<ns>/tig-bench-<challenge>:<version>` (monorepo source + warm cargo
-cache pre-built in; C3 injects only the algorithm and incremental-builds, so there
-is no per-job source upload or cold compile). GPU challenges (`vector_search`,
-`hypergraph`, `neuralnet_optimizer`) bake too: their PTX is pre-built with `nvcc`
-at image-build time, and `neuralnet_optimizer`'s seed-blinding anti-cheat is baked
-into `tig-challenges` inside `Dockerfile.bench`.
-
-Set `tig_c3_image` in config to override any challenge's image explicitly. The
-image must already be published — the mirror workflow
-(`.github/workflows/mirror-tig-images.yml`) builds and pushes all 8 to Docker Hub.
+| key           | purpose                                                                                                                                                                             |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `compute`     | `"c3"` for C3 cloud hardware (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`.                                             |
+| `c3_hardware` | C3 hardware selector. Use `"auto"` to run CPU challenges on `cpu-d3-4vcpu-16gb` and GPU challenges on `l40`; pin an exact profile only when needed.                                 |
+| `c3_time`     | Per-job walltime (default: `02:00:00`).                                                                                                                                             |
+| `c3_provider` | Optional C3 backend passed as `c3 deploy -p ...`.                                                                                                                                   |
+| `c3_api_key`  | Optional per-agent C3 API key (raw value). Omit to inherit the top-level fleet `c3_api_key`, then `C3_API_KEY`, then the `c3 login` session. Lets agents bill C3 to different keys. |
+| `env_image`   | Docker Hub image for the job. Defaults: `rust:1-bookworm` (CPU) or `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (GPU). Use `env_cpu` / `env_gpu` to set each separately.            |

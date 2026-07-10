@@ -50,6 +50,14 @@ SANDBOX_SPEC.md
 # Staging area for files pending deletion — never committed
 will_remove_later/
 
+# Local-only artifacts (old exports, backups, reports) — never committed
+local/
+.c3.env
+*.bak
+*.bak.*
+invites*.csv
+agent_activity.csv
+
 # Per-user Claude Code settings — the swarm writes its own sandbox settings
 # into worktrees (.swarm/sandbox-settings.json), so nothing here is shared.
 .claude/settings.json
