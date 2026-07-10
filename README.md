@@ -203,6 +203,33 @@ Each iteration prints a `[BENCH]` line: the aggregate `Score`, `Feasible`, and a
 
 The aggregate is a **shifted geometric mean** across tracks, and a failed or infeasible track is assigned a large fixed penalty. Because of that penalty, **a single bad track can drag the whole aggregate negative** even when the other tracks scored well. 
 
+## Inspecting agentic prompts
+
+In agentic mode (`claude-code-agentic` / `codex-agentic`) each iteration runs
+`claude -p` inside `worktrees/<agent>/`, and Claude Code logs the full session.
+To see exactly what an agent was told and did:
+
+```bash
+python3 scripts/show_agent_session.py <agent> --list   # list that agent's sessions, newest first
+python3 scripts/show_agent_session.py <agent>          # render the newest one
+python3 scripts/show_agent_session.py <agent> --index 3  # an older run
+python3 scripts/show_agent_session.py <agent> --full   # don't truncate long blocks
+```
+
+A session is a full agentic trace, not just input→output text. You see, in order:
+
+- **SYSTEM** — the swarm's stable rules (`worktrees/<agent>/CLAUDE.md`). These
+  aren't in the raw session log — the harness folds them into the system prompt —
+  so the script prints the on-disk copy for you. (Claude Code's own base system
+  prompt isn't recoverable from a log; capture it with `claude --debug` on a live run.)
+- **USER** — the per-iteration prompt the swarm piped in (score, role, niche,
+  inspiration, task).
+- **thinking** — Claude's private reasoning before it acts (scratchpad
+  chain-of-thought, not shown to end users normally; surfaced here).
+- **ASSISTANT** — the text replies.
+- **⚙ TOOL CALL / └─ TOOL RESULT** — each `Read`/`Edit`/`Bash` the agent made and
+  what came back.
+
 ## Local files
 
 Swarm state lives on the server. Local files only tell this clone how to connect and run:
@@ -267,11 +294,32 @@ c3 --version
 
 ### Optional C3 fields in `fleet.config.json`
 
-| key           | purpose                                                                                                                                                                             |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `compute`     | `"c3"` for C3 cloud hardware (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`.                                             |
-| `c3_hardware` | C3 hardware selector. Use `"auto"` to run CPU challenges on `cpu-d3-4vcpu-16gb` and GPU challenges on `l40`; pin an exact profile only when needed.                                 |
-| `c3_time`     | Per-job walltime (default: `02:00:00`).                                                                                                                                             |
-| `c3_provider` | Optional C3 backend passed as `c3 deploy -p ...`.                                                                                                                                   |
-| `c3_api_key`  | Optional per-agent C3 API key (raw value). Omit to inherit the top-level fleet `c3_api_key`, then `C3_API_KEY`, then the `c3 login` session. Lets agents bill C3 to different keys. |
-| `env_image`   | Docker Hub image for the job. Defaults: `rust:1-bookworm` (CPU) or `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (GPU). Use `env_cpu` / `env_gpu` to set each separately.            |
+| key            | purpose                                                              |
+|----------------|---------------------------------------------------------------------|
+| `compute`      | `"c3"` for C3 cloud hardware (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`. |
+| `c3_hardware`  | C3 hardware selector. Use `"auto"` to run CPU challenges on `cpu-d3-4vcpu-16gb` and GPU challenges on `l40`; pin an exact profile only when needed. |
+| `c3_time`      | Per-job walltime (default: `02:00:00`).                             |
+| `c3_provider`  | Optional C3 backend passed as `c3 deploy -p ...`.                  |
+| `c3_api_key`   | Optional per-agent C3 API key (raw value). Omit to inherit the top-level fleet `c3_api_key`, then `C3_API_KEY`, then the `c3 login` session. Lets agents bill C3 to different keys. |
+| `env_image`    | Docker Hub image for the job. Defaults: `rust:1-bookworm` (CPU) or `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (GPU). Use `env_cpu` / `env_gpu` to set each separately. |
+
+Each C3 benchmark runs the same `scripts/benchmark.py` inside that Docker Hub
+image: the loop stages a minimal workspace, deploys it, polls until the job
+finishes, then pulls the `benchmark.json` result back.
+
+The TIG-native C3 Docker path resolves a per-challenge Docker Hub image
+(`_tig_c3_image` / `_SUPPORTED_TIG_C3_CHALLENGES` in `scripts/c3_compute.py`)
+under the namespace `tig_dockerhub` / `TIG_DOCKERHUB` (default `danieltiagoadams`)
+at the version pinned in `tig_pin.json` (currently `0.0.6`).
+
+All 8 challenges — CPU and GPU alike — use **baked images**
+`docker.io/<ns>/tig-bench-<challenge>:<version>` (monorepo source + warm cargo
+cache pre-built in; C3 injects only the algorithm and incremental-builds, so there
+is no per-job source upload or cold compile). GPU challenges (`vector_search`,
+`hypergraph`, `neuralnet_optimizer`) bake too: their PTX is pre-built with `nvcc`
+at image-build time, and `neuralnet_optimizer`'s seed-blinding anti-cheat is baked
+into `tig-challenges` inside `Dockerfile.bench`.
+
+Set `tig_c3_image` in config to override any challenge's image explicitly. The
+image must already be published — the mirror workflow
+(`.github/workflows/mirror-tig-images.yml`) builds and pushes all 8 to Docker Hub.

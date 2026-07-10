@@ -288,7 +288,7 @@ def push_config_to_server(
     to `deadline_s`. Returns True once verified-stable, False if the deadline
     passes.
 
-    `cfg["challenges"]` is a dict of {challenge: {tracks, timeout,
+    `cfg["challenges"]` is a dict of {challenge: {tracks,
     scoring_direction, initial_algorithm_code, ...}}; `cfg["active_challenge"]`
     selects which one contributors auto-follow.
     """
@@ -457,10 +457,6 @@ def collect_per_challenge_configs(
     for ch, meta in target.items():
         ch_def = _load_challenge_registry()[ch]
         tracks: dict = {"seed": "test"}
-        # Per-instance wall-clock timeout retired — the TIG backend bounds by
-        # fuel (max_fuel_budget), not the clock. `default_timeout` is kept only
-        # as harmless metadata for backward compat; it is no longer prompted.
-        timeout = ch_def.default_timeout
         if use_defaults:
             default_tracks = DEFAULT_TRACKS_PER_CHALLENGE.get(ch)
             if default_tracks:
@@ -481,7 +477,6 @@ def collect_per_challenge_configs(
         algo_data = initial_algorithms.get(ch, {})
         sub: dict = {
             "tracks": tracks,
-            "timeout": timeout,
             "scoring_direction": meta["scoring_direction"],
             "initial_algorithm_code": algo_data.get("algorithm_code", ""),
             "strategy_tags": meta.get("strategy_tags", []),
@@ -545,6 +540,12 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
     stagnation_threshold = params["stagnation_threshold"]
     stagnation_limit = params["stagnation_limit"]
     hypothesis_recall_threshold = params["hypothesis_recall_threshold"]
+    # HPO knobs default in for other callers (e.g. the control-ui companion)
+    # that don't set them explicitly.
+    hpo_first_tune_improvements = params.get("hpo_first_tune_improvements", 10)
+    hpo_min_improvements = params.get("hpo_min_improvements", 4)
+    hpo_search_budget = params.get("hpo_search_budget", 13)
+    hpo_num_suggested_configs = params.get("hpo_num_suggested_configs", 5)
     seed_inactive_pool = params.get("seed_inactive_pool", False)
     seedable = params.get("seedable")
     if seedable is None:
@@ -583,6 +584,10 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         "STAGNATION_THRESHOLD": str(stagnation_threshold),
         "STAGNATION_LIMIT": str(stagnation_limit),
         "HYPOTHESIS_RECALL_THRESHOLD": str(hypothesis_recall_threshold),
+        "HPO_FIRST_TUNE_IMPROVEMENTS": str(hpo_first_tune_improvements),
+        "HPO_MIN_IMPROVEMENTS": str(hpo_min_improvements),
+        "HPO_SEARCH_BUDGET": str(hpo_search_budget),
+        "HPO_NUM_SUGGESTED_CONFIGS": str(hpo_num_suggested_configs),
         "SWARM_CHALLENGES_B64": encode_challenges_blob(challenges_cfg),
     })
 
@@ -628,7 +633,6 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         "hypothesis_recall_threshold": hypothesis_recall_threshold,
         "scoring_direction": challenge_meta["scoring_direction"],
         "tracks": active_sub["tracks"],
-        "timeout": active_sub["timeout"],
         "algorithm_path": f"src/{active_challenge}/algorithm/mod.rs",
     }
     if active_def.is_gpu:
@@ -672,6 +676,66 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         "n_challenges": n_challenges,
         "config_ok": config_ok,
     }
+
+
+# HPO knobs are good out of the box, so the wizard hides them behind one opt-in
+# question. Kept here so both wizard branches resolve them identically. Values
+# mirror the server's SWARM_DEFAULTS; the client driver reads them via the
+# pushed swarm config (scripts/run_loop.py's HPO gate + search).
+_HPO_ORDER = (
+    "hpo_first_tune_improvements", "hpo_min_improvements",
+    "hpo_search_budget", "hpo_num_suggested_configs",
+)
+_HPO_DEFAULTS = {
+    "hpo_first_tune_improvements": 10,
+    "hpo_min_improvements": 4,
+    "hpo_search_budget": 13,
+    "hpo_num_suggested_configs": 5,
+}
+_HPO_PROMPTS = {
+    "hpo_first_tune_improvements": (
+        "HPO first-tune improvements (per-trajectory improvements before a "
+        "trajectory's FIRST tune)", 1),
+    "hpo_min_improvements": (
+        "HPO min improvements (improvements before later tunes; also the "
+        "tune-band width)", 1),
+    "hpo_search_budget": (
+        "HPO search budget (configs evaluated per tune, incl. the default + "
+        "LLM-suggested)", 1),
+    "hpo_num_suggested_configs": (
+        "HPO LLM-suggested configs (max LLM-proposed configs in the budget; "
+        "0 = random draws only)", 0),
+}
+
+
+def _resolve_hpo_settings(
+    args: argparse.Namespace | None, *, interactive: bool = False,
+) -> tuple[int, int, int, int]:
+    """Resolve the 4 host-tunable HPO knobs (in `_HPO_ORDER`).
+
+    CLI flags win when present. The `--yes` / use-defaults path takes the
+    defaults silently. The interactive wizard asks one opt-in question and only
+    prompts for the 4 values if the host says yes (defaults are sensible, so
+    most hosts skip). Any knob left unset falls back to its default.
+    """
+    vals = {k: _arg_value(args, k) for k in _HPO_ORDER}
+    edit = any(vals[k] is not None for k in _HPO_ORDER)  # a flag was passed
+    if interactive and not edit:
+        ans = prompt(
+            "Edit HPO (hyperparameter-optimization) settings? The defaults are "
+            "sensible — only tune if you know you want to. [y/N]",
+            default="N",
+        )
+        edit = ans.strip().lower() in ("y", "yes")
+    if edit and interactive:
+        for k in _HPO_ORDER:
+            if vals[k] is None:
+                label, minimum = _HPO_PROMPTS[k]
+                vals[k] = prompt_int(label, _HPO_DEFAULTS[k], minimum=minimum)
+    for k in _HPO_ORDER:
+        if vals[k] is None:
+            vals[k] = _HPO_DEFAULTS[k]
+    return tuple(vals[k] for k in _HPO_ORDER)
 
 
 def run_create(args: argparse.Namespace | None = None) -> int:
@@ -787,6 +851,8 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         stagnation_limit = _arg_value(args, "stagnation_limit")
         stagnation_limit = 10 if stagnation_limit is None else stagnation_limit
         hypothesis_recall_threshold = _arg_value(args, "hypothesis_recall_threshold") or 3
+        (hpo_first_tune_improvements, hpo_min_improvements,
+         hpo_search_budget, hpo_num_suggested_configs) = _resolve_hpo_settings(args)
     else:
         stagnation_threshold = _arg_value(args, "stagnation_threshold") or prompt_int(
             "Stagnation threshold (iterations without improvement before hints/inspiration)",
@@ -803,6 +869,10 @@ def run_create(args: argparse.Namespace | None = None) -> int:
             "showing prior failed hypotheses for the current program)",
             3, minimum=1,
         )
+        (hpo_first_tune_improvements, hpo_min_improvements,
+         hpo_search_budget, hpo_num_suggested_configs) = _resolve_hpo_settings(
+            args, interactive=True,
+        )
 
     # Hand the resolved wizard decisions to the non-interactive core, which does
     # the Railway provisioning + config push + seeding + local-file writes. The
@@ -816,6 +886,10 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         "stagnation_threshold": stagnation_threshold,
         "stagnation_limit": stagnation_limit,
         "hypothesis_recall_threshold": hypothesis_recall_threshold,
+        "hpo_first_tune_improvements": hpo_first_tune_improvements,
+        "hpo_min_improvements": hpo_min_improvements,
+        "hpo_search_budget": hpo_search_budget,
+        "hpo_num_suggested_configs": hpo_num_suggested_configs,
         "seed_inactive_pool": seed_inactive_pool,
         "seedable": seedable,
     })
@@ -1070,7 +1144,6 @@ def switch_challenge(challenge: str) -> dict:
         refreshed["is_gpu"] = True
     if sub:
         refreshed["tracks"] = sub.get("tracks", {})
-        refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Carry the stagnation knobs into the host's cache too (switch doesn't
     # fetch /api/swarm_config, so source them from swarm.admin.json).
@@ -1169,7 +1242,6 @@ def run_sync() -> int:
         refreshed["is_gpu"] = True
     if sub:
         refreshed["tracks"] = sub.get("tracks", {})
-        refreshed["timeout"] = sub.get("timeout", 5)
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Mirror the client-relevant stagnation knobs so the driver can time
     # tacit-knowledge distillation (see _CACHE_FIELDS).

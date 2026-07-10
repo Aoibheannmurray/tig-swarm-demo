@@ -32,6 +32,7 @@ mkdir -p "$stage/tig-source"
 # Re-add only the source the dev image stripped; exclude build artifacts / vcs.
 tar -C "$MONOREPO" --exclude=./target --exclude=./.git -cf - . | tar -C "$stage/tig-source" -xf -
 cp "$HERE/scripts/modified_test_algorithm" "$stage/modified_test_algorithm"
+cp "$HERE/scripts/bench_blind_nn.py" "$stage/bench_blind_nn.py"
 cp "$HERE/Dockerfile.bench" "$stage/Dockerfile.bench"
 
 IMAGE="tig-custom-image-${CHALLENGE}:${VERSION}"

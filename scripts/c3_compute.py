@@ -24,8 +24,8 @@ import json
 import os
 import threading
 import re
-import shlex
 import shutil
+import random
 import subprocess
 import tempfile
 import time
@@ -61,37 +61,46 @@ _AUTO_HARDWARE_VALUES = {"", "auto", "default"}
 # c3_max_parallel_jobs in fleet.config.json).
 _DEFAULT_NONCES_PER_SHARD = 8
 _DEFAULT_MAX_PARALLEL_JOBS = 3
+# Concurrent shards upload byte-identical workspace files (same algorithm/mod.rs,
+# Cargo.toml, …); a content-addressed blob store rejects simultaneous writes to
+# the same object with HTTP 429 ("Reduce your concurrent request rate for the
+# same object"). Retry ONLY that throttle, with exponential + FULL-jitter backoff
+# so the racing shards de-synchronise instead of colliding again in lockstep. A
+# 429 happens during workspace upload, before any job is submitted, so retrying
+# can't orphan a running job. Happy path adds zero latency (only fires on the
+# 429 signature); non-throttle deploy failures still fail fast.
+_DEPLOY_MAX_ATTEMPTS = 5          # 1 initial + up to 4 retries
+_DEPLOY_BACKOFF_BASE_SECS = 1.5   # jitter window for the first retry
+_DEPLOY_BACKOFF_CAP_SECS = 20.0   # per-retry window ceiling
+_DEPLOY_RETRY_SIGNATURES = (
+    "status 429", "ServiceUnavailable", "concurrent request rate",
+)
 # CPU challenges served by a *baked* custom image (tig-bench-<ch>): the monorepo
 # source + warm cargo cache + modified_test_algorithm are pre-built into the
 # image (see Dockerfile.bench / build_bench_image.sh). C3 pulls it (cached per
 # pool), injects ONLY the algorithm into the pre-baked swarm_algo slot, and
 # incremental-builds (seconds) — no per-job source upload, no cold compile.
+# Every challenge — CPU and GPU — is served by a *baked* custom image
+# (tig-bench-<ch>): the monorepo source + warm cargo cache + modified_test_algorithm
+# are pre-built into the image (see Dockerfile.bench / build_bench_image.sh). C3
+# pulls it (cached per pool), injects ONLY the algorithm into the pre-baked
+# swarm_algo slot, and incremental-builds in seconds — no per-job source upload, no
+# cold compile. The GPU challenges (vector_search, hypergraph, neuralnet_optimizer)
+# bake too: nvcc pre-builds their PTX at image-build time, and neuralnet's
+# seed-blinding anti-cheat is baked into tig-challenges by Dockerfile.bench (see
+# _NN_BOILERPLATE) rather than patched per job. The raw dev-image path (Option A,
+# per-job monorepo upload + cold compile) has been fully retired.
 _TIG_BAKED_CHALLENGES = frozenset({
     "satisfiability",
     "vehicle_routing",
     "knapsack",
     "job_scheduling",
     "energy_arbitrage",
-})
-# GPU challenges still use the raw dev image + per-job source upload (Option A).
-# neuralnet_optimizer is raw too: its C3 runner patches the pinned tig-challenges
-# source to blind the optimizer seed (anti-cheat) and assembles the harness
-# boilerplate, so it needs the uploaded source rather than a pre-baked slot.
-_TIG_RAW_CHALLENGES = frozenset({
     "vector_search",
     "hypergraph",
     "neuralnet_optimizer",
 })
-_SUPPORTED_TIG_C3_CHALLENGES = _TIG_BAKED_CHALLENGES | _TIG_RAW_CHALLENGES
-_TIG_SOURCE_TAR_EXCLUDES = (
-    "./target",
-    "./.git",
-    "./tig-algorithms/lib",
-)
-# Pinned TIG monorepo source (re-added into the uploaded workspace for the raw
-# Option-A path only; the dev image strips it). Baked challenges don't need this.
-# Default sibling dir; override with cfg["tig_monorepo_path"].
-_TIG_MONOREPO = ROOT.parent / "tig-monorepo"
+_SUPPORTED_TIG_C3_CHALLENGES = _TIG_BAKED_CHALLENGES
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -559,42 +568,18 @@ def _tig_c3_image(cfg: dict) -> str:
             f"currently supported: {supported}"
         )
     # Default namespace points at the TIG dev's public Docker Hub images
-    # (the prebuilt tig-bench-*/tig-dev-* mirrors); override with the
-    # `tig_dockerhub` config key or the TIG_DOCKERHUB env var.
+    # (the prebuilt tig-bench-* baked images); override with the `tig_dockerhub`
+    # config key or the TIG_DOCKERHUB env var.
     ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB", "danieltiagoadams")
-    if challenge in _TIG_BAKED_CHALLENGES:
-        return f"docker.io/{ns}/tig-bench-{challenge}:{_bm_tig_version()}"
-    return f"docker.io/{ns}/tig-dev-{challenge}:{_bm_tig_version()}"
+    return f"docker.io/{ns}/tig-bench-{challenge}:{_bm_tig_version()}"
 
 
 def _create_tig_workspace(stage: Path, cfg: dict) -> None:
     challenge = cfg["challenge"]
-    # Baked (Option B): the source is already in the image at /app; upload only
-    # the small driver + the agent's algorithm. No per-job source tar.
-    if challenge not in _TIG_BAKED_CHALLENGES:
-        monorepo = Path(cfg.get("tig_monorepo_path") or _TIG_MONOREPO)
-        if not (monorepo / "tig-algorithms").exists():
-            raise FileNotFoundError(f"pinned TIG monorepo source not found at {monorepo}")
-        src = stage / "tig-source"
-        src.mkdir(parents=True, exist_ok=True)
-        # Use tar to copy the source: it preserves symlinks (the monorepo has
-        # self-referential symlinks under tig-benchmarker that shutil.copytree
-        # follows into a loop) and excludes build/generated artifacts.
-        exclude_args = " ".join(
-            f"--exclude={shlex.quote(path)}" for path in _TIG_SOURCE_TAR_EXCLUDES
-        )
-        # `bash -c` with pipefail so a failure in the *first* tar (missing
-        # source, permission error) fails the pipeline instead of silently
-        # staging a truncated tree.
-        subprocess.run(
-            [
-                "bash", "-c",
-                "set -o pipefail; "
-                f"tar -C {shlex.quote(str(monorepo))} {exclude_args} -cf - . "
-                f"| tar -C {shlex.quote(str(src))} -xf -",
-            ],
-            check=True,
-        )
+    # Every challenge is baked (Option B): the monorepo source + warm cargo cache
+    # live in the image at /app. Upload only the small driver + the agent's
+    # algorithm (and, for neuralnet, the harness boilerplate solve_challenge). No
+    # per-job source tar.
     _copy_required(ROOT / "scripts" / "tig_bench_driver.py", stage / "tig_bench_driver.py")
     _copy_required(ROOT / "scripts" / "modified_test_algorithm", stage / "modified_test_algorithm")
     _stage_tig_algorithm(stage, cfg)
@@ -667,52 +652,28 @@ cp "$OUT/driver.stderr" c3-artifacts/ 2>/dev/null || true
 def _tig_runner_script(cfg: dict, seed: str, hyperparameters: str | None) -> str:
     challenge = cfg["challenge"]
     is_nn = challenge == "neuralnet_optimizer"
-    baked = challenge in _TIG_BAKED_CHALLENGES
 
-    # Baked (Option B): source + warm cache live in the image at /app. Inject the
-    # algorithm into the pre-baked swarm_algo slot and incremental-build. No
-    # source re-add, no `pub mod swarm_algo` append (baked), no nn blinding (nn
-    # is a raw/GPU challenge, never baked).
-    if baked:
-        return (
-            _tig_runner_prologue(challenge)
-            + f"""SLOT=/app/tig-algorithms/src/{challenge}/swarm_algo
-mkdir -p "$SLOT"
-cp algorithm/mod.rs "$SLOT/mod.rs"
-cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
-"""
-            + _tig_runner_epilogue(cfg, seed, hyperparameters, "/app")
-        )
-
-    # neuralnet anti-cheat: blind the seed handed to optimizer_init_state.
-    patch = ""
-    if is_nn:
-        patch = (
-            "python3 - <<'PYEOF'\n"
-            "p = 'tig-source/tig-challenges/src/neuralnet_optimizer/mod.rs'\n"
-            "t = open(p).read()\n"
-            "old = \"    let mut optimizer_state = optimizer_init_state(\\n        challenge.seed.clone(),\"\n"
-            "new = (\"    let optimizer_seed = { use rand::{RngCore, SeedableRng}; \"\n"
-            "       \"let mut sd = rand::rngs::StdRng::from_seed(challenge.seed); \"\n"
-            "       \"let mut b = [0u8; 32]; sd.fill_bytes(&mut b); b };\\n\"\n"
-            "       \"    let mut optimizer_state = optimizer_init_state(\\n        optimizer_seed,\")\n"
-            "assert old in t, 'blinding anchor not found'\n"
-            "open(p, 'w').write(t.replace(old, new, 1))\n"
-            "print('[run] blinded optimizer seed')\n"
-            "PYEOF\n"
-        )
+    # Baked (Option B, all challenges): the monorepo source + warm cargo cache live
+    # in the image at /app. Inject the algorithm into the pre-baked swarm_algo slot
+    # and incremental-build (seconds). No source re-add, no `pub mod swarm_algo`
+    # append (the Dockerfile already added it), no runtime seed-blinding
+    # (neuralnet's blind is baked into tig-challenges at image-build time — see
+    # Dockerfile.bench).
+    #
+    # neuralnet only: the agent writes just the three optimizer hooks, so the slot
+    # needs the harness boilerplate solve_challenge concatenated on. That's a cheap
+    # local join of two already-staged files (algorithm/mod.rs + boilerplate.rs) —
+    # no source upload, exactly as before.
     assemble = ('cat algorithm/mod.rs boilerplate.rs > "$SLOT/mod.rs"'
                 if is_nn else 'cp algorithm/mod.rs "$SLOT/mod.rs"')
-
     return (
         _tig_runner_prologue(challenge)
-        + f"""{patch}SLOT=tig-source/tig-algorithms/src/{challenge}/swarm_algo
+        + f"""SLOT=/app/tig-algorithms/src/{challenge}/swarm_algo
 mkdir -p "$SLOT"
 {assemble}
 cp algorithm/*.cu "$SLOT/" 2>/dev/null || true
-grep -q "pub mod swarm_algo;" tig-source/tig-algorithms/src/{challenge}/mod.rs || echo "pub mod swarm_algo;" >> tig-source/tig-algorithms/src/{challenge}/mod.rs
 """
-        + _tig_runner_epilogue(cfg, seed, hyperparameters, '"$PWD/tig-source"')
+        + _tig_runner_epilogue(cfg, seed, hyperparameters, "/app")
     )
 
 
@@ -835,6 +796,7 @@ def _update_c3_cli_once() -> bool:
 
 
 def _run_one_c3_shard(
+def _run_one_c3_shard_inner(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
     _cli_updated: bool = False,
 ) -> tuple[dict | None, str]:
@@ -849,27 +811,35 @@ def _run_one_c3_shard(
     provider = _arg_value(args, "c3_provider")
     if provider:
         cmd.extend(["-p", provider])
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        encoding="utf-8", errors="replace", cwd=stage, env=env,
-    )
-    lines: list[str] = []
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.rstrip()
-        lines.append(line)
-        print(f"    [C3][{label}]   {line}")
-    proc.wait()
-    combined = "\n".join(lines)
-    if proc.returncode != 0:
-        stale = _stale_cli_error(combined)
-        if stale:
-            # Self-heal: update the CLI and retry this shard once. The stage
-            # dir is untouched by a failed deploy, so a straight re-run is safe.
-            if not _cli_updated and _update_c3_cli_once():
-                return _run_one_c3_shard(args, env, stage, label, _cli_updated=True)
-            return None, stale
-        return None, f"c3 deploy failed ({proc.returncode}):\n{combined[-2000:]}"
+
+    combined = ""
+    for attempt in range(1, _DEPLOY_MAX_ATTEMPTS + 1):
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace", cwd=stage, env=env,
+        )
+        lines: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            lines.append(line)
+            print(f"    [C3][{label}]   {line}")
+        proc.wait()
+        combined = "\n".join(lines)
+        if proc.returncode == 0:
+            break
+        # Retry only the object-store throttle (see _DEPLOY_RETRY_SIGNATURES);
+        # every other deploy failure fails fast.
+        throttled = any(sig in combined for sig in _DEPLOY_RETRY_SIGNATURES)
+        if not throttled or attempt == _DEPLOY_MAX_ATTEMPTS:
+            return None, f"c3 deploy failed ({proc.returncode}):\n{combined[-2000:]}"
+        window = min(_DEPLOY_BACKOFF_CAP_SECS, _DEPLOY_BACKOFF_BASE_SECS * 2 ** (attempt - 1))
+        delay = random.uniform(0, window)
+        print(
+            f"    [C3][{label}]   deploy throttled (429 same-object); "
+            f"retry {attempt}/{_DEPLOY_MAX_ATTEMPTS - 1} in {delay:.1f}s"
+        )
+        time.sleep(delay)
 
     job_id = _parse_c3_id(combined)
     if not job_id:
@@ -902,6 +872,20 @@ def _run_one_c3_shard(
     return comb, ""
 
 
+def _run_one_c3_shard(
+    args: argparse.Namespace, env: dict, stage: Path, label: str,
+    job_slots=None,
+) -> tuple[dict | None, str]:
+    """Global-cap wrapper around one shard's deploy+poll. When parallel HPO
+    passes a shared `job_slots` semaphore, hold a slot for this shard's entire
+    lifetime, so concurrent config evaluations never exceed c3_max_parallel_jobs
+    total live C3 jobs (respecting the account concurrency limit)."""
+    if job_slots is None:
+        return _run_one_c3_shard_inner(args, env, stage, label)
+    with job_slots:
+        return _run_one_c3_shard_inner(args, env, stage, label)
+
+
 def _merge_combined(results: list, challenge: str, fuel: int) -> dict:
     """Reassemble per-shard ``combined.json`` dicts into one, concatenating each
     track's nonce records across shards. Shaped exactly like a single-job
@@ -924,7 +908,7 @@ def _merge_combined(results: list, challenge: str, fuel: int) -> dict:
 
 def _run_tig_benchmark_c3(
     args: argparse.Namespace, cfg: dict, server: str, env: dict,
-    seed: str | None, hyperparameters: str | None,
+    seed: str | None, hyperparameters: str | None, job_slots=None,
 ) -> tuple[dict | None, str]:
     challenge = cfg.get("challenge", "unknown")
     image = _tig_c3_image(cfg)
@@ -978,9 +962,12 @@ def _run_tig_benchmark_c3(
 
         results: list[dict | None] = [None] * len(jobs)
         errs: list[str] = [""] * len(jobs)
-        with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        # With a shared job_slots semaphore (parallel HPO), the semaphore is the
+        # global cap; let this config submit all its shards and block on slots.
+        pool_workers = len(jobs) if job_slots is not None else max_parallel
+        with ThreadPoolExecutor(max_workers=pool_workers) as pool:
             futures = {
-                pool.submit(_run_one_c3_shard, args, env, stage, label): idx
+                pool.submit(_run_one_c3_shard, args, env, stage, label, job_slots): idx
                 for idx, stage, label in jobs
             }
             for future in as_completed(futures):
@@ -1006,7 +993,7 @@ def _run_tig_benchmark_c3(
 
 def run_benchmark_c3(
     args: argparse.Namespace, config: dict, server: str,
-    seed: str | None = None, hyperparameters: str | None = None,
+    seed: str | None = None, hyperparameters: str | None = None, job_slots=None,
 ) -> tuple[dict | None, str]:
     if shutil.which("c3") is None:
         return None, "[C3] c3 CLI not found. Install from https://cthree.cloud/install.sh"
@@ -1044,6 +1031,6 @@ def run_benchmark_c3(
     # Fuel-instrumented TIG-docker backend (TIG image + driver → combined.json →
     # benchmark.json) is the ONLY C3 benchmarking path. The custom wall-clock
     # staging path (_create_workspace / _write_c3_project) has been retired.
-    return _run_tig_benchmark_c3(args, cfg, server, env, seed, hyperparameters)
+    return _run_tig_benchmark_c3(args, cfg, server, env, seed, hyperparameters, job_slots)
 
 

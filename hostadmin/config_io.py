@@ -105,7 +105,7 @@ _ADMIN_FIELDS = (
 )
 _CACHE_FIELDS = (
     "server_url", "active_challenge", "challenge", "swarm_type",
-    "tracks", "timeout", "scoring_direction",
+    "tracks", "scoring_direction",
     "algorithm_path", "kernel_path", "is_gpu",
     # Non-secret tuning knobs the *client* needs. The driver
     # (run_loop.py) times tacit-knowledge distillation off stagnation_limit;
