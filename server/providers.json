@@ -38,11 +38,11 @@
   {
     "key": "openrouter",
     "label": "OpenRouter (multi-model proxy, OpenAI-compatible)",
-    "default_model": "qwen/qwen-2.5-coder-32b-instruct",
+    "default_model": "qwen/qwen3-coder",
     "api_key_env": "OPENROUTER_API_KEY",
     "name_stub": "openrouter",
     "supports_c3": true,
-    "blurb": "OpenRouter \u2014 gateway to many providers under one key. Written to the config as an OpenAI-compatible endpoint (provider `openai` + api_base). Use publisher/model strings like `qwen/qwen-2.5-coder-32b-instruct` or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."
+    "blurb": "OpenRouter \u2014 gateway to many providers under one key. Written to the config as an OpenAI-compatible endpoint (provider `openai` + api_base). Use publisher/model strings like `qwen/qwen3-coder` or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."
   },
   {
     "key": "deepseek",
