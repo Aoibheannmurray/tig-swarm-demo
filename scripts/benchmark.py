@@ -230,6 +230,15 @@ def _tig_image(cfg: dict) -> str:
     return f"tig-custom-image-{cfg['challenge']}:{_tig_version()}"
 
 
+def _published_tig_image(cfg: dict) -> str:
+    """The baked image CI publishes to Docker Hub (mirror-tig-images.yml) —
+    the same tig-bench-<challenge> image the C3 path pulls. Namespace mirrors
+    c3_compute._tig_c3_image: `tig_dockerhub` config key, then TIG_DOCKERHUB
+    env, then the TIG dev's public namespace."""
+    ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB", "danieltiagoadams")
+    return f"docker.io/{ns}/tig-bench-{cfg['challenge']}:{_tig_version()}"
+
+
 def _daemon_running() -> bool:
     return subprocess.run(
         ["docker", "info"], capture_output=True
@@ -280,13 +289,40 @@ def _ensure_docker_daemon() -> None:
     sys.exit(1)
 
 
-def _ensure_tig_image(image: str, challenge: str) -> None:
-    """Ensure the custom TIG image exists locally, building it if missing.
-    (C3 pulls the image from the registry instead — handled in the C3 path.)"""
+def _ensure_tig_image(image: str, challenge: str, cfg: dict) -> None:
+    """Ensure the custom TIG image exists locally.
+
+    Preferred source is the PUBLISHED baked image (docker.io/<ns>/tig-bench-
+    <challenge>, built by .github/workflows/mirror-tig-images.yml) — the same
+    image the C3 path uses — pulled and re-tagged under the local name. A
+    plain `docker pull` only accepts a manifest matching the host platform,
+    so on architectures the registry doesn't carry (CI publishes linux/amd64)
+    the pull fails cleanly and we fall back to building from the pinned
+    monorepo source locally — slow, but native."""
     if subprocess.run(["docker", "image", "inspect", image],
                       capture_output=True).returncode == 0:
         return
-    print(f"TIG image '{image}' not found — building via build_bench_image.sh…",
+
+    remote = _published_tig_image(cfg)
+    # Pull with an EXPLICIT platform: registry images are single-arch
+    # manifests (CI builds linux/amd64), and a plain `docker pull` of one
+    # succeeds even on a mismatched host — the exec-format crash would only
+    # surface later, mid-benchmark. With --platform, docker validates at
+    # pull time and we fall back to the native local build instead.
+    import platform as _plat
+    arch = "arm64" if _plat.machine().lower() in ("arm64", "aarch64") else "amd64"
+    print(f"TIG image '{image}' not found — pulling {remote} (linux/{arch})…",
+          file=sys.stderr)
+    pull = subprocess.run(
+        ["docker", "pull", "--platform", f"linux/{arch}", remote],
+        capture_output=True, text=True)
+    if pull.returncode == 0:
+        subprocess.run(["docker", "tag", remote, image], check=True)
+        print(f"Pulled and tagged as {image}.", file=sys.stderr)
+        return
+    reason = (pull.stderr or pull.stdout or "").strip()[-300:]
+    print(f"Pull unavailable ({reason}) — building locally via "
+          "build_bench_image.sh (one-time, can take several minutes)…",
           file=sys.stderr)
     build = subprocess.run(
         ["bash", str(ROOT_DIR / "scripts" / "build_bench_image.sh"), challenge],
@@ -358,7 +394,7 @@ def run_tig_benchmark(cfg: dict) -> int:
     challenge = cfg["challenge"]
     image = _tig_image(cfg)
     _ensure_docker_daemon()
-    _ensure_tig_image(image, challenge)
+    _ensure_tig_image(image, challenge, cfg)
 
     algo_path = ROOT_DIR / cfg.get("algorithm_path", f"src/{challenge}/algorithm/mod.rs")
     if not algo_path.exists():
@@ -531,6 +567,17 @@ def _track_hyperparameters(raw: str | None, track_key: str) -> str | None:
 
 
 def main() -> int:
+    # Fleet-start preparation mode: make sure the active challenge's TIG image
+    # is present (pull the published bake, else build) and exit — so the
+    # multi-minute cold path happens ONCE, visibly, before agents launch,
+    # instead of inside the first benchmark of every local-compute agent.
+    if "--ensure-image" in sys.argv:
+        cfg = load_swarm_config()
+        _ensure_docker_daemon()
+        _ensure_tig_image(_tig_image(cfg), cfg["challenge"], cfg)
+        print(f"TIG image ready for {cfg['challenge']}.", file=sys.stderr)
+        return 0
+
     print("Loading swarm config…", file=sys.stderr)
     cfg = load_swarm_config()
     # Stamp the locked-in challenge once so the operator can spot an
