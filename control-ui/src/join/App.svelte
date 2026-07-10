@@ -73,11 +73,11 @@
   // scrubbed on load) so it can be baked into copy-paste commands. Raw base is
   // derived from REPO_URL so a fork's own bootstrap URL works.
   const RAW_BASE = REPO_URL.replace("github.com", "raw.githubusercontent.com");
-  // TEMP: the bootstrap + fleet code live on this branch until it merges to
+  // TEMP: the bootstrap + fleet code live on staging until it merges to
   // main. When merged, set BOOTSTRAP_REF back to "main" (the branch-pinning
-  // below then falls away automatically) and drop the /server-onboarding raw
-  // URL in the README.
-  const BOOTSTRAP_REF: string = "server-onboarding";
+  // below then falls away automatically) and drop the /staging raw URL in
+  // the README.
+  const BOOTSTRAP_REF: string = "staging";
   const joinLink = () => buildJoinLink(serverUrl(), username, password);
 
   // ── Per-OS one-liner ──
@@ -166,7 +166,7 @@
     <div class="card" style="max-width:640px;margin:16px auto 0">
       <h2>Run agents on your machine</h2>
       <p class="lede">
-        One command sets everything up: it fetches the swarm code, then opens a
+        Two steps set everything up: clone the swarm code, then open a
         <b>setup app in your browser</b> — pick your AI provider and models,
         paste your API keys there (an LLM key, and a
         <a href="https://cthree.cloud/dashboard/settings" target="_blank" rel="noopener">C3
@@ -184,39 +184,42 @@
         <button class:active={osTab === "windows"} onclick={() => (osTab = "windows")}>Windows</button>
       </nav>
 
-      <div class="field">
-        <label for="boot">Paste this into a terminal{osTab === "windows" ? " (PowerShell or cmd)" : ""}</label>
-        <div id="boot" class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{bootstrapCmd()}</div>
-        <button class="ghost" onclick={() => copy(bootstrapCmd(), "boot")}>
-          {copied === "boot" ? "Copied ✓" : "Copy command"}
-        </button>
-        {#if osTab === "windows"}
-          <div class="hint">If <span class="mono">python</span> isn't recognized, try <span class="mono">py</span> instead.</div>
-        {/if}
-      </div>
+      <ol class="steps">
+        <li>
+          <div>Get the code{osTab === "windows" ? " (PowerShell or cmd)" : ""}</div>
+          <div class="cmd mono" style="word-break:break-all">{cloneCmd()}</div>
+          <button class="ghost" onclick={() => copy(cloneCmd(), "clone")}>
+            {copied === "clone" ? "Copied ✓" : "Copy"}
+          </button>
+        </li>
+        <li>
+          <div>Open the setup app with your join link</div>
+          <div class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{runJoinCmd()}</div>
+          <button class="ghost" onclick={() => copy(runJoinCmd(), "run")}>
+            {copied === "run" ? "Copied ✓" : "Copy"}
+          </button>
+          {#if osTab === "windows"}
+            <div class="hint">If <span class="mono">python</span> isn't recognized, try <span class="mono">py</span> instead.</div>
+          {/if}
+        </li>
+      </ol>
       <p class="lede" style="margin-top:6px">
         Your join link and credentials are already in the command — the setup
         app opens pre-filled at <span class="mono">http://127.0.0.1:8787</span>.
       </p>
 
       <details style="margin-top:12px">
-        <summary>Prefer to clone the repo yourself?</summary>
-        <ol class="steps" style="margin-top:10px">
-          <li>
-            <div>Get the code</div>
-            <div class="cmd mono" style="word-break:break-all">{cloneCmd()}</div>
-            <button class="ghost" onclick={() => copy(cloneCmd(), "clone")}>
-              {copied === "clone" ? "Copied ✓" : "Copy"}
-            </button>
-          </li>
-          <li>
-            <div>Open the setup app with your join link</div>
-            <div class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{runJoinCmd()}</div>
-            <button class="ghost" onclick={() => copy(runJoinCmd(), "run")}>
-              {copied === "run" ? "Copied ✓" : "Copy"}
-            </button>
-          </li>
-        </ol>
+        <summary>Prefer a single command? (fetches the code for you, pinned to <span class="mono">{BOOTSTRAP_REF}</span>)</summary>
+        <div class="field" style="margin-top:10px">
+          <label for="boot">Paste this into a terminal{osTab === "windows" ? " (PowerShell or cmd)" : ""}</label>
+          <div id="boot" class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{bootstrapCmd()}</div>
+          <button class="ghost" onclick={() => copy(bootstrapCmd(), "boot")}>
+            {copied === "boot" ? "Copied ✓" : "Copy command"}
+          </button>
+          {#if osTab === "windows"}
+            <div class="hint">If <span class="mono">python</span> isn't recognized, try <span class="mono">py</span> instead.</div>
+          {/if}
+        </div>
       </details>
     </div>
 

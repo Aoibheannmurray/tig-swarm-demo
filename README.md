@@ -26,7 +26,7 @@ the hosted Admin Console. See
 ```bash
 railway login
 python3 setup.py create              # deploys a Railway swarm, scaffolds fleet.config.json
-python3 setup.py switch energy_arbitrage     # change the active challenge later
+python3 setup.py switch neuralnet_optimizer     # change the active challenge later
 ```
 
 Manage contributors from the same clone:
@@ -62,15 +62,15 @@ a gitignored `secrets.local.json`, never uploaded), and click **Launch fleet**.
 
 ```bash
 # macOS / Linux (needs Python 3 + git)
-# NOTE: pinned to the server-onboarding branch until it merges to main —
+# NOTE: pinned to the staging branch until it merges to main —
 # then use .../main/deploy/get-swarm.py and drop --branch.
-curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py \
-  | python3 - join "<your-join-link>" --ui --branch server-onboarding
+curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/staging/deploy/get-swarm.py \
+  | python3 - join "<your-join-link>" --ui --branch staging
 ```
 
 ```powershell
 # Windows (PowerShell or cmd; try `py` if `python` isn't recognized)
-curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py | python - join "<your-join-link>" --ui --branch server-onboarding
+curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/staging/deploy/get-swarm.py | python - join "<your-join-link>" --ui --branch staging
 ```
 
 (Advanced: dropping `--ui` runs headless instead, fetching a fleet config
