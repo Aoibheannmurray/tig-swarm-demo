@@ -41,6 +41,8 @@ import signal
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from proc_utils import group_kwargs, kill_tree, term_tree
@@ -85,10 +87,11 @@ for _stream in (sys.stdout, sys.stderr):
 _AGENT_CONFIG_KEYS = (
     "provider", "model", "api_base", "compute",
     "c3_hardware", "c3_time", "c3_cloud_provider", "c3_no_build",
-    # Distributed C3 benchmarking (see c3_compute.py). Per-agent: nonces per
-    # shard/machine (default 8) and the max concurrent C3 shard jobs this agent
-    # runs (default 3 — the basic C3 plan's cap). Each agent can pick its own.
-    "c3_nonces_per_shard", "c3_max_parallel_jobs",
+    # Distributed C3 benchmarking (see c3_compute.py + c3_pool.py). The
+    # fleet-wide C3 concurrent-job cap: also the balanced shard count per
+    # benchmark. Best set once at the top level (all agents share ONE C3 key and
+    # thus one FCFS slot pool); a per-agent value still overrides the pool size.
+    "c3_max_parallel_jobs",
     # Per-agent C3 API key (raw value). Omit to inherit the top-level fleet
     # `c3_api_key`, the C3_API_KEY env var, or the `c3 login` session — in that
     # order. Lets each agent bill C3 to a different key without separate fleets.
@@ -140,7 +143,7 @@ _FLEET_WIDE_DEFAULT_KEYS = (
     "cleaner_cooldown_iters",
     # Distributed C3 benchmarking: set once at the top level and every agent
     # inherits (per-agent entry still overrides via setdefault).
-    "c3_nonces_per_shard", "c3_max_parallel_jobs",
+    "c3_max_parallel_jobs",
 )
 
 # Fleet-entry fields the monitor loop re-syncs into a running worktree's
@@ -764,6 +767,95 @@ def _sync_hot_reload_to_worktrees(
                 print(f"  [fleet] {name}: hot-reload sync failed: {e}", file=sys.stderr)
 
 
+# C3 control-plane defaults. The concurrency cap is read LIVE from C3, never
+# from a hardcoded tier table — the cap C3 actually enforces is the truth (e.g.
+# an account may carry a custom limit, or C3 may retune a tier). Override the
+# host with C3_API_ENDPOINT (self-hosted / test control planes).
+_C3_API_ENDPOINT = "https://api.cthree.cloud"
+_C3_API_TIMEOUT_SECS = 20
+
+
+def _c3_access_token() -> str | None:
+    """Fall back to the `c3 login` OAuth token when no API key is configured
+    (local dev). The runner and API-key fleets never need this."""
+    try:
+        creds = json.loads((Path.home() / ".c3" / "credentials.json").read_text())
+    except (OSError, ValueError):
+        return None
+    tok = creds.get("access_token")
+    return tok if isinstance(tok, str) and tok else None
+
+
+def _c3_api_get(base: str, path: str, token: str) -> dict | None:
+    """GET a C3 control-plane JSON endpoint with a bearer token. None on any
+    transport/decode error — the caller degrades gracefully."""
+    # A User-Agent is required — the control plane's edge 403s the default
+    # `Python-urllib` agent.
+    req = urllib.request.Request(
+        base.rstrip("/") + path,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "tig-swarm-fleet/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_C3_API_TIMEOUT_SECS) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _select_concurrency_limit(subscription: dict, tiers: dict) -> int | None:
+    """The actual concurrent-job cap C3 enforces, from live API payloads. An
+    account-specific `concurrency_limit` on the subscription wins; otherwise the
+    current tier's `concurrency_limit` from the tiers catalog. None if neither is
+    a positive int (so the caller can fall back)."""
+    override = subscription.get("concurrency_limit")
+    if isinstance(override, int) and override > 0:
+        return override
+    tier = (subscription.get("tier") or "").strip().lower()
+    if not tier:
+        return None
+    for entry in (tiers or {}).get("tiers", []):
+        if (entry.get("tier") or "").strip().lower() == tier:
+            cap = entry.get("concurrency_limit")
+            return cap if isinstance(cap, int) and cap > 0 else None
+    return None
+
+
+def _query_c3_plan_cap(c3_key: str | None) -> int | None:
+    """Return the concurrent-job cap C3 *actually* enforces for this account, by
+    reading it live from the control plane (`/v2/billing/subscription` for the
+    current/overridden plan, `/v2/billing/tiers` for the plan's limit). None if
+    it can't be determined (no auth, offline, unexpected payload) — the caller
+    then falls back to the configured value."""
+    token = c3_key or _c3_access_token()
+    if not token:
+        return None
+    base = os.environ.get("C3_API_ENDPOINT") or _C3_API_ENDPOINT
+    subscription = _c3_api_get(base, "/v2/billing/subscription", token)
+    if not subscription:
+        return None
+    # Account override short-circuits before we even fetch the tier catalog.
+    override = subscription.get("concurrency_limit")
+    if isinstance(override, int) and override > 0:
+        return override
+    tiers = _c3_api_get(base, "/v2/billing/tiers", token)
+    return _select_concurrency_limit(subscription, tiers or {})
+
+
+def _resolve_fleet_c3_key(agents: list[dict]) -> str | None:
+    """The single C3 key the fleet shares: env override, then any agent's
+    resolved `c3_api_key` (top-level default already merged in by _load_fleet),
+    then the local secrets store."""
+    return (
+        os.environ.get("C3_API_KEY")
+        or next((a.get("c3_api_key") for a in agents if a.get("c3_api_key")), None)
+        or secrets_local.resolve("C3_API_KEY")
+    )
+
+
 def cmd_run(
     agents: list[dict],
     only: list[str] | None,
@@ -806,6 +898,34 @@ def cmd_run(
     use_color = sys.stdout.isatty()
     procs: list[tuple[str, subprocess.Popen, threading.Thread]] = []
 
+    # One coherent fleet-wide C3 slot-pool cap (c3_pool.py). All agents share ONE
+    # C3 key, so the cap is the subscription's max concurrent-job limit — query
+    # it live from C3 rather than trusting a hand-set number. This same cap is
+    # both the pool size AND each benchmark's balanced shard count, so we stamp
+    # it onto every agent's c3_max_parallel_jobs before seeding worktrees.
+    def _agent_cap(a: dict) -> int:
+        try:
+            return max(1, int(a.get("c3_max_parallel_jobs", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    c3_agents = [a for a in agents if (a.get("compute") or "local") == "c3"]
+    fleet_pool_size = None
+    if c3_agents:
+        fleet_pool_size = _query_c3_plan_cap(_resolve_fleet_c3_key(agents))
+    if fleet_pool_size:
+        print(f"  [fleet] C3 subscription cap: {fleet_pool_size} concurrent job(s) "
+              f"(fleet-wide pool size + shards per benchmark)")
+        for a in agents:
+            a["c3_max_parallel_jobs"] = fleet_pool_size
+    else:
+        # No C3 agents, or the query failed (offline / auth) — fall back to the
+        # configured value so the fleet still launches with a sane, coherent cap.
+        fleet_pool_size = max((_agent_cap(a) for a in agents), default=3)
+        if c3_agents:
+            print(f"  [fleet] WARNING: could not read C3 subscription cap; "
+                  f"falling back to configured c3_max_parallel_jobs={fleet_pool_size}")
+
     for i, agent in enumerate(agents):
         name = agent["name"]
         print(f"  [fleet] preparing {name}…")
@@ -824,6 +944,13 @@ def cmd_run(
             c3_key = secrets_local.resolve("C3_API_KEY")
             if c3_key:
                 env["C3_API_KEY"] = c3_key
+        # Fleet-wide C3 slot pool (c3_pool.py): every agent in this fleet shares
+        # ONE C3 key and thus one plan cap, so point them all at one pool dir
+        # under the repo/clone root (shared by every worktree, isolated per
+        # contributor on the hosted runner) and one agreed pool size. Agents
+        # coordinate FCFS through it.
+        env["C3_POOL_DIR"] = str(ROOT / ".c3-pool")
+        env["C3_POOL_SIZE"] = str(fleet_pool_size)
         # Stdout is piped (not a TTY), so Python would block-buffer the child's
         # output and the fleet would look silent until buffers fill. Force
         # line-buffered I/O so [BENCH]/registration prints stream live.

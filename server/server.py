@@ -904,7 +904,7 @@ async def contributor_me(
 _CONTRIB_AGENT_KEYS = frozenset({
     "name", "provider", "model", "api_base", "api_key_env",
     "compute", "hardware", "c3_hardware", "c3_time", "c3_cloud_provider",
-    "c3_no_build", "c3_nonces_per_shard", "c3_max_parallel_jobs",
+    "c3_no_build", "c3_max_parallel_jobs",
     "log_prompts", "detailed_prompts", "tacit_write", "role", "edit_mode",
     "hpo_min_improvements", "hpo_first_tune_improvements",
     "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
@@ -921,7 +921,7 @@ _CONTRIB_TOP_KEYS = frozenset({
     "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
     "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
     "cleaner_cooldown_iters",
-    "c3_nonces_per_shard", "c3_max_parallel_jobs",
+    "c3_max_parallel_jobs",
 })
 _CONTRIB_MAX_AGENTS = 32
 # Agent names become worktree directory names and git branch segments on the

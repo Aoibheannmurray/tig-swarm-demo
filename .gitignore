@@ -28,6 +28,8 @@ fleet.config.json
 .fleet-cache.json
 secrets.local.json
 agent.config.json
+# Fleet-wide C3 slot-pool coordination dir (c3_pool.py) — runtime state
+.c3-pool/
 # Hosted runner (runner/) local state — never committed
 runner/data/
 runner/workspaces/
