@@ -1,0 +1,14 @@
+{
+  "name": "Prometheus TIG Swarm",
+  "short_name": "TIG Swarm",
+  "description": "Join a TIG optimization swarm — configure and monitor your AI coding agents.",
+  "start_url": "/join/",
+  "scope": "/join/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#e8590c",
+  "icons": [
+    { "src": "/prometheus-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/prometheus-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

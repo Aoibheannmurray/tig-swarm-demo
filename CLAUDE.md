@@ -20,6 +20,7 @@ hints/inspiration across the swarm.
 | `dashboard/` | Web UI for the server | TypeScript/Vite — see `dashboard/CLAUDE.md` |
 | `control-ui/` | Web UI for setup/onboarding (host create, contributor join, admin console) | Svelte/Vite — see `control-ui/README.md` |
 | `control_server.py` | Local companion server the control-ui talks to (`/local-api/*`); wraps the CLI cores | Python/FastAPI |
+| `runner/` | **Hosted fleet runner** (Tier 1): a separate service that runs contributor fleets in the cloud (encrypted keys, C3-only, per-contributor isolation). Its own image/volume — see `runner/README.md` | Python/FastAPI |
 | `initial_algorithms/` | Editable per-challenge seed algorithms | Rust |
 | `docs/` | Long-form internals (`ARCHITECTURE.md`, …) | — |
 | `run.py` | **Contributor** entry point (`python3 run.py`, or `--ui` for the web companion) | Python |

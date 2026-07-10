@@ -6,7 +6,7 @@ RUN npm ci
 COPY dashboard/ .
 RUN npm run build
 
-# Stage 1b: Build control-ui (only its admin console ships on the hosted server)
+# Stage 1b: Build control-ui (its admin console + join page ship on the hosted server)
 FROM node:20-slim AS controlui
 WORKDIR /control-ui
 COPY control-ui/package.json control-ui/package-lock.json ./
@@ -21,12 +21,25 @@ WORKDIR /app
 COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server/ .
+# Algorithm snapshot for browser-only ("Deploy on Railway") deploys: the
+# server seeds initial code + the pool from these on first boot when no host
+# clone ran `setup.py create` (server/first_boot.py). Text sources; harmless
+# for normal deploys (first-boot fill only touches empty slots).
+# NOTE: initial_algorithms/ MUST stay out of .ignore, or `railway up`'s upload
+# snapshot omits it and this COPY fails ("/initial_algorithms: not found").
+COPY initial_algorithms/ ./initial_algorithms/
 COPY --from=dashboard /dashboard/dist ./static/
-# Admin Console served at /admin/. Copy only the admin entry + its content-hashed
-# asset chunks — NOT the companion's dist/index.html, which would shadow the
-# dashboard's own index.html at /.
+# Admin Console served at /admin/, contributor join page at /join/. Copy only
+# those entries + the content-hashed asset chunks — NOT the companion's
+# dist/index.html, which would shadow the dashboard's own index.html at /.
 COPY --from=controlui /control-ui/dist/admin ./static/admin/
+COPY --from=controlui /control-ui/dist/join ./static/join/
 COPY --from=controlui /control-ui/dist/assets ./static/assets/
+# Public assets the admin/join pages reference at root (icon, fonts) + the
+# join page's PWA manifest & service worker. Copied individually so the
+# companion's dist/index.html never lands at / (it would shadow the dashboard).
+COPY --from=controlui /control-ui/dist/prometheus-icon.png /control-ui/dist/prometheus.png /control-ui/dist/fonts.css /control-ui/dist/manifest.webmanifest /control-ui/dist/sw.js ./static/
+COPY --from=controlui /control-ui/dist/fonts ./static/fonts/
 
 RUN chmod +x /app/entrypoint.sh
 

@@ -42,6 +42,10 @@ export const localApi = {
     fetch(`${LOCAL}/fleet/start`, post({ only })).then(jsonOrThrow),
   fleetStop: () => fetch(`${LOCAL}/fleet/stop`, post({})).then(jsonOrThrow),
 
+  secretsStatus: () => fetch(`${LOCAL}/secrets`).then(jsonOrThrow),
+  secretSet: (name: string, value: string) =>
+    fetch(`${LOCAL}/secrets`, post({ name, value })).then(jsonOrThrow),
+
   railwayStatus: () => fetch(`${LOCAL}/railway/status`).then(jsonOrThrow),
   swarmAdmin: () => fetch(`${LOCAL}/swarm/admin`).then(jsonOrThrow),
   swarmCreate: (params: any) =>
@@ -75,8 +79,22 @@ export function hostedBase(): string {
   return q ? q.replace(/\/$/, "") : "";
 }
 
+function contribHeaders(username: string, password: string): Record<string, string> {
+  return { "X-Username": username, "X-Swarm-Password": password };
+}
+
 export const hostedApi = {
   swarmConfig: () => fetch(`${hostedBase()}/api/swarm_config`).then(jsonOrThrow),
+
+  // Contributor-credential-gated (X-Username / X-Swarm-Password — the same
+  // pair that gates agent registration). Used by the hosted /join page to
+  // validate an invite and describe the swarm. (The wider /api/contributor/*
+  // config endpoints still exist server-side for headless runs, but the UI
+  // no longer surfaces them — config lives in the LOCAL setup app.)
+  contributorMe: (username: string, password: string) =>
+    fetch(`${hostedBase()}/api/contributor/me`, {
+      headers: contribHeaders(username, password),
+    }).then(jsonOrThrow),
 
   // admin_key-gated POSTs
   contributors: (adminKey: string) =>
@@ -94,6 +112,15 @@ export const hostedApi = {
   resetChallenge: (adminKey: string, challenge: string) =>
     fetch(`${hostedBase()}/api/admin/reset_challenge`, post({ admin_key: adminKey, challenge })).then(jsonOrThrow),
 };
+
+// One-link form of an invite: the swarm server's /join page with the
+// credentials in the URL *fragment*, which browsers never send to the server
+// — they stay out of proxy/host logs. Mirrors
+// hostadmin/contributors.py:build_join_link; keep the two in sync.
+export function buildJoinLink(serverUrl: string, username: string, password: string): string {
+  const base = serverUrl.replace(/\/$/, "");
+  return `${base}/join#u=${encodeURIComponent(username)}&p=${encodeURIComponent(password)}`;
+}
 
 // Derive a contributor's per-swarm password client-side (mirrors setup.py
 // run_invite: sha256(username + ':' + base)). Used by the Admin Console so the

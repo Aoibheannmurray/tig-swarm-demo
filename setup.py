@@ -66,9 +66,9 @@ from hostadmin import swarm as _swarm
 from hostadmin import tacit as _tacit
 
 from hostadmin.challenges_bridge import get_challenges
-from hostadmin.contributors import run_invite, run_list, run_revoke
+from hostadmin.contributors import run_invite, run_list, run_revoke, run_set_runner
 from hostadmin.railway import RailwayError
-from hostadmin.swarm import run_create, run_switch, run_sync
+from hostadmin.swarm import run_create, run_create_runner, run_switch, run_sync
 from hostadmin.tacit import run_tacit
 
 # Attribute delegation order for the back-compat surface below. swarm first:
@@ -182,6 +182,29 @@ def main() -> int:
         "list",
         help="Host: list contributors (joined agents, active count, revoked state).",
     )
+    create_runner = sub.add_parser(
+        "create-runner",
+        help="Host: deploy the hosted fleet runner (zero-install cloud tier) as "
+             "its own Railway service and point the swarm at it.",
+    )
+    create_runner.add_argument(
+        "--runner-name", dest="runner_name", default=None,
+        help="Railway project/service name for the runner (default: <swarm>-runner).",
+    )
+    create_runner.add_argument(
+        "--workspace", default=None,
+        help="Railway workspace to deploy into (default: auto / your only one).",
+    )
+    set_runner = sub.add_parser(
+        "set-runner",
+        help="Host: enable the zero-install cloud tier by pointing the swarm "
+             "at an already-deployed runner service (empty URL unsets it).",
+    )
+    set_runner.add_argument(
+        "runner_url",
+        help="Public URL of the deployed runner service (see runner/README.md); "
+             "pass \"\" to unset.",
+    )
     args = parser.parse_args()
 
     if args.mode == "create":
@@ -207,6 +230,17 @@ def main() -> int:
         return run_revoke(args.username)
     if args.mode == "list":
         return run_list()
+    if args.mode == "create-runner":
+        try:
+            return run_create_runner(args)
+        except RailwayError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    if args.mode == "set-runner":
+        return run_set_runner(args.runner_url)
 
     print(
         "setup.py is the host-admin tool.\n"

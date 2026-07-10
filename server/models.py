@@ -69,6 +69,20 @@ class RenameRequest(BaseModel):
     agent_name: str = Field(max_length=MAX_LABEL_LEN)
 
 
+# Server-stored contributor fleet config (server-first onboarding P1).
+# Both fields optional so a PUT can update either independently; the handler
+# rejects a body with neither, deep-validates `config` (whitelisted keys, no
+# raw secrets — see server._validate_contributor_config), and merges with the
+# stored row.
+MAX_CONTRIB_CONFIG_LEN = 32 * 1024
+MAX_CONTRIB_TACIT_LEN = 16 * 1024
+
+
+class ContributorConfigPut(BaseModel):
+    config: Optional[dict] = None
+    tacit: Optional[str] = Field(default=None, max_length=MAX_CONTRIB_TACIT_LEN)
+
+
 class IterationCreate(BaseModel):
     agent_id: str
     title: str = Field(max_length=MAX_LABEL_LEN)

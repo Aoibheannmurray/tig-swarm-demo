@@ -62,6 +62,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
 
 import init_fleet
 import run_fleet
+import secrets_local
 import setup as setup_mod
 
 UI_DIST = ROOT / "control-ui" / "dist"
@@ -200,7 +201,11 @@ class FleetController:
                     on_output=self._on_output,
                     on_status=self._on_status,
                 )
-            except Exception as exc:  # surface, don't crash the server
+            except (Exception, SystemExit) as exc:  # surface, don't crash the server
+                # SystemExit too: cmd_run's key resolution (_resolve_api_key)
+                # exits with an actionable message when a key is missing — a
+                # bare `except Exception` would let that kill this thread
+                # silently and leave the UI stuck on "starting".
                 self._on_status("error", {"error": f"{type(exc).__name__}: {exc}"})
 
         self._thread = threading.Thread(target=_target, daemon=True)
@@ -511,6 +516,11 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return fleet.start(only=only)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
+        except SystemExit as exc:
+            # run_fleet._load_fleet is CLI-oriented and exits with an
+            # actionable message (e.g. server-sourced config with no agents
+            # saved yet). Surface it as a 400, not a 500 traceback.
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     @app.post("/local-api/fleet/stop")
     async def fleet_stop() -> dict:
@@ -649,6 +659,30 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+    # ── Local secrets (API keys) — no `export` needed ──
+    @app.get("/local-api/secrets")
+    def secrets_status() -> dict:
+        """Which API-key env vars are set and where they win from (env vs the
+        local secrets.local.json). Values are never returned."""
+        return {"secrets": secrets_local.status()}
+
+    @app.post("/local-api/secrets")
+    async def secrets_set(payload: dict) -> dict:
+        """Store (or clear, with an empty value) one API key locally. Keyed by
+        environment-variable NAME so the runner injects it the same way an
+        `export` would. Loopback-only surface (see the DNS-rebinding guard),
+        so a plaintext value over localhost is acceptable — it lands in a 0600
+        file, not the shell history an `export` leaves behind."""
+        name = (payload.get("name") or "").strip()
+        value = payload.get("value") or ""
+        if not name or not name.replace("_", "").isalnum() or not name.isupper():
+            return JSONResponse(
+                {"error": "name must be an ENV_VAR_NAME (e.g. ANTHROPIC_API_KEY)"},
+                status_code=400,
+            )
+        secrets_local.store(name, value)
+        return {"ok": True, "secrets": secrets_local.status()}
+
     # ── Invite (host, local): derive per-contributor password ──
     @app.post("/local-api/invite")
     async def invite(payload: dict) -> dict:
@@ -666,7 +700,10 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return JSONResponse({"error": "username is required"}, status_code=400)
         derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
         return {"server_url": server_url, "username": username,
-                "swarm_password": derived}
+                "swarm_password": derived,
+                # One-link form of the same credentials (fragment-encoded so
+                # they never reach server logs); None without a server_url.
+                "join_link": setup_mod.build_join_link(server_url, username, derived)}
 
     # ── Proxy /api/* to the swarm's hosted server ──
     #
@@ -753,6 +790,38 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     return app
 
 
+def _port_free(host: str, port: int) -> bool:
+    """True when nothing is accepting connections on (host, port)."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) != 0
+
+
+def _probe_companion(host: str, port: int) -> dict | None:
+    """If the occupant of (host, port) is a TIG companion, return its
+    /local-api/env payload; None for anything else (or on any error)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/local-api/env", timeout=2
+        ) as resp:
+            body = json.load(resp)
+        return body if isinstance(body, dict) and body.get("mode") == "local" else None
+    except Exception:
+        return None
+
+
+def _same_root(cwd: object) -> bool:
+    """Does a probed companion serve THIS repo checkout? Distinguishes 'reopen
+    the one that's already running' from 'a companion for some other clone is
+    on that port' (which must not be reused — different config, code)."""
+    try:
+        return Path(str(cwd)).resolve() == ROOT.resolve()
+    except (OSError, ValueError):
+        return False
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Local control-plane UI for the TIG swarm.")
     p.add_argument("--host", default="127.0.0.1", help="Bind address (default: localhost).")
@@ -761,12 +830,48 @@ def main() -> int:
                    help="Don't auto-open a browser tab.")
     args = p.parse_args()
 
+    # The user drives everything from the browser; this process's terminal may
+    # exist but nobody is watching it. Tell secrets_local never to input() —
+    # a missing key must fail fast with "add it in the Keys panel", not hang
+    # the fleet launch on an invisible terminal prompt.
+    os.environ["TIG_SWARM_NO_PROMPT"] = "1"
+
     # Binding anything other than loopback exposes host credentials and fleet
     # controls to the network. Treat it as an explicit opt-out of the
     # DNS-rebinding/Host guard, and make the risk loud.
     is_loopback_bind = _host_is_loopback(args.host)
 
-    url = f"http://{args.host}:{args.port}/"
+    # Port collision handling — re-running the join one-liner must be
+    # idempotent, not "[Errno 48] address already in use":
+    #   * if the occupant is a companion serving THIS repo checkout, just
+    #     reopen the browser at it and exit;
+    #   * otherwise (another app, or a companion for a different checkout)
+    #     fall forward to the next free port.
+    port = args.port
+    if not _port_free(args.host, port):
+        occupant = _probe_companion(args.host, port)
+        if occupant and _same_root(occupant.get("cwd")):
+            existing = f"http://{args.host}:{port}/"
+            print(f"TIG Swarm Control is already running — opening {existing}")
+            print("  (Ctrl-C in ITS terminal stops it.)")
+            if not args.no_browser:
+                try:
+                    webbrowser.open(existing)
+                except Exception:
+                    pass
+            return 0
+        for candidate in range(port + 1, port + 21):
+            if _port_free(args.host, candidate):
+                print(f"  port {port} is in use — using {candidate} instead.")
+                port = candidate
+                break
+        else:
+            sys.exit(
+                f"Ports {port}-{port + 20} are all in use. Free one "
+                f"(macOS/Linux: `lsof -ti :{port} | xargs kill`) or pass --port."
+            )
+
+    url = f"http://{args.host}:{port}/"
     print(f"TIG Swarm Control — {url}")
     print("  (Ctrl-C stops the companion; a running fleet stops with it.)")
     if not is_loopback_bind:
@@ -785,7 +890,7 @@ def main() -> int:
     uvicorn.run(
         create_app(allow_remote=not is_loopback_bind),
         host=args.host,
-        port=args.port,
+        port=port,
         log_level="warning",
     )
     return 0

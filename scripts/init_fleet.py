@@ -509,6 +509,8 @@ def _build_agent(
     compute: str,
     hardware: str | None,
     api_base: str | None = None,
+    role: str | None = None,
+    seeded_start: bool | None = None,
 ) -> dict:
     entry: dict = {
         "name": name,
@@ -535,9 +537,15 @@ def _build_agent(
         entry["detailed_prompts"] = True
     # Default role from tier: frontier → explorer (ambitious rewrites, fills the
     # seed pool), standard → exploiter (localized search/replace edits + HPO).
-    # Role is contributor-owned and hot-reloads, so editing `role` in
-    # fleet.config.json overrides this for either tier at any time.
-    entry["role"] = tiers.role_for_tier(tier)
+    # An explicit setup pick wins; either way role stays contributor-owned and
+    # hot-reloads via fleet.config.json.
+    entry["role"] = role if role in ("explorer", "exploiter") else tiers.role_for_tier(tier)
+    # Optional seeding override from setup: True = fresh trajectories start
+    # from working code (server seed pool → best peer → stub fallback),
+    # False = always the bare stub. Omitted = the server's tier/role/GPU
+    # auto policy decides.
+    if seeded_start is not None:
+        entry["seeded_start"] = bool(seeded_start)
     return entry
 
 
@@ -632,6 +640,28 @@ def build_fleet_config(params: dict) -> dict:
     if compute == "c3" and hardware and hardware not in _C3_HARDWARE_KEYS:
         raise ValueError(f"unknown C3 hardware: {hardware!r}")
 
+    # Optional behavior picks from setup. `role`: explorer/exploiter (empty or
+    # "auto" = tier default). `seeded_start`: "seed"/"stub"/bool (empty or
+    # "auto" = server policy). Both stay hot-editable in fleet.config.json.
+    role = (str(params.get("role") or "")).strip().lower() or None
+    if role in ("", "auto"):
+        role = None
+    if role is not None and role not in ("explorer", "exploiter"):
+        raise ValueError(f"unknown role: {role!r} (explorer or exploiter)")
+    raw_seed = params.get("seeded_start")
+    if isinstance(raw_seed, bool):
+        seeded_start = raw_seed
+    else:
+        seed_text = str(raw_seed or "").strip().lower()
+        if seed_text in ("", "auto"):
+            seeded_start = None
+        elif seed_text in ("seed", "true"):
+            seeded_start = True
+        elif seed_text in ("stub", "false"):
+            seeded_start = False
+        else:
+            raise ValueError(f"unknown seeded_start: {raw_seed!r} (seed, stub, or auto)")
+
     config: dict = {
         "server_url": server_url,
         "username": username,
@@ -642,7 +672,7 @@ def build_fleet_config(params: dict) -> dict:
         config["c3_api_key"] = c3_api_key
     config["agents"] = [
         _build_agent(name, provider, model, api_key_env, compute, hardware,
-                     api_base=api_base)
+                     api_base=api_base, role=role, seeded_start=seeded_start)
         for name in names
     ]
     return config
@@ -728,6 +758,20 @@ def run_wizard(force: bool = False) -> int:
         else None
     )
 
+    # Behavior picks. Both are hot-editable in fleet.config.json afterward
+    # (`role` / `seeded_start`); "auto" defers to tier/server defaults.
+    print()
+    role = _prompt_choice("Agent role?", [
+        ("auto", "auto — pick by model tier (recommended)"),
+        ("explorer", "explorer — writes novel, ambitious algorithms"),
+        ("exploiter", "exploiter — small focused edits to working code"),
+    ], default_idx=0)
+    seeding = _prompt_choice("Starting point for fresh trajectories?", [
+        ("auto", "auto — server decides (recommended)"),
+        ("seed", "seed — start from working code"),
+        ("stub", "stub — start from scratch"),
+    ], default_idx=0)
+
     config = build_fleet_config({
         "server_url": server_url,
         "username": username,
@@ -738,6 +782,8 @@ def run_wizard(force: bool = False) -> int:
         "compute": compute,
         "hardware": hardware,
         "c3_api_key": c3_api_key,
+        "role": role,
+        "seeded_start": seeding,
     })
     write_fleet_config(config)
 

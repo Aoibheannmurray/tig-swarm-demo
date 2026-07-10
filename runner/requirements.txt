@@ -1,0 +1,7 @@
+# Hosted runner service deps. Kept separate from server/requirements.txt —
+# the runner is its own Railway service/image (it also needs git + the c3 CLI
+# in the image; see runner/Dockerfile). The worker deps the spawned fleets
+# use live in the repo-root requirements.txt.
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+cryptography>=42,<47

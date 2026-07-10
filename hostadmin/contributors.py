@@ -39,6 +39,45 @@ def _generate_invite_slug(taken: set[str]) -> str:
     return f"contrib-{random.randint(10000, 99999)}"
 
 
+# Where contributors' machines fetch the bootstrap + code from. TEMP: pinned
+# to this branch until it merges to main — then set _BOOTSTRAP_REF = "main".
+# Keep in sync with BOOTSTRAP_REF in control-ui/src/join/App.svelte.
+_BOOTSTRAP_REF = "server-onboarding"
+_RAW_BASE = "https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo"
+
+
+def build_join_command(join_link: str) -> str:
+    """The ready-to-send macOS/Linux one-liner: fetches the code and opens the
+    local setup app with the contributor's credentials baked in. Mirrors what
+    the hosted /join page renders (which also carries the Windows variant)."""
+    branch = "" if _BOOTSTRAP_REF == "main" else f" --branch {_BOOTSTRAP_REF}"
+    return (
+        f"curl -fsSL {_RAW_BASE}/{_BOOTSTRAP_REF}/deploy/get-swarm.py | "
+        f'python3 - join "{join_link}" --ui{branch}'
+    )
+
+
+def build_join_link(server_url: str | None, username: str, derived: str) -> str | None:
+    """One-link invite: `<server>/join#u=<username>&p=<derived>`.
+
+    The credentials ride in the URL *fragment*, which browsers never send to
+    the server — they stay out of Railway/proxy logs. The hosted /join page
+    reads the fragment client-side (see docs/server-first-onboarding-plan.md
+    §5). Returns None when no usable server URL is known (fresh host machine
+    before `setup.py create`), so callers can skip the link line rather than
+    print a broken one.
+    """
+    import urllib.parse
+    url = (server_url or "").strip().rstrip("/")
+    if not url or url.startswith("<") or url.startswith("$"):
+        return None
+    return (
+        f"{url}/join"
+        f"#u={urllib.parse.quote(username, safe='')}"
+        f"&p={urllib.parse.quote(derived, safe='')}"
+    )
+
+
 def run_invite(username: str | None) -> int:
     """Issue a per-contributor swarm password by computing
     sha256(username + ':' + base_password). Prints the username + derived
@@ -81,14 +120,26 @@ def run_invite(username: str | None) -> int:
         issued.append(username)
         admin["issued_contributors"] = issued
         write_swarm_admin(admin)
+    join_link = build_join_link(server_url, username, derived)
+    if join_link:
+        print()
+        print(f"  Join link (share this one line):")
+        print(f"    {join_link}")
+        print()
+        print("  It opens the swarm's join page, which hands them a one-paste")
+        print("  command for their OS. Treat it like the password it contains.")
+        print()
+        print("  Or send them the command directly (macOS/Linux; the join page")
+        print("  has the Windows variant):")
+        print(f"    {build_join_command(join_link)}")
     print()
     print(f'  "server_url": {json.dumps(server_url)},')
     print(f'  "username": {json.dumps(username)},')
     print(f'  "swarm_password": {json.dumps(derived)},')
     print()
-    print("  Share the three lines above with the contributor.")
-    print("  They paste them into their fleet.config.json (replacing the")
-    print("  matching keys), then run `python scripts/run_fleet.py`.")
+    print("  Or share the three lines above for the manual flow: the")
+    print("  contributor pastes them into their fleet.config.json (replacing")
+    print("  the matching keys), then runs `python scripts/run_fleet.py`.")
     print()
     return 0
 
@@ -179,12 +230,93 @@ def run_revoke(username: str) -> int:
         revoked.append(username)
         admin["revoked_contributors"] = revoked
         write_swarm_admin(admin)
+
+    # If a hosted runner is configured, tear down the contributor's cloud fleet
+    # and purge their stored keys too (best-effort — a revoke on the
+    # coordination server already stops their agents authenticating). The
+    # admin_key doubles as the runner's RUNNER_ADMIN_KEY.
+    runner_teardown = _revoke_hosted_fleet(admin, admin_key, username)
+
     print()
     print(f"  Revoked:        {username}")
     print(f"  Agents stopped: {result.get('agents_invalidated', 0)}")
+    if runner_teardown is not None:
+        print(f"  Hosted fleet:   {runner_teardown}")
     print(f"  Future register attempts under this username will be rejected.")
     print()
     return 0
+
+
+def run_set_runner(runner_url: str) -> int:
+    """Point the swarm at its hosted fleet runner (the zero-install Tier-1
+    service). Two effects:
+      1. Sets the server's `runner_url` config, which makes the contributor
+         join page show the "Run in the cloud" tab.
+      2. Mirrors it into swarm.admin.json so `setup.py revoke` also tears
+         down a contributor's hosted fleet + purges their stored keys.
+    Pass an empty string to unset (hides the tab; stops revoke teardown)."""
+    import urllib.parse
+
+    runner_url = (runner_url or "").strip().rstrip("/")
+    if runner_url and not runner_url.startswith(("http://", "https://")):
+        print("set-runner: runner URL must start with http:// or https://",
+              file=sys.stderr)
+        return 1
+    creds = _admin_creds("set-runner")
+    if creds is None:
+        return 1
+    admin, admin_key, server_url = creds
+    endpoint = (
+        f"{server_url.rstrip('/')}/api/admin/config"
+        f"?key=runner_url&value={urllib.parse.quote(runner_url, safe='')}"
+    )
+    try:
+        post_json(endpoint, {"admin_key": admin_key})
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")[:200]
+        print(f"set-runner: server returned {e.code}: {body}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        print(f"set-runner: failed to reach {server_url} ({e})", file=sys.stderr)
+        return 1
+    admin["runner_url"] = runner_url
+    write_swarm_admin(admin)
+    print()
+    if runner_url:
+        print(f"  Hosted runner set: {runner_url}")
+        print("  NOTE: the join page's cloud tab is currently disabled in the UI —")
+        print("  the runner is reachable via its API only (see runner/README.md).")
+        print("  `setup.py revoke` will also tear down a contributor's hosted fleet.")
+    else:
+        print("  Hosted runner unset.")
+    print()
+    return 0
+
+
+def _revoke_hosted_fleet(admin: dict, admin_key: str, username: str) -> str | None:
+    """Best-effort teardown of a contributor's hosted (Tier-1) fleet via the
+    runner's admin webhook. Returns a human status string, or None when no
+    runner is configured (the common case). Never fails the revoke."""
+    runner_url = (admin.get("runner_url") or "").strip().rstrip("/")
+    if not runner_url:
+        return None
+    import json
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        f"{runner_url}/api/runner/admin/revoke",
+        data=json.dumps({"username": username}).encode(),
+        headers={"Content-Type": "application/json", "X-Admin-Key": admin_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.load(resp)
+        return "stopped + keys purged" if body.get("was_running") else "no active fleet"
+    except urllib.error.HTTPError as e:
+        return f"runner returned HTTP {e.code}"
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        return f"runner unreachable ({e})"
 
 
 def run_list() -> int:

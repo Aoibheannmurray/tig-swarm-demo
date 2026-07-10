@@ -163,7 +163,7 @@ def register_agent(
 
 def get_state(
     server: str, agent_id: str, role: str | None = None,
-    *, agent_token: str | None = None,
+    *, seeded_start: bool | None = None, agent_token: str | None = None,
 ) -> dict:
     # /api/state?agent_id=X is authenticated: the server requires an
     # X-Agent-Token header resolving to agent X (403 otherwise). The
@@ -171,6 +171,11 @@ def get_state(
     url = f"{server}/api/state?agent_id={urllib.parse.quote(agent_id)}"
     if role:
         url += f"&role={urllib.parse.quote(role)}"
+    # Contributor-owned seeding override (`seeded_start` in fleet.config.json).
+    # Reported each poll like `role`; omitted entirely when unset so the
+    # server applies its tier/role auto policy.
+    if seeded_start is not None:
+        url += f"&seeded_start={'true' if seeded_start else 'false'}"
     headers = {"X-Agent-Token": agent_token} if agent_token else None
     # /api/state does real work server-side (stagnation resets, seed
     # selection, pool deposits) and shares the SQLite writer with every

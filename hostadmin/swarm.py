@@ -934,14 +934,14 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         )
     print("\n  Onboard each contributor with:\n")
     print("    python setup.py invite [<username>]")
-    print("    # prints their username + per-contributor swarm_password.")
-    print("    # Omit <username> to auto-generate a random slug — you don't")
-    print("    # have to collect names from contributors beforehand.")
-    print("    # Share the three values with them; they paste into fleet.config.json")
-    print(f"    # (URL: {server_url}) and run `python scripts/run_fleet.py`.")
+    print("    # Prints a one-line JOIN LINK (plus the raw values for the")
+    print("    # manual flow). Omit <username> to auto-generate a random slug.")
+    print("    # They open the link, configure agents in the browser, then run")
+    print('    #   python run.py --join "<link>"   (or the no-clone paths in the README).')
     print("\n  Boot a bad actor any time with:\n")
     print("    python setup.py revoke <username>")
-    print("    # blocks future registers and kills their running agents.")
+    print("    # blocks future registers, kills their agents, and (if a runner")
+    print("    # is set) tears down their hosted fleet + purges their keys.")
     print("\n  Base password (keep private — used by `setup.py invite` to derive")
     print("  per-contributor passwords; rotating it kicks every contributor):")
     print(f"    {swarm_password}")
@@ -955,6 +955,95 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     # scripts, and the operator all see it) instead of a half-initialised swarm
     # masquerading as ready.
     return 0 if config_ok else 1
+
+
+def run_create_runner(args: argparse.Namespace | None = None) -> int:
+    """Deploy the hosted fleet runner (Tier 1) as its own Railway service and
+    point the swarm at it — the automated equivalent of the manual runner
+    steps `setup.py create` prints. Requires an existing swarm (reads its
+    server_url + admin_key from swarm.admin.json)."""
+    print("TIG Swarm — deploy the hosted fleet runner (zero-install tier)")
+    print("=" * 48)
+
+    _railway_check_installed()
+    user = _railway_check_auth()
+    who = user.get("email") or user.get("name") or "unknown"
+    print(f"  authed as Railway user: {who}\n")
+    workspace = _arg_value(args, "workspace") or _pick_workspace(user)
+
+    admin = read_swarm_admin()
+    server_url = (
+        admin.get("server_url") or read_swarm_cache().get("server_url") or ""
+    ).rstrip("/")
+    admin_key = (admin.get("admin_key") or "").strip()
+    if not server_url or not admin_key:
+        print(
+            "create-runner: no existing swarm found (need server_url + admin_key\n"
+            "  in swarm.admin.json). Run `python setup.py create` first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    swarm_name = admin.get("swarm_name") or "tig-swarm"
+    runner_name = _arg_value(args, "runner_name") or f"{swarm_name}-runner"
+    # Fernet key = 32 random bytes, urlsafe-base64. Generated with stdlib so the
+    # host CLI stays dependency-free (runner.vault reads this exact format).
+    secret_key = base64.urlsafe_b64encode(os.urandom(32)).decode()
+
+    print(f"Deploying runner service '{runner_name}' on Railway…")
+    _project, service, _resumed = _railway_provision(runner_name, workspace)
+    svc = service.get("name", runner_name)
+
+    print("  setting environment variables…")
+    _railway_set_variables(svc, {
+        # Build runner/Dockerfile, not the root (server) Dockerfile.
+        "RAILWAY_DOCKERFILE_PATH": "runner/Dockerfile",
+        "RUNNER_SECRET_KEY": secret_key,
+        "COORDINATION_SERVER_URL": server_url,
+        "RUNNER_ADMIN_KEY": admin_key,
+        "RUNNER_DATA_DIR": "/data",
+        "RUNNER_WORKSPACES": "/data/workspaces",
+    })
+
+    print("  attaching /data volume (enrollment DB + per-contributor workspaces)…")
+    _railway_add_volume(svc, "/data")
+
+    print("  deploying (build logs follow; this takes a few minutes)…\n")
+    _railway_up(svc)
+
+    print("\n  fetching public URL…")
+    runner_url = _railway_domain(svc)
+    print(f"  runner URL: {runner_url}")
+
+    print("  waiting for the runner to come online…")
+    if not _wait_for_server(runner_url, probe_path="/api/runner/health"):
+        print(
+            "\n  WARNING: the runner didn't answer /api/runner/health in time — it\n"
+            "  may still be rolling out. Once it's up, finish by running:\n"
+            f"    python setup.py set-runner {runner_url}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("  pointing the swarm at the runner…")
+    from .contributors import run_set_runner
+    rc = run_set_runner(runner_url)
+    if rc != 0:
+        return rc
+
+    print("\n" + "=" * 48)
+    print("HOSTED RUNNER IS LIVE")
+    print("=" * 48)
+    print(f"\n  Runner:  {runner_url}")
+    print(f"  Swarm:   {server_url}")
+    print("\n  NOTE: the join page's cloud tab is currently disabled in the UI;")
+    print("  the runner is reachable via its API only (see runner/README.md).")
+    print("  Manage it in Railway: https://railway.com/dashboard")
+    print("\n  NOTE: your clone's .railway/ link now points at the runner project;")
+    print("  swarm admin (switch/invite/revoke) uses the server API, so it's")
+    print("  unaffected. Re-run `setup.py create` (resume) to relink the swarm.")
+    print()
+    return 0
 
 
 def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:

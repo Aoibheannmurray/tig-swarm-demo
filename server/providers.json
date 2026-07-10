@@ -1,0 +1,83 @@
+[
+  {
+    "key": "anthropic",
+    "label": "Anthropic (Claude API)",
+    "default_model": "claude-opus-4-7",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "name_stub": "claude",
+    "supports_c3": true,
+    "blurb": "Claude via Anthropic's API. Needs ANTHROPIC_API_KEY."
+  },
+  {
+    "key": "openai",
+    "label": "OpenAI (GPT API)",
+    "default_model": "gpt-5",
+    "api_key_env": "OPENAI_API_KEY",
+    "name_stub": "gpt",
+    "supports_c3": true,
+    "blurb": "GPT via OpenAI's API. Needs OPENAI_API_KEY."
+  },
+  {
+    "key": "google",
+    "label": "Google (Gemini API)",
+    "default_model": "gemini-2.5-pro",
+    "api_key_env": "GOOGLE_API_KEY",
+    "name_stub": "gemini",
+    "supports_c3": true,
+    "blurb": "Gemini via Google's API. Needs GOOGLE_API_KEY."
+  },
+  {
+    "key": "venice",
+    "label": "Venice.ai (OpenAI-compatible)",
+    "default_model": "zai-org-glm-5",
+    "api_key_env": "VENICE_API_KEY",
+    "name_stub": "venice",
+    "supports_c3": true,
+    "blurb": "Venice.ai \u2014 OpenAI-compatible. Needs VENICE_API_KEY."
+  },
+  {
+    "key": "openrouter",
+    "label": "OpenRouter (multi-model proxy, OpenAI-compatible)",
+    "default_model": "qwen/qwen-2.5-coder-32b-instruct",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "name_stub": "openrouter",
+    "supports_c3": true,
+    "blurb": "OpenRouter \u2014 gateway to many providers under one key. Written to the config as an OpenAI-compatible endpoint (provider `openai` + api_base). Use publisher/model strings like `qwen/qwen-2.5-coder-32b-instruct` or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."
+  },
+  {
+    "key": "deepseek",
+    "label": "DeepSeek (OpenAI-compatible)",
+    "default_model": "deepseek-v4-pro",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "name_stub": "deepseek",
+    "supports_c3": true,
+    "blurb": "DeepSeek \u2014 OpenAI-compatible. Written to the config as provider `openai` + api_base. Use model ids like `deepseek-v4-pro`, `deepseek-chat` or `deepseek-reasoner`. Needs DEEPSEEK_API_KEY."
+  },
+  {
+    "key": "claude-code",
+    "label": "Claude CLI \u2014 single-shot mode",
+    "default_model": "claude-opus-4-7",
+    "api_key_env": null,
+    "name_stub": "claude-cli",
+    "supports_c3": true,
+    "blurb": "Uses the `claude` CLI's own login. No API key needed."
+  },
+  {
+    "key": "claude-code-agentic",
+    "label": "Claude CLI \u2014 agentic (tooled, sandboxed)",
+    "default_model": "claude-opus-4-7",
+    "api_key_env": null,
+    "name_stub": "claude-agentic",
+    "supports_c3": true,
+    "blurb": "Agentic Claude CLI \u2014 more capable, 5-20x more tokens. Subscription only."
+  },
+  {
+    "key": "codex-agentic",
+    "label": "Codex CLI \u2014 agentic",
+    "default_model": "",
+    "api_key_env": null,
+    "name_stub": "codex-agentic",
+    "supports_c3": true,
+    "blurb": "Agentic Codex CLI \u2014 uses `codex login`. Subscription only."
+  }
+]

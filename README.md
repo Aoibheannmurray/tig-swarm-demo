@@ -14,7 +14,14 @@ tracked but not triaged on any schedule; contributions are welcome via PR.
 
 ## Host
 
-Requirements: Python 3, Railway CLI, Railway account.
+**Browser-only (easiest):** deploy the coordination server to Railway with one
+click — no terminal, no CLI. The server self-configures on first boot
+(generates its admin key + swarm password, seeds starting algorithms from the
+image), then you manage everything — challenge, contributors, join links — from
+the hosted Admin Console. See
+[deploy/DEPLOY_ON_RAILWAY.md](./deploy/DEPLOY_ON_RAILWAY.md).
+
+**CLI:** requirements: Python 3, Railway CLI, Railway account.
 
 ```bash
 railway login
@@ -43,6 +50,32 @@ Requirements:
 - Either an API key for your chosen provider, or a logged-in `claude` / `codex` CLI
 
 
+
+### Join with a link (easiest)
+
+If your host sent you a **join link** (`https://<swarm>/join#u=…&p=…`), open it
+in a browser — the join page hands you a single command with the link already
+baked in. It fetches the swarm code (no manual clone) and opens the local
+**setup app** in your browser, where you pick your provider/models, paste your
+API keys (LLM + [C3](https://cthree.cloud/dashboard/settings); stored locally in
+a gitignored `secrets.local.json`, never uploaded), and click **Launch fleet**.
+
+```bash
+# macOS / Linux (needs Python 3 + git)
+# NOTE: pinned to the server-onboarding branch until it merges to main —
+# then use .../main/deploy/get-swarm.py and drop --branch.
+curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py \
+  | python3 - join "<your-join-link>" --ui --branch server-onboarding
+```
+
+```powershell
+# Windows (PowerShell or cmd; try `py` if `python` isn't recognized)
+curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/server-onboarding/deploy/get-swarm.py | python - join "<your-join-link>" --ui --branch server-onboarding
+```
+
+(Advanced: dropping `--ui` runs headless instead, fetching a fleet config
+stored server-side via the `/api/contributor/config` API — there's no UI for
+authoring that anymore, so most people want the setup-app flow above.)
 
 ### Local Web Setup
 
@@ -93,6 +126,7 @@ Per-agent fields:
 | `api_base`         | Optional override of the provider's base URL, e.g. `https://openrouter.ai/api/v1`.                                                                                                                                         |
 | `detailed_prompts` | Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile.                                                                                                |
 | `role`             | `explorer` writes novel/ambitious algorithms; `exploiter` makes small focused localized edits. **Hot-editable** — change it in `fleet.config.json` while the fleet runs and it takes effect on the agent's next iteration. |
+| `seeded_start`     | Optional `true`/`false` override of where the agent starts a fresh trajectory. `true`: start from working code (server seed pool → best active peer → stub as fallback); `false`: always start from the bare stub. Omit for the default policy: frontier explorers bootstrap from the stub on CPU challenges, everyone else (and all GPU challenges) gets working code. **Hot-editable** like `role`; applies at the next fresh trajectory (registration or stagnation reset), not mid-trajectory. |
 
 
 

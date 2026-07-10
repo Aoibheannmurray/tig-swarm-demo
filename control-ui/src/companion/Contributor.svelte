@@ -46,17 +46,60 @@
   // when the provider can't use C3.
   let compute = $state("c3");
   let hardware = $state("auto");
+  // Behavior picks (both hot-editable later in fleet.config.json):
+  // role: how agents edit (explorer = novel rewrites, exploiter = focused
+  // tweaks); seeding: where a fresh trajectory starts (working code vs stub).
+  // "auto" defers to the tier/server defaults.
+  let role = $state("auto");
+  let seeding = $state("auto");
   let c3ApiKey = $state("");
+  // API keys stored locally in secrets.local.json (no `export` needed).
+  // Declared here (before c3Ready reads it) so the rune graph resolves.
+  let secrets: Record<string, { set: boolean; source: string }> = $state({});
+  let keyDraft: Record<string, string> = $state({});
+  let keyMsg = $state("");
   let supportsC3 = $derived(selectedProvider?.supports_c3 ?? false);
   // Keep `compute` valid for the chosen provider: if it can't do C3, force local.
   $effect(() => { if (!supportsC3 && compute === "c3") compute = "local"; });
 
   // Capability probe (Docker / C3) so we can guide instead of failing mid-run.
   let preflight: any = $state(null);
-  const c3Ready = $derived(
-    !!preflight && (preflight.c3.key_in_env || preflight.c3.cli_installed || !!c3ApiKey.trim()),
+  // The `c3` binary is REQUIRED for C3 compute — it performs the deploys; an
+  // API key only authenticates it. So "ready" needs the CLI installed, plus
+  // some auth source (env key, stored key, key typed here, or `c3 login`).
+  const c3CliInstalled = $derived(!!preflight?.c3?.cli_installed);
+  const c3HasAuth = $derived(
+    !!preflight?.c3?.key_in_env || !!c3ApiKey.trim() || !!secrets["C3_API_KEY"]?.set,
   );
+  // `c3 login` sessions aren't detectable, so CLI-installed counts as ready
+  // (the banner still nudges toward a key / login); CLI-missing never does.
+  const c3Ready = $derived(c3CliInstalled);
+  async function recheckPreflight() {
+    try { preflight = await localApi.preflight(); } catch { /* keep last */ }
+  }
   const dockerInstalled = $derived(!!preflight && preflight.docker.installed);
+
+  // ── API keys (stored locally in secrets.local.json — no `export` needed) ──
+  async function refreshSecrets() {
+    try { secrets = (await localApi.secretsStatus()).secrets ?? {}; }
+    catch { /* companion may predate the endpoint — hide the panel */ }
+  }
+  async function saveKey(name: string) {
+    keyMsg = "";
+    const value = (keyDraft[name] ?? "").trim();
+    if (!value) return;
+    try {
+      secrets = (await localApi.secretSet(name, value)).secrets ?? secrets;
+      keyDraft[name] = "";
+      keyMsg = `Saved ${name}.`;
+    } catch (e: any) { keyMsg = e.message; }
+  }
+  // The env-var names this fleet will need: the chosen provider's key (if any)
+  // plus C3 when benchmarking in the cloud.
+  let neededKeys = $derived([
+    ...(selectedProvider?.api_key_env ? [selectedProvider.api_key_env] : []),
+    ...(compute === "c3" ? ["C3_API_KEY"] : []),
+  ]);
 
   // ── Tacit ──
   let tacitText = $state("");
@@ -72,6 +115,7 @@
       c3hw = p.c3_hardware;
       // Probe capabilities for the readiness panel (non-blocking best-effort).
       localApi.preflight().then((pf) => (preflight = pf)).catch(() => {});
+      refreshSecrets();
       // Prefill connection from an existing fleet.config.json, if any.
       const fc = await localApi.getFleetConfig();
       if (fc.exists && fc.config) {
@@ -102,6 +146,8 @@
         provider, model, count, prefix: prefix || undefined,
         compute, hardware: compute === "c3" ? hardware : undefined,
         c3_api_key: compute === "c3" ? c3ApiKey : undefined,
+        role: role === "auto" ? undefined : role,
+        seeded_start: seeding === "auto" ? undefined : seeding,
       };
       const res = await localApi.setFleetConfig(params);
       writtenConfig = res.config;
@@ -132,6 +178,7 @@
 
 <Stepper steps={STEPS} current={step} />
 {#if error}<div class="banner err">{error}</div>{/if}
+{#if keyMsg}<div class="banner ok">{keyMsg}</div>{/if}
 
 {#if step === 0}
   <div class="card">
@@ -173,7 +220,24 @@
       <label for="model">Model</label>
       <input id="model" type="text" bind:value={model} placeholder={selectedProvider?.default_model || "model id"} />
       {#if selectedProvider?.api_key_env}
-        <div class="hint">Needs <code>{selectedProvider.api_key_env}</code> exported in the shell that runs the fleet.</div>
+        {@const kn = selectedProvider.api_key_env}
+        <div class="hint">
+          Needs <code>{kn}</code>.
+          {#if secrets[kn]?.set}
+            <span class="pill ok">set ({secrets[kn].source})</span>
+          {:else}
+            <span class="pill info">not set</span> — paste it below (stored
+            locally in <code>secrets.local.json</code>, never uploaded).
+          {/if}
+        </div>
+        {#if !secrets[kn]?.set || secrets[kn]?.source === "file"}
+          <div class="row" style="align-items:flex-end;margin-top:8px">
+            <div class="field" style="margin-bottom:0;flex:1">
+              <input type="password" bind:value={keyDraft[kn]} placeholder={`paste ${kn}`} />
+            </div>
+            <button onclick={() => saveKey(kn)}>{secrets[kn]?.set ? "Update" : "Save key"}</button>
+          </div>
+        {/if}
       {/if}
     </div>
 
@@ -221,25 +285,54 @@
       {#if !supportsC3}<div class="hint">This provider runs benchmarks locally (Docker).</div>{/if}
     </div>
 
+    <div class="row">
+      <div class="field">
+        <label for="role">Agent role</label>
+        <select id="role" bind:value={role}>
+          <option value="auto">Auto — by model tier (recommended)</option>
+          <option value="explorer">Explorer — writes novel, ambitious algorithms</option>
+          <option value="exploiter">Exploiter — small focused edits to working code</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="seeding">Starting point</label>
+        <select id="seeding" bind:value={seeding}>
+          <option value="auto">Auto — server decides (recommended)</option>
+          <option value="seed">Seed — start from working code</option>
+          <option value="stub">Stub — start from scratch</option>
+        </select>
+      </div>
+    </div>
+    <div class="hint">
+      Both are hot-editable later in <code>fleet.config.json</code>
+      (<code>role</code> / <code>seeded_start</code>) — changes apply on the
+      agent's next iteration. “Starting point” takes effect when a fresh
+      trajectory begins, not mid-run.
+    </div>
+
     <!-- Readiness: guide the user to the prerequisites for the chosen backend
          instead of letting the fleet fail mid-run. -->
     {#if compute === "c3"}
-      {#if c3Ready}
+      {#if preflight && !c3CliInstalled}
+        <div class="banner warn">
+          <b>Install the c3 CLI</b> — C3 benchmarking needs it even with an API
+          key (the CLI submits the jobs). Run this in a terminal, then Recheck:
+          <div class="mono" style="margin:8px 0;padding:8px 10px;border-radius:6px;background:var(--bg-sunken,rgba(127,127,127,.12))">curl -fsSL https://cthree.cloud/install.sh | sh</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button onclick={recheckPreflight}>↻ Recheck</button>
+            <span class="hint" style="margin:0">Windows: no native c3 CLI — use WSL, or
+              {#if dockerInstalled}switch to <b>Local Docker</b> above.{:else}install Docker Desktop and switch to <b>Local Docker</b>.{/if}
+            </span>
+          </div>
+        </div>
+      {:else if c3Ready}
         <div class="banner ok">
           C3 is ready — {preflight?.c3.key_in_env
             ? "C3_API_KEY detected in your environment."
-            : c3ApiKey.trim()
-              ? "using the key you entered below."
-              : "the c3 CLI is installed (log in with c3 login if you haven't)."}
+            : c3HasAuth
+              ? "using your saved/entered key."
+              : "the c3 CLI is installed (paste a key below, or run c3 login)."}
           No local Docker needed.
-        </div>
-      {:else if preflight}
-        <div class="banner warn">
-          C3 isn't set up yet. Paste a C3 API key below, <em>or</em> install the
-          c3 CLI (<span class="mono">https://cthree.cloud/install.sh</span>) and run
-          <span class="mono">c3 login</span>.
-          {#if dockerInstalled}<br />Docker <em>is</em> installed here, so you could
-            switch to <b>Local Docker</b> above instead.{/if}
         </div>
       {/if}
       <div class="field">
@@ -249,8 +342,24 @@
         </select>
       </div>
       <div class="field">
-        <label for="c3k">C3 API key (optional)</label>
-        <input id="c3k" type="password" bind:value={c3ApiKey} placeholder="leave blank to use C3_API_KEY / c3 login" />
+        <label for="c3k">C3 API key</label>
+        {#if secrets["C3_API_KEY"]?.set}
+          <div class="hint"><span class="pill ok">C3_API_KEY set ({secrets["C3_API_KEY"].source})</span></div>
+        {:else}
+          <div class="row" style="align-items:flex-end">
+            <div class="field" style="margin-bottom:0;flex:1">
+              <input type="password" bind:value={keyDraft["C3_API_KEY"]}
+                placeholder="paste C3_API_KEY (stored locally)" />
+            </div>
+            <button onclick={() => saveKey("C3_API_KEY")}>Save key</button>
+          </div>
+          <div class="hint">
+            Create one at
+            <span class="mono">cthree.cloud/dashboard/settings</span>.
+            Or leave blank and set <code>c3_api_key</code> per agent / use
+            <span class="mono">c3 login</span>.
+          </div>
+        {/if}
       </div>
     {:else if compute === "local"}
       {#if preflight && !dockerInstalled}

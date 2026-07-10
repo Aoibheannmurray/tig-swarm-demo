@@ -25,7 +25,12 @@ server/static/
 .swarm-cache.json
 swarm.admin.json
 fleet.config.json
+.fleet-cache.json
+secrets.local.json
 agent.config.json
+# Hosted runner (runner/) local state — never committed
+runner/data/
+runner/workspaces/
 swarm.config.json
 worktrees/
 CHALLENGE.md

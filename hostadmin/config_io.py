@@ -99,6 +99,9 @@ _ADMIN_FIELDS = (
     "hypothesis_recall_threshold",
     # Invite/revoke bookkeeping written back by run_invite / run_revoke.
     "issued_contributors", "revoked_contributors",
+    # Hosted runner (Tier 1) URL, written by set-runner / create-runner so
+    # `revoke` can also tear down a contributor's hosted fleet.
+    "runner_url",
 )
 _CACHE_FIELDS = (
     "server_url", "active_challenge", "challenge", "swarm_type",

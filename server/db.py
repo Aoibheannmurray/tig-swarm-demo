@@ -236,6 +236,19 @@ CREATE TABLE IF NOT EXISTS seed_pool (
     origin_agent_id TEXT,
     created_at TEXT NOT NULL
 );
+
+-- Server-stored per-contributor fleet config + tacit knowledge (P1 of
+-- docs/server-first-onboarding-plan.md). `config_json` is the sanitized
+-- fleet plan the hosted contributor console edits — the same agents-array
+-- shape as fleet.config.json, secrets hard-rejected at the API layer.
+-- `tacit_text` is the contributor's hosted tacit-knowledge notes. The
+-- local runner fetches both in --join mode (P2).
+CREATE TABLE IF NOT EXISTS contributor_configs (
+    username TEXT PRIMARY KEY,
+    config_json TEXT,
+    tacit_text TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 # Indexes are split out from the main schema so they can be applied after
@@ -281,6 +294,10 @@ DEFAULT_CONFIG = {
     "owner_name": "",
     "swarm_type": "cpu",
     "hypothesis_recall_threshold": "3",
+    # Public URL of this swarm's hosted fleet runner (Tier 1), if the host
+    # deployed one. Empty = no cloud-run option; the join page then only
+    # offers the local runner. Set via POST /api/swarm_config (admin).
+    "runner_url": "",
 }
 
 
@@ -564,6 +581,18 @@ async def init_db() -> None:
                 await _apply_env_swarm_config(db)
             except Exception as e:  # noqa: BLE001 — boot must survive any bad var
                 print(f"init_db: could not apply env swarm config: {e!r}")
+            # Browser-only ("Deploy on Railway") host setup has no clone to run
+            # `setup.py create`, so populate initial algorithm code + the seed
+            # pool from a snapshot baked into the image, if present. No-op when
+            # the bundle is absent or the code is already set (see first_boot).
+            try:
+                import first_boot
+                summary = await first_boot.seed_from_bundle(db)
+                if summary.get("initial_code") or summary.get("seeds"):
+                    print(f"init_db: first-boot seeding {summary}")
+                await db.commit()
+            except Exception as e:  # noqa: BLE001 — never block boot on seeding
+                print(f"init_db: first-boot seeding skipped: {e!r}")
             await db.execute(
                 "INSERT OR REPLACE INTO config (key, value) VALUES ('env_config_applied', '1')"
             )
@@ -1613,3 +1642,34 @@ async def get_trajectory_score_history(
             best = score
             steps.append({"score": score, "created_at": row["created_at"]})
     return steps
+
+
+# ── Contributor configs (server-first onboarding P1) ──
+
+
+async def get_contributor_config(
+    conn: aiosqlite.Connection, username: str,
+) -> dict | None:
+    """The contributor's stored fleet config row, or None before first save.
+    `config_json` is returned as stored (a JSON string or NULL) — the API
+    layer owns encoding/decoding and validation."""
+    cursor = await conn.execute(
+        "SELECT config_json, tacit_text, updated_at "
+        "FROM contributor_configs WHERE username = ?",
+        (username,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def set_contributor_config(
+    conn: aiosqlite.Connection, username: str,
+    config_json: str | None, tacit_text: str | None, updated_at: str,
+) -> None:
+    """Full-row upsert. Partial-update semantics (PUT with only `config` or
+    only `tacit`) are the caller's job: read the existing row, merge, write."""
+    await conn.execute(
+        "INSERT OR REPLACE INTO contributor_configs "
+        "(username, config_json, tacit_text, updated_at) VALUES (?, ?, ?, ?)",
+        (username, config_json, tacit_text, updated_at),
+    )

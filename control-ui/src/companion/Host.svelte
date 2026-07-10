@@ -235,6 +235,12 @@
         <li><span>Admin key</span><code>{r.admin_key}</code></li>
         <li><span>Base password</span><code>{r.swarm_password}</code></li>
       </ul>
+      <p class="lede" style="margin-top:14px">
+        <b>Next:</b> open the Admin Console to create a <b>join link</b> for each
+        contributor — they configure agents in the browser, then run one command
+        (<span class="mono">python run.py --join "&lt;link&gt;"</span>) or a no-clone
+        path from the README.
+      </p>
       <div class="actions">
         <div class="spacer"></div>
         <a class="btn primary" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
