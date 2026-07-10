@@ -230,6 +230,56 @@ def _tig_image(cfg: dict) -> str:
     return f"tig-custom-image-{cfg['challenge']}:{_tig_version()}"
 
 
+def _daemon_running() -> bool:
+    return subprocess.run(
+        ["docker", "info"], capture_output=True
+    ).returncode == 0
+
+
+def _ensure_docker_daemon() -> None:
+    """Ensure the Docker daemon is reachable, launching the app if not."""
+    if _daemon_running():
+        return
+
+    print("Docker daemon not running — attempting to start…", file=sys.stderr)
+    if sys.platform == "darwin":
+        launched = any(
+            subprocess.run(["open", "-a", app], capture_output=True).returncode == 0
+            for app in ("Docker", "OrbStack")
+        )
+        if not launched:
+            print(
+                "error: could not launch Docker Desktop or OrbStack — start it manually.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    elif sys.platform.startswith("linux"):
+        # Best-effort: Docker Desktop on Linux registers a user-level service.
+        # System dockerd usually needs sudo, which we don't have here.
+        subprocess.run(
+            ["systemctl", "--user", "start", "docker-desktop"],
+            capture_output=True,
+        )
+    else:
+        print(
+            f"error: don't know how to auto-start Docker on {sys.platform} — start it manually.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        if _daemon_running():
+            print("Docker daemon is ready.", file=sys.stderr)
+            return
+        time.sleep(2)
+    print(
+        "error: Docker daemon did not become ready within 90s — start it manually.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _ensure_tig_image(image: str, challenge: str) -> None:
     """Ensure the custom TIG image exists locally, building it if missing.
     (C3 pulls the image from the registry instead — handled in the C3 path.)"""
