@@ -27,6 +27,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -272,6 +273,93 @@ class DeployController:
         return self.status()
 
 
+# ── Railway login (device-code flow) ──────────────────────────────────
+
+
+class RailwayLoginController:
+    """Drives `railway login --browserless` so the host can sign in from the
+    UI: spawn the CLI, scrape the pairing link + code from its output, and let
+    the UI poll until the process exits — /local-api/railway/status then
+    reports authed. The device-code flow is the right one here: the companion
+    often runs on a headless/remote box, where the CLI's own browser flow
+    can't open anything.
+
+    One attempt at a time; starting a new one kills a stale pending process
+    (pairing codes expire after a few minutes, so "start over" must work)."""
+
+    # Pairing codes seen from the CLI: word tuples ("brave-otter-lamp") or
+    # grouped alphanumerics ("ABCD-1234"). Scraped loosely on lines that
+    # mention "code"; the raw output is always returned as a fallback so an
+    # unparsed format still leaves the UI usable.
+    _CODE_RE = re.compile(r"\b([A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,})+)\b")
+    _URL_RE = re.compile(r"https://\S+")
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self.state = "idle"  # idle | pending | done | error
+        self.url: str | None = None
+        self.code: str | None = None
+        self.output = ""
+        self.error: str | None = None
+
+    def status(self) -> dict:
+        return {"state": self.state, "url": self.url, "code": self.code,
+                "output": self.output[-1500:], "error": self.error}
+
+    def start(self) -> dict:
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.kill()
+            self.state = "pending"
+            self.url = None
+            self.code = None
+            self.output = ""
+            self.error = None
+            try:
+                self._proc = subprocess.Popen(
+                    ["railway", "login", "--browserless"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, text=True,
+                    encoding="utf-8", errors="replace",
+                )
+            except OSError as exc:
+                self.state = "error"
+                self.error = f"could not run the railway CLI: {exc}"
+                return self.status()
+            proc = self._proc
+
+        def _watch() -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                self.output += line
+                if self.url is None:
+                    m = self._URL_RE.search(line)
+                    if m:
+                        self.url = m.group(0).rstrip(".,)…")
+                if self.code is None and "code" in line.lower():
+                    m = self._CODE_RE.search(line)
+                    if m:
+                        self.code = m.group(1)
+            proc.wait()
+            # Only the thread watching the CURRENT process may update state —
+            # a killed stale process's watcher must not clobber the new run.
+            if proc is self._proc:
+                if proc.returncode == 0:
+                    self.state = "done"
+                else:
+                    self.state = "error"
+                    self.error = (
+                        f"railway login exited {proc.returncode} — the pairing "
+                        "code may have expired; start again."
+                    )
+
+        self._thread = threading.Thread(target=_watch, daemon=True)
+        self._thread.start()
+        return self.status()
+
+
 # ── App factory ────────────────────────────────────────────────────────
 
 
@@ -350,6 +438,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     hub = EventHub()
     fleet = FleetController(hub)
     deploy = DeployController(hub)
+    railway_login = RailwayLoginController()
 
     # DNS-rebinding guard. This companion serves host credentials (e.g.
     # /local-api/swarm/admin returns the admin_key) and can start/stop fleets,
@@ -542,6 +631,16 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             # failure (SystemExit kept for belt-and-braces) — translate to a
             # soft status so the UI can show the right instruction.
             return {"available": False, "authed": False, "message": str(exc)}
+
+    @app.post("/local-api/railway/login")
+    async def railway_login_start() -> dict:
+        """Start (or restart) a device-code Railway login. Returns the pairing
+        link + code once the CLI prints them; the UI polls the GET below."""
+        return railway_login.start()
+
+    @app.get("/local-api/railway/login")
+    def railway_login_status() -> dict:
+        return railway_login.status()
 
     @app.get("/local-api/swarm/admin")
     def swarm_admin() -> dict:

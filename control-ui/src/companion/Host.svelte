@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import LogStream from "../components/LogStream.svelte";
   import { localApi } from "../lib/api";
   import { ensureStream, deployLog, deployStatus } from "../lib/stream";
@@ -65,6 +65,39 @@
     }
   }
 
+  // ── Login from the UI (device-code flow) ──
+  // POST spawns `railway login --browserless` on the companion; we show the
+  // pairing link + code it prints and poll until the CLI exits (paired) or
+  // fails (codes expire after a few minutes — the button restarts cleanly).
+  let login: any = $state(null);
+  let loginPoll: ReturnType<typeof setInterval> | null = null;
+  function stopLoginPoll() {
+    if (loginPoll) { clearInterval(loginPoll); loginPoll = null; }
+  }
+  async function startLogin() {
+    error = "";
+    try {
+      login = await localApi.railwayLoginStart();
+    } catch (e: any) {
+      error = e.message;
+      return;
+    }
+    stopLoginPoll();
+    loginPoll = setInterval(async () => {
+      try {
+        login = await localApi.railwayLoginStatus();
+        if (login.state === "done") {
+          stopLoginPoll();
+          await refreshRailway();
+          if (railway?.authed) login = null;
+        } else if (login.state === "error") {
+          stopLoginPoll();
+        }
+      } catch { /* companion hiccup — keep polling */ }
+    }, 2000);
+  }
+  onDestroy(stopLoginPoll);
+
   async function createSwarm() {
     error = ""; deploying = true;
     try {
@@ -128,11 +161,36 @@
     {/if}
   </div>
   {#if !railway?.authed}
-    <p class="lede">
-      Provisioning needs the Railway CLI, logged in. In your terminal run
-      <code>railway login</code>, complete the browser flow, then hit Recheck.
-      {#if railway?.message}<br /><span class="muted mono">{railway.message}</span>{/if}
-    </p>
+    {#if !login || login.state === "idle"}
+      <p class="lede">
+        Provisioning needs the Railway CLI, logged in.
+        <b>Log in right here</b> — or run <code>railway login</code> in a
+        terminal and hit Recheck.
+        {#if railway?.message}<br /><span class="muted mono">{railway.message}</span>{/if}
+      </p>
+      <button class="primary" onclick={startLogin}>Log in to Railway</button>
+    {:else if login.state === "pending"}
+      {#if login.url}
+        <p class="lede">
+          Open this link in any browser
+          {#if login.code} and enter code <b class="mono">{login.code}</b>{/if}
+          — this page updates by itself once you're signed in.
+        </p>
+        <div class="cmd mono" style="word-break:break-all;margin-bottom:8px">
+          <a href={login.url} target="_blank" rel="noopener">{login.url}</a>
+        </div>
+      {:else}
+        <p class="lede">Starting the Railway sign-in…</p>
+        {#if login.output}<pre class="mono muted" style="white-space:pre-wrap">{login.output}</pre>{/if}
+      {/if}
+      <button class="ghost" onclick={startLogin}>Start over</button>
+    {:else if login.state === "error"}
+      <div class="banner err">{login.error || "Login failed."}</div>
+      {#if login.output}<pre class="mono muted" style="white-space:pre-wrap">{login.output}</pre>{/if}
+      <button class="primary" onclick={startLogin}>Try again</button>
+    {:else if login.state === "done"}
+      <p class="lede">Signed in — refreshing status…</p>
+    {/if}
   {/if}
 </div>
 
@@ -276,6 +334,13 @@
 
 <style>
   .rowhead { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .cmd {
+    background: var(--bg-sunken, rgba(127, 127, 127, 0.12));
+    border-radius: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    font-size: 0.92em;
+  }
   .rowhead h2 { margin: 0; }
   .check { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--ink); }
   .check input { width: auto; }

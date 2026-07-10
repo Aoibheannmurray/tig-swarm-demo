@@ -90,6 +90,45 @@ def main() -> int:
         check(c.post("/local-api/invite", json={"swarm_password": "b"}).status_code == 400,
               "invite without username rejected")
 
+        print("railway login (device-code flow, stubbed CLI)")
+        import io
+        import time as _time
+
+        class _FakePopen:
+            """Stands in for `railway login --browserless`: emits a pairing
+            link + code, then exits 0 as if the pairing completed."""
+            def __init__(self, *a, **kw):
+                self.returncode = 0
+                self.stdout = io.StringIO(
+                    "Sign in from any device:\n"
+                    "  https://railway.com/cli-login?d=abc123\n"
+                    "Your pairing code is: brave-otter-lamp\n"
+                )
+            def poll(self):
+                return self.returncode
+            def wait(self):
+                return self.returncode
+            def kill(self):
+                pass
+
+        orig_popen = control_server.subprocess.Popen
+        control_server.subprocess.Popen = _FakePopen
+        try:
+            rl = c.post("/local-api/railway/login").json()
+            check(rl["state"] in ("pending", "done"), "login start accepted")
+            deadline = _time.time() + 5
+            while _time.time() < deadline:
+                rl = c.get("/local-api/railway/login").json()
+                if rl["state"] == "done" and rl.get("url"):
+                    break
+                _time.sleep(0.05)
+            check(rl["state"] == "done", "login completes when the CLI exits 0")
+            check(rl["url"] == "https://railway.com/cli-login?d=abc123",
+                  "pairing link scraped from CLI output")
+            check(rl["code"] == "brave-otter-lamp", "pairing code scraped")
+        finally:
+            control_server.subprocess.Popen = orig_popen
+
         print("fleet status / websocket")
         check(c.get("/local-api/fleet/status").json()["state"] == "idle", "fleet idle before start")
         # TestClient stamps Host "testserver" on WS handshakes regardless of
