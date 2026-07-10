@@ -86,7 +86,7 @@
     "puffin", "gecko", "wombat", "ibex", "stoat", "kestrel", "tapir", "quokka"];
   let bulkCount = $state(1);
   let bulkPrefix = $state("");
-  let bulkInvites: { username: string; link: string }[] = $state([]);
+  let bulkInvites: { username: string; link: string; block: string }[] = $state([]);
   function randomSlug(taken: Set<string>): string {
     for (let i = 0; i < 40; i++) {
       const name = `${INVITE_ADJECTIVES[Math.floor(Math.random() * INVITE_ADJECTIVES.length)]}-${INVITE_NOUNS[Math.floor(Math.random() * INVITE_NOUNS.length)]}`;
@@ -106,10 +106,14 @@
       names.push(name);
     }
     try {
-      bulkInvites = await Promise.all(names.map(async (username) => ({
-        username,
-        link: buildJoinLink(serverLabel(), username, await deriveInvitePassword(username, basePassword)),
-      })));
+      bulkInvites = await Promise.all(names.map(async (username) => {
+        const pw = await deriveInvitePassword(username, basePassword);
+        return {
+          username,
+          link: buildJoinLink(serverLabel(), username, pw),
+          block: `"server_url": "${serverLabel()}",\n"username": "${username}",\n"swarm_password": "${pw}"`,
+        };
+      }));
     } catch (e: any) { error = e.message; }
   }
   const bulkText = $derived(bulkInvites.map((b) => `${b.username}: ${b.link}`).join("\n"));
@@ -372,6 +376,23 @@
             <textarea id="blk" readonly rows={Math.min(10, bulkInvites.length + 1)}>{bulkText}</textarea>
             <button class="ghost" onclick={() => navigator.clipboard.writeText(bulkText)}>Copy all</button>
           </div>
+          <div style="margin-top:8px">
+            {#each bulkInvites as b}
+              <details class="invite-item">
+                <summary><span class="mono">{b.username}</span> <span class="muted">— join link + manual credentials</span></summary>
+                <div class="field" style="margin-top:10px">
+                  <label for={`bl-${b.username}`}>Join link</label>
+                  <textarea id={`bl-${b.username}`} readonly rows="2">{b.link}</textarea>
+                  <button class="ghost" onclick={() => navigator.clipboard.writeText(b.link)}>Copy link</button>
+                </div>
+                <div class="field">
+                  <label for={`bb-${b.username}`}>Manual config lines (server / username / password)</label>
+                  <textarea id={`bb-${b.username}`} readonly rows="3">{b.block}</textarea>
+                  <button class="ghost" onclick={() => navigator.clipboard.writeText(b.block)}>Copy</button>
+                </div>
+              </details>
+            {/each}
+          </div>
         {/if}
       </div>
     {:else if tab === "challenge"}
@@ -510,6 +531,8 @@
   .tabs button.active { color: var(--ink); border-bottom-color: var(--color-accent); }
   .rowhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
   .knobrow { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
+  .invite-item { border: 1px solid var(--border-subtle); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+  .invite-item summary { cursor: pointer; }
   .rowhead h2 { margin: 0; }
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   th { text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim); padding: 8px 10px; border-bottom: 1px solid var(--border-default); }
