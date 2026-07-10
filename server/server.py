@@ -57,7 +57,7 @@ SWARM_DEFAULTS: dict[str, int] = {
     # publish lands on a fresh trajectory and trivially "beats" an empty best.
     "inactive_minutes": 60,
     "stagnation_threshold": 2,
-    "stagnation_limit": 5,
+    "stagnation_limit": 4,
     # Kill-switch for trajectories that never turn positive: when > 0, a
     # trajectory whose best is still not better than 0 (= the baseline)
     # after this many edits is reset on the next state poll, exactly like a
@@ -3166,6 +3166,11 @@ async def get_swarm_config():
             "has_initial_kernel_code": bool(row.get("initial_kernel_code")),
             "is_gpu": ch_def.is_gpu if ch_def else False,
             "strategy_tags": strategy_tags,
+            # Canonical track labels for this challenge — a superset of the
+            # configured `tracks` keys. Lets the Admin Console's instances
+            # editor offer tracks currently at 0 instances (absent from
+            # `tracks`), which would otherwise be invisible and uneditable.
+            "track_keys": list(ch_def.track_keys) if ch_def else [],
         }
 
     return {

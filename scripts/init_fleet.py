@@ -103,13 +103,13 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
      "Venice.ai — OpenAI-compatible. Needs VENICE_API_KEY."),
     ("openrouter",
      "OpenRouter (multi-model proxy, OpenAI-compatible)",
-     "qwen/qwen-2.5-coder-32b-instruct",
+     "qwen/qwen3-coder",
      "OPENROUTER_API_KEY",
      "openrouter",
      True,
      "OpenRouter — gateway to many providers under one key. Written to the "
      "config as an OpenAI-compatible endpoint (provider `openai` + api_base). "
-     "Use publisher/model strings like `qwen/qwen-2.5-coder-32b-instruct` "
+     "Use publisher/model strings like `qwen/qwen3-coder` "
      "or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."),
     ("deepseek",
      "DeepSeek (OpenAI-compatible)",

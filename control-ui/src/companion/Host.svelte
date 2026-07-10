@@ -15,7 +15,7 @@
   let workspace = $state("");
   let activeChallenge = $state("");
   let stagThreshold = $state(2);
-  let stagLimit = $state(10);
+  let stagLimit = $state(4);
   let recallThreshold = $state(3);
   let seedInactive = $state(false);
   let useDefaults = $state(true);

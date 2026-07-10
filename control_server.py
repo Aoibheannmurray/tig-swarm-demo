@@ -638,7 +638,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "active_challenge": active_challenge,
             "challenges_cfg": challenges_cfg,
             "stagnation_threshold": int(payload.get("stagnation_threshold", 2)),
-            "stagnation_limit": int(payload.get("stagnation_limit", 10)),
+            "stagnation_limit": int(payload.get("stagnation_limit", 4)),
             "hypothesis_recall_threshold": int(payload.get("hypothesis_recall_threshold", 3)),
             "seed_inactive_pool": bool(payload.get("seed_inactive_pool", False)),
         }

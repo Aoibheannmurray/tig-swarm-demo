@@ -66,6 +66,11 @@ async def test_tracks_only_update_preserves_subconfig():
     assert sub["tracks"]["seed"] == "test", sub["tracks"]
     assert sub["scoring_direction"] == "min", sub
     assert sub["has_initial_algorithm"] is True, sub
+    # Canonical track labels ride along so the console can offer 0-instance
+    # tracks (absent from the configured `tracks` dict).
+    assert "n=50,s=flow_shop" in sub["track_keys"], sub["track_keys"]
+    assert len(sub["track_keys"]) >= len(
+        [k for k, v in sub["tracks"].items() if isinstance(v, int)]), sub
     algo = await server.get_initial_algorithm(CHALLENGE)
     assert algo["algorithm_code"] == "// the initial algorithm\n", algo
     print("PASS test_tracks_only_update_preserves_subconfig")

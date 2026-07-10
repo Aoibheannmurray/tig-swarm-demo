@@ -300,7 +300,7 @@ def push_config_to_server(
         "owner_name": cfg.get("owner_name", ""),
         "swarm_type": cfg.get("swarm_type", "cpu"),
         "stagnation_threshold": cfg.get("stagnation_threshold", 2),
-        "stagnation_limit": cfg.get("stagnation_limit", 10),
+        "stagnation_limit": cfg.get("stagnation_limit", 4),
         "hypothesis_recall_threshold": cfg.get("hypothesis_recall_threshold", 3),
     }
     url = f"{server_url.rstrip('/')}/api/swarm_config"
@@ -940,7 +940,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         # tweak via curl /api/swarm_config later if they want.
         stagnation_threshold = _arg_value(args, "stagnation_threshold") or 2
         stagnation_limit = _arg_value(args, "stagnation_limit")
-        stagnation_limit = 10 if stagnation_limit is None else stagnation_limit
+        stagnation_limit = 4 if stagnation_limit is None else stagnation_limit
         hypothesis_recall_threshold = _arg_value(args, "hypothesis_recall_threshold") or 3
         (hpo_first_tune_improvements, hpo_min_improvements,
          hpo_search_budget, hpo_num_suggested_configs) = _resolve_hpo_settings(args)
@@ -953,7 +953,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         if stagnation_limit is None:
             stagnation_limit = prompt_int(
                 "Stagnation limit (iterations without improvement before trajectory reset, 0=disabled)",
-                10, minimum=0,
+                4, minimum=0,
             )
         hypothesis_recall_threshold = _arg_value(args, "hypothesis_recall_threshold") or prompt_int(
             "Hypothesis recall threshold (iterations without improvement before "

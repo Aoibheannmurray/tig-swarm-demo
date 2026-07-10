@@ -190,47 +190,52 @@
   // ── Settings (stagnation + HPO knobs, hot-editable) ──
   // Every knob is read by contributors from the pushed swarm config on their
   // next iteration/state poll, so edits apply without restarting the swarm.
-  const KNOBS: { key: string; label: string; hint: string }[] = [
+  const SWARM_KNOBS: { key: string; label: string; hint: string }[] = [
     { key: "stagnation_threshold", label: "Stagnation threshold",
       hint: "iterations without improvement before an agent is treated as stagnating (hints kick in)" },
     { key: "stagnation_limit", label: "Stagnation limit",
       hint: "iterations without improvement before the trajectory is reset (0 = never reset)" },
     { key: "negative_trajectory_limit", label: "Negative-trajectory limit",
-      hint: "edits allowed while a trajectory's best is still ≤ 0 before reset; 0 = off — keep OFF on challenges with inherently negative scores (e.g. neuralnet)" },
+      hint: "edits allowed while a trajectory's best is still ≤ 0 before reset; 0 = off" },
     { key: "hypothesis_recall_threshold", label: "Hypothesis recall threshold",
       hint: "how many past hypotheses are recalled into agent prompts" },
-    { key: "hpo_first_tune_improvements", label: "HPO: first-tune improvements",
+  ];
+  const HPO_KNOBS: { key: string; label: string; hint: string }[] = [
+    { key: "hpo_first_tune_improvements", label: "First-tune improvements",
       hint: "improvements a trajectory needs before its FIRST hyperparameter tune" },
-    { key: "hpo_min_improvements", label: "HPO: min improvements",
+    { key: "hpo_min_improvements", label: "Min improvements",
       hint: "improvements needed for later tunes; also sets the tune-band width" },
-    { key: "hpo_search_budget", label: "HPO: search budget",
+    { key: "hpo_search_budget", label: "Search budget",
       hint: "hyperparameter configs evaluated per tune" },
-    { key: "hpo_num_suggested_configs", label: "HPO: LLM-suggested configs",
+    { key: "hpo_num_suggested_configs", label: "LLM-suggested configs",
       hint: "max LLM-suggested configs folded into the search budget" },
   ];
+  const ALL_KNOBS = [...SWARM_KNOBS, ...HPO_KNOBS];
   let knobDraft: Record<string, number> = $state({});
   let settingsMsg = $state("");
+  let hpoMsg = $state("");
   $effect(() => {
     if (config && tab === "settings") {
-      for (const k of KNOBS) {
+      for (const k of ALL_KNOBS) {
         if (knobDraft[k.key] === undefined) knobDraft[k.key] = config[k.key];
       }
     }
   });
-  async function saveSettings() {
-    settingsMsg = ""; error = "";
+  async function saveKnobs(knobs: { key: string }[], which: "swarm" | "hpo") {
+    settingsMsg = ""; hpoMsg = ""; error = "";
+    const setMsg = (m: string) => (which === "swarm" ? (settingsMsg = m) : (hpoMsg = m));
     const changed: Record<string, number> = {};
-    for (const k of KNOBS) {
+    for (const k of knobs) {
       const v = knobDraft[k.key];
       if (v !== undefined && v !== null && Number.isFinite(v) && v !== config[k.key]) {
         changed[k.key] = Math.floor(v);
       }
     }
-    if (!Object.keys(changed).length) { settingsMsg = "Nothing changed."; return; }
+    if (!Object.keys(changed).length) { setMsg("Nothing changed."); return; }
     try {
       await hostedApi.updateSwarmConfig(adminKey, changed);
       config = await hostedApi.swarmConfig();
-      settingsMsg = `Saved: ${Object.keys(changed).join(", ")}. Agents pick this up on their next iteration.`;
+      setMsg(`Saved: ${Object.keys(changed).join(", ")}. Agents pick this up on their next iteration.`);
     } catch (e: any) { error = e.message; }
   }
 
@@ -243,12 +248,20 @@
   $effect(() => { if (config && !trackChallenge) trackChallenge = config.active_challenge; });
   const trackSource = $derived(
     (config?.available_challenges?.[trackChallenge]?.tracks ?? {}) as Record<string, any>);
-  const numericTracks = $derived(
-    Object.keys(trackSource).filter((k) => typeof trackSource[k] === "number"));
+  // Union of the challenge's canonical track labels (server-provided
+  // `track_keys`) and whatever numeric entries the config holds: a track at
+  // 0 instances is usually ABSENT from the config's tracks dict, and without
+  // the canonical list it would be invisible and impossible to turn back on.
+  const numericTracks = $derived.by(() => {
+    const canonical: string[] = config?.available_challenges?.[trackChallenge]?.track_keys ?? [];
+    const configured = Object.keys(trackSource).filter((k) => typeof trackSource[k] === "number");
+    return [...new Set([...canonical, ...configured])];
+  });
   $effect(() => {
-    // Re-key the draft when the selected challenge changes.
+    // Re-key the draft when the selected challenge changes (missing = 0).
     trackChallenge;
-    trackDraft = Object.fromEntries(numericTracks.map((k) => [k, trackSource[k]]));
+    trackDraft = Object.fromEntries(numericTracks.map(
+      (k) => [k, typeof trackSource[k] === "number" ? trackSource[k] : 0]));
   });
   async function saveTracks() {
     trackMsg = ""; error = "";
@@ -500,11 +513,11 @@
       <div class="card">
         <h2>Swarm settings</h2>
         <p class="lede">
-          Stagnation and hyperparameter-optimization knobs. All hot-editable:
-          contributors read them from the swarm config on every iteration, so
-          changes apply without restarting anything.
+          Stagnation and trajectory knobs. Hot-editable: contributors read
+          them from the swarm config on every iteration, so changes apply
+          without restarting anything.
         </p>
-        {#each KNOBS as k}
+        {#each SWARM_KNOBS as k}
           <div class="row knobrow" style="align-items:center">
             <div style="flex:1">
               <div>{k.label} <span class="mono muted">({k.key})</span></div>
@@ -515,8 +528,30 @@
             </div>
           </div>
         {/each}
-        <div class="actions"><div class="spacer"></div><button class="primary" onclick={saveSettings}>Save settings</button></div>
+        <div class="actions"><div class="spacer"></div><button class="primary" onclick={() => saveKnobs(SWARM_KNOBS, "swarm")}>Save swarm settings</button></div>
         {#if settingsMsg}<div class="banner ok" style="margin-top:14px">{settingsMsg}</div>{/if}
+      </div>
+
+      <div class="card">
+        <h2>HPO settings</h2>
+        <p class="lede">
+          Hyperparameter-optimization gate and search knobs — when trajectories
+          earn a tune and how much budget each tune spends. Hot-editable like
+          the swarm settings.
+        </p>
+        {#each HPO_KNOBS as k}
+          <div class="row knobrow" style="align-items:center">
+            <div style="flex:1">
+              <div>{k.label} <span class="mono muted">({k.key})</span></div>
+              <div class="hint" style="margin-top:2px">{k.hint}</div>
+            </div>
+            <div class="field" style="margin-bottom:0;max-width:130px">
+              <input type="number" min="0" aria-label={k.label} bind:value={knobDraft[k.key]} />
+            </div>
+          </div>
+        {/each}
+        <div class="actions"><div class="spacer"></div><button class="primary" onclick={() => saveKnobs(HPO_KNOBS, "hpo")}>Save HPO settings</button></div>
+        {#if hpoMsg}<div class="banner ok" style="margin-top:14px">{hpoMsg}</div>{/if}
       </div>
     {/if}
   {/if}
