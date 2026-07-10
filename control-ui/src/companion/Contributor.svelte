@@ -344,21 +344,30 @@
       <div class="field">
         <label for="c3k">C3 API key</label>
         {#if secrets["C3_API_KEY"]?.set}
-          <div class="hint"><span class="pill ok">C3_API_KEY set ({secrets["C3_API_KEY"].source})</span></div>
-        {:else}
+          <div class="hint">
+            <span class="pill ok">C3_API_KEY set ({secrets["C3_API_KEY"].source})</span>
+            {#if secrets["C3_API_KEY"].source === "env"}
+              — the environment variable takes precedence; change it in your
+              shell (a value saved here would be ignored).
+            {/if}
+          </div>
+        {/if}
+        {#if !secrets["C3_API_KEY"]?.set || secrets["C3_API_KEY"]?.source === "file"}
           <div class="row" style="align-items:flex-end">
             <div class="field" style="margin-bottom:0;flex:1">
-              <input type="password" bind:value={keyDraft["C3_API_KEY"]}
-                placeholder="paste C3_API_KEY (stored locally)" />
+              <input id="c3k" type="password" bind:value={keyDraft["C3_API_KEY"]}
+                placeholder={secrets["C3_API_KEY"]?.set ? "paste new C3_API_KEY to replace it" : "paste C3_API_KEY (stored locally)"} />
             </div>
-            <button onclick={() => saveKey("C3_API_KEY")}>Save key</button>
+            <button onclick={() => saveKey("C3_API_KEY")}>{secrets["C3_API_KEY"]?.set ? "Update" : "Save key"}</button>
           </div>
-          <div class="hint">
-            Create one at
-            <span class="mono">cthree.cloud/dashboard/settings</span>.
-            Or leave blank and set <code>c3_api_key</code> per agent / use
-            <span class="mono">c3 login</span>.
-          </div>
+          {#if !secrets["C3_API_KEY"]?.set}
+            <div class="hint">
+              Create one at
+              <span class="mono">cthree.cloud/dashboard/settings</span>.
+              Or leave blank and set <code>c3_api_key</code> per agent / use
+              <span class="mono">c3 login</span>.
+            </div>
+          {/if}
         {/if}
       </div>
     {:else if compute === "local"}

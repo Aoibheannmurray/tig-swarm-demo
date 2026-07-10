@@ -7,8 +7,10 @@
 #
 #   version        defaults to tig_version in tig_pin.json
 #   monorepo_path  defaults to ../tig-monorepo (the pinned TIG source)
-#   PLATFORM env   defaults to linux/amd64 (the production arch; set
-#                  linux/arm64 to build/run natively on Apple Silicon / arm hosts)
+#   PLATFORM env   defaults to the HOST's platform (the image runs locally,
+#                  and a non-native base can't execute without emulation —
+#                  its first RUN dies with `exec format error`). Set it
+#                  explicitly for cross-builds where emulation is available.
 #
 # Produces image:  tig-custom-image-<challenge>:<version>
 set -euo pipefail
@@ -17,7 +19,11 @@ CHALLENGE="${1:?usage: build_bench_image.sh <challenge> [version] [monorepo_path
 HERE="$(cd "$(dirname "$0")/.." && pwd)"   # swarm repo root
 VERSION="${2:-$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['tig_version'])" "$HERE/tig_pin.json")}"
 MONOREPO="${3:-$(cd "$HERE/.." && pwd)/tig-monorepo}"
-PLATFORM="${PLATFORM:-linux/amd64}"
+case "$(uname -m)" in
+  arm64|aarch64) DEFAULT_PLATFORM="linux/arm64" ;;
+  *)             DEFAULT_PLATFORM="linux/amd64" ;;
+esac
+PLATFORM="${PLATFORM:-$DEFAULT_PLATFORM}"
 
 if [ ! -d "$MONOREPO/tig-algorithms" ]; then
   echo "error: monorepo source not found at $MONOREPO (pass it as arg 3)" >&2

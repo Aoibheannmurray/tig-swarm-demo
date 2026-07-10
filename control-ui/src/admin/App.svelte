@@ -109,6 +109,27 @@
   let poolChallenge = $state("");
   let poolMsg = $state("");
   $effect(() => { if (config && !poolChallenge) poolChallenge = config.active_challenge; });
+
+  // Seed pool listing (read-only). Loaded when the Pools tab is open and the
+  // challenge picker changes; older servers without /api/admin/seeds get a
+  // graceful "not supported" note instead of an error banner.
+  let seeds: any[] = $state([]);
+  let seedsErr = $state("");
+  let seedsLoading = $state(false);
+  async function loadSeeds() {
+    seedsErr = ""; seedsLoading = true;
+    try {
+      seeds = (await hostedApi.listSeeds(adminKey, poolChallenge)).seeds ?? [];
+    } catch (e: any) {
+      seeds = [];
+      seedsErr = /404|Not Found/i.test(e.message)
+        ? "This swarm server predates the seed-pool listing — redeploy it to enable this view."
+        : e.message;
+    } finally {
+      seedsLoading = false;
+    }
+  }
+  $effect(() => { if (authed && tab === "pools" && poolChallenge) loadSeeds(); });
   async function pool(action: "seed" | "clear" | "reset") {
     poolMsg = ""; error = "";
     try {
@@ -247,6 +268,41 @@
           <button class="danger" onclick={() => pool("reset")}>Reset leaderboard</button>
         </div>
         {#if poolMsg}<div class="banner ok" style="margin-top:14px">{poolMsg}</div>{/if}
+      </div>
+
+      <div class="card">
+        <div class="rowhead">
+          <h2>Seed pool <span class="muted">({seeds.length})</span></h2>
+          <div class="spacer"></div>
+          <button onclick={loadSeeds} disabled={seedsLoading}>{seedsLoading ? "Loading…" : "↻ Refresh"}</button>
+        </div>
+        <p class="lede">
+          Working starter algorithms handed out on fresh <b>{poolChallenge}</b>
+          trajectories (seed → best peer → stub). An empty pool means seeded
+          agents fall back to a peer's code, or the bare stub if none exists.
+        </p>
+        {#if seedsErr}<div class="banner err">{seedsErr}</div>{/if}
+        <table>
+          <thead><tr><th>Tag</th><th>Source</th><th>Score</th><th>Feasible</th><th>Size</th><th>Origin</th><th>Created</th></tr></thead>
+          <tbody>
+            {#each seeds as s}
+              <tr>
+                <td class="mono">{s.strategy_tag}</td>
+                <td><span class="pill {s.source === 'authored' ? 'info' : 'ok'}">{s.source}</span></td>
+                <td>{s.score ?? "—"}</td>
+                <td>{#if s.feasible}<span class="pill ok">yes</span>{:else}<span class="pill err">no</span>{/if}</td>
+                <td class="muted">{Math.round(s.code_chars / 1000)}k{s.kernel_chars ? ` + ${Math.round(s.kernel_chars / 1000)}k cu` : ""}{s.multi_file ? " · multi-file" : ""}</td>
+                <td class="mono muted">{s.origin_agent_id ?? "—"}</td>
+                <td class="muted">{fmtTime(s.created_at)}</td>
+              </tr>
+            {/each}
+            {#if seeds.length === 0 && !seedsErr}
+              <tr><td colspan="7" class="muted">
+                {seedsLoading ? "Loading…" : "Seed pool is empty — deposit one via setup.py or POST /api/admin/seed_pool."}
+              </td></tr>
+            {/if}
+          </tbody>
+        </table>
       </div>
     {/if}
   {/if}

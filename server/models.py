@@ -234,6 +234,14 @@ class AdminSeedPool(AdminAuth):
     score: Optional[float] = None
 
 
+class AdminSeedsQuery(AdminAuth):
+    """Owner-only: list one challenge's seed pool as metadata (tags, sources,
+    scores, code sizes — not the code bodies). Read-only; exists so the Admin
+    Console can show whether the pool is actually populated instead of the
+    host inferring it from agents' start-source log lines."""
+    challenge: "ChallengeName"
+
+
 # Swarm-wide configuration set by the owner via the setup wizard.
 # challenge: which TIG challenge this swarm is optimizing.
 # tracks: keys are track labels (e.g. "n_nodes=600"), values are instance counts.

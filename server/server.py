@@ -22,6 +22,7 @@ from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
     AdminRevoke, AdminSeedInactive, AdminSeedPool, AdminClearInactive,
+    AdminSeedsQuery,
     ContributorConfigPut, MAX_CONTRIB_CONFIG_LEN,
     MessageCreate,
     SwarmConfigUpdate,
@@ -2968,6 +2969,27 @@ async def admin_seed_pool(req: AdminSeedPool):
         "challenge": req.challenge,
         "strategy_tag": req.strategy_tag,
     }
+
+
+@app.post("/api/admin/seeds")
+async def admin_list_seeds(req: AdminSeedsQuery):
+    """Read-only: every seed_pool row for a challenge (feasible or not) as
+    metadata — tag, source, score, feasibility, code sizes, provenance. Code
+    bodies are omitted (they can run to megabytes); the point is to let the
+    host see at a glance whether the pool is populated, instead of inferring
+    it from agents' start-source log lines."""
+    await verify_admin(req)
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT id, strategy_tag, source, score, feasible, origin_agent_id, "
+            "       created_at, LENGTH(algorithm_code) AS code_chars, "
+            "       LENGTH(COALESCE(kernel_code, '')) AS kernel_chars, "
+            "       (algorithm_files IS NOT NULL) AS multi_file "
+            "FROM seed_pool WHERE challenge = ? ORDER BY strategy_tag, id",
+            (req.challenge,),
+        )
+        seeds = [dict(r) for r in await cursor.fetchall()]
+    return {"challenge": req.challenge, "count": len(seeds), "seeds": seeds}
 
 
 @app.post("/api/admin/revoke")
