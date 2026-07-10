@@ -34,6 +34,7 @@ import json
 import math
 import random
 from typing import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DEFAULT_N = 13
 DEFAULT_NUM_SUGGESTED = 5
@@ -172,6 +173,7 @@ def search(
     hpo_seed: str = DEFAULT_HPO_SEED,
     direction: str = "max",
     log: Callable[[str], None] = print,
+    max_workers: int = 0,
 ) -> dict:
     """Run the search; return the per-track winners and all trial results.
 
@@ -193,31 +195,50 @@ def search(
     rng = random.Random(hpo_seed)
     configs = build_config_set(search_space, suggested_configs, n, num_suggested, rng)
     log(f"  [HPO] evaluating {len(configs)} configs on seed '{hpo_seed}' "
-        f"(N={n}, suggested={num_suggested})")
+        f"(N={n}, suggested={num_suggested}, "
+        f"parallel={len(configs) if int(max_workers) <= 0 else max(1, min(int(max_workers), len(configs)))})")
 
-    trials: list[dict] = []
+    # Evaluate the (static) config set. max_workers > 1 fans configs out
+    # concurrently; each config's benchmark still shards internally, and a
+    # shared job semaphore (closed over by benchmark_fn) caps total concurrent
+    # C3 jobs. Trials are collected by index, so winners + logging stay
+    # deterministic regardless of completion order.
+    def _eval(i: int, cfg: dict) -> dict:
+        bench, err = benchmark_fn(hpo_seed, json.dumps(cfg))
+        if bench is None:
+            log(f"  [HPO] {i + 1}/{len(configs)} FAILED: {(err or '')[:80]}")
+            return {"config": cfg, "score": None, "feasible": False,
+                    "track_scores": None, "error": err}
+        score = bench.get("score")
+        feasible = bool(bench.get("feasible", False))
+        tag = "default" if cfg == {} else json.dumps(cfg)
+        log(f"  [HPO] {i + 1}/{len(configs)} score={score} feasible={feasible} {tag}")
+        return {"config": cfg, "score": score, "feasible": feasible,
+                "track_scores": bench.get("track_scores"), "error": None}
+
+    trials: list[dict] = [None] * len(configs)  # type: ignore[list-item]
+    # max_workers <= 0 means "all configs": fan them all out and let the shared
+    # job semaphore (closed over by benchmark_fn) be the sole concurrency bound.
+    workers = (len(configs) if int(max_workers) <= 0
+               else max(1, min(int(max_workers), len(configs))))
+    if workers == 1:
+        for i, cfg in enumerate(configs):
+            trials[i] = _eval(i, cfg)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_eval, i, cfg): i for i, cfg in enumerate(configs)}
+            for fut in as_completed(futs):
+                trials[futs[fut]] = fut.result()
+
     best_cfg: dict | None = None
     best_score: float | None = None
     best_feasible = False
-
-    for i, cfg in enumerate(configs):
-        bench, err = benchmark_fn(hpo_seed, json.dumps(cfg))
-        if bench is None:
-            trials.append({"config": cfg, "score": None, "feasible": False,
-                           "track_scores": None, "error": err})
-            log(f"  [HPO] {i + 1}/{len(configs)} FAILED: {err[:80]}")
+    for t in trials:
+        s = t["score"]
+        if s is None:
             continue
-        score = bench.get("score")
-        feasible = bool(bench.get("feasible", False))
-        trials.append({"config": cfg, "score": score, "feasible": feasible,
-                       "track_scores": bench.get("track_scores"), "error": None})
-        tag = "default" if cfg == {} else json.dumps(cfg)
-        log(f"  [HPO] {i + 1}/{len(configs)} score={score} feasible={feasible} {tag}")
-        if score is None:
-            continue
-        if best_cfg is None or _is_better(direction, score, feasible, best_score, best_feasible):
-            best_cfg, best_score, best_feasible = cfg, score, feasible
-
+        if best_cfg is None or _is_better(direction, s, t["feasible"], best_score, best_feasible):
+            best_cfg, best_score, best_feasible = t["config"], s, t["feasible"]
     if best_cfg is None:
         best_cfg = {}
     winning_configs = _per_track_winners(trials, direction)

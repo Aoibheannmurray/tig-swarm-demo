@@ -286,19 +286,25 @@ def sync_challenge() -> None:
 
 
 def _run_benchmark_local(
-    seed: str | None = None, hyperparameters: str | None = None
+    seed: str | None = None, hyperparameters: str | None = None, job_slots=None,
 ) -> tuple[dict | None, str]:
     env = os.environ.copy()
     if seed is not None:
         env["TIG_BENCH_SEED"] = seed
     if hyperparameters is not None:
         env["TIG_HYPERPARAMETERS"] = hyperparameters
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "benchmark.py")],
-        capture_output=True, text=True, cwd=ROOT,
-        encoding="utf-8", errors="replace",
-        env=env,
-    )
+    if job_slots is not None:
+        job_slots.acquire()
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "benchmark.py")],
+            capture_output=True, text=True, cwd=ROOT,
+            encoding="utf-8", errors="replace",
+            env=env,
+        )
+    finally:
+        if job_slots is not None:
+            job_slots.release()
     if result.returncode != 0:
         err = result.stderr or result.stdout or "Benchmark failed"
         print(f"  Benchmark failed:\n{err[-2000:]}", file=sys.stderr)
@@ -315,7 +321,7 @@ _BENCH_HEARTBEAT_INTERVAL_S = 300
 
 def run_benchmark(
     args: argparse.Namespace, config: dict, server: str,
-    seed: str | None = None, hyperparameters: str | None = None,
+    seed: str | None = None, hyperparameters: str | None = None, job_slots=None,
 ) -> tuple[dict | None, str]:
     """Run a benchmark on the configured compute provider.
 
@@ -340,10 +346,11 @@ def run_benchmark(
         )
     try:
         if args.compute == "local":
-            return _run_benchmark_local(seed, hyperparameters)
+            return _run_benchmark_local(seed, hyperparameters, job_slots=job_slots)
         if args.compute == "c3":
             return run_benchmark_c3(
-                args, config, server, seed=seed, hyperparameters=hyperparameters
+                args, config, server, seed=seed, hyperparameters=hyperparameters,
+                job_slots=job_slots,
             )
         return None, f"Unknown compute provider: {args.compute}"
     finally:
@@ -1110,8 +1117,16 @@ def _maybe_tune_hyperparameters(
         return default_bench, None, in_tok, out_tok
 
     # 3. Random search on the (non-test) HPO seed.
+    # Config-parallel HPO: evaluate all candidate configs concurrently, bounded
+    # solely by a shared semaphore of c3_max_parallel_jobs. Every C3 shard deploy
+    # (and each local docker run) acquires a slot, so total live jobs never
+    # exceed the account's concurrent-job cap: below the cap we keep sending
+    # jobs, at the cap they wait. Set c3_max_parallel_jobs=1 for fully serial.
+    job_slots = threading.Semaphore(max(1, int(config.get("c3_max_parallel_jobs", 3))))
+
     def benchmark_fn(seed: str, hp_json: str) -> tuple[dict | None, str]:
-        return run_benchmark(args, config, server, seed=seed, hyperparameters=hp_json)
+        return run_benchmark(args, config, server, seed=seed,
+                             hyperparameters=hp_json, job_slots=job_slots)
 
     result = hpo.search(
         benchmark_fn, parsed["hyperparameters"], parsed["suggested_configs"],
@@ -1193,7 +1208,7 @@ def _fix_runtime_errors(
                 "runtime_fix", config,
                 args.provider, model, api_key,
                 build_code_system_prompt(challenge_md, config),
-                build_runtime_fix_prompt(current_code, bench, current_kernel, config.get("timeout", 30)),
+                build_runtime_fix_prompt(current_code, bench, current_kernel),
                 args.api_base,
             )
             input_tokens += usage["input_tokens"]

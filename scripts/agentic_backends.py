@@ -315,11 +315,7 @@ _SOLVER_CONSTRAINTS_TEMPLATE = """\
 
 - The existing `use` imports at the top of the starting file must remain
   (e.g. `use tig_challenges::<challenge>::*;`).
-- Keep the harness entry points and their signatures unchanged: for most
-  challenges that is `fn solve_challenge(`; for `neuralnet_optimizer` it is the
-  `pub fn optimizer_init_state` / `optimizer_query_at_params` / `optimizer_step`
-  hooks (the training loop and `solve_challenge` are harness-owned — do not add
-  or rename them). The harness calls these by name.
+{entry_points_bullet}
 {time_bullet}
 - Do not remove `unsafe` blocks that are already there; do not add new
   `unsafe` unless you understand the invariants.
@@ -347,6 +343,28 @@ def _strategy_tags_line(config: dict) -> str:
     return ", ".join(f"`{t}`" for t in get_strategy_tags(config))
 
 
+def _entry_points_bullet(challenge: str) -> str:
+    """The harness-entry-point constraint, specialized per challenge.
+
+    Only the entry point(s) the active challenge actually has are named — a
+    knapsack agent shouldn't be told about neuralnet optimizer hooks it will
+    never touch.
+    """
+    if challenge in {"neuralnet_optimizer"}:
+        return (
+            "- Keep the harness entry points and their signatures unchanged: the\n"
+            "  `pub fn optimizer_init_state` / `optimizer_query_at_params` /\n"
+            "  `optimizer_step` hooks. The training loop and `solve_challenge` are\n"
+            "  harness-owned — do not add or rename them. The harness calls these\n"
+            "  hooks by name."
+        )
+    return (
+        "- Keep the harness entry point and its signature unchanged: `fn\n"
+        "  solve_challenge(`. Do not rename it or add a competing entry point —\n"
+        "  the harness calls it by name."
+    )
+
+
 def _time_budget_parts(challenge: str) -> tuple[str, str]:
     """(time_bullet, opt_contract) for the solver-constraints section.
 
@@ -364,12 +382,17 @@ def _time_budget_parts(challenge: str) -> tuple[str, str]:
         )
         return time_bullet, opt_contract
     time_bullet = (
-        "- Bounding is by FUEL, not wall-clock: your solver runs until it exhausts the\n"
-        "  challenge's fuel budget (instruction-counted, deterministic) or returns. Call\n"
-        "  `save_solution()` early with your first feasible solution, then keep improving\n"
-        "  and re-saving — the last saved solution is scored, and the runtime stops you\n"
-        "  at the fuel cap. Do NOT gate the loop on `std::time::Instant` / a wall-clock\n"
-        "  deadline: clock-based control flow makes fuel usage nondeterministic."
+        "- Bounding is by FUEL, not wall-clock: the solver runs until it exhausts the\n"
+        "  challenge's fuel budget (instruction-counted, deterministic) or returns. Have\n"
+        "  it call `save_solution()` early with the first feasible solution, then keep\n"
+        "  improving and re-saving — the last saved solution is scored.\n"
+        "- IMPLEMENT A STOPPING CONDITION — do NOT just `loop {}` until the fuel cap.\n"
+        "  Exhausting the whole budget to chase negligible gains wastes compute and slows\n"
+        "  the swarm's iteration rate. Decide when the search has effectively converged and\n"
+        "  return then; how you detect convergence is up to you. Judge it from the solution\n"
+        "  state and the search's own progress, NEVER from `std::time::Instant` / a\n"
+        "  wall-clock deadline (that makes fuel usage nondeterministic). Don't stop so\n"
+        "  eagerly that you leave real improvement on the table."
     )
     return time_bullet, ""
 
@@ -384,6 +407,7 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     """
     challenge = config.get("challenge", "unknown")
     kernel_relpath = config.get("kernel_path")
+    entry_points_bullet = _entry_points_bullet(challenge)
     time_bullet, opt_contract = _time_budget_parts(challenge)
 
     # GPU challenges: the kernel is NOT compiled by cargo (it's compiled to
@@ -426,7 +450,9 @@ yourself — the driver loop runs the official benchmark after you exit and
 publishes the score paired with your hypothesis.
 
 """
-        + _SOLVER_CONSTRAINTS_TEMPLATE.format(time_bullet=time_bullet)
+        + _SOLVER_CONSTRAINTS_TEMPLATE.format(
+            entry_points_bullet=entry_points_bullet, time_bullet=time_bullet,
+        )
         + """
 ## When to stop
 
@@ -541,6 +567,7 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     sandbox.
     """
     challenge = config.get("challenge", "unknown")
+    entry_points_bullet = _entry_points_bullet(challenge)
     time_bullet, opt_contract = _time_budget_parts(challenge)
 
     return (
@@ -572,7 +599,9 @@ hypothesis to underperform.
   hit a permission wall, work around it within these rules.
 
 """
-        + _SOLVER_CONSTRAINTS_TEMPLATE.format(time_bullet=time_bullet)
+        + _SOLVER_CONSTRAINTS_TEMPLATE.format(
+            entry_points_bullet=entry_points_bullet, time_bullet=time_bullet,
+        )
         + """
 ## When to stop
 

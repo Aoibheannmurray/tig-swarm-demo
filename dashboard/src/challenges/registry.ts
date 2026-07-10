@@ -8,7 +8,7 @@
 //      sub-config, and the pretty name are all read off the entry.
 //
 // Server-driven config (active_challenge, available_challenges, tracks,
-// timeout, scoring_direction) still flows through swarmConfig.ts; this
+// scoring_direction) still flows through swarmConfig.ts; this
 // file only owns the *client-side* metadata that doesn't come from the
 // wire.
 
@@ -26,7 +26,6 @@ export type ScoringDirection = "min" | "max";
 
 export interface ChallengeSubConfig {
   tracks: Record<string, number | string>;
-  timeout: number;
   scoring_direction: ScoringDirection;
   has_initial_algorithm: boolean;
 }
@@ -50,7 +49,6 @@ interface ChallengeEntry {
 
 const FALLBACK_SUB: ChallengeSubConfig = {
   tracks: {},
-  timeout: 5,
   scoring_direction: "max",
   has_initial_algorithm: false,
 };

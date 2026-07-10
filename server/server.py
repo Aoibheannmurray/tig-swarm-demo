@@ -71,6 +71,18 @@ SWARM_DEFAULTS: dict[str, int] = {
     # above this many source lines are never harvested as seeds.
     "seed_pool_size": 10,
     "seed_max_loc": 200,
+    # Hyperparameter-optimization gate + search. The contributor's driver reads
+    # these from the pushed swarm config (see scripts/run_loop.py _hpo_gate_open
+    # / _maybe_run_hpo). first_tune_improvements: per-trajectory improvements a
+    # trajectory needs before its FIRST tune (the band check is waived that
+    # once). min_improvements: improvements needed for later tunes; also sets
+    # the tune-band width. search_budget (N): configs evaluated per tune
+    # (default {} + suggested + random). num_suggested_configs: max
+    # LLM-suggested configs folded into N.
+    "hpo_first_tune_improvements": 10,
+    "hpo_min_improvements": 4,
+    "hpo_search_budget": 13,
+    "hpo_num_suggested_configs": 5,
 }
 
 # Float-valued swarm tunables (swarm_setting only returns ints).
@@ -167,7 +179,6 @@ async def get_challenge_config_cached(challenge: str) -> dict:
         cfg = {
             "challenge": challenge,
             "tracks": "{}",
-            "timeout": ch_def.default_timeout if ch_def else 30,
             "scoring_direction": ch_def.scoring_direction if ch_def else "max",
             "initial_algorithm_code": "",
             "initial_kernel_code": "",
@@ -2879,7 +2890,6 @@ async def get_swarm_config():
         ch_def = challenges.CHALLENGES.get(ch_name)
         available[ch_name] = {
             "tracks": tracks,
-            "timeout": row.get("timeout") or (ch_def.default_timeout if ch_def else 30),
             "scoring_direction": row.get("scoring_direction") or (
                 ch_def.scoring_direction if ch_def else "max"
             ),
@@ -2906,6 +2916,11 @@ async def get_swarm_config():
         "hypothesis_recall_threshold": swarm_setting(
             config, "hypothesis_recall_threshold",
         ),
+        # HPO gate + search knobs, read client-side by scripts/run_loop.py.
+        "hpo_first_tune_improvements": swarm_setting(config, "hpo_first_tune_improvements"),
+        "hpo_min_improvements": swarm_setting(config, "hpo_min_improvements"),
+        "hpo_search_budget": swarm_setting(config, "hpo_search_budget"),
+        "hpo_num_suggested_configs": swarm_setting(config, "hpo_num_suggested_configs"),
     }
 
 
@@ -2946,7 +2961,6 @@ async def update_swarm_config(req: SwarmConfigUpdate):
             await db.upsert_challenge_config(
                 conn, ch,
                 tracks=json.dumps(sub["tracks"]) if sub.get("tracks") is not None else None,
-                timeout=sub.get("timeout"),
                 scoring_direction=sub.get("scoring_direction"),
                 initial_algorithm_code=sub.get("initial_algorithm_code"),
                 initial_kernel_code=sub.get("initial_kernel_code"),

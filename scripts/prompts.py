@@ -716,13 +716,17 @@ def _fuel_budget_guidance(config: dict) -> str:
             "deterministic."
         )
     return (
-        "\nBounding is by FUEL, not wall-clock: your solver runs until it exhausts the "
-        "challenge's fuel budget (instruction-counted, deterministic) or returns. Call "
-        "save_solution() early with your first feasible solution, then keep improving and "
-        "re-saving — the last saved solution is scored. Do NOT self-terminate on a wall-clock "
-        "deadline and do NOT branch on std::time::Instant / SystemTime: clock-based control "
-        "flow makes fuel usage nondeterministic. If nothing is saved before fuel runs out, "
-        "the instance counts as infeasible."
+        "\nBounding is by FUEL, not wall-clock: the solver runs until it exhausts the "
+        "challenge's fuel budget (instruction-counted, deterministic) or returns. Have it call "
+        "save_solution() early with the first feasible solution, then keep improving and "
+        "re-saving — the last saved solution is scored. IMPLEMENT A STOPPING CONDITION — do NOT "
+        "just loop until the fuel cap: exhausting the whole budget to chase negligible gains "
+        "wastes compute and slows the swarm's iteration rate. Decide when the search has "
+        "effectively converged and return then; how you detect convergence is up to you. Judge "
+        "it from the solution state and the search's own progress, never from a wall-clock "
+        "deadline / std::time::Instant / SystemTime (that makes fuel usage nondeterministic). "
+        "Don't stop so eagerly that you leave real improvement on the table. If nothing is "
+        "saved before fuel runs out, the instance counts as infeasible."
     )
 
 
@@ -1201,7 +1205,7 @@ def parse_hyperparameter_response(response: str) -> dict:
 # ── Error recovery prompts ─────────────────────────────────────────
 
 
-def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", timeout: int = 30) -> str:
+def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "") -> str:
     errors = bench.get("errors") or []
     error_lines = "\n".join(f"  - {e}" for e in errors)
     score = bench.get("score", 0)
@@ -1435,18 +1439,13 @@ def build_agentic_user_prompt(
     is_gpu = bool(config.get("is_gpu"))
     challenge = config.get("challenge", "unknown")
 
-    my_score = state.get("current_trajectory_best")
-    global_best = state.get("best_score")
+    # `stagnation` still gates the tacit-knowledge distillation trigger below.
     stagnation = state.get("my_runs_since_improvement", 0)
-    runs = state.get("my_runs", 0)
-    improvements = state.get("my_improvements", 0)
 
     parts.append(
         f"## Iteration context\n"
-        f"- Challenge: {challenge}{' (GPU)' if is_gpu else ''}\n"
-        f"- Your best score: {my_score}\n"
-        f"- Global best score: {global_best}\n"
-        f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}"
+        f"- Your best score: {state.get('current_trajectory_best')}\n"
+        f"- Global best score: {state.get('best_score')}"
     )
 
     if role == "exploiter":

@@ -611,6 +611,28 @@ timeout to catch true hangs — but fuel already bounds all instrumented compute
   Scoring-policy calibration wrinkle — keep the infeasible floor below the real TIG
   quality range.
 
+- ✅ **All GPU challenges migrated to the baked path — raw path retired.**
+  `vector_search`, `hypergraph`, and `neuralnet_optimizer` now resolve to the baked
+  `tig-bench-<ch>` image like every CPU challenge; `_TIG_RAW_CHALLENGES`, the per-job
+  monorepo tar (`_create_tig_workspace`), the raw runner branch, and the `mirror-raw`
+  CI job are all removed. This eliminates the heavy per-job source upload + cold
+  compile that made GPU fan-out expensive (every shard was a fresh L40 re-uploading
+  the whole monorepo and compiling from cold). Two GPU specials were relocated, not
+  dropped:
+  - **neuralnet seed-blinding** moved from a runtime source-patch to a **build-time**
+    step in `Dockerfile.bench` (applied to `tig-challenges` before the warm build, so
+    the harness compiles + caches already blinded; the `/app` source is blinded too,
+    so it can't be un-blinded even from the public image). Supersedes the runtime
+    patch noted in the `_TIG_RAW_CHALLENGES` bullet above.
+  - **neuralnet boilerplate `solve_challenge`** is still assembled **locally** at
+    inject time (`cat algorithm/mod.rs boilerplate.rs`) — a cheap join of two staged
+    files, no source upload. The agent still writes only the three optimizer hooks.
+  Security sequencing: the blinded `tig-bench-neuralnet_optimizer` image must be
+  rebuilt + pushed (the mirror workflow re-triggers on `Dockerfile.bench` changes)
+  before any neuralnet benchmark runs on the new path — a pre-existing non-blinded
+  `tig-bench-neuralnet_optimizer` would otherwise leak the seed. Verified: full
+  script/server test suites green; image builds validated in CI (no local GPU).
+
 ## Open items
 - _(none — design decisions resolved; see phasing under Algorithm-contract
   conformance + Implementation status for order.)_
