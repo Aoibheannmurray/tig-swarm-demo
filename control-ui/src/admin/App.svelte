@@ -11,7 +11,7 @@
 
   let contributors: any[] = $state([]);
   let config: any = $state(null);
-  let tab: "contributors" | "challenge" | "broadcast" | "pools" = $state("contributors");
+  let tab: "contributors" | "challenge" | "broadcast" | "pools" | "settings" = $state("contributors");
 
   // The swarm's PUBLIC url — what invites must carry so contributors can reach
   // it. When this console is served by the local companion (at /admin/),
@@ -75,6 +75,44 @@
       inviteLink = buildJoinLink(serverLabel(), inviteName.trim(), pw);
     } catch (e: any) { error = e.message; }
   }
+
+  // ── Bulk / random invites ──
+  // Same derivation as the single invite (sha256(username:base), local-only).
+  // Random usernames use adjective-noun slugs like the CLI's `setup.py invite`;
+  // a prefix switches to numbered names (prefix-1 … prefix-N).
+  const INVITE_ADJECTIVES = ["swift", "quiet", "brave", "merry", "keen", "vivid",
+    "lucky", "bold", "sunny", "witty", "calm", "nimble", "spry", "zesty"];
+  const INVITE_NOUNS = ["otter", "falcon", "badger", "lynx", "heron", "marmot",
+    "puffin", "gecko", "wombat", "ibex", "stoat", "kestrel", "tapir", "quokka"];
+  let bulkCount = $state(1);
+  let bulkPrefix = $state("");
+  let bulkInvites: { username: string; link: string }[] = $state([]);
+  function randomSlug(taken: Set<string>): string {
+    for (let i = 0; i < 40; i++) {
+      const name = `${INVITE_ADJECTIVES[Math.floor(Math.random() * INVITE_ADJECTIVES.length)]}-${INVITE_NOUNS[Math.floor(Math.random() * INVITE_NOUNS.length)]}`;
+      if (!taken.has(name)) return name;
+    }
+    return `contrib-${10000 + Math.floor(Math.random() * 90000)}`;
+  }
+  async function makeBulkInvites() {
+    error = "";
+    if (!basePassword) { error = "Enter the base swarm password (from create) to generate invites."; return; }
+    const n = Math.max(1, Math.min(50, Math.floor(bulkCount) || 1));
+    const taken = new Set<string>(contributors.map((c) => c.username));
+    const names: string[] = [];
+    for (let i = 1; i <= n; i++) {
+      const name = bulkPrefix.trim() ? `${bulkPrefix.trim()}-${i}` : randomSlug(taken);
+      taken.add(name);
+      names.push(name);
+    }
+    try {
+      bulkInvites = await Promise.all(names.map(async (username) => ({
+        username,
+        link: buildJoinLink(serverLabel(), username, await deriveInvitePassword(username, basePassword)),
+      })));
+    } catch (e: any) { error = e.message; }
+  }
+  const bulkText = $derived(bulkInvites.map((b) => `${b.username}: ${b.link}`).join("\n"));
 
   async function revoke(username: string) {
     if (!confirm(`Revoke ${username}? This kills their running agents.`)) return;
@@ -145,6 +183,84 @@
 
   let challengeNames = $derived(config ? Object.keys(config.available_challenges ?? {}) : []);
 
+  // ── Settings (stagnation + HPO knobs, hot-editable) ──
+  // Every knob is read by contributors from the pushed swarm config on their
+  // next iteration/state poll, so edits apply without restarting the swarm.
+  const KNOBS: { key: string; label: string; hint: string }[] = [
+    { key: "stagnation_threshold", label: "Stagnation threshold",
+      hint: "iterations without improvement before an agent is treated as stagnating (hints kick in)" },
+    { key: "stagnation_limit", label: "Stagnation limit",
+      hint: "iterations without improvement before the trajectory is reset (0 = never reset)" },
+    { key: "negative_trajectory_limit", label: "Negative-trajectory limit",
+      hint: "edits allowed while a trajectory's best is still ≤ 0 before reset; 0 = off — keep OFF on challenges with inherently negative scores (e.g. neuralnet)" },
+    { key: "hypothesis_recall_threshold", label: "Hypothesis recall threshold",
+      hint: "how many past hypotheses are recalled into agent prompts" },
+    { key: "hpo_first_tune_improvements", label: "HPO: first-tune improvements",
+      hint: "improvements a trajectory needs before its FIRST hyperparameter tune" },
+    { key: "hpo_min_improvements", label: "HPO: min improvements",
+      hint: "improvements needed for later tunes; also sets the tune-band width" },
+    { key: "hpo_search_budget", label: "HPO: search budget",
+      hint: "hyperparameter configs evaluated per tune" },
+    { key: "hpo_num_suggested_configs", label: "HPO: LLM-suggested configs",
+      hint: "max LLM-suggested configs folded into the search budget" },
+  ];
+  let knobDraft: Record<string, number> = $state({});
+  let settingsMsg = $state("");
+  $effect(() => {
+    if (config && tab === "settings") {
+      for (const k of KNOBS) {
+        if (knobDraft[k.key] === undefined) knobDraft[k.key] = config[k.key];
+      }
+    }
+  });
+  async function saveSettings() {
+    settingsMsg = ""; error = "";
+    const changed: Record<string, number> = {};
+    for (const k of KNOBS) {
+      const v = knobDraft[k.key];
+      if (v !== undefined && v !== null && Number.isFinite(v) && v !== config[k.key]) {
+        changed[k.key] = Math.floor(v);
+      }
+    }
+    if (!Object.keys(changed).length) { settingsMsg = "Nothing changed."; return; }
+    try {
+      await hostedApi.updateSwarmConfig(adminKey, changed);
+      config = await hostedApi.swarmConfig();
+      settingsMsg = `Saved: ${Object.keys(changed).join(", ")}. Agents pick this up on their next iteration.`;
+    } catch (e: any) { error = e.message; }
+  }
+
+  // ── Instances (tracks) editor ──
+  // A challenge's `tracks` maps track label → instance count, plus non-numeric
+  // bookkeeping entries (e.g. "seed": "test") which must be preserved as-is.
+  let trackChallenge = $state("");
+  let trackDraft: Record<string, number> = $state({});
+  let trackMsg = $state("");
+  $effect(() => { if (config && !trackChallenge) trackChallenge = config.active_challenge; });
+  const trackSource = $derived(
+    (config?.available_challenges?.[trackChallenge]?.tracks ?? {}) as Record<string, any>);
+  const numericTracks = $derived(
+    Object.keys(trackSource).filter((k) => typeof trackSource[k] === "number"));
+  $effect(() => {
+    // Re-key the draft when the selected challenge changes.
+    trackChallenge;
+    trackDraft = Object.fromEntries(numericTracks.map((k) => [k, trackSource[k]]));
+  });
+  async function saveTracks() {
+    trackMsg = ""; error = "";
+    const tracks: Record<string, any> = { ...trackSource };
+    for (const k of numericTracks) {
+      const v = Math.floor(trackDraft[k]);
+      if (!Number.isFinite(v) || v < 0) { error = `Invalid count for ${k}.`; return; }
+      tracks[k] = v;
+    }
+    try {
+      await hostedApi.updateSwarmConfig(adminKey, { challenges: { [trackChallenge]: { tracks } } });
+      config = await hostedApi.swarmConfig();
+      trackMsg = `Instances saved for ${trackChallenge} — applies to the next benchmark each agent runs.`;
+    } catch (e: any) { error = e.message; }
+  }
+
   function fmtTime(t: string | null): string {
     if (!t) return "—";
     try { return new Date(t).toLocaleString(); } catch { return t; }
@@ -181,6 +297,7 @@
       <button class:active={tab === "challenge"} onclick={() => (tab = "challenge")}>Challenge</button>
       <button class:active={tab === "broadcast"} onclick={() => (tab = "broadcast")}>Broadcast</button>
       <button class:active={tab === "pools"} onclick={() => (tab = "pools")}>Pools</button>
+      <button class:active={tab === "settings"} onclick={() => (tab = "settings")}>Settings</button>
     </nav>
 
     {#if tab === "contributors"}
@@ -230,6 +347,33 @@
           </div>
         {/if}
       </div>
+
+      <div class="card">
+        <h2>Batch invites</h2>
+        <p class="lede">
+          Generate several invites at once — random names, or numbered ones
+          when you set a prefix (<span class="mono">team → team-1 … team-N</span>).
+          Derived locally, same as single invites.
+        </p>
+        <div class="row" style="align-items:flex-end">
+          <div class="field" style="margin-bottom:0;max-width:130px">
+            <label for="bc">How many</label>
+            <input id="bc" type="number" min="1" max="50" bind:value={bulkCount} />
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label for="bpfx">Prefix <span class="muted" style="text-transform:none">(optional — blank = random names)</span></label>
+            <input id="bpfx" type="text" bind:value={bulkPrefix} placeholder="e.g. team" />
+          </div>
+          <div style="flex:0 0 auto"><button class="primary" onclick={makeBulkInvites}>Generate</button></div>
+        </div>
+        {#if bulkInvites.length}
+          <div class="field" style="margin-top:16px">
+            <label for="blk">{bulkInvites.length} join link(s) — one per line (each contains that user's password)</label>
+            <textarea id="blk" readonly rows={Math.min(10, bulkInvites.length + 1)}>{bulkText}</textarea>
+            <button class="ghost" onclick={() => navigator.clipboard.writeText(bulkText)}>Copy all</button>
+          </div>
+        {/if}
+      </div>
     {:else if tab === "challenge"}
       <div class="card">
         <h2>Active challenge</h2>
@@ -242,6 +386,33 @@
           <div style="flex:0 0 auto"><button class="primary" onclick={switchChallenge}>Switch</button></div>
         </div>
         {#if challengeMsg}<div class="banner ok" style="margin-top:14px">{challengeMsg}</div>{/if}
+      </div>
+
+      <div class="card">
+        <h2>Instances per track</h2>
+        <p class="lede">
+          How many instances each benchmark runs per track. Hot-editable —
+          contributors pick the new counts up on their next sync (more
+          instances = more robust scores, longer benchmarks).
+        </p>
+        <div class="field" style="max-width:260px">
+          <label for="tc">Challenge</label>
+          <select id="tc" bind:value={trackChallenge}>{#each challengeNames as c}<option value={c}>{c}</option>{/each}</select>
+        </div>
+        {#each numericTracks as t}
+          <div class="row" style="align-items:center">
+            <div class="mono" style="flex:1">{t}</div>
+            <div class="field" style="margin-bottom:0;max-width:130px">
+              <input type="number" min="0" aria-label={`instances for ${t}`} bind:value={trackDraft[t]} />
+            </div>
+          </div>
+        {/each}
+        {#if numericTracks.length === 0}
+          <p class="muted">No instance-count tracks configured for this challenge.</p>
+        {:else}
+          <div class="actions"><div class="spacer"></div><button class="primary" onclick={saveTracks}>Save instances</button></div>
+        {/if}
+        {#if trackMsg}<div class="banner ok" style="margin-top:14px">{trackMsg}</div>{/if}
       </div>
     {:else if tab === "broadcast"}
       <div class="card">
@@ -304,6 +475,28 @@
           </tbody>
         </table>
       </div>
+    {:else if tab === "settings"}
+      <div class="card">
+        <h2>Swarm settings</h2>
+        <p class="lede">
+          Stagnation and hyperparameter-optimization knobs. All hot-editable:
+          contributors read them from the swarm config on every iteration, so
+          changes apply without restarting anything.
+        </p>
+        {#each KNOBS as k}
+          <div class="row knobrow" style="align-items:center">
+            <div style="flex:1">
+              <div>{k.label} <span class="mono muted">({k.key})</span></div>
+              <div class="hint" style="margin-top:2px">{k.hint}</div>
+            </div>
+            <div class="field" style="margin-bottom:0;max-width:130px">
+              <input type="number" min="0" aria-label={k.label} bind:value={knobDraft[k.key]} />
+            </div>
+          </div>
+        {/each}
+        <div class="actions"><div class="spacer"></div><button class="primary" onclick={saveSettings}>Save settings</button></div>
+        {#if settingsMsg}<div class="banner ok" style="margin-top:14px">{settingsMsg}</div>{/if}
+      </div>
     {/if}
   {/if}
 </div>
@@ -316,6 +509,7 @@
   }
   .tabs button.active { color: var(--ink); border-bottom-color: var(--color-accent); }
   .rowhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .knobrow { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
   .rowhead h2 { margin: 0; }
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   th { text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim); padding: 8px 10px; border-bottom: 1px solid var(--border-default); }

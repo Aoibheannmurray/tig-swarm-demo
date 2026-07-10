@@ -261,11 +261,17 @@ ChallengeName = Literal[
 
 class ChallengeSubConfig(BaseModel):
     """Per-challenge configuration. The owner can populate all seven in
-    parallel via the wizard; switching the active challenge is independent."""
-    tracks: dict = {}
-    scoring_direction: Literal["min", "max"] = "max"
-    initial_algorithm_code: str = ""
-    initial_kernel_code: str = ""
+    parallel via the wizard; switching the active challenge is independent.
+
+    Every field is Optional so partial updates are actually partial: the
+    handler skips None fields. With the old non-None defaults, a client
+    sending only `tracks` (e.g. the Admin Console's instances editor) would
+    silently blank the challenge's initial_algorithm_code and flip
+    scoring_direction back to "max"."""
+    tracks: Optional[dict] = None
+    scoring_direction: Optional[Literal["min", "max"]] = None
+    initial_algorithm_code: Optional[str] = None
+    initial_kernel_code: Optional[str] = None
     strategy_tags: Optional[list[str]] = None
 
 
@@ -288,6 +294,12 @@ class SwarmConfigUpdate(AdminAuth):
     # than 0 before it gets reset. 0 = disabled (see SWARM_DEFAULTS).
     negative_trajectory_limit: Optional[int] = None
     hypothesis_recall_threshold: Optional[int] = None
+    # HPO gate + search knobs (mirrors GET /api/swarm_config; contributors'
+    # run_loop reads them from the pushed config on every iteration).
+    hpo_first_tune_improvements: Optional[int] = None
+    hpo_min_improvements: Optional[int] = None
+    hpo_search_budget: Optional[int] = None
+    hpo_num_suggested_configs: Optional[int] = None
 
 
 class MessageCreate(BaseModel):

@@ -105,6 +105,8 @@ export const hostedApi = {
     fetch(`${hostedBase()}/api/admin/broadcast`, post({ admin_key: adminKey, message, priority })).then(jsonOrThrow),
   setActiveChallenge: (adminKey: string, challenge: string) =>
     fetch(`${hostedBase()}/api/swarm_config`, post({ admin_key: adminKey, active_challenge: challenge })).then(jsonOrThrow),
+  updateSwarmConfig: (adminKey: string, payload: Record<string, any>) =>
+    fetch(`${hostedBase()}/api/swarm_config`, post({ admin_key: adminKey, ...payload })).then(jsonOrThrow),
   seedInactive: (adminKey: string, challenge: string) =>
     fetch(`${hostedBase()}/api/admin/seed_inactive`, post({ admin_key: adminKey, challenge })).then(jsonOrThrow),
   listSeeds: (adminKey: string, challenge: string) =>

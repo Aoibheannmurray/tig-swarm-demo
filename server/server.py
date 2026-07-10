@@ -3243,6 +3243,10 @@ async def update_swarm_config(req: SwarmConfigUpdate):
             ("stagnation_limit", str(req.stagnation_limit) if req.stagnation_limit is not None else None),
             ("negative_trajectory_limit", str(req.negative_trajectory_limit) if req.negative_trajectory_limit is not None else None),
             ("hypothesis_recall_threshold", str(req.hypothesis_recall_threshold) if req.hypothesis_recall_threshold is not None else None),
+            ("hpo_first_tune_improvements", str(req.hpo_first_tune_improvements) if req.hpo_first_tune_improvements is not None else None),
+            ("hpo_min_improvements", str(req.hpo_min_improvements) if req.hpo_min_improvements is not None else None),
+            ("hpo_search_budget", str(req.hpo_search_budget) if req.hpo_search_budget is not None else None),
+            ("hpo_num_suggested_configs", str(req.hpo_num_suggested_configs) if req.hpo_num_suggested_configs is not None else None),
         ):
             if value is not None:
                 await conn.execute(
