@@ -54,11 +54,18 @@ jobs:
   # GPU challenges bake too (nvcc compiles PTX without a GPU). neuralnet's seed
   # blinding is baked in by Dockerfile.bench. The C3 path pulls these tig-bench-*
   # images for every challenge — there is no longer a raw dev-image path.
+  #
+  # Two native builds per challenge (amd64 on ubuntu-latest, arm64 on GitHub's
+  # free arm runners — no QEMU), each pushed as :<ver>-<arch>; the merge job
+  # below combines them into a multi-arch index on the main :<ver> tag. C3
+  # pulls amd64 from that index; arm contributors (Apple Silicon, arm servers)
+  # benchmarking locally pull arm64 via benchmark.py's pull-first path.
   build-baked:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
+        arch: [amd64, arm64]
         challenge:
           - satisfiability
           - vehicle_routing
@@ -97,21 +104,63 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build baked image for ${{ matrix.challenge }}
+      - name: Build baked image for ${{ matrix.challenge }} (${{ matrix.arch }})
         env:
           VER: ${{ steps.pin.outputs.version }}
-          PLATFORM: linux/amd64
+          PLATFORM: linux/${{ matrix.arch }}
         run: |
           bash scripts/build_bench_image.sh "${{ matrix.challenge }}" "$VER" \
             "${GITHUB_WORKSPACE}/_tig-monorepo"
 
-      - name: Tag + push as tig-bench-${{ matrix.challenge }}
+      - name: Tag + push as tig-bench-${{ matrix.challenge }}:${{ steps.pin.outputs.version }}-${{ matrix.arch }}
         env:
           VER: ${{ steps.pin.outputs.version }}
           NS: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           LOCAL="tig-custom-image-${{ matrix.challenge }}:${VER}"
-          DST="docker.io/${NS}/tig-bench-${{ matrix.challenge }}:${VER}"
+          DST="docker.io/${NS}/tig-bench-${{ matrix.challenge }}:${VER}-${{ matrix.arch }}"
           docker tag "$LOCAL" "$DST"
           docker push "$DST"
           echo "Pushed: $DST"
+
+  # -------- Merge per-arch manifests into one multi-arch tag ------
+  merge-manifests:
+    needs: build-baked
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        challenge:
+          - satisfiability
+          - vehicle_routing
+          - knapsack
+          - job_scheduling
+          - energy_arbitrage
+          - vector_search
+          - hypergraph
+          - neuralnet_optimizer
+    steps:
+      - name: Checkout swarm repo
+        uses: actions/checkout@v4
+
+      - name: Read pinned TIG version
+        id: pin
+        run: |
+          ver=$(python3 -c "import json; print(json.load(open('tig_pin.json'))['tig_version'])")
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create multi-arch index for ${{ matrix.challenge }}
+        env:
+          VER: ${{ steps.pin.outputs.version }}
+          NS: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          BASE="docker.io/${NS}/tig-bench-${{ matrix.challenge }}"
+          docker buildx imagetools create -t "${BASE}:${VER}" \
+            "${BASE}:${VER}-amd64" "${BASE}:${VER}-arm64"
+          docker buildx imagetools inspect "${BASE}:${VER}"
