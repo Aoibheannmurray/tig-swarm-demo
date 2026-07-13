@@ -6,10 +6,10 @@ CLI:
     python3 scripts/download_algorithm.py <challenge> <algorithm> [--force] [--ref BRANCH]
 
 The upstream layout is `tig-algorithms/src/{challenge}/{algorithm}` on the
-branch named `{challenge}/{algorithm}` (override with `--ref`). If the
-fetched algorithm is a single `mod.rs` (+ optional `*.cu`) we drop it into
-`initial_algorithms/{challenge}.rs` (+ `{challenge}.cu`); otherwise we
-materialize the directory under `initial_algorithms/{challenge}/`.
+branch named `{challenge}/{algorithm}` (override with `--ref`). The fetched
+bundle (single- or multi-file, names preserved) replaces the challenge's
+starting-code slot `initial_algorithms/{challenge}/stub/` (with `--force`);
+the authored `seeds/` pool is never touched.
 
 Importable: `download_algorithm(challenge, algorithm, *, force, ref=None)`.
 """
@@ -100,65 +100,38 @@ def _decode_blob(blob: object) -> str:
 # ── Staging ───────────────────────────────────────────────────────────
 
 
-def _is_simple_layout(files: dict[str, str]) -> bool:
-    """True iff the upstream bundle is just `mod.rs` (+ at most one `*.cu`)."""
-    rs_files = [p for p in files if p.endswith(".rs")]
-    cu_files = [p for p in files if p.endswith(".cu")]
-    other = [p for p in files if not (p.endswith(".rs") or p.endswith(".cu"))]
-    if other:
-        return False
-    if rs_files != ["mod.rs"]:
-        return False
-    return len(cu_files) <= 1
-
-
 def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
-    """Drop the fetched files into initial_algorithms/. Returns the staged
-    path (file or directory)."""
-    INITIAL_DIR.mkdir(parents=True, exist_ok=True)
-    legacy_rs = INITIAL_DIR / f"{challenge}.rs"
-    legacy_cu = INITIAL_DIR / f"{challenge}.cu"
-    bundle_dir = INITIAL_DIR / challenge
+    """Drop the fetched files into ``initial_algorithms/<challenge>/stub/``
+    — the challenge's starting-code slot (filenames preserved; single- and
+    multi-file bundles land the same way).
 
-    if _is_simple_layout(files):
-        target = legacy_rs
-        cu_target = legacy_cu if any(p.endswith(".cu") for p in files) else None
-        existing = [p for p in (target, cu_target, bundle_dir) if p and p.exists()]
-        if existing and not force:
-            raise DownloadError(
-                f"refusing to overwrite {[str(p.relative_to(ROOT)) for p in existing]}; pass --force"
-            )
-        # Clean stale directory if we're switching from multi-file to single-file.
-        if bundle_dir.exists():
-            shutil.rmtree(bundle_dir)
-        target.write_text(files["mod.rs"], encoding="utf-8")
-        if cu_target is not None:
-            cu_path = next(p for p in files if p.endswith(".cu"))
-            cu_target.write_text(files[cu_path], encoding="utf-8")
-        elif legacy_cu.exists() and force:
-            legacy_cu.unlink()
-        return target
-
-    # Multi-file directory layout.
+    Only that directory is managed: the authored seed pool (``seeds/``) is
+    never touched — the pre-restructure staging rmtree'd the whole challenge
+    directory and could silently delete ``seeds/``. Flat pre-restructure
+    artifacts (``<challenge>.rs`` / ``.cu``) are cleaned up on ``--force`` so
+    a stale copy can't shadow ``stub/`` for legacy readers. Returns the
+    staged directory."""
     if "mod.rs" not in files:
         raise DownloadError("upstream algorithm has no mod.rs; refusing to seed")
-    existing = [p for p in (legacy_rs, legacy_cu, bundle_dir) if p.exists()]
+    stub_dir = INITIAL_DIR / challenge / "stub"
+    legacy_rs = INITIAL_DIR / f"{challenge}.rs"
+    legacy_cu = INITIAL_DIR / f"{challenge}.cu"
+    existing = [p for p in (stub_dir, legacy_rs, legacy_cu) if p.exists()]
     if existing and not force:
         raise DownloadError(
             f"refusing to overwrite {[str(p.relative_to(ROOT)) for p in existing]}; pass --force"
         )
-    if bundle_dir.exists():
-        shutil.rmtree(bundle_dir)
-    if legacy_rs.exists():
-        legacy_rs.unlink()
-    if legacy_cu.exists():
-        legacy_cu.unlink()
-    bundle_dir.mkdir(parents=True)
+    if stub_dir.exists():
+        shutil.rmtree(stub_dir)
+    for legacy in (legacy_rs, legacy_cu):
+        if legacy.exists():
+            legacy.unlink()
+    stub_dir.mkdir(parents=True)
     for rel, body in files.items():
-        out = bundle_dir / rel
+        out = stub_dir / rel
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(body, encoding="utf-8")
-    return bundle_dir
+    return stub_dir
 
 
 # ── Public API ────────────────────────────────────────────────────────

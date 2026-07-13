@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Copy the seed algorithms into src/ so a fresh clone compiles.
+"""Copy the starting algorithms into src/ so a fresh clone compiles.
 
 `src/<challenge>/algorithm/` is gitignored (the swarm overwrites it at
 runtime), so `cargo check --features solver,<challenge>` fails with E0583 on a
-fresh clone. This copies `initial_algorithms/<challenge>.rs` to
-`src/<challenge>/algorithm/mod.rs` (and `<challenge>.cu` to `kernels.cu` for
-GPU challenges) for local development and CI.
+fresh clone. This copies each challenge's starting code into
+`src/<challenge>/algorithm/` for local development and CI:
+
+  initial_algorithms/<ch>/stub/*      (mod.rs [+ kernels.cu], names preserved)
+  initial_algorithms/<ch>.rs (+ .cu)  (pre-restructure fallback) -> mod.rs
 
 Usage:
     python3 scripts/seed_algorithms.py              # seed every challenge
@@ -25,14 +27,39 @@ SEEDS = ROOT / "initial_algorithms"
 SRC = ROOT / "src"
 
 
+def _source_files(challenge: str) -> dict[str, Path] | None:
+    """The starting files for a challenge as {destination relpath: source}.
+
+    Prefers the `stub/` directory (multi-file aware, filenames preserved),
+    falling back to the pre-restructure flat file."""
+    stub_dir = SEEDS / challenge / "stub"
+    if (stub_dir / "mod.rs").is_file():
+        return {
+            str(p.relative_to(stub_dir)): p
+            for p in sorted(stub_dir.rglob("*")) if p.is_file()
+        }
+    legacy_rs = SEEDS / f"{challenge}.rs"
+    if legacy_rs.is_file():
+        out = {"mod.rs": legacy_rs}
+        legacy_cu = SEEDS / f"{challenge}.cu"
+        if legacy_cu.is_file():
+            out["kernels.cu"] = legacy_cu
+        return out
+    return None
+
+
 def challenges() -> list[str]:
-    return sorted(p.stem for p in SEEDS.glob("*.rs"))
+    names = {p.stem for p in SEEDS.glob("*.rs")}  # pre-restructure fallback
+    for d in SEEDS.iterdir():
+        if d.is_dir() and _source_files(d.name):
+            names.add(d.name)
+    return sorted(names)
 
 
 def seed(challenge: str, force: bool) -> str:
-    seed_rs = SEEDS / f"{challenge}.rs"
-    if not seed_rs.exists():
-        return f"skip  {challenge}: no seed at {seed_rs.relative_to(ROOT)}"
+    sources = _source_files(challenge)
+    if sources is None:
+        return f"skip  {challenge}: no starting code under initial_algorithms/{challenge}/"
     algo_dir = SRC / challenge / "algorithm"
     if not (SRC / challenge).is_dir():
         return f"skip  {challenge}: no src/{challenge}/ module"
@@ -40,11 +67,12 @@ def seed(challenge: str, force: bool) -> str:
     if mod_rs.exists() and not force:
         return f"keep  {challenge}: src/{challenge}/algorithm/mod.rs exists (use --force to overwrite)"
     algo_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(seed_rs, mod_rs)
-    seed_cu = SEEDS / f"{challenge}.cu"
-    if seed_cu.exists():
-        shutil.copyfile(seed_cu, algo_dir / "kernels.cu")
-    return f"seed  {challenge}: initial_algorithms/{challenge}.rs -> src/{challenge}/algorithm/mod.rs"
+    for rel, src_path in sources.items():
+        dst = algo_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src_path, dst)
+    origin = sources["mod.rs"].relative_to(ROOT)
+    return f"seed  {challenge}: {origin} -> src/{challenge}/algorithm/mod.rs"
 
 
 def main() -> int:

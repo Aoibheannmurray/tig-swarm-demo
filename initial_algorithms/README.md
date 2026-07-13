@@ -1,21 +1,36 @@
 # initial_algorithms/
 
-Per-challenge starting code broadcast to agents on a fresh trajectory. There are
-two kinds of file here — **stubs** and **seeds** — and they feed two different
-agent paths (see `server/tiers.py`, `server/server.py::seed_for_agent`).
+Per-challenge starting code broadcast to agents on a fresh trajectory. One
+directory per challenge, two slots that feed different agent paths (see
+`server/tiers.py`, `server/server.py::seed_for_agent`):
 
-## Stubs — `initial_algorithms/<challenge>.rs` (+ optional `.cu`)
+```
+initial_algorithms/<challenge>/
+  stub/                         # the starting-code slot: mod.rs [+ kernels.cu]
+  seeds/<strategy_tag>.rs (.cu) # authored seed pool entries
+```
 
-The bare `unimplemented!()` starting point. Handed to **frontier-tier explorer**
-agents, which are expected to bootstrap a complete algorithm from scratch. This
-is the swarm's historical default and is broadcast verbatim at `setup.py create`
-(see `read_initial_algorithms`).
+## Stub — `<challenge>/stub/` (`mod.rs` [+ `*.cu`, + sibling modules])
 
-`energy_arbitrage/` additionally ships a full **multi-file initial** algorithm
-(`mod.rs` + `track_*.rs`) rather than a single stub — that whole directory is the
-energy_arbitrage starting implementation.
+The challenge's starting code — what the server broadcasts on iteration 1 and
+on fresh-start trajectory resets (`read_initial_algorithms`,
+`server/first_boot.py`). Its sophistication varies by design:
 
-## Seeds — `initial_algorithms/<challenge>/seeds/<strategy_tag>.rs` (+ optional `.cu`)
+- **CPU challenges** ship the bare `unimplemented!()` placeholder. Handed to
+  **frontier-tier explorer** agents, which are expected to bootstrap a
+  complete algorithm from scratch — the swarm's historical default.
+- **GPU challenges** ship a real working implementation, because
+  bootstrapping a *compiling* CUDA kernel from a bare placeholder is too hard
+  even for frontier models (see `seed_for_agent` — on GPU challenges every
+  agent starts from working code).
+
+A host can replace any challenge's slot with stronger code before
+`setup.py create` — by editing it, or by staging a mainnet algorithm with
+`scripts/download_algorithm.py` (which replaces ONLY `stub/`; `seeds/` is
+never touched). Single- and multi-file algorithms land the same way: `mod.rs`
+plus optional `*.cu` / sibling modules, filenames preserved.
+
+## Seeds — `<challenge>/seeds/<strategy_tag>.rs` (+ optional `.cu`)
 
 Complete, **feasible** simple algorithms. `setup.py create` loads every file
 under a `seeds/` directory into the server's seed pool (`read_authored_seeds` →

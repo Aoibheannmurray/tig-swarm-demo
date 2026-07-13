@@ -51,12 +51,14 @@ async def seed_from_bundle(db) -> dict:
     seeds_added = 0
 
     for challenge in _challenges.CHALLENGE_NAMES:
-        # 1) Initial algorithm (the stub every agent starts from) — fill only
+        # 1) Starting code (what agents get on a fresh trajectory) — fill only
         #    when the challenge has no code yet, so we never clobber a
-        #    create-provisioned or admin-edited stub.
-        rs = bundle / f"{challenge}.rs"
-        cu = bundle / f"{challenge}.cu"
-        if rs.is_file():
+        #    create-provisioned or admin-edited one. Layout (see
+        #    initial_algorithms/README.md): <ch>/stub/mod.rs (+ *.cu), with
+        #    the pre-restructure flat <ch>.rs (+ .cu) as a fallback for
+        #    images built from an older tree.
+        rs, cu = _initial_sources(bundle, challenge)
+        if rs is not None:
             existing = await _db.get_challenge_config(db, challenge)
             if not (existing and (existing.get("initial_algorithm_code") or "").strip()):
                 try:
@@ -64,7 +66,7 @@ async def seed_from_bundle(db) -> dict:
                         db, challenge,
                         initial_algorithm_code=rs.read_text(encoding="utf-8"),
                         initial_kernel_code=(cu.read_text(encoding="utf-8")
-                                             if cu.is_file() else None),
+                                             if cu is not None else None),
                     )
                     initial_filled += 1
                 except OSError:
@@ -95,6 +97,22 @@ async def seed_from_bundle(db) -> dict:
                     pass
 
     return {"bundle": str(bundle), "initial_code": initial_filled, "seeds": seeds_added}
+
+
+def _initial_sources(bundle: Path, challenge: str) -> tuple[Path | None, Path | None]:
+    """(algorithm .rs, kernel .cu or None) for a challenge, or (None, None).
+
+    Preference: <ch>/stub/mod.rs (first stub/*.cu) → flat <ch>.rs (<ch>.cu,
+    the pre-restructure layout, for images built from an older tree)."""
+    stub_mod = bundle / challenge / "stub" / "mod.rs"
+    if stub_mod.is_file():
+        cus = sorted(stub_mod.parent.glob("*.cu"))
+        return stub_mod, (cus[0] if cus else None)
+    legacy_rs = bundle / f"{challenge}.rs"
+    if legacy_rs.is_file():
+        legacy_cu = bundle / f"{challenge}.cu"
+        return legacy_rs, (legacy_cu if legacy_cu.is_file() else None)
+    return None, None
 
 
 async def _authored_seed_exists(db, challenge: str, strategy_tag: str) -> bool:
