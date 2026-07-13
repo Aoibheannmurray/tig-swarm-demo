@@ -26,7 +26,7 @@ the hosted Admin Console. See
 ```bash
 railway login
 python3 setup.py create              # deploys a Railway swarm, scaffolds fleet.config.json
-python3 setup.py switch knapsack     # change the active challenge later
+python3 setup.py switch hypergraph     # change the active challenge later
 ```
 
 Manage contributors from the same clone:

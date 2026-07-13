@@ -45,6 +45,15 @@
       trackEdits = edits;
       admin = await localApi.swarmAdmin();
       if (admin?.active_challenge) switchTo = admin.active_challenge;
+      // Recover a deploy that's still running (or that finished) from a prior
+      // page — e.g. a reload mid-provision — so the UI re-attaches instead of
+      // showing an idle create form over a live deploy.
+      const s = await localApi.swarmCreateStatus();
+      if (s.running) {
+        deploying = true;
+      } else if (s.state === "done" || s.state === "error") {
+        deployStatus.set({ state: s.state, result: s.result, error: s.error });
+      }
     } catch (e: any) {
       error = e.message;
     }
@@ -126,6 +135,28 @@
 
   $effect(() => {
     if ($deployStatus.state === "done" || $deployStatus.state === "error") deploying = false;
+  });
+
+  // Fallback poll: the deploy's completion is normally delivered as a single
+  // `deploy_status` event over the WebSocket, but that socket sits idle for the
+  // minutes-long Railway build (build logs stream to the terminal, not the hub),
+  // so a silently-dropped connection can swallow the final event and strand the
+  // UI on "Provisioning…" even though the backend finished. While a deploy is in
+  // flight, poll the authoritative status endpoint and reconcile on a terminal
+  // state — the $effect above then clears `deploying` and renders the result.
+  $effect(() => {
+    if (!deploying) return;
+    const timer = setInterval(async () => {
+      try {
+        const s = await localApi.swarmCreateStatus();
+        if (s.state === "done" || s.state === "error") {
+          deployStatus.set({ state: s.state, result: s.result, error: s.error });
+        }
+      } catch {
+        /* transient companion hiccup — keep polling */
+      }
+    }, 3000);
+    return () => clearInterval(timer);
   });
 
   async function doSwitch() {

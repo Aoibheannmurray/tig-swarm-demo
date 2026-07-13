@@ -52,6 +52,11 @@ export const localApi = {
   swarmAdmin: () => fetch(`${LOCAL}/swarm/admin`).then(jsonOrThrow),
   swarmCreate: (params: any) =>
     fetch(`${LOCAL}/swarm/create`, post(params)).then(jsonOrThrow),
+  // Authoritative deploy state, independent of the WebSocket. Polled as a
+  // fallback so a dropped `deploy_status` event can't leave the UI stuck on
+  // "Provisioning…" forever (the Railway build is minutes of WS silence).
+  swarmCreateStatus: () =>
+    fetch(`${LOCAL}/swarm/create/status`).then(jsonOrThrow),
   swarmSwitch: (challenge: string) =>
     fetch(`${LOCAL}/swarm/switch`, post({ challenge })).then(jsonOrThrow),
 };
