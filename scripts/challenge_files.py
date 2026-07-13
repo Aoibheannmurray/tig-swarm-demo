@@ -293,9 +293,18 @@ def read_tacit_knowledge() -> str:
 
 
 def is_stub_code(code: str) -> bool:
-    """True when the algorithm is a placeholder that can't produce solutions."""
+    """True when the algorithm is a placeholder that can't produce solutions.
+
+    Comments are stripped before matching: a real algorithm whose comments
+    merely MENTION `unimplemented!()` (e.g. the knapsack greedy seed's header,
+    "…handed instead of `unimplemented!()`…") must not classify as a stub —
+    exploiter agents refuse to iterate on stubs, so a false positive here
+    livelocks them ("awaiting seed" on code they were already handed).
+    """
     if not code or not code.strip():
         return True
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)   # /* block */ comments
+    code = re.sub(r"//[^\n]*", "", code)                # // line comments
     return "unimplemented!" in code or "todo!" in code
 
 
