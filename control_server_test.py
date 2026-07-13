@@ -90,6 +90,51 @@ def main() -> int:
         check(c.post("/local-api/invite", json={"swarm_password": "b"}).status_code == 400,
               "invite without username rejected")
 
+        print("railway login (device-code flow, stubbed CLI)")
+        import time as _time
+
+        class _FakeProc:
+            """Stands in for the pty-spawned `railway login --browserless`."""
+            returncode = 0
+            def poll(self):
+                return self.returncode
+            def wait(self):
+                return self.returncode
+            def kill(self):
+                pass
+
+        def _fake_spawn():
+            # ANSI-colored pty-style output, with the CLI's upgrade notice
+            # (a docs.railway.com URL) BEFORE the real activation link — the
+            # scraper must skip it, not lock it in as "the" URL.
+            import io
+            reader = io.StringIO(
+                "\x1b[33mNew version! https://docs.railway.com/cli\x1b[0m\r\n"
+                "\x1b[1mSign in from any device:\x1b[0m\r\n"
+                "  https://railway.com/cli-login?d=abc123\r\n"
+                "Your pairing code is: \x1b[36mbrave-otter-lamp\x1b[0m\r\n"
+            )
+            return _FakeProc(), reader
+
+        orig_launch = control_server.RailwayLoginController._spawn
+        control_server.RailwayLoginController._spawn = staticmethod(_fake_spawn)
+        try:
+            rl = c.post("/local-api/railway/login").json()
+            check(rl["state"] in ("pending", "done"), "login start accepted")
+            deadline = _time.time() + 5
+            while _time.time() < deadline:
+                rl = c.get("/local-api/railway/login").json()
+                if rl["state"] == "done" and rl.get("url"):
+                    break
+                _time.sleep(0.05)
+            check(rl["state"] == "done", "login completes when the CLI exits 0")
+            check(rl["url"] == "https://railway.com/cli-login?d=abc123",
+                  "pairing link scraped (docs.railway upgrade notice skipped)")
+            check(rl["code"] == "brave-otter-lamp",
+                  "pairing code scraped through ANSI color codes")
+        finally:
+            control_server.RailwayLoginController._spawn = orig_launch
+
         print("fleet status / websocket")
         check(c.get("/local-api/fleet/status").json()["state"] == "idle", "fleet idle before start")
         # TestClient stamps Host "testserver" on WS handshakes regardless of

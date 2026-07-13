@@ -913,6 +913,24 @@ def cmd_run(
     # expected to know how to fix.
     _ensure_root_swarm_cache(server_url)
 
+    # Local-compute agents benchmark in the TIG docker image. Prepare it ONCE
+    # up front (pull the published tig-bench-<challenge> bake, else build from
+    # source) so the cold path happens here, visibly, instead of silently
+    # inside the first benchmark of every local agent — where a several-minute
+    # docker build looks like a hung iteration. Failure is non-fatal: the
+    # per-benchmark _ensure_tig_image still retries (and reports the error),
+    # and C3-only fleets never enter this branch.
+    if any((a.get("compute") or "local") == "local" for a in agents):
+        print("  [fleet] preparing the local TIG benchmark image…")
+        prep = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "benchmark.py"),
+             "--ensure-image"],
+            cwd=str(ROOT),
+        )
+        if prep.returncode != 0:
+            print("  [fleet] WARNING: TIG image preparation failed — local "
+                  "benchmarks will retry (and report the error) per iteration.")
+
     use_color = sys.stdout.isatty()
     procs: list[tuple[str, subprocess.Popen, threading.Thread]] = []
 
