@@ -222,10 +222,11 @@ class AdminSeedPool(AdminAuth):
     """Owner-only: deposit a host-authored seed algorithm into `seed_pool`.
 
     Seeds are working starter algorithms handed to standard-tier / exploiter
-    agents on a fresh trajectory (instead of the bare stub). Deduped by
-    (challenge, strategy_tag, source='authored') via the UNIQUE index — one
-    authored seed per (challenge, strategy_tag). Used at swarm-create time to
-    load any `initial_algorithms/<challenge>/seeds/*.rs` files the host wrote.
+    agents on a fresh trajectory (instead of the bare stub). Upserted by
+    (challenge, strategy_tag): one authored seed per key — identical
+    re-deposits are no-ops, changed code replaces the pool copy
+    (db.upsert_authored_seed). Used at swarm-create time to load any
+    `initial_algorithms/<challenge>/seeds/*.rs` files the host wrote.
     """
     challenge: "ChallengeName"
     strategy_tag: str
