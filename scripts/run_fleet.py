@@ -884,6 +884,24 @@ def cmd_run(
             sys.exit(f"Unknown agent name(s) in --only: {', '.join(unknown)}")
         agents = [a for a in agents if a["name"] in only]
 
+    # Mirror fleet-level bootstrap milestones to BOTH the terminal (CLI users)
+    # and the control-ui log stream (`on_output`). Without this, everything up
+    # to the first agent subprocess print — key resolution, the C3 subscription
+    # query, per-agent worktree creation/seeding — is terminal-only, so the web
+    # companion shows "launched" with an empty log panel and looks hung during a
+    # bootstrap that can take a while (git worktree + `setup.py sync` + a live
+    # C3 API round-trip). Routing them through `on_output` gives the UI real
+    # progress and makes any stall visible instead of silent.
+    def _fleet_log(msg: str) -> None:
+        print(msg)
+        if on_output is not None:
+            try:
+                on_output("fleet", msg.strip())
+            except Exception:  # a UI consumer must never kill the fleet
+                pass
+
+    _fleet_log("  [fleet] preparing to launch — resolving keys and swarm state…")
+
     # Resolve every API key up front so missing secrets fail fast before any
     # worktree work or subprocess starts.
     key_envs = [_resolve_api_key(a) for a in agents]
@@ -912,10 +930,11 @@ def cmd_run(
     c3_agents = [a for a in agents if (a.get("compute") or "local") == "c3"]
     fleet_pool_size = None
     if c3_agents:
+        _fleet_log("  [fleet] querying C3 subscription for the concurrency cap…")
         fleet_pool_size = _query_c3_plan_cap(_resolve_fleet_c3_key(agents))
     if fleet_pool_size:
-        print(f"  [fleet] C3 subscription cap: {fleet_pool_size} concurrent job(s) "
-              f"(fleet-wide pool size + shards per benchmark)")
+        _fleet_log(f"  [fleet] C3 subscription cap: {fleet_pool_size} concurrent job(s) "
+                   f"(fleet-wide pool size + shards per benchmark)")
         for a in agents:
             a["c3_max_parallel_jobs"] = fleet_pool_size
     else:
@@ -923,12 +942,13 @@ def cmd_run(
         # configured value so the fleet still launches with a sane, coherent cap.
         fleet_pool_size = max((_agent_cap(a) for a in agents), default=3)
         if c3_agents:
-            print(f"  [fleet] WARNING: could not read C3 subscription cap; "
-                  f"falling back to configured c3_max_parallel_jobs={fleet_pool_size}")
+            _fleet_log(f"  [fleet] WARNING: could not read C3 subscription cap; "
+                       f"falling back to configured c3_max_parallel_jobs={fleet_pool_size}")
 
     for i, agent in enumerate(agents):
         name = agent["name"]
-        print(f"  [fleet] preparing {name}…")
+        _fleet_log(f"  [fleet] preparing {name}… (worktree + swarm state; first "
+                   f"run compiles, which can take a few minutes)")
         path = _ensure_worktree(name)
         _seed_worktree(path, agent, fleet_tacit, server_url, username, swarm_password)
 
@@ -979,11 +999,11 @@ def cmd_run(
         )
         t.start()
         procs.append((name, proc, t))
-        print(f"  [fleet] spawned {name} (pid {proc.pid}) in {path}")
+        _fleet_log(f"  [fleet] spawned {name} (pid {proc.pid}) in {path}")
         if on_status is not None:
             on_status("spawned", {"name": name, "pid": proc.pid})
 
-    print(f"  [fleet] {len(procs)} agent(s) running. Ctrl-C to stop.")
+    _fleet_log(f"  [fleet] {len(procs)} agent(s) running. Ctrl-C to stop.")
     if on_status is not None:
         on_status("running", {"count": len(procs)})
 

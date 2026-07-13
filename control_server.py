@@ -257,6 +257,18 @@ class DeployController:
                 self.state = "done"
                 self._hub.emit({"type": "deploy_status", "event": "done",
                                 "result": res})
+                # Print a completion banner to the terminal too. create_swarm's
+                # last line is a mundane "fleet.config.json already present", and
+                # `run.py --ui` is a long-running server that never returns to a
+                # shell prompt — so without this the terminal just stops mid-log
+                # and reads as "hung", even though the deploy finished and the
+                # browser has the result. (The CLI path prints its own summary.)
+                url = (res or {}).get("server_url", "?")
+                print(f"\n{'='*48}\nSWARM DEPLOYED — {url}\n{'='*48}\n"
+                      f"  The browser UI now has the server URL + credentials.\n"
+                      f"  This --ui process keeps running to serve that UI; leave\n"
+                      f"  it up (Ctrl-C to stop). It is done, not hung.\n",
+                      flush=True)
             except (Exception, SystemExit) as exc:
                 # SystemExit too: setup's CLI-oriented helpers may still exit
                 # instead of raising — a bare `except Exception` would let that
@@ -266,6 +278,8 @@ class DeployController:
                 self.state = "error"
                 self._hub.emit({"type": "deploy_status", "event": "error",
                                 "error": self.error})
+                print(f"\n  DEPLOY FAILED: {self.error}\n", file=sys.stderr,
+                      flush=True)
 
         self._thread = threading.Thread(target=_target, daemon=True)
         self._thread.start()
