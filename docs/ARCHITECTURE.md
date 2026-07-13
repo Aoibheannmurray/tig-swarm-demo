@@ -172,7 +172,7 @@ The agent reads the updated state and starts the cycle again. Over many iteratio
 
 The starting code every agent sees on a fresh trajectory — both the very first iteration and the "fresh start" slot of trajectory resets — is the swarm's **initial algorithm**, set by the host once at swarm creation.
 
-The repo ships with one editable file per challenge under `initial_algorithms/<challenge>.rs` (plus `initial_algorithms/<challenge>.cu` for GPU challenges that ship a CUDA kernel). Each file's default content is a near-trivial baseline; the host can replace any of them with a stronger starter before running `python setup.py create`. `setup.py create` reads every file via `read_initial_algorithms()`, sends them to the server as part of the per-challenge `challenge_configs` payload, and the server stores each one under that challenge's `initial_algorithm_code` (and `initial_kernel_code`, where applicable).
+The repo ships one directory per challenge under `initial_algorithms/<challenge>/` (see `initial_algorithms/README.md` for the full layout): the starting-code slot `stub/` (`mod.rs` [+ `kernels.cu`] — a bare placeholder on CPU challenges, a real working implementation on GPU ones; `scripts/download_algorithm.py` can replace it with mainnet code), and the authored `seeds/` pool. `setup.py create` reads each challenge's `stub/mod.rs` via `read_initial_algorithms()`, sends it to the server as part of the per-challenge `challenge_configs` payload, and the server stores it under that challenge's `initial_algorithm_code` (and `initial_kernel_code`, where applicable).
 
 When a trajectory reset occurs (`runs_since_improvement >= stagnation_limit`), the server picks between a fresh start and an inactive-pool adoption using the rule `go_fresh = not inactive_pool or T^1.5 < P`, where **T** is the total number of trajectories ever created for this challenge and **P** is the total number of deactivations across all of them (`server/server.py:729-734`). If `go_fresh` is true, the agent's new starting code is the swarm's initial algorithm — same as on iteration 1; otherwise the server uniformly samples one entry from the inactive pool, removes it (consume-once), and reactivates that trajectory.
 
@@ -230,7 +230,7 @@ hardware-independent. See `tig_docker_plan.md` and `scripts/CLAUDE.md` for the f
 | `CHALLENGE.md` | Per-challenge details — types, scoring, tips (templated from `src/<challenge>/README.md`) |
 | `server/server.py` | Coordination server — FastAPI, WebSocket, all agent APIs |
 | `server/db.py` | SQLite schema, migrations, direction-aware queries |
-| `initial_algorithms/<challenge>.{rs,cu}` | Host-editable starting algorithm per challenge (+ optional CUDA kernel); broadcast at swarm creation |
+| `initial_algorithms/<challenge>/` | Host-editable starting code per challenge (`stub/`, `seeds/`); broadcast at swarm creation |
 | `src/<challenge>/algorithm/mod.rs` | The single file agents edit |
 | `src/<challenge>/mod.rs` | Challenge module — types, generator, evaluator |
 | `scripts/benchmark.py` | Build + run + evaluate + score |

@@ -543,7 +543,7 @@ timeout to catch true hangs — but fuel already bounds all instrumented compute
   phrasing lets the conformed seeds (`use tig_challenges::<ch>::*;`) drive it, and the
   hyperparameter-variant validation now requires `use tig_challenges::`. Prompts and
   files are now consistent.
-- ✅ **GPU `.cu` seed mechanism (task 12) — already satisfied.** `initial_algorithms/<ch>.cu`
+- ✅ **GPU `.cu` seed mechanism (task 12) — already satisfied.** GPU kernel starters (now `initial_algorithms/<ch>/stub/kernels.cu`)
   seeds exist; `setup.py` posts `initial_kernel_code` to the server; `run_loop` writes
   `kernels.cu` to `kernel_path` (= `src/<ch>/algorithm/kernels.cu`, same dir as `mod.rs`);
   the TIG injection copies the algorithm dir so `build_ptx` finds the `.cu`. Validated

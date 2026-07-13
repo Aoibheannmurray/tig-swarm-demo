@@ -521,6 +521,18 @@ async def init_db() -> None:
         # unique index so multiple seeds can share a strategy_tag and admission
         # is decided by similarity/LOC/cap, not first-feasible-per-tag.
         await db.execute("DROP INDEX IF EXISTS idx_seed_pool_dedup")
+        # Collapse AUTHORED duplicates that piled up in the window where the
+        # unique index was gone but /api/admin/seed_pool still assumed the DB
+        # deduped (every `setup.py create` re-run added a copy of each
+        # authored seed). Authored seeds are host-owned, one per
+        # (challenge, strategy_tag) — keep the newest row; harvested seeds
+        # are untouched. Idempotent, and upsert_authored_seed keeps it clean
+        # going forward.
+        await db.execute(
+            "DELETE FROM seed_pool WHERE source = 'authored' AND id NOT IN ("
+            "  SELECT MAX(id) FROM seed_pool WHERE source = 'authored' "
+            "  GROUP BY challenge, strategy_tag)"
+        )
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -731,11 +743,14 @@ async def insert_seed(
     origin_agent_id: str | None = None,
     algorithm_files: str | None = None,
 ) -> bool:
-    """Insert a seed, deduped by (challenge, strategy_tag, source) via the
-    UNIQUE index. INSERT OR IGNORE means first-write-per-tag wins and later
-    writes are silently dropped. Returns True iff a row was actually added."""
+    """Insert a seed row. Plain insert — there is NO uniqueness constraint
+    (the old per-(challenge, tag, source) UNIQUE index was dropped when pool
+    diversity moved to similarity-based admission), so admission is the
+    CALLER's job: harvested seeds go through seed_diversity.decide_admission,
+    authored seeds through `upsert_authored_seed`. Returns True iff a row was
+    added (kept for call-site compatibility; always True on success)."""
     cur = await conn.execute(
-        "INSERT OR IGNORE INTO seed_pool "
+        "INSERT INTO seed_pool "
         "(challenge, strategy_tag, source, score, feasible, algorithm_code, "
         " kernel_code, algorithm_files, origin_agent_id, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -743,6 +758,59 @@ async def insert_seed(
          algorithm_code, kernel_code, algorithm_files, origin_agent_id, created_at),
     )
     return cur.rowcount > 0
+
+
+async def upsert_authored_seed(
+    conn: aiosqlite.Connection,
+    challenge: str,
+    strategy_tag: str,
+    algorithm_code: str,
+    *,
+    created_at: str,
+    score: float | None = None,
+    kernel_code: str | None = None,
+) -> str:
+    """Deposit a HOST-AUTHORED seed, keyed by (challenge, strategy_tag).
+
+    Authored seeds mirror files under initial_algorithms/<ch>/seeds/ — the
+    host owns them, so a re-deposit must REPLACE the pool copy (a host who
+    fixes a seed and re-runs `setup.py create` expects agents to draw the
+    fixed version), and repeat deposits of identical content must be no-ops
+    (idempotent create re-runs). Harvested seeds are untouched — they share
+    tags freely under similarity-based admission.
+
+    Returns 'inserted' | 'updated' | 'unchanged'. Legacy duplicate authored
+    rows for the key (from the era when the endpoint lost its dedupe) are
+    collapsed to the newest row as a side effect."""
+    cursor = await conn.execute(
+        "SELECT id, algorithm_code, kernel_code FROM seed_pool "
+        "WHERE challenge = ? AND strategy_tag = ? AND source = 'authored' "
+        "ORDER BY id DESC",
+        (challenge, strategy_tag),
+    )
+    rows = await cursor.fetchall()  # positional access: works with or without row_factory
+    if len(rows) > 1:  # collapse legacy duplicates, keep the newest
+        stale = [r[0] for r in rows[1:]]
+        await conn.execute(
+            f"DELETE FROM seed_pool WHERE id IN ({','.join('?' * len(stale))})",
+            stale,
+        )
+    if not rows:
+        await insert_seed(
+            conn, challenge, strategy_tag, algorithm_code,
+            created_at=created_at, source="authored", score=score,
+            feasible=True, kernel_code=kernel_code,
+        )
+        return "inserted"
+    newest_id, newest_code, newest_kernel = rows[0][0], rows[0][1], rows[0][2]
+    if newest_code == algorithm_code and (newest_kernel or None) == (kernel_code or None):
+        return "unchanged"
+    await conn.execute(
+        "UPDATE seed_pool SET algorithm_code = ?, kernel_code = ?, score = ?, "
+        "feasible = 1, created_at = ? WHERE id = ?",
+        (algorithm_code, kernel_code, score, created_at, newest_id),
+    )
+    return "updated"
 
 
 async def list_seeds(conn: aiosqlite.Connection, challenge: str) -> list[dict]:

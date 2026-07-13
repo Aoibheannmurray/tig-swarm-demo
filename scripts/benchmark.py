@@ -239,6 +239,38 @@ def _published_tig_image(cfg: dict) -> str:
     return f"docker.io/{ns}/tig-bench-{cfg['challenge']}:{_tig_version()}"
 
 
+def _cleanup_stale_tig_images(cfg: dict) -> None:
+    """Remove baked TIG images that aren't the active challenge at the pinned
+    version.
+
+    The images are 10–20GB each on disk and nothing else ever deletes them, so
+    a host that switches challenges a few times fills its disk. They're pure
+    caches — re-pulled from Docker Hub in minutes — so anything under the
+    tig-custom-image-* / */tig-bench-* names that isn't the current
+    challenge+version is removed. `docker rmi` failures (e.g. a container
+    still running from an old image) are ignored; the next benchmark retries.
+    """
+    keep = {
+        _tig_image(cfg),
+        _published_tig_image(cfg).removeprefix("docker.io/"),
+    }
+    listing = subprocess.run(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+        capture_output=True, text=True)
+    if listing.returncode != 0:
+        return
+    for ref in listing.stdout.split():
+        repo, _, tag = ref.rpartition(":")
+        if not repo or tag == "<none>" or ref in keep:
+            continue
+        if not (repo.startswith("tig-custom-image-")
+                or repo.rpartition("/")[2].startswith("tig-bench-")):
+            continue
+        print(f"Removing stale TIG image {ref} (active is "
+              f"'{cfg['challenge']}' @ {_tig_version()})…", file=sys.stderr)
+        subprocess.run(["docker", "rmi", ref], capture_output=True)
+
+
 def _daemon_running() -> bool:
     return subprocess.run(
         ["docker", "info"], capture_output=True
@@ -298,7 +330,12 @@ def _ensure_tig_image(image: str, challenge: str, cfg: dict) -> None:
     plain `docker pull` only accepts a manifest matching the host platform,
     so on architectures the registry doesn't carry (CI publishes linux/amd64)
     the pull fails cleanly and we fall back to building from the pinned
-    monorepo source locally — slow, but native."""
+    monorepo source locally — slow, but native.
+
+    Other challenges' images are dropped first (challenge switches would
+    otherwise accumulate 10–20GB per challenge until the disk fills), so the
+    space is free before any pull needs it."""
+    _cleanup_stale_tig_images(cfg)
     if subprocess.run(["docker", "image", "inspect", image],
                       capture_output=True).returncode == 0:
         return

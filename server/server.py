@@ -2950,22 +2950,26 @@ async def admin_clear_inactive(req: AdminClearInactive):
 
 @app.post("/api/admin/seed_pool")
 async def admin_seed_pool(req: AdminSeedPool):
-    """Deposit a host-authored seed algorithm into `seed_pool`. Deduped by
-    (challenge, strategy_tag, source='authored'); a repeat for the same tag is
-    silently ignored (idempotent re-runs of `setup.py create`)."""
+    """Deposit a host-authored seed algorithm into `seed_pool` — an UPSERT
+    keyed by (challenge, strategy_tag): identical re-deposits are no-ops
+    (idempotent `setup.py create` re-runs) and changed code REPLACES the pool
+    copy (an edited seeds/<tag>.rs propagates on the next create). Harvested
+    seeds are never touched. `seeded` stays in the response for older
+    hostadmin clients; `action` says what actually happened."""
     await verify_admin(req)
     if not req.algorithm_code.strip():
         raise HTTPException(status_code=400, detail="algorithm_code is empty")
     timestamp = now()
     async with db.connect() as conn:
-        added = await db.insert_seed(
+        action = await db.upsert_authored_seed(
             conn, req.challenge, req.strategy_tag, req.algorithm_code,
-            created_at=timestamp, source="authored", score=req.score,
-            feasible=True, kernel_code=req.kernel_code,
+            created_at=timestamp, score=req.score,
+            kernel_code=req.kernel_code,
         )
         await conn.commit()
     return {
-        "seeded": added,
+        "seeded": action != "unchanged",
+        "action": action,
         "challenge": req.challenge,
         "strategy_tag": req.strategy_tag,
     }

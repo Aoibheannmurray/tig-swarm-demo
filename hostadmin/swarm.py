@@ -354,17 +354,33 @@ def push_config_to_server(
 
 
 def read_initial_algorithms() -> dict[str, dict[str, str]]:
-    """Read per-challenge initial algorithm files. Missing files map to
-    empty strings — agents start from a stub. Returns
-    {challenge: {"algorithm_code": ..., "kernel_code": ...}}."""
+    """Read per-challenge starting code (broadcast to agents on a fresh
+    trajectory).
+
+    Layout (see initial_algorithms/README.md): each challenge's starting code
+    lives at ``initial_algorithms/<ch>/stub/mod.rs`` — a bare placeholder for
+    CPU challenges, a real working algorithm for GPU ones (and for any
+    challenge where the host staged stronger code via
+    ``scripts/download_algorithm.py``). Kernel code is the first ``*.cu`` in
+    the same directory. The pre-restructure flat ``initial_algorithms/<ch>.rs``
+    (+ ``.cu``) is kept as a read fallback so an older checkout still
+    administers fine. Missing both maps to empty strings — agents start
+    bare."""
     out: dict[str, dict[str, str]] = {}
+    base = ROOT / "initial_algorithms"
     for ch in get_challenges():
-        algo_path = ROOT / "initial_algorithms" / f"{ch}.rs"
-        kernel_path = ROOT / "initial_algorithms" / f"{ch}.cu"
-        out[ch] = {
-            "algorithm_code": algo_path.read_text() if algo_path.is_file() else "",
-            "kernel_code": kernel_path.read_text() if kernel_path.is_file() else "",
-        }
+        code, kernel = "", ""
+        stub_mod = base / ch / "stub" / "mod.rs"
+        legacy_rs = base / f"{ch}.rs"
+        if stub_mod.is_file():
+            code = stub_mod.read_text()
+            cus = sorted(stub_mod.parent.glob("*.cu"))
+            kernel = cus[0].read_text() if cus else ""
+        elif legacy_rs.is_file():
+            code = legacy_rs.read_text()
+            legacy_cu = base / f"{ch}.cu"
+            kernel = legacy_cu.read_text() if legacy_cu.is_file() else ""
+        out[ch] = {"algorithm_code": code, "kernel_code": kernel}
     return out
 
 
@@ -399,8 +415,9 @@ def seed_pool_from_authored(
     failures are RETURNED (as challenge/tag labels) so the caller can verify
     and retry — a silently empty pool means seeded agents get the bare stub
     and nobody notices until the "why is everything a cold start?" hunt.
-    Idempotent — the server dedupes by (challenge, strategy_tag, source), so
-    re-running create silently ignores seeds already present."""
+    Idempotent — the server upserts by (challenge, strategy_tag): identical
+    re-deposits are no-ops and an edited seed file replaces the pool copy on
+    the next create run."""
     if not seeds:
         return []
     failed: list[str] = []
@@ -419,7 +436,8 @@ def seed_pool_from_authored(
                 f"{server_url.rstrip('/')}/api/admin/seed_pool",
                 payload, timeout=10,
             )
-            status = "added" if body.get("seeded") else "already present"
+            # Newer servers report the upsert outcome; older ones only `seeded`.
+            status = body.get("action") or ("added" if body.get("seeded") else "already present")
             print(f"  {label}: seed {status}")
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:200]

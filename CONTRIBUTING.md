@@ -10,7 +10,7 @@ dev setup at all.
 | Path | What | Stack |
 |------|------|-------|
 | `src/` | Rust solver framework — feature-gated, one module per challenge | Rust |
-| `initial_algorithms/` | Per-challenge seed algorithms | Rust |
+| `initial_algorithms/` | Per-challenge starting code (`<ch>/stub/`) + authored seed pool (`<ch>/seeds/`) | Rust |
 | `scripts/` | Orchestration: per-agent loop, fleet, benchmarking, publishing | Python |
 | `server/` | Coordination server (scores, config, leaderboard, WebSocket) | Python / FastAPI |
 | `dashboard/` | Web UI for the server | TypeScript / Vite |
@@ -27,7 +27,7 @@ dev setup at all.
 it at runtime), so on a fresh clone seed it first:
 
 ```bash
-python3 scripts/seed_algorithms.py          # copies initial_algorithms/ seeds in
+python3 scripts/seed_algorithms.py          # copies initial_algorithms/ starting code in
 cargo check --features solver,knapsack      # then per-challenge checks work
 ```
 
