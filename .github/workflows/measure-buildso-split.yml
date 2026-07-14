@@ -1,0 +1,41 @@
+name: measure-buildso-split
+
+# Decompose build_so's ~825s (real algorithm) into cargo vs instrumentation-loop
+# vs link, to decide whether any part is reducible. amd64, compile-only, no GPU.
+on:
+  push:
+    branches: [measure-buildso-split]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DEV_IMAGE: ghcr.io/tig-foundation/tig-monorepo/hypergraph/dev:0.0.6
+    steps:
+      - name: Checkout swarm repo
+        uses: actions/checkout@v4
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache || true
+          df -h /
+
+      - name: Checkout pinned TIG monorepo source
+        uses: actions/checkout@v4
+        with:
+          repository: tig-foundation/tig-monorepo
+          path: _tig-monorepo
+
+      - name: Measure the build_so phase split (real algorithm)
+        run: |
+          set -euo pipefail
+          docker pull "$DEV_IMAGE"
+          docker run --rm \
+            -v "$PWD/_tig-monorepo:/work" -v "$PWD:/swarm" \
+            -w /work -e CHALLENGE=hypergraph \
+            "$DEV_IMAGE" bash /swarm/.github/scripts/measure_split.sh
