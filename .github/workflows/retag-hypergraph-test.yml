@@ -1,0 +1,30 @@
+name: retag-hypergraph-test
+
+# Copies the already-built patched hypergraph image (:0.0.6, digest 3b9ac854…)
+# to a fresh tag so a C3 test can't hit a stale-cached :0.0.6. Manifest copy only
+# (no pull/rebuild), so it's fast and arch-independent.
+on:
+  push:
+    branches: [retag-hypergraph-test]
+
+permissions:
+  contents: read
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Copy :0.0.6 -> :objcache-test
+        env:
+          NS: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          SRC="docker.io/${NS}/tig-bench-hypergraph:0.0.6"
+          DST="docker.io/${NS}/tig-bench-hypergraph:objcache-test"
+          docker buildx imagetools create -t "$DST" "$SRC"
+          echo "=== $DST ==="
+          docker buildx imagetools inspect "$DST" | head -8
