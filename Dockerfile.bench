@@ -27,6 +27,14 @@ WORKDIR /app
 COPY modified_test_algorithm /usr/local/bin/tig-scripts/modified_test_algorithm
 RUN chmod +x /usr/local/bin/tig-scripts/modified_test_algorithm
 
+# Interim: override build_so with our object-cache version (upstream PR pending).
+# Placed BEFORE the warm build below so that warm build runs with the patch and
+# pre-populates the object cache into the image — runtime rebuilds then reuse the
+# cached std/deps objects (~14 min -> seconds). Byte-identical objects to the
+# original build (validated); remove this once the dev image ships the fix.
+COPY build_so.patched /usr/local/bin/tig-scripts/build_so
+RUN chmod +x /usr/local/bin/tig-scripts/build_so
+
 # Anti-cheat (neuralnet_optimizer ONLY): blind the seed the harness hands to the
 # agent's optimizer_init_state hook. The optimizer needs a deterministic,
 # per-instance randomness source, but the *raw* challenge.seed also regenerates the

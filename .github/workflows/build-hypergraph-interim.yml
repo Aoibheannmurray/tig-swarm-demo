@@ -1,0 +1,57 @@
+name: build-hypergraph-interim
+
+# One-off: build + push ONLY the hypergraph bench image, with the interim
+# build_so object-cache patch baked in, so it can be tested on C3 before rolling
+# the fix out to the other challenges. Triggered by pushing the
+# `interim-buildso-hypergraph` branch. Safe to delete once the rollout is done.
+on:
+  push:
+    branches: [interim-buildso-hypergraph]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest        # amd64
+    timeout-minutes: 120
+    steps:
+      - name: Checkout swarm repo
+        uses: actions/checkout@v4
+
+      - name: Free runner disk (dev image is multi-GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache || true
+          df -h /
+
+      - name: Read pinned TIG version
+        id: pin
+        run: echo "version=$(python3 -c "import json;print(json.load(open('tig_pin.json'))['tig_version'])")" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned TIG monorepo source
+        uses: actions/checkout@v4
+        with:
+          repository: tig-foundation/tig-monorepo
+          path: _tig-monorepo
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build baked hypergraph image (interim build_so patch)
+        env:
+          PLATFORM: linux/amd64
+        run: bash scripts/build_bench_image.sh hypergraph "${{ steps.pin.outputs.version }}" "${GITHUB_WORKSPACE}/_tig-monorepo"
+
+      - name: Tag + push to the tag C3 pulls
+        env:
+          VER: ${{ steps.pin.outputs.version }}
+          NS: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          LOCAL="tig-custom-image-hypergraph:${VER}"
+          DST="docker.io/${NS}/tig-bench-hypergraph:${VER}"
+          docker tag "$LOCAL" "$DST"
+          docker push "$DST"
+          echo "Pushed: $DST"

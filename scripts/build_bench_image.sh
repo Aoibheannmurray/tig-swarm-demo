@@ -39,6 +39,9 @@ mkdir -p "$stage/tig-source"
 tar -C "$MONOREPO" --exclude=./target --exclude=./.git -cf - . | tar -C "$stage/tig-source" -xf -
 cp "$HERE/scripts/modified_test_algorithm" "$stage/modified_test_algorithm"
 cp "$HERE/scripts/bench_blind_nn.py" "$stage/bench_blind_nn.py"
+# Interim: bake our patched build_so (object cache) over the dev image's copy so
+# runtime rebuilds reuse cached std/deps objects. Remove once upstream ships it.
+cp "$HERE/scripts/build_so.patched" "$stage/build_so.patched"
 cp "$HERE/Dockerfile.bench" "$stage/Dockerfile.bench"
 
 IMAGE="tig-custom-image-${CHALLENGE}:${VERSION}"

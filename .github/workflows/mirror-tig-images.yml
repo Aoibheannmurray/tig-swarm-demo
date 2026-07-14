@@ -38,6 +38,7 @@ on:
         required: false
         default: ""
   push:
+    branches: [main]
     paths:
       - "tig_pin.json"
       - "Dockerfile.bench"
