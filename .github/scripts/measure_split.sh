@@ -21,6 +21,7 @@ cp /swarm/fixtures/hypergraph/mod.rs "${SLOT}/mod.rs"
 cp /swarm/fixtures/hypergraph/kernels.cu "${SLOT}/kernels.cu" 2>/dev/null || true
 
 run() {  # $1=build_so variant  $2=label  $3=saved-so path
+  rm -rf target   # fresh target per build: avoids stale .ll from the other RUSTFLAGS colliding
   install -m 0755 "$1" /usr/local/bin/tig-scripts/build_so
   local t0 t1
   t0=$(date +%s)
