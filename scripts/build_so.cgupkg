@@ -1,0 +1,337 @@
+#!/bin/bash
+
+set -e
+
+# Check if CHALLENGE environment variable is set
+if [ -z "$CHALLENGE" ]; then
+  echo "Error: CHALLENGE environment variable is not set."
+  exit 1
+fi
+
+# Check if ALGORITHM argument is provided
+if [ -z "$1" ]; then
+  echo "Error: ALGORITHM argument is required."
+  echo "Usage: $0 <ALGORITHM>"
+  exit 1
+fi
+
+ALGORITHM="$1"
+
+echo "Compiling .so for $CHALLENGE/$ALGORITHM"
+cp tig-binary/src/entry_point_template.rs tig-binary/src/entry_point.rs
+sed -i "s/{CHALLENGE}/$CHALLENGE/g" tig-binary/src/entry_point.rs
+sed -i "s/{ALGORITHM}/$ALGORITHM/g" tig-binary/src/entry_point.rs
+
+FEATURES="entry_point $CHALLENGE"
+
+ARCH=$(uname -m)
+RUST_TARGET=$(if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    echo "aarch64-unknown-linux-gnu";
+else
+    echo "x86_64-unknown-linux-gnu";
+fi)
+_T_CARGO0=$(date +%s)
+RUSTFLAGS="--emit=llvm-ir -C embed-bitcode=yes -C opt-level=3 -C lto=no -C debuginfo=0 -C relocation-model=pic" \
+cargo +nightly-2025-02-10 build \
+    -p tig-binary \
+    --target=$RUST_TARGET \
+    --release \
+    -Z build-std=core,alloc,std \
+    -Z build-std-features=panic-unwind \
+    --features="$FEATURES"
+_T_CARGO1=$(date +%s); echo "[phase] cargo: $((_T_CARGO1-_T_CARGO0))s"
+_T_LOOP0=$_T_CARGO1
+
+ll_files=()
+while IFS= read -r line; do
+    if [[ $line != *"panic_abort-"* ]]; then
+        ll_files+=("$line")
+    fi
+done < <(find "target/$RUST_TARGET/release/deps" -name "*.ll")
+
+object_files=()
+temp_objs=()
+pids=()
+file_pids=()
+pid_files=()
+pid_objs=()
+max_jobs=$(nproc)
+
+cuda_whitelist_files=(
+    "std-"
+    "tig_challenges"
+    "tig_binary"
+    "tig_algorithms"
+)
+
+# ---------------------------------------------------------------------------
+# Object cache (additive).
+#
+# The per-.ll compilation below (opt fuel-pass + llc + clang) is a pure function
+# of the .ll contents and the toolchain, but it was recomputed for EVERY crate on
+# EVERY build — including std/core/alloc and all crates.io deps, whose IR never
+# changes between builds. For GPU challenges that is ~50+ files of llc/clang work
+# and dominates build time (observed: ~14 min, of which the algorithm itself is a
+# couple of crates). Caching each object keyed on a hash of its .ll (plus the
+# compile mode and a toolchain fingerprint) makes a cache hit byte-identical to
+# recompiling, so only the changed algorithm crate is recompiled each run.
+#
+# Opt out with BUILD_SO_OBJ_CACHE_DIR="" (empty) to force full recompilation.
+# ---------------------------------------------------------------------------
+OBJ_CACHE_DIR="${BUILD_SO_OBJ_CACHE_DIR-$(pwd)/.build_so_obj_cache}"
+TOOLCHAIN_FP=""
+if [ -n "$OBJ_CACHE_DIR" ]; then
+    if mkdir -p "$OBJ_CACHE_DIR" 2>/dev/null; then
+        # Fingerprint the fuel plugin, the compilers, and this script itself, so
+        # any change to the toolchain, flags, or build logic invalidates every
+        # cache entry automatically (no manual version bump needed).
+        TOOLCHAIN_FP=$( { \
+            sha256sum /opt/llvm/lib/LLVMFuelRTSig.so 2>/dev/null; \
+            opt --version 2>/dev/null; \
+            llc --version 2>/dev/null; \
+            clang --version 2>/dev/null; \
+            sha256sum "$0" 2>/dev/null; \
+          } | sha256sum | cut -d' ' -f1 ) || true
+    else
+        OBJ_CACHE_DIR=""   # can't create cache dir -> disable, compile as before
+    fi
+fi
+
+# Store a freshly compiled object into the cache. Best-effort and atomic: a cache
+# write must never fail the build, and readers must never see a partial object.
+_store_obj() {
+    local _src="$1" _dst="$2"
+    [ -n "$_dst" ] || return 0
+    [ -s "$_src" ] || return 0          # never cache an empty/failed object
+    local _tmp="${_dst}.tmp.$$"
+    if cp "$_src" "$_tmp" 2>/dev/null && mv -f "$_tmp" "$_dst" 2>/dev/null; then
+        :
+    else
+        rm -f "$_tmp" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# Process a single file
+process_file() {
+    local ll_file="$1"
+    local is_first=$2
+    local temp_obj="$3"
+    local is_cuda=$4
+
+    # Stable per-crate name (cargo's -<hash> suffix stripped). Used both as the
+    # fuel pass's LL_FILE_BASENAME input and as part of the cache key.
+    local basename=$(basename "$ll_file" | sed -E 's/-[a-f0-9]+\.ll$//' | sed 's/\.ll$//')
+    local _pf0=$(date +%s)
+
+    # --- object cache lookup (best-effort; any failure falls through to compile).
+    #     is_cuda + is_first + basename + the .ll hash fully determine the object.
+    local _cached=""
+    if [ -n "$OBJ_CACHE_DIR" ] && [ -n "$TOOLCHAIN_FP" ]; then
+        local _hash
+        _hash=$(sha256sum "$ll_file" 2>/dev/null | cut -d' ' -f1 || true)
+        if [ -n "$_hash" ]; then
+            _cached="$OBJ_CACHE_DIR/${TOOLCHAIN_FP}-cuda${is_cuda}-first${is_first}-${basename}-${_hash}.o"
+            if [ -f "$_cached" ] && cp "$_cached" "$temp_obj" 2>/dev/null; then
+                echo "Cached $ll_file"
+                echo "[file] $(( $(date +%s)-_pf0 ))s CACHED $basename"
+                return 0
+            fi
+        fi
+    fi
+
+    if [ $is_cuda -eq 1 ]; then
+        file_in_whitelist=0
+        for whitelist_file in "${cuda_whitelist_files[@]}"; do
+            if [[ "$ll_file" == *"$whitelist_file"* ]]; then
+                file_in_whitelist=1
+                break
+            fi
+        done
+
+        if [ $file_in_whitelist -eq 0 ]; then
+            echo "Skipping $ll_file (not in whitelist)"
+
+            cat "$ll_file" | \
+            llc -relocation-model=pic -o - | \
+            clang -fPIC -c -x assembler - -o "$temp_obj"
+
+            _store_obj "$temp_obj" "$_cached"
+            echo "[file] $(( $(date +%s)-_pf0 ))s SKIP $basename"
+            return 0
+        fi
+    fi
+
+    echo "Processing $ll_file"
+
+    cat "$ll_file" | \
+    IS_FIRST_SRC=$is_first INSTRUMENT_FUEL=1 INSTRUMENT_RTSIG=1 INSTRUMENT_MEMORY=1 LL_FILE_BASENAME="$basename" opt \
+            -load-pass-plugin /opt/llvm/lib/LLVMFuelRTSig.so \
+            -passes="fuel-rt-sig" -S -o - | \
+    llc -relocation-model=pic -o - | \
+    clang -fPIC -c -x assembler - -o "$temp_obj"
+
+    local _rc=$?
+    if [ $_rc -eq 0 ]; then
+        _store_obj "$temp_obj" "$_cached"
+    fi
+    echo "[file] $(( $(date +%s)-_pf0 ))s PROC $basename"
+    return $_rc
+}
+
+is_cuda=0
+for ll_file in "${ll_files[@]}"
+do
+    if [[ "$ll_file" == *"cudarc"* ]]; then
+        is_cuda=1
+        break
+    fi
+done
+
+# Launch processes up to max_jobs
+for ll_file in "${ll_files[@]}"
+do
+    temp_obj=$(mktemp).o
+    temp_objs+=("$temp_obj")
+    
+    # Set IS_FIRST_SRC flag - first file gets 1, all others get 0
+    if [[ "$ll_file" == *"tig_challenges-"* ]]
+    then
+        is_first=1
+    else
+        is_first=0
+    fi
+    
+    # Launch in background
+    process_file "$ll_file" $is_first "$temp_obj" $is_cuda &
+    pid=$!
+    
+    # Store associations
+    pids+=($pid)
+    pid_files[$pid]="$ll_file"
+    pid_objs[$pid]="$temp_obj"
+    
+    if [ ${#pids[@]} -ge $max_jobs ]
+    then
+        wait -n -p exited_pid
+        exit_status=$?
+        
+        if [ $exit_status -ne 0 ]
+        then
+            echo "Failed to process ${pid_files[$exited_pid]}"
+
+            for active_pid in "${pids[@]}"
+            do
+                kill $active_pid 2>/dev/null || true
+            done
+            exit 1
+        else
+            # Find index of the exited PID
+            for idx in "${!pids[@]}"
+            do
+                if [ "${pids[$idx]}" = "$exited_pid" ]
+                then
+                    echo "Successfully processed ${pid_files[$exited_pid]}"
+                    object_files+=("${pid_objs[$exited_pid]}")
+                    unset pids[$idx]
+                    break
+                fi
+            done
+        fi
+        
+        pids=("${pids[@]}")
+    fi
+done
+
+while [ ${#pids[@]} -gt 0 ]
+do
+    wait -n -p exited_pid
+    exit_status=$?
+        
+    if [ $exit_status -ne 0 ]
+    then
+        echo "Failed to process ${pid_files[$exited_pid]}"
+
+        for active_pid in "${pids[@]}"
+        do
+            kill $active_pid 2>/dev/null || true
+        done
+        exit 1
+    else
+        # Find index of the exited PID
+        for idx in "${!pids[@]}"
+        do
+            if [ "${pids[$idx]}" = "$exited_pid" ]
+            then
+                echo "Successfully processed ${pid_files[$exited_pid]}"
+                object_files+=("${pid_objs[$exited_pid]}")
+                unset pids[$idx]
+                break
+            fi
+        done
+    fi
+        
+    pids=("${pids[@]}")
+done
+
+echo "Successfully processed all files"
+_T_LOOP1=$(date +%s); echo "[phase] loop: $((_T_LOOP1-_T_LOOP0))s"
+
+RUST_TARGET_LIBDIR=$(rustc --print target-libdir --target=$RUST_TARGET)
+LIBSTD_HASH=$(find "$RUST_TARGET_LIBDIR" -name "libstd-*.rlib" -exec basename {} \; | head -n1 | sed -E 's/libstd-(.*)\..*$/\1/')
+
+if [ ! -L "$RUST_TARGET_LIBDIR/libstd.so" ]
+then
+    ln -sf "$RUST_TARGET_LIBDIR/libstd-$LIBSTD_HASH.so" "$RUST_TARGET_LIBDIR/libstd.so"
+fi
+
+ARCH=$(if [ "$(uname -i)" = "aarch64" ] || [ "$(uname -i)" = "arm64" ] || [ "$(arch 2>/dev/null || echo "")" = "aarch64" ] || [ "$(arch 2>/dev/null || echo "")" = "arm64" ]; then
+    echo "arm64"
+else
+    echo "amd64"
+fi)
+output=tig-algorithms/lib/$CHALLENGE/$ARCH/$ALGORITHM.so
+mkdir -p $(dirname $output)
+
+echo "Linking into shared library '$output'"
+cat > export_symbols.map << 'EOF'
+{
+  global:
+    help;
+    entry_point;
+    __fuel_remaining;
+    __runtime_signature;
+    __curr_memory_usage;
+    __total_memory_usage;
+    __max_memory_usage;
+    __max_allowed_memory_usage;
+    __cudarc_fuel_used;
+    __cudarc_host_memory_used;
+    __cudarc_device_memory_used;
+    __cudarc_runtime_signature;
+  local: *;
+};
+EOF
+clang "${object_files[@]}" \
+    -shared \
+    -fPIC \
+    -o $output \
+    -L "$RUST_TARGET_LIBDIR" \
+    -lm \
+    -lstd \
+    -Wl,--gc-sections \
+    -ffunction-sections \
+    -fdata-sections \
+    -Wl,-z,noexecstack \
+    -Wl,--build-id=none \
+    -Wl,--eh-frame-hdr \
+    -Wl,--version-script=export_symbols.map \
+    -Wl,-Map=output.map
+
+strip --strip-debug $output
+
+# Clean up temp files
+rm -f /tmp/*.o.path
+
+echo "[phase] link+strip: $(( $(date +%s)-_T_LOOP1 ))s"
+echo "Done"
