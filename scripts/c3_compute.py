@@ -151,6 +151,31 @@ def _select_docker_image(args: argparse.Namespace, config: dict) -> str:
     )
 
 
+def _warm_c3_image(cfg: dict) -> str | None:
+    """Resolve the pre-baked WARM image for this challenge's flavor, or None
+    to use the plain toolchain image + full-source staging.
+
+    Warm images (Dockerfile.warm / scripts/build_warm_image.sh) carry the
+    swarm crate source and a pre-built release cargo target, so a job only
+    injects the algorithm dir and does an incremental build — seconds-to-a-
+    minute instead of a cold 10-20 minute compile.
+
+    Resolution: explicit ref (`c3_warm_image` config / TIG_C3_WARM_IMAGE env)
+    wins; else opt-in via `c3_warm_images: true` (or TIG_C3_WARM_IMAGES=1)
+    derives docker.io/<ns>/tig-swarm-warm-{cpu|gpu}:latest from the
+    `tig_dockerhub` config / TIG_DOCKERHUB env namespace."""
+    explicit = cfg.get("c3_warm_image") or os.environ.get("TIG_C3_WARM_IMAGE")
+    if explicit:
+        return explicit
+    if not (cfg.get("c3_warm_images") or os.environ.get("TIG_C3_WARM_IMAGES")):
+        return None
+    ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB")
+    if not ns:
+        return None
+    kind = "gpu" if _is_gpu_config(cfg) else "cpu"
+    return f"docker.io/{ns}/tig-swarm-warm-{kind}:latest"
+
+
 def _copy_required(src: Path, dst: Path) -> None:
     if not src.exists():
         raise FileNotFoundError(f"required C3 workspace path missing: {src}")
@@ -322,6 +347,135 @@ python3 scripts/benchmark.py \\
 
 cp "${{C3_ARTIFACTS_DIR}}/benchmark.json" c3-artifacts/benchmark.json 2>/dev/null || true
 cp "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" c3-artifacts/benchmark.stderr 2>/dev/null || true
+
+exit "$status"
+"""
+    script_path = stage / script_name
+    _write_container_file(script_path, runner)
+    script_path.chmod(0o755)
+    return script_name
+
+
+def _create_warm_workspace(stage: Path, config: dict, server: str) -> dict:
+    """Stage the MINIMAL upload for a warm-image job: the algorithm dir
+    (multi-file sources + CUDA kernels), current scripts/, Cargo manifests
+    (cmp-guarded overlay in the runner) and the locked config. The crate
+    source + warm cargo target are already in the image at /app."""
+    challenge = config.get("challenge", "unknown")
+    staged_config = dict(config)
+    staged_config["server_url"] = server
+
+    for name in ("Cargo.toml", "Cargo.lock"):
+        _copy_required(ROOT / name, stage / name)
+
+    _copy_required(ROOT / "src" / challenge / "algorithm", stage / "algorithm")
+
+    scripts_stage = stage / "scripts"
+    scripts_stage.mkdir(parents=True, exist_ok=True)
+    for script in (ROOT / "scripts").glob("*.py"):
+        _copy_required(script, scripts_stage / script.name)
+
+    _write_container_file(
+        stage / ".swarm-cache.json",
+        json.dumps(staged_config, indent=2, sort_keys=True) + "\n",
+    )
+    return staged_config
+
+
+def _write_warm_c3_project(
+    stage: Path,
+    config: dict,
+    server: str,
+    c3_time: str,
+    image: str,
+    seed: str | None = None,
+    hyperparameters: str | None = None,
+) -> str:
+    """The `.c3` + runner for a warm-image job (see _warm_c3_image). The
+    runner overlays the uploaded orchestration onto the baked crate at /app,
+    replaces ONLY the algorithm dir, and runs benchmark.py there — cargo hits
+    the pre-built target and rebuilds just the crate + relinks."""
+    run_id = uuid.uuid4().hex[:10]
+    challenge = config.get("challenge", "unknown")
+    script_name = f"run-warm-{run_id}.sh"
+    hardware = _resolve_c3_hardware(config)
+    requires_accelerator = _docker_requires_accelerator(config)
+
+    c3_config = f"""\
+project: tig-swarm-benchmark
+script: {_yaml_quote(script_name)}
+hardware: {_yaml_quote(hardware)}
+time: {_yaml_quote(c3_time)}
+job_name: {_yaml_quote(f"tig-{challenge}-{run_id}")}
+
+docker:
+  image: {_yaml_quote(image)}
+  requires_accelerator: {_yaml_quote(requires_accelerator)}
+
+output:
+  - ./c3-artifacts
+"""
+    _write_container_file(stage / ".c3", c3_config)
+
+    gpu_check = ""
+    if _is_gpu_config(config):
+        gpu_check = """
+if ! command -v nvcc >/dev/null 2>&1; then
+  echo "nvcc is required for GPU challenges; the warm GPU image should be built FROM a CUDA devel base" >&2
+  exit 127
+fi
+"""
+
+    identity_export = ""
+    tig_user_id = str(config.get("tig_user_id") or "").strip()
+    if tig_user_id:
+        identity_export = f"export TIG_USER_ID={_yaml_quote(tig_user_id)}"
+
+    hpo_exports = ""
+    if seed is not None:
+        hpo_exports += f"\nexport TIG_BENCH_SEED={_yaml_quote(seed)}"
+    if hyperparameters is not None:
+        hpo_exports += f"\nexport TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}"
+
+    runner = f"""\
+#!/bin/bash
+set -euo pipefail
+
+cd "${{C3_JOB_WORKDIR:-/workspace}}"
+WORK="$PWD"
+mkdir -p "${{C3_ARTIFACTS_DIR}}" c3-artifacts
+
+export TIG_IN_DOCKER=1
+export TIG_SWARM_SERVER={_yaml_quote(server)}
+{identity_export}{hpo_exports}
+export PATH="${{HOME:-/root}}/.cargo/bin:/root/.cargo/bin:${{PATH}}"
+
+APP=/app
+if [ ! -d "$APP/target/release" ]; then
+  echo "warm image is missing the pre-built /app/target — was it built from Dockerfile.warm?" >&2
+  exit 127
+fi
+
+# Overlay the CURRENT orchestration + config onto the baked crate. The Cargo
+# manifests are cmp-guarded so an unchanged manifest keeps its baked mtime and
+# the no-drift case stays a pure cache hit.
+cp .swarm-cache.json "$APP/.swarm-cache.json"
+cp -f scripts/*.py "$APP/scripts/"
+cmp -s Cargo.toml "$APP/Cargo.toml" || cp Cargo.toml "$APP/Cargo.toml"
+cmp -s Cargo.lock "$APP/Cargo.lock" || cp Cargo.lock "$APP/Cargo.lock"
+
+# Inject ONLY the algorithm (whole dir: multi-file sources + CUDA kernels).
+rm -rf "$APP/src/{challenge}/algorithm"
+cp -r algorithm "$APP/src/{challenge}/algorithm"
+{gpu_check}
+cd "$APP"
+status=0
+python3 scripts/benchmark.py \\
+  > "${{C3_ARTIFACTS_DIR}}/benchmark.json" \\
+  2> "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" || status=$?
+
+cp "${{C3_ARTIFACTS_DIR}}/benchmark.json" "$WORK/c3-artifacts/benchmark.json" 2>/dev/null || true
+cp "${{C3_ARTIFACTS_DIR}}/benchmark.stderr" "$WORK/c3-artifacts/benchmark.stderr" 2>/dev/null || true
 
 exit "$status"
 """
@@ -790,7 +944,8 @@ def run_benchmark_c3(
         cfg.get("c3_max_parallel_jobs", _DEFAULT_MAX_PARALLEL_JOBS),
     )
 
-    image = _select_docker_image(args, cfg)
+    warm_image = _warm_c3_image(cfg)
+    image = warm_image or _select_docker_image(args, cfg)
     cfg["env"] = image
 
     env = os.environ.copy()
@@ -803,16 +958,24 @@ def run_benchmark_c3(
     if auth_err:
         return None, auth_err
 
-    print(f"    [C3] Staging project for {challenge} with image {image}...")
+    mode = "warm" if warm_image else "full-source"
+    print(f"    [C3] Staging {mode} project for {challenge} with image {image}...")
 
     with tempfile.TemporaryDirectory(prefix="tig-c3-", ignore_cleanup_errors=True) as tmp:
         stage = Path(tmp)
         try:
-            _create_workspace(stage, cfg, server)
-            _write_c3_project(
-                stage, cfg, server, args.c3_time, image,
-                seed=seed, hyperparameters=hyperparameters,
-            )
+            if warm_image:
+                _create_warm_workspace(stage, cfg, server)
+                _write_warm_c3_project(
+                    stage, cfg, server, args.c3_time, image,
+                    seed=seed, hyperparameters=hyperparameters,
+                )
+            else:
+                _create_workspace(stage, cfg, server)
+                _write_c3_project(
+                    stage, cfg, server, args.c3_time, image,
+                    seed=seed, hyperparameters=hyperparameters,
+                )
         except Exception as exc:
             return None, f"[C3] Failed to create staged project: {exc}"
 

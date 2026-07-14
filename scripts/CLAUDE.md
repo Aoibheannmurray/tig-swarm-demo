@@ -59,6 +59,21 @@ Algorithms author against `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases
 the crate as `tig_challenges`, so a file also compiles when ported to the
 upstream tig-monorepo).
 
+**Warm images (optional, C3 fast path).** `Dockerfile.warm` bakes the swarm
+crate source + a pre-built release cargo target into
+`tig-swarm-warm-{cpu,gpu}` (build: `scripts/build_warm_image.sh`; publish: CI
+`build-warm-images.yml`, amd64-only — C3 is amd64 and local compute never
+uses these). When configured, the C3 job uploads ONLY the algorithm dir +
+scripts + config, injects the algorithm into the baked crate at `/app`, and
+incremental-builds in well under a minute instead of a 10–20 min cold
+compile. Opt in per fleet/agent via `c3_warm_image: <full ref>` (or env
+`TIG_C3_WARM_IMAGE`), or `c3_warm_images: true` + `tig_dockerhub: <ns>` to
+derive `docker.io/<ns>/tig-swarm-warm-{cpu|gpu}:latest`. Unset = the plain
+full-source path above. Rebuild/republish the images whenever `src/` (the
+challenge harnesses) or the Cargo manifests change — CI does this on push to
+staging; a job-side cmp-guarded overlay keeps a drifted Cargo.toml correct
+(just slower) in the meantime. See `scripts/test_warm_c3.py`.
+
 **Fleet-wide C3 slot pool.** Every agent in a fleet shares ONE C3 key, so all
 C3 benchmarks gate on a fleet-wide FCFS slot pool (`c3_pool.py`) of
 `c3_max_parallel_jobs` slots: total live C3 jobs never exceed the plan cap,
