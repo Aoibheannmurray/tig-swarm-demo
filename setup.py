@@ -14,7 +14,7 @@ Subcommands:
                               the `railway` CLI to create a project + service
                               + volume, sets env vars, deploys the server,
                               then pushes swarm-wide config (challenge, tracks,
-                              …) to the live URL. Scaffolds a
+                              timeout, …) to the live URL. Scaffolds a
                               fleet.config.json so the host can immediately
                               participate.
 

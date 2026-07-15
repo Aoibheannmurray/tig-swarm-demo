@@ -62,8 +62,8 @@ hints/inspiration across the swarm.
   inside git worktrees, where root-level tracked files are always present.
 - `src/lib.rs`'s `extern crate self as tig_challenges;` is **load-bearing**, not
   cruft: it lets algorithms import `tig_challenges::<ch>::*` so one file compiles
-  both here and in the TIG-docker slot. (TIG-docker benchmark backend — see
-  `scripts/CLAUDE.md` + `docs/tig_docker_plan.md`.)
+  both here and when ported into the upstream tig-monorepo (mainnet submissions,
+  `c3_tig_bench.py`).
 
 ## Editing note — the swarm overwrites CLAUDE.md in worktrees
 

@@ -1,6 +1,6 @@
 // Live swarm config: the swarm's `active_challenge` (the challenge the host
 // has selected for contributors to work on) plus the per-challenge sub-configs
-// (tracks, scoring_direction). Fetched once at page load and refreshed
+// (tracks, timeout, scoring_direction). Fetched once at page load and refreshed
 // when the server broadcasts a `swarm_config_updated` event over the WebSocket.
 //
 // Every panel that renders challenge-specific content (labels, the active
@@ -127,6 +127,7 @@ export async function loadSwarmConfig(apiBase: string): Promise<SwarmConfig> {
     for (const [name, sub] of Object.entries(raw)) {
       available[name] = {
         tracks: sub?.tracks ?? {},
+        timeout: typeof sub?.timeout === "number" ? sub.timeout : 5,
         scoring_direction: sub?.scoring_direction === "min" ? "min" : "max",
         has_initial_algorithm: !!sub?.has_initial_algorithm,
       };

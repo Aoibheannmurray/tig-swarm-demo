@@ -208,17 +208,17 @@ Four focused pages break individual views out full-screen: **Ideas** (`ideas.htm
 ## Build System
 
 Challenges are feature-gated in `Cargo.toml` (`#[cfg(feature = "<challenge>")]`). The
-crate builds as a library — algorithms are compiled and scored inside the **TIG docker**
-backend, not by swarm-owned solver/generator/evaluator binaries (those were retired
-when the custom wall-clock path was removed). The `solver` feature is kept as a **no-op**
-purely so the dev/agent compile-check `cargo check --features solver,<challenge>` still
-resolves.
+crate builds four swarm-owned binaries — `tig_generator`, `tig_solver`, `tig_evaluator`
+(CPU challenges) and `tig_gpu_benchmark` (GPU challenges) — each gated behind its
+matching feature plus one challenge feature (e.g. `--features solver,knapsack`).
 
-Benchmarking (`benchmark.py` → `run_tig_benchmark`, or `c3_compute.py` on C3) injects the
-agent's algorithm into a prebuilt, fuel-instrumented image, runs `build_algorithm`, and
-scores each track with `modified_test_algorithm` (real `tig-runtime` / `tig-verifier`).
-Bounding is by **fuel** (`max_fuel_budget`), not wall-clock — deterministic and
-hardware-independent. See `tig_docker_plan.md` and `scripts/CLAUDE.md` for the full backend.
+Benchmarking (`benchmark.py` locally, `c3_compute.py` on C3) builds those binaries with
+cargo inside a plain toolchain image (`Dockerfile.cpu` / `Dockerfile.gpu` locally;
+`rust:1-bookworm` / `nvidia/cuda:…-devel` on C3), generates instances once (cached under
+`datasets/<challenge>/generated/`), and runs solver + evaluator per instance. Bounding
+is by a **per-instance wall-clock timeout** (`timeout` in the challenge config, synced
+via `/api/swarm_config`); a solver that hasn't saved a solution when the deadline hits
+scores that instance as infeasible. See `scripts/CLAUDE.md` for details.
 
 ## Key Files
 

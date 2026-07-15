@@ -36,47 +36,89 @@ multi-agent fleet, benchmarking, and publishing results to the server.
 - `challenge_files.py`, `download_algorithm.py`, `init_fleet.py`,
   `sync_identity.py`, `build_ptx.py` — supporting helpers.
 
-## TIG-docker benchmark backend
+## Benchmark backend (simple builds, wall-clock)
 
-An alternative to the custom benchmark path that compiles + scores in the **real
-TIG toolchain** (fuel-instrumented; `tig-runtime`/`tig-verifier`), gated by
-`benchmark_backend: "tig"` (or env `TIG_BENCH_BACKEND=tig`). Both `benchmark.py`
-(local docker) and `c3_compute.py` (C3) branch into it via `_tig_backend(cfg)`.
+`benchmark.py` compiles the swarm's own binaries (`tig_generator` /
+`tig_solver` / `tig_evaluator`, or `tig_gpu_benchmark` for GPU challenges)
+with cargo and scores each instance under a **per-instance wall-clock
+timeout** (`timeout` in the synced challenge config; the solver saves early
+and re-saves — unsaved at the deadline = infeasible).
 
-- `modified_test_algorithm` — fuel-capturing tester (additive copy of the
-  monorepo `test_algorithm`); `--output-json` emits per-nonce records + aggregates.
-- `tig_bench_driver.py` — runs inside the image: `build_algorithm` + per-track
-  `modified_test_algorithm` → one combined JSON.
-- `build_bench_image.sh` — builds the custom image from `../tig-monorepo` + the pin.
-- Repo root: `Dockerfile.bench`, `tig_pin.json` (pinned TIG version);
-  `docs/tig_docker_plan.md` (design + status). Algorithms author against
-  `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases the crate as `tig_challenges`).
+- **Local**: `benchmark.py` re-execs itself inside a plain toolchain image
+  built from root `Dockerfile.cpu` / `Dockerfile.gpu` (`tig-swarm-cpu` /
+  `tig-swarm-gpu`, built lazily on first run), with a per-agent cargo
+  `target/` volume. Instances are generated once and cached under
+  `datasets/<challenge>/generated/`.
+- **C3** (`c3_compute.py`): stages a minimal workspace (Cargo.toml + src/ +
+  scripts/ + .swarm-cache.json) into a temp dir, deploys it as ONE C3 job on
+  a public Docker Hub image (`rust:1-bookworm` CPU / `nvidia/cuda:…-devel`
+  GPU — the runner script apt-installs anything missing), runs
+  `scripts/benchmark.py` inside, and pulls back `benchmark.json`.
 
-**Distributed C3 (balanced sharding + fleet pool).** On the C3 path
-(`c3_compute.py`) a benchmark's nonces are split into exactly
-`min(c3_max_parallel_jobs, total_nonces)` **balanced** shards (sizes differ by
-≤1 nonce: 22 over 3 → 8,7,7; over 4 → 6,6,5,5), packing *across* track
-boundaries (a shard may carry slices from several tracks). Each shard runs as its
-own C3 job; a job runs one `modified_test_algorithm` per track-slice it holds;
-the per-shard `combined.json`s are merged (`_merge_combined`) and scored once by
-`_tig_adapter`, so the score matches a single-job run — only faster. With
-`c3_max_parallel_jobs=1` a benchmark runs as a single job. The driver reads each
-track's `--start` window from `TIG_STARTS`. See `scripts/test_c3_sharding.py`.
+Algorithms author against `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases
+the crate as `tig_challenges`, so a file also compiles when ported to the
+upstream tig-monorepo).
 
-`c3_max_parallel_jobs` (default 3, the basic-plan cap) is the **only** sharding
-knob now — it's both the balanced shard count per benchmark *and* the size of a
-**fleet-wide FCFS slot pool** (`c3_pool.py`). Every agent in a fleet shares ONE
-C3 key, so they all gate on that pool: total live C3 jobs never exceed the plan
-cap, and extra shards queue first-come-first-served. `run_fleet.py` points every
-agent at one pool dir (`.c3-pool/` under the repo/clone root) via `C3_POOL_DIR`
-and injects one agreed `C3_POOL_SIZE`; a lone `run.py` agent (no pool dir) falls
-back to an in-process semaphore.
+**Warm images (optional, C3 fast path).** `Dockerfile.warm` bakes the swarm
+crate source + a pre-built release cargo target into
+`tig-swarm-warm-{cpu,gpu}` (build: `scripts/build_warm_image.sh`; publish: CI
+`build-warm-images.yml`, amd64-only — C3 is amd64 and local compute never
+uses these). When configured, the C3 job uploads ONLY the algorithm dir +
+scripts + config, injects the algorithm into the baked crate at `/app`, and
+incremental-builds in well under a minute instead of a 10–20 min cold
+compile. Opt in per fleet/agent via `c3_warm_images: true` (pulls
+`docker.io/tigfoundation/tig-swarm-warm-{cpu|gpu}:latest` — the TIG
+Foundation's public namespace, published by CI; override the namespace with
+`tig_dockerhub: <ns>` / env `TIG_DOCKERHUB`), or pin an exact ref with
+`c3_warm_image: <full ref>` (or env `TIG_C3_WARM_IMAGE`). Unset = the plain
+full-source path above. Rebuild/republish the images whenever `src/` (the
+challenge harnesses) or the Cargo manifests change — CI does this on push to
+staging; a job-side cmp-guarded overlay keeps a drifted Cargo.toml correct
+(just slower) in the meantime. See `scripts/test_warm_c3.py`.
+
+**Distributed C3 (balanced sharding + fleet pool).** On the C3 path a
+benchmark's instances are split into exactly
+`min(c3_max_parallel_jobs, total_instances)` **balanced** shards (sizes differ
+by ≤1 instance: 22 over 3 → 8,7,7), packing *across* track boundaries (a shard
+may carry slices from several tracks). Each shard is its own C3 job running
+`benchmark.py` on its per-track window — `TIG_TRACK_STARTS` offsets instance
+indices, and the per-instance seed depends only on the global index
+(`tig_generator --start` / `tig_gpu_benchmark --index`), so shard windows are
+byte-identical to the unsharded run. The per-shard `benchmark.json`s are
+merged (`_merge_shard_benchmarks`) and re-aggregated with `benchmark.aggregate`,
+so the score matches a single-job run exactly — only faster. With
+`c3_max_parallel_jobs=1` a benchmark runs as a single job. One benchmark can
+therefore use every chip the plan allows (e.g. free plan = 3) while the rest
+of the fleet waits on LLM responses. See `scripts/test_c3_sharding.py`.
+Sharding pays off most on warm images (per-shard fixed cost is seconds); on
+the full-source path each shard repeats the cold compile.
+
+**Big CPU machines (auto).** With `c3_hardware` unset/`auto`, each CPU
+benchmark queries the C3 control plane and deploys on the best CPU profile
+actually available right now — highest availability tier, then most vCPUs
+(`_best_cpu_hardware`, cached ~10 min; falls back to `cpu-d3-4vcpu-16gb`
+offline). Inside the job, `bench_workers` (config, or env
+`TIG_BENCH_WORKERS`) sets concurrent solver processes; its default
+`max(4, cpu_count // 2)` rides whatever machine the job landed on (≈ physical
+cores — solvers are single-threaded + timeout-bounded, so oversubscribing SMT
+threads lowers scores). Set `c3_hardware` + `bench_workers` explicitly to pin
+hardware and contention instead. GPUs: one job = one GPU regardless of
+profile; parallelism comes from sharding (default `l40` — cheapest, highest
+availability).
+
+**Fleet-wide C3 slot pool.** Every agent in a fleet shares ONE C3 key, so all
+C3 shard jobs gate on a fleet-wide FCFS slot pool (`c3_pool.py`) of
+`c3_max_parallel_jobs` slots: total live C3 jobs never exceed the plan cap,
+extras queue first-come-first-served. `run_fleet.py` points every agent at one
+pool dir (`.c3-pool/` under the repo/clone root) via `C3_POOL_DIR` and injects
+one agreed `C3_POOL_SIZE`; a lone `run.py` agent (no pool dir) falls back to an
+in-process semaphore.
 
 **The cap is read LIVE from C3, not configured.** At launch `run_fleet.py` queries
 the control plane (`/v2/billing/subscription` + `/v2/billing/tiers`, honoring any
 per-account override) for the concurrency limit C3 actually enforces (free 3 /
 pro 10 / team 50 today) and stamps it onto every agent's `c3_max_parallel_jobs` —
-so pool size and shard count always match the real subscription. A configured
+so the pool size always matches the real subscription. A configured
 `c3_max_parallel_jobs` is only a fallback used when the query fails (offline /
 no C3 auth). See `scripts/test_c3_pool.py` and `scripts/test_c3_plan_cap.py`.
 

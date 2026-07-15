@@ -80,54 +80,58 @@ def test_benchmark_id_is_fresh_10_char_hex():
     print("PASS test_benchmark_id_is_fresh_10_char_hex")
 
 
-def test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
+def test_c3_runner_exports_precomposed_user_id():
     with tempfile.TemporaryDirectory() as tmp:
         stage = Path(tmp)
-        c3_compute._write_tig_c3_project(
+        script = c3_compute._write_c3_project(
+            stage,
+            {
+                "challenge": "knapsack",
+                "c3_hardware": "l40",
+                "tig_user_id": "aoibheann (agent 69e67db9ffb3)",
+            },
+            "https://example.invalid",
+            "00:10:00",
+            "rust:1-bookworm",
+        )
+        runner = (stage / script).read_text()
+        assert 'export TIG_USER_ID="aoibheann (agent 69e67db9ffb3)"' in runner
+        assert "agent.config.json" not in runner
+    print("PASS test_c3_runner_exports_precomposed_user_id")
+
+
+def test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge():
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp)
+        c3_compute._write_c3_project(
+            stage,
+            {"challenge": "knapsack", "c3_hardware": "auto"},
+            "https://example.invalid",
+            "00:10:00",
+            "rust:1-bookworm",
+        )
+        c3_yaml = (stage / ".c3").read_text()
+        assert 'hardware: "cpu-d3-4vcpu-16gb"' in c3_yaml
+        assert 'requires_accelerator: "none"' in c3_yaml
+        assert "\ngpu:" not in c3_yaml
+    print("PASS test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge")
+
+
+def test_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp)
+        c3_compute._write_c3_project(
             stage,
             {"challenge": "hypergraph", "is_gpu": True, "c3_hardware": "auto"},
+            "https://example.invalid",
             "00:10:00",
-            "docker.io/danieltiagoadams/tig-bench-hypergraph:0.0.6",
-            "test",
-            None,
+            "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04",
         )
         c3_yaml = (stage / ".c3").read_text()
         assert 'hardware: "l40"' in c3_yaml
         assert 'requires_accelerator: "cuda"' in c3_yaml
         assert "\ngpu:" not in c3_yaml
-    print("PASS test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge")
-
-
-def test_tig_c3_default_image_resolution():
-    # All 8 challenges are C3-supported and now resolve to the baked
-    # tig-bench-<ch> image — CPU and GPU alike (the raw tig-dev-<ch> path is
-    # retired). An unknown challenge still raises with the supported list.
-    ver = c3_compute._bm_tig_version()
-    for ch in ("satisfiability", "hypergraph", "neuralnet_optimizer", "vector_search"):
-        assert c3_compute._tig_c3_image({"challenge": ch}).endswith(
-            f"tig-bench-{ch}:" + ver
-        ), ch
-    try:
-        c3_compute._tig_c3_image({"challenge": "not_a_challenge"})
-    except ValueError as exc:
-        assert "currently supported" in str(exc)
-    else:
-        raise AssertionError("expected unsupported TIG C3 image to raise")
-    print("PASS test_tig_c3_default_image_resolution")
-
-
-def test_neuralnet_runner_assembles_boilerplate_without_source_upload():
-    # neuralnet is baked: the runner must concat the harness boilerplate onto the
-    # agent's hooks (local join, no monorepo upload) and inject into the /app slot.
-    # No runtime blinding (that is baked into the image) and no tig-source tree.
-    script = c3_compute._tig_runner_script(
-        {"challenge": "neuralnet_optimizer"}, "test", None
-    )
-    assert 'cat algorithm/mod.rs boilerplate.rs > "$SLOT/mod.rs"' in script
-    assert "SLOT=/app/tig-algorithms/src/neuralnet_optimizer/swarm_algo" in script
-    assert "blinded optimizer seed" not in script  # blinding is baked, not runtime
-    assert "tig-source" not in script               # no per-job source upload
-    print("PASS test_neuralnet_runner_assembles_boilerplate_without_source_upload")
+    print("PASS test_c3_project_uses_gpu_hardware_for_auto_gpu_challenge")
 
 
 def _main():
@@ -137,9 +141,9 @@ def _main():
     test_agent_id_only()
     test_unknown_when_no_identity()
     test_benchmark_id_is_fresh_10_char_hex()
-    test_tig_c3_project_uses_gpu_hardware_for_auto_gpu_challenge()
-    test_tig_c3_default_image_resolution()
-    test_neuralnet_runner_assembles_boilerplate_without_source_upload()
+    test_c3_runner_exports_precomposed_user_id()
+    test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge()
+    test_c3_project_uses_gpu_hardware_for_auto_gpu_challenge()
     print("\nAll benchmark run-id tests passed.")
 
 

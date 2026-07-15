@@ -365,34 +365,38 @@ def _entry_points_bullet(challenge: str) -> str:
     )
 
 
-def _time_budget_parts(challenge: str) -> tuple[str, str]:
+def _time_budget_parts(challenge: str, config: dict) -> tuple[str, str]:
     """(time_bullet, opt_contract) for the solver-constraints section.
 
     Optimizer-hook challenges (neuralnet_optimizer): the training loop owns
     save_solution, and the agent gets the full optimizer-hook contract.
     """
+    timeout = config.get("timeout", 30)
     if challenge in {"neuralnet_optimizer"}:
         from prompts import OPTIMIZER_HOOK_CONTRACT as opt_contract
         time_bullet = (
-            "- Bounding is by FUEL, not wall-clock: the harness-owned training loop runs "
-            "until the challenge's fuel budget is exhausted and its best checkpoint is "
-            "scored. Keep your optimizer hooks lean (fewer instructions => more epochs fit "
-            "the fuel budget); the harness calls save_solution for you (do NOT call it "
-            "yourself, and do NOT write your own loop). Avoid clock-based control flow."
+            f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
+            f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
+            f"for you (do NOT call it yourself, and do NOT write your own loop). Never read "
+            f"the clock in your hooks (`std::time::Instant` / `SystemTime`): these "
+            f"algorithms are ported to the upstream TIG runtime, which requires "
+            f"deterministic, clock-free control flow."
         )
         return time_bullet, opt_contract
     time_bullet = (
-        "- Bounding is by FUEL, not wall-clock: the solver runs until it exhausts the\n"
-        "  challenge's fuel budget (instruction-counted, deterministic) or returns. Have\n"
-        "  it call `save_solution()` early with the first feasible solution, then keep\n"
-        "  improving and re-saving — the last saved solution is scored.\n"
-        "- IMPLEMENT A STOPPING CONDITION — do NOT just `loop {}` until the fuel cap.\n"
-        "  Exhausting the whole budget to chase negligible gains wastes compute and slows\n"
-        "  the swarm's iteration rate. Decide when the search has effectively converged and\n"
-        "  return then; how you detect convergence is up to you. Judge it from the solution\n"
-        "  state and the search's own progress, NEVER from `std::time::Instant` / a\n"
-        "  wall-clock deadline (that makes fuel usage nondeterministic). Don't stop so\n"
-        "  eagerly that you leave real improvement on the table."
+        f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
+        f"  hard deadline. Call `save_solution()` early with your first feasible\n"
+        f"  solution, then keep improving and re-saving. The last saved solution is\n"
+        f"  what gets scored.\n"
+        f"- Do NOT read the clock (`std::time::Instant` / `SystemTime`) or use\n"
+        f"  wall-time as a stopping condition — the harness owns the deadline, and\n"
+        f"  these algorithms are later ported to the upstream TIG runtime, which\n"
+        f"  requires deterministic, clock-free control flow. Bound your search with\n"
+        f"  tunable HYPERPARAMETERS instead (num_iterations, restarts,\n"
+        f"  no-improvement patience, convergence tolerance), with defaults sized to\n"
+        f"  finish comfortably inside the time budget — the hyperparameter search\n"
+        f"  can then tune them to fill it."
     )
     return time_bullet, ""
 
@@ -408,7 +412,7 @@ def _build_claude_md(challenge_md: str, config: dict) -> str:
     challenge = config.get("challenge", "unknown")
     kernel_relpath = config.get("kernel_path")
     entry_points_bullet = _entry_points_bullet(challenge)
-    time_bullet, opt_contract = _time_budget_parts(challenge)
+    time_bullet, opt_contract = _time_budget_parts(challenge, config)
 
     # GPU challenges: the kernel is NOT compiled by cargo (it's compiled to
     # PTX separately), so give the agent the compile-check command for it.
@@ -568,7 +572,7 @@ def _build_agents_md(challenge_md: str, config: dict) -> str:
     """
     challenge = config.get("challenge", "unknown")
     entry_points_bullet = _entry_points_bullet(challenge)
-    time_bullet, opt_contract = _time_budget_parts(challenge)
+    time_bullet, opt_contract = _time_budget_parts(challenge, config)
 
     return (
         _DOC_INTRO_TEMPLATE.format(

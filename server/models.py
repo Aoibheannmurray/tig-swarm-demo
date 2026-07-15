@@ -246,6 +246,7 @@ class AdminSeedsQuery(AdminAuth):
 # Swarm-wide configuration set by the owner via the setup wizard.
 # challenge: which TIG challenge this swarm is optimizing.
 # tracks: keys are track labels (e.g. "n_nodes=600"), values are instance counts.
+# timeout: per-instance solver timeout in seconds.
 # scoring_direction: "min" (smaller score wins) or "max" (larger wins).
 # swarm_name / owner_name are display-only.
 ChallengeName = Literal[
@@ -270,6 +271,7 @@ class ChallengeSubConfig(BaseModel):
     silently blank the challenge's initial_algorithm_code and flip
     scoring_direction back to "max"."""
     tracks: Optional[dict] = None
+    timeout: Optional[int] = None
     scoring_direction: Optional[Literal["min", "max"]] = None
     initial_algorithm_code: Optional[str] = None
     initial_kernel_code: Optional[str] = None

@@ -701,32 +701,37 @@ def _rust_rules_block(config: dict) -> str:
     return block
 
 
-def _fuel_budget_guidance(config: dict) -> str:
-    """Bounding guidance for code prompts. The TIG backend bounds by FUEL
-    (instruction-counted, deterministic), NOT wall-clock — so agents must not
-    self-terminate on a clock deadline, which would under-spend the budget and
-    break fuel determinism."""
+def _time_budget_guidance(config: dict) -> str:
+    """Bounding guidance for code prompts: each instance is killed at a hard
+    wall-clock deadline, so solvers must save early and often. The deadline is
+    the HARNESS's job, not the algorithm's: reading the clock inside the
+    algorithm (std::time::Instant / SystemTime) is banned because these
+    algorithms are later ported to the upstream TIG monorepo, whose
+    fuel-instrumented runtime requires deterministic control flow — a
+    clock-gated loop won't survive submission."""
+    timeout = config.get("timeout", 30)
     if _is_optimizer_hook_challenge(config):
         return (
-            "\nBounding is by FUEL, not wall-clock: the harness-owned training loop runs "
-            "until the challenge's fuel budget is exhausted, then its best checkpoint is "
-            "scored. Keep your optimizer hooks lean — fewer instructions per step means more "
-            "epochs fit in the fuel budget. The harness calls save_solution for you (you do "
-            "NOT call it). Avoid clock-based control flow — fuel accounting must stay "
-            "deterministic."
+            f"\nPer-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and the best checkpoint it saved is "
+            f"evaluated. Keep your optimizer hooks fast so more epochs fit in the budget; "
+            f"the harness calls save_solution for you (you do NOT call it). Never read the "
+            f"clock inside your hooks (std::time::Instant / SystemTime): these algorithms "
+            f"are ported to the upstream TIG runtime, which requires deterministic, "
+            f"clock-free control flow."
         )
     return (
-        "\nBounding is by FUEL, not wall-clock: the solver runs until it exhausts the "
-        "challenge's fuel budget (instruction-counted, deterministic) or returns. Have it call "
-        "save_solution() early with the first feasible solution, then keep improving and "
-        "re-saving — the last saved solution is scored. IMPLEMENT A STOPPING CONDITION — do NOT "
-        "just loop until the fuel cap: exhausting the whole budget to chase negligible gains "
-        "wastes compute and slows the swarm's iteration rate. Decide when the search has "
-        "effectively converged and return then; how you detect convergence is up to you. Judge "
-        "it from the solution state and the search's own progress, never from a wall-clock "
-        "deadline / std::time::Instant / SystemTime (that makes fuel usage nondeterministic). "
-        "Don't stop so eagerly that you leave real improvement on the table. If nothing is "
-        "saved before fuel runs out, the instance counts as infeasible."
+        f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
+        f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
+        f"keep improving and re-saving — the last saved solution is evaluated. If no "
+        f"solution was saved when the deadline hits, the instance counts as infeasible. "
+        f"Do NOT read the clock (std::time::Instant / SystemTime) or use wall-time as a "
+        f"stopping condition — the harness owns the deadline, and these algorithms are "
+        f"later ported to the upstream TIG runtime, which requires deterministic, "
+        f"clock-free control flow. Bound your search with tunable HYPERPARAMETERS instead "
+        f"(e.g. num_iterations, restarts, no-improvement patience, convergence tolerance), "
+        f"with defaults sized to finish comfortably inside the time budget — the "
+        f"hyperparameter search can then tune them to fill it."
     )
 
 
@@ -736,7 +741,7 @@ def build_code_system_prompt(
     challenge = config.get("challenge", "unknown")
     is_gpu = bool(config.get("is_gpu"))
     opt_hooks = _is_optimizer_hook_challenge(config)
-    time_guidance = _fuel_budget_guidance(config)
+    time_guidance = _time_budget_guidance(config)
     # For exploiters, inject the localized-edit rule between the time budget and
     # the output-format rules so it's read before they start writing.
     if role == "exploiter":
@@ -890,7 +895,7 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge by making
 targeted edits to its source files.
 
 {challenge_md}
-{_fuel_budget_guidance(config)}{role_steer}
+{_time_budget_guidance(config)}{role_steer}
 
 {SEARCH_REPLACE_FORMAT}{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
 
@@ -1205,7 +1210,9 @@ def parse_hyperparameter_response(response: str) -> dict:
 # ── Error recovery prompts ─────────────────────────────────────────
 
 
-def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "") -> str:
+def build_runtime_fix_prompt(
+    code: str, bench: dict, kernel_code: str = "", timeout: int = 30,
+) -> str:
     errors = bench.get("errors") or []
     error_lines = "\n".join(f"  - {e}" for e in errors)
     score = bench.get("score", 0)
@@ -1222,15 +1229,16 @@ def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "") -> s
         f"Score: {score}  Feasible: {feasible}\n"
         f"Per-track scores:\n{track_summary}\n"
         f"Errors:\n{error_lines}\n\n"
-        "Bounding is by FUEL, not wall-clock: the solver runs until it exhausts the "
-        "challenge's fuel budget (instruction-counted, deterministic) or returns.\n\n"
+        f"Per-instance time budget: {timeout} seconds. The solver is killed after this deadline.\n\n"
         "How to interpret the errors:\n"
         "- 'no solution saved' = the code crashed, panicked, or returned Err() "
-        "before ever calling save_solution(), OR it exhausted its fuel before saving. "
-        "Fix: call save_solution() EARLY with your first feasible solution, then keep "
-        "improving and re-saving in a loop (the runtime stops you at the fuel cap). Do "
-        "NOT gate the loop on a wall-clock deadline / std::time::Instant — that is "
-        "nondeterministic under fuel accounting.\n"
+        "before ever calling save_solution(), OR the solver ran out of time "
+        "without saving. Fix: call save_solution() EARLY with your first feasible "
+        "solution, then keep improving and re-saving inside a hyperparameter-bounded "
+        "loop (e.g. num_iterations / patience sized to finish within the time "
+        "budget). Do NOT read the clock (std::time::Instant / SystemTime) as a "
+        "stopping condition — the harness owns the deadline, and clock-free control "
+        "flow is required when the algorithm is ported to the upstream TIG runtime.\n"
         "- Any other error = the code saved a solution but the evaluator "
         "rejected it (constraint violation). Fix: check that your solution "
         "satisfies all feasibility constraints described in the challenge.\n\n"

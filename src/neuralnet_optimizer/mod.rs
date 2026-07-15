@@ -480,10 +480,24 @@ pub fn training_loop(
     )?;
     model.init_weights(challenge.seed.clone(), stream.clone(), module.clone())?;
 
-    // Initialize optimizer
+    // Initialize optimizer.
+    //
+    // Anti-cheat: the hook gets a one-way StdRng-derived seed, NOT the raw
+    // challenge.seed. The optimizer legitimately needs deterministic
+    // per-instance randomness (the run must be verifiable, so no OS/clock
+    // entropy), but the raw seed also regenerates the instance's *true
+    // targets* — an agent handed it could reconstruct the dataset and emit
+    // the answers directly. The derived seed is still deterministic and
+    // per-instance, but not invertible to the real one.
     let param_sizes = model.get_parameter_sizes();
+    let optimizer_seed = {
+        let mut sd = StdRng::from_seed(challenge.seed);
+        let mut b = [0u8; 32];
+        sd.fill_bytes(&mut b);
+        b
+    };
     let mut optimizer_state = optimizer_init_state(
-        challenge.seed.clone(),
+        optimizer_seed,
         &param_sizes, // FIXME pass model instead?
         stream.clone(),
         module.clone(),
