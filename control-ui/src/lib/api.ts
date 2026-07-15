@@ -49,6 +49,8 @@ export const localApi = {
   railwayStatus: () => fetch(`${LOCAL}/railway/status`).then(jsonOrThrow),
   railwayLoginStart: () => fetch(`${LOCAL}/railway/login`, { method: "POST" }).then(jsonOrThrow),
   railwayLoginStatus: () => fetch(`${LOCAL}/railway/login`).then(jsonOrThrow),
+  railwayInstallStart: () => fetch(`${LOCAL}/railway/install`, { method: "POST" }).then(jsonOrThrow),
+  railwayInstallStatus: () => fetch(`${LOCAL}/railway/install`).then(jsonOrThrow),
   swarmAdmin: () => fetch(`${LOCAL}/swarm/admin`).then(jsonOrThrow),
   swarmCreate: (params: any) =>
     fetch(`${LOCAL}/swarm/create`, post(params)).then(jsonOrThrow),

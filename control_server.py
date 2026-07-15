@@ -415,6 +415,128 @@ class RailwayLoginController:
         return self.status()
 
 
+# ── Railway CLI install ────────────────────────────────────────────────
+
+# Where the vendor installer (railway.com/install.sh) drops the binary. Its
+# precedence is  --bin-dir > RAILWAY_BIN_DIR > $RAILWAY_HOME/bin > ~/.railway/bin;
+# we never override, so the default ~/.railway/bin is what lands. The installer
+# only patches shell rc files, so a companion already running won't see the new
+# binary — we prepend these dirs to this process's PATH ourselves.
+_RAILWAY_CANDIDATE_BINDIRS = (
+    Path.home() / ".railway" / "bin",
+    Path("/usr/local/bin"),
+    Path.home() / ".local" / "bin",
+)
+
+
+def _ensure_railway_on_path() -> bool:
+    """Make `railway` findable by this process, and report whether it is.
+
+    Handles both the post-install case (the installer wrote ~/.railway/bin but
+    that dir isn't on the companion's PATH) and the pre-existing case (railway
+    installed there, companion launched from a shell that never sourced it).
+    Idempotent: prepends a candidate dir to os.environ['PATH'] only when it
+    actually holds a railway binary and isn't already present."""
+    if shutil.which("railway") is not None:
+        return True
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    for d in _RAILWAY_CANDIDATE_BINDIRS:
+        exe = d / ("railway.exe" if os.name == "nt" else "railway")
+        if exe.exists() and str(d) not in parts:
+            os.environ["PATH"] = os.pathsep.join([str(d), *parts])
+            parts = os.environ["PATH"].split(os.pathsep)
+    return shutil.which("railway") is not None
+
+
+class RailwayInstallController:
+    """Installs the Railway CLI via the vendor script so a host with no CLI can
+    get unblocked from the UI — no separate terminal step. Runs
+    `curl -fsSL railway.com/install.sh | bash -s -- -y` (the `-y` skips the
+    installer's confirmation prompt); the default bin dir is ~/.railway/bin,
+    which is under $HOME and needs no sudo. The UI polls status() until the
+    process exits, then re-checks railway/status (now `installed: true`).
+
+    POSIX only. Windows has no bash/curl-pipe-bash contract, so start() there
+    fails fast with the manual-install hint instead of a confusing shell error.
+
+    One attempt at a time; a new start() kills any pending run."""
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self.state = "idle"  # idle | pending | done | error
+        self.output = ""
+        self.error: str | None = None
+
+    def status(self) -> dict:
+        return {"state": self.state, "output": self.output[-2000:],
+                "error": self.error}
+
+    def start(self) -> dict:
+        if os.name == "nt":
+            self.state = "error"
+            self.error = (
+                "Automatic install isn't supported on Windows. Install the "
+                "Railway CLI with one of:\n"
+                "    scoop install railway\n"
+                "    npm i -g @railway/cli\n"
+                "then click Recheck."
+            )
+            return self.status()
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.kill()
+            self.state = "pending"
+            self.output = ""
+            self.error = None
+            # `-s --` forwards `-y` to the piped script; without a controlling
+            # TTY the installer would otherwise wait on a confirmation prompt.
+            cmd = [
+                "bash", "-c",
+                "curl -fsSL https://railway.com/install.sh | bash -s -- -y",
+            ]
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, text=True,
+                    encoding="utf-8", errors="replace", cwd=str(ROOT),
+                )
+            except OSError as exc:
+                self.state = "error"
+                self.error = f"could not start the installer: {exc}"
+                return self.status()
+            self._proc = proc
+
+        def _watch() -> None:
+            assert proc.stdout is not None
+            try:
+                for line in proc.stdout:
+                    # The installer colorizes; strip ANSI so the UI's log pane
+                    # shows plain text, not escape gibberish.
+                    self.output += RailwayLoginController._ANSI_RE.sub("", line)
+            finally:
+                proc.stdout.close()
+            proc.wait()
+            if proc is not self._proc:
+                return  # a newer run superseded this one
+            if proc.returncode == 0 and _ensure_railway_on_path():
+                self.state = "done"
+            else:
+                self.state = "error"
+                self.error = (
+                    "The installer exited without leaving a usable `railway` "
+                    "on PATH. Install it manually (see railway.com/install.sh) "
+                    "and click Recheck."
+                    if proc.returncode == 0
+                    else f"installer exited {proc.returncode} — see the log below."
+                )
+
+        self._thread = threading.Thread(target=_watch, daemon=True)
+        self._thread.start()
+        return self.status()
+
+
 # ── App factory ────────────────────────────────────────────────────────
 
 
@@ -494,6 +616,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     fleet = FleetController(hub)
     deploy = DeployController(hub)
     railway_login = RailwayLoginController()
+    railway_install = RailwayInstallController()
 
     # DNS-rebinding guard. This companion serves host credentials (e.g.
     # /local-api/swarm/admin returns the admin_key) and can start/stop fleets,
@@ -679,19 +802,37 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     # ── Host: railway + provisioning ──
     @app.get("/local-api/railway/status")
     def railway_status() -> dict:
+        # Pick up a railway installed in ~/.railway/bin even when the companion's
+        # shell never sourced it — otherwise a valid install still reads as
+        # "not installed". `installed` lets the UI branch: missing CLI → offer to
+        # install; present-but-unauthed → offer to log in.
+        installed = _ensure_railway_on_path()
+        if not installed:
+            return {"available": False, "installed": False, "authed": False,
+                    "message": "The Railway CLI isn't installed."}
         try:
             user = setup_mod._railway_check_auth()
             who = user.get("email") or user.get("name") or "unknown"
             workspaces = [
                 w["name"] for w in (user.get("workspaces") or []) if w.get("name")
             ]
-            return {"available": True, "authed": True, "user": who,
-                    "workspaces": workspaces}
+            return {"available": True, "installed": True, "authed": True,
+                    "user": who, "workspaces": workspaces}
         except (Exception, SystemExit) as exc:
-            # _railway_check_installed / _check_auth raise RailwayError on
-            # failure (SystemExit kept for belt-and-braces) — translate to a
-            # soft status so the UI can show the right instruction.
-            return {"available": False, "authed": False, "message": str(exc)}
+            # CLI present but not logged in (or a transient whoami failure) —
+            # translate to a soft status so the UI shows the login flow.
+            return {"available": False, "installed": True, "authed": False,
+                    "message": str(exc)}
+
+    @app.post("/local-api/railway/install")
+    async def railway_install_start() -> dict:
+        """Install the Railway CLI via the vendor script. Returns immediately;
+        the UI polls the GET below until it exits, then re-reads status."""
+        return railway_install.start()
+
+    @app.get("/local-api/railway/install")
+    async def railway_install_status() -> dict:
+        return railway_install.status()
 
     @app.post("/local-api/railway/login")
     async def railway_login_start() -> dict:

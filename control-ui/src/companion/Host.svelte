@@ -150,6 +150,49 @@
   }
   onDestroy(stopLoginPoll);
 
+  // ── Install the Railway CLI from the UI ──
+  // POST runs the vendor installer (railway.com/install.sh) on the companion;
+  // we poll until it exits, then re-read status (now installed → login flow).
+  let install: any = $state(null);
+  let installPoll: ReturnType<typeof setInterval> | null = null;
+  function stopInstallPoll() {
+    if (installPoll) { clearInterval(installPoll); installPoll = null; }
+  }
+  async function startInstall() {
+    error = "";
+    try {
+      install = await localApi.railwayInstallStart();
+    } catch (e: any) {
+      error = e.message;
+      return;
+    }
+    stopInstallPoll();
+    installPoll = setInterval(async () => {
+      try {
+        install = await localApi.railwayInstallStatus();
+        if (install.state === "done") {
+          stopInstallPoll();
+          await refreshRailway();
+          if (railway?.installed) install = null;
+        } else if (install.state === "error") {
+          stopInstallPoll();
+        }
+      } catch { /* companion hiccup — keep polling */ }
+    }, 2000);
+  }
+  onDestroy(stopInstallPoll);
+
+  // Copy a credential to the clipboard for pasting into the Admin Console.
+  // Keyed by field so only the clicked row flips to "Copied".
+  let copied = $state("");
+  async function copyText(field: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = field;
+      setTimeout(() => { if (copied === field) copied = ""; }, 1500);
+    } catch { /* clipboard blocked (non-secure context) — leave the value visible */ }
+  }
+
   async function createSwarm() {
     error = ""; deploying = true;
     try {
@@ -233,12 +276,36 @@
     <div class="spacer"></div>
     {#if railway?.authed}
       <span class="pill ok">authed · {railway.user}</span>
+    {:else if railway && !railway.installed}
+      <span class="pill warn">CLI not installed</span>
+      <button onclick={recheckRailway}>Recheck</button>
     {:else}
       <span class="pill warn">not connected</span>
       <button onclick={recheckRailway}>Recheck</button>
     {/if}
   </div>
-  {#if !railway?.authed}
+
+  {#if railway && !railway.installed}
+    <!-- No CLI: offer to install it (provisioning shells out to `railway`). -->
+    {#if !install || install.state === "idle"}
+      <p class="lede">
+        Provisioning runs on the Railway CLI, which isn't installed yet.
+        <b>Install it here</b> — or run
+        <code>bash &lt;(curl -fsSL railway.com/install.sh)</code> in a terminal
+        and hit Recheck.
+      </p>
+      <button class="primary" onclick={startInstall}>Install the Railway CLI</button>
+    {:else if install.state === "pending"}
+      <p class="lede">Installing the Railway CLI… this takes a few seconds.</p>
+      {#if install.output}<pre class="mono muted" style="white-space:pre-wrap">{install.output}</pre>{/if}
+    {:else if install.state === "error"}
+      <div class="banner err">{install.error || "Install failed."}</div>
+      {#if install.output}<pre class="mono muted" style="white-space:pre-wrap">{install.output}</pre>{/if}
+      <button class="primary" onclick={startInstall}>Try again</button>
+    {:else if install.state === "done"}
+      <p class="lede">Installed — refreshing status…</p>
+    {/if}
+  {:else if !railway?.authed}
     {#if !login || login.state === "idle"}
       <p class="lede">
         Provisioning needs the Railway CLI, logged in.
@@ -373,8 +440,18 @@
       </div>
       <ul class="creds">
         <li><span>Dashboard</span><a href={`${r.server_url}/`} target="_blank" rel="noreferrer">{r.server_url}/</a></li>
-        <li><span>Admin key</span><code>{r.admin_key}</code></li>
-        <li><span>Base password</span><code>{r.swarm_password}</code></li>
+        <li><span>Admin key</span>
+          <div class="credval">
+            <code>{r.admin_key}</code>
+            <button type="button" class="copybtn" onclick={() => copyText("admin_key", r.admin_key)}>{copied === "admin_key" ? "Copied" : "Copy"}</button>
+          </div>
+        </li>
+        <li><span>Base password</span>
+          <div class="credval">
+            <code>{r.swarm_password}</code>
+            <button type="button" class="copybtn" onclick={() => copyText("swarm_password", r.swarm_password)}>{copied === "swarm_password" ? "Copied" : "Copy"}</button>
+          </div>
+        </li>
       </ul>
       <p class="lede" style="margin-top:14px">
         <b>Next:</b> open the Admin Console to create a <b>join link</b> for each
@@ -465,6 +542,10 @@
   .creds li span { color: var(--ink-dim); }
   .seedpool { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
   .creds li b.bad { color: #c0392b; }
+  .credval { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .credval code { overflow-wrap: anywhere; }
+  .copybtn { flex: 0 0 auto; font-size: 12px; padding: 3px 9px; border: 1px solid var(--border-subtle); border-radius: 6px; background: transparent; color: var(--ink-dim); cursor: pointer; }
+  .copybtn:hover { color: var(--ink); border-color: var(--ink-dim); }
   .tracks { margin: 4px 0 14px; }
   .trackgroup { padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
   .trackname { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
