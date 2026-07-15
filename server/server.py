@@ -2961,11 +2961,12 @@ async def admin_seed_pool(req: AdminSeedPool):
     if not req.algorithm_code.strip():
         raise HTTPException(status_code=400, detail="algorithm_code is empty")
     timestamp = now()
+    files_json = json.dumps(req.algorithm_files) if req.algorithm_files else None
     async with db.connect() as conn:
         action = await db.upsert_authored_seed(
             conn, req.challenge, req.strategy_tag, req.algorithm_code,
             created_at=timestamp, score=req.score,
-            kernel_code=req.kernel_code,
+            kernel_code=req.kernel_code, algorithm_files=files_json,
         )
         await conn.commit()
     return {

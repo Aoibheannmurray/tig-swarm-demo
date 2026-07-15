@@ -273,6 +273,11 @@ class AdminSeedPool(AdminAuth):
     strategy_tag: str
     algorithm_code: str
     kernel_code: Optional[str] = None
+    # Full multi-file algorithm as a {relpath: content} map (entry `mod.rs`),
+    # for multi-module / multi-kernel seeds (e.g. a mainnet algorithm seeded
+    # into the pool). None for single-file seeds — `algorithm_code` is then the
+    # whole thing.
+    algorithm_files: Optional[dict] = None
     score: Optional[float] = None
 
 

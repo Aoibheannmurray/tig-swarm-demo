@@ -823,6 +823,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "stagnation_limit": int(payload.get("stagnation_limit", 4)),
             "hypothesis_recall_threshold": int(payload.get("hypothesis_recall_threshold", 3)),
             "seed_inactive_pool": bool(payload.get("seed_inactive_pool", False)),
+            "seed_pool_mainnet": bool(payload.get("seed_pool_mainnet", False)),
         }
         try:
             return deploy.start(params)
@@ -888,9 +889,11 @@ def create_app(allow_remote: bool = False) -> FastAPI:
 
     @app.post("/local-api/swarm/reseed")
     async def swarm_reseed(payload: dict) -> dict:
-        """Re-deposit the host's authored seeds into the swarm's seed pool.
-        Idempotent — the server upserts by (challenge, strategy_tag), so an
-        unchanged seed is a no-op and an edited one replaces the pool copy."""
+        """Re-deposit seeds into the swarm's seed pool. Always re-deposits the
+        host's authored seeds (idempotent upsert by challenge+strategy_tag);
+        with ``{"mainnet": true}`` ALSO deposits each challenge's top TIG
+        mainnet algorithm (strategy_tag="mainnet"), so an existing swarm can
+        gain a mainnet starting point without a full re-create."""
         admin = setup_mod.read_swarm_admin()
         server_url = admin.get("server_url")
         key = admin.get("admin_key")
@@ -903,15 +906,20 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         only = _swarm_challenges(admin)
         seeds = [s for s in setup_mod.read_authored_seeds()
                  if only is None or s["challenge"] in only]
-        if not seeds:
+        want_mainnet = bool(payload.get("mainnet"))
+        if not seeds and not want_mainnet:
             return JSONResponse(
                 {"error": "no authored seeds found under "
                           "initial_algorithms/<challenge>/seeds/."},
                 status_code=400,
             )
         try:
-            failed = setup_mod.seed_pool_from_authored(server_url, key, seeds)
-            missing = setup_mod.verify_seed_pool(server_url, key, seeds)
+            failed = setup_mod.seed_pool_from_authored(server_url, key, seeds) if seeds else []
+            missing = setup_mod.verify_seed_pool(server_url, key, seeds) if seeds else []
+            mainnet_failed = []
+            if want_mainnet:
+                mainnet_failed = setup_mod.seed_pool_from_mainnet(
+                    server_url, key, only or set())
         except Exception as exc:
             return JSONResponse({"error": f"reseed failed: {exc}"}, status_code=502)
         return {
@@ -919,6 +927,8 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "total": len(seeds),
             "failed": failed,
             "missing": missing,
+            "mainnet": want_mainnet,
+            "mainnet_failed": mainnet_failed,
         }
 
     # ── Local secrets (API keys) — no `export` needed ──

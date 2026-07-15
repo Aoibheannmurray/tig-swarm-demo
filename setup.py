@@ -120,6 +120,15 @@ def add_create_setup_args(parser: argparse.ArgumentParser) -> None:
             "the swarm (multi-file aware; incompatible ones are skipped)."
         ),
     )
+    parser.add_argument(
+        "--seed-pool-mainnet", action="store_true",
+        help=(
+            "After deploy, seed the INITIAL (seed) pool with the current "
+            "top-earning TIG mainnet algorithm for every challenge, so fresh "
+            "trajectories start from it. Independent of --seed-inactive-pool "
+            "(use either, both, or neither)."
+        ),
+    )
 
 
 def main() -> int:

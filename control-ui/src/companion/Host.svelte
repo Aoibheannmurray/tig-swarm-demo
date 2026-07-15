@@ -18,6 +18,7 @@
   let stagLimit = $state(4);
   let recallThreshold = $state(3);
   let seedInactive = $state(false);
+  let seedPoolMainnet = $state(false);
   let useDefaults = $state(true);
   // Per-challenge {track_key: instances} edits for the customize view,
   // seeded from the server's track_defaults (same values the CLI wizard uses).
@@ -51,12 +52,19 @@
     try { seed = await localApi.seedStatus(); } catch { seed = null; }
   }
 
+  let reseedMainnet = $state(false);
   async function doReseed() {
     reseeding = true; seedMsg = ""; error = "";
     try {
-      const r = await localApi.reseed();
-      seedMsg = `Re-seeded ${r.deposited}/${r.total} authored seed(s)` +
+      const r = await localApi.reseed(reseedMainnet);
+      let msg = `Re-seeded ${r.deposited}/${r.total} authored seed(s)` +
         (r.missing?.length ? ` — still missing: ${r.missing.join(", ")}` : " — pool verified.");
+      if (r.mainnet) {
+        msg += r.mainnet_failed?.length
+          ? ` Mainnet: failed for ${r.mainnet_failed.join(", ")}.`
+          : " Mainnet algorithm deposited.";
+      }
+      seedMsg = msg;
       await refreshSeed();
     } catch (e: any) {
       error = e.message;
@@ -154,6 +162,7 @@
         stagnation_limit: stagLimit,
         hypothesis_recall_threshold: recallThreshold,
         seed_inactive_pool: seedInactive,
+        seed_pool_mainnet: seedPoolMainnet,
       };
       if (workspace) payload.workspace = workspace;
       if (!useDefaults) {
@@ -311,7 +320,8 @@
     </div>
   </div>
   <div class="field">
-    <label class="check"><input type="checkbox" bind:checked={seedInactive} /> Seed the inactive pool from the top TIG mainnet algorithm</label>
+    <label class="check"><input type="checkbox" bind:checked={seedInactive} /> Seed the inactive pool from the top TIG mainnet algorithm <span class="muted">(drawn on trajectory resets)</span></label>
+    <label class="check"><input type="checkbox" bind:checked={seedPoolMainnet} /> Seed the initial pool from the top TIG mainnet algorithm <span class="muted">(fresh trajectories start from it)</span></label>
   </div>
   <div class="field">
     <label class="check"><input type="checkbox" bind:checked={useDefaults} /> Use recommended benchmark instance counts for every challenge</label>
@@ -403,6 +413,7 @@
       <div class="seedpool">
         <div class="row" style="align-items:baseline">
           <label style="flex:1">Seed pool</label>
+          <label class="check" style="margin:0 12px 0 0"><input type="checkbox" bind:checked={reseedMainnet} /> from mainnet too</label>
           <button onclick={doReseed} disabled={reseeding}>
             {reseeding ? "Re-seeding…" : "Re-seed pool"}
           </button>

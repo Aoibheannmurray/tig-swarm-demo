@@ -60,7 +60,8 @@ export const localApi = {
   swarmSwitch: (challenge: string) =>
     fetch(`${LOCAL}/swarm/switch`, post({ challenge })).then(jsonOrThrow),
   seedStatus: () => fetch(`${LOCAL}/swarm/seed_status`).then(jsonOrThrow),
-  reseed: () => fetch(`${LOCAL}/swarm/reseed`, post({})).then(jsonOrThrow),
+  reseed: (mainnet = false) =>
+    fetch(`${LOCAL}/swarm/reseed`, post({ mainnet })).then(jsonOrThrow),
 };
 
 // Live event stream from the companion (fleet logs + deploy progress).
