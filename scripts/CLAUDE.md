@@ -91,14 +91,18 @@ of the fleet waits on LLM responses. See `scripts/test_c3_sharding.py`.
 Sharding pays off most on warm images (per-shard fixed cost is seconds); on
 the full-source path each shard repeats the cold compile.
 
-**Big CPU machines.** A CPU shard job also parallelises *within* the machine:
-`bench_workers` config (or env `TIG_BENCH_WORKERS`) sets the concurrent solver
-processes per job — default a conservative 4. To exploit large C3 CPU
-profiles, set `c3_hardware` (e.g. `cpu-d3-96vcpu-384gb`) together with
-`bench_workers` (≈ physical cores, i.e. vCPU/2). Keep both consistent across
-the fleet: solvers are timeout-bounded, so different contention/hardware =
-non-comparable scores. Same argument for GPUs: pick ONE profile fleet-wide
-(default `l40`).
+**Big CPU machines (auto).** With `c3_hardware` unset/`auto`, each CPU
+benchmark queries the C3 control plane and deploys on the best CPU profile
+actually available right now — highest availability tier, then most vCPUs
+(`_best_cpu_hardware`, cached ~10 min; falls back to `cpu-d3-4vcpu-16gb`
+offline). Inside the job, `bench_workers` (config, or env
+`TIG_BENCH_WORKERS`) sets concurrent solver processes; its default
+`max(4, cpu_count // 2)` rides whatever machine the job landed on (≈ physical
+cores — solvers are single-threaded + timeout-bounded, so oversubscribing SMT
+threads lowers scores). Set `c3_hardware` + `bench_workers` explicitly to pin
+hardware and contention instead. GPUs: one job = one GPU regardless of
+profile; parallelism comes from sharding (default `l40` — cheapest, highest
+availability).
 
 **Fleet-wide C3 slot pool.** Every agent in a fleet shares ONE C3 key, so all
 C3 shard jobs gate on a fleet-wide FCFS slot pool (`c3_pool.py`) of

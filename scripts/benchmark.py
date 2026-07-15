@@ -224,15 +224,16 @@ def build(challenge: str) -> tuple[str, str, str]:
 def _bench_workers(cfg: dict, num_instances: int) -> int:
     """Concurrent solver processes for a CPU benchmark job.
 
-    Resolution: env `TIG_BENCH_WORKERS` > config `bench_workers` > the legacy
-    default of min(4, cpu_count). The default is deliberately conservative —
-    solvers are single-threaded and timeout-bounded, so oversubscribing cores
-    slows every solver down and silently LOWERS scores. Hosts benchmarking on
-    big C3 CPU profiles (48/96 vCPU) raise the knob to match the machine
-    (physical cores are a good ceiling: vCPUs are SMT threads, and two solvers
-    sharing a core each lose real work within their timeout). Keep the value
-    consistent across the fleet — scores are only comparable when every
-    benchmark runs under the same contention."""
+    Resolution: env `TIG_BENCH_WORKERS` > config `bench_workers` > a default
+    that scales with the machine: max(4, cpu_count // 2). Half the vCPUs ≈
+    the physical cores (cloud vCPUs are SMT threads): solvers are
+    single-threaded and timeout-bounded, so two solvers sharing a physical
+    core each lose real work inside their deadline — the default rides the
+    core count without oversubscribing. On the small 4-vCPU C3 profiles this
+    is the legacy 4; on a 96-vCPU box it's 48, so `auto` hardware
+    (c3_compute._best_cpu_hardware) exploits whatever machine the job lands
+    on with no extra config. Set the knob explicitly to pin contention (and
+    score comparability) across the fleet."""
     for raw in (os.environ.get("TIG_BENCH_WORKERS"), cfg.get("bench_workers")):
         if raw in (None, ""):
             continue
@@ -244,7 +245,7 @@ def _bench_workers(cfg: dict, num_instances: int) -> int:
             continue
         if value > 0:
             return min(num_instances, value)
-    return min(num_instances, min(4, os.cpu_count() or 1))
+    return min(num_instances, max(4, (os.cpu_count() or 1) // 2))
 
 
 def _track_starts() -> dict[str, int]:

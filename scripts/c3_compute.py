@@ -124,6 +124,55 @@ def _resolve_c3_hardware(config: dict, requested: str | None = None) -> str:
     return _DEFAULT_GPU_HARDWARE if _is_gpu_config(config) else _DEFAULT_CPU_HARDWARE
 
 
+# `auto` CPU hardware is upgraded to the best profile C3 can actually deliver
+# RIGHT NOW (largest available box — the per-vCPU rate is flat-to-cheaper on
+# the big profiles, and bench_workers scales the job's solver parallelism to
+# whatever machine it lands on). Cached briefly so a sharded benchmark's jobs
+# make one control-plane query, not one per shard.
+_AVAILABILITY_RANK = {"high": 3, "medium": 2, "low": 1}
+_HW_CACHE_TTL_SECS = 600
+_hw_cache: tuple[float, str] | None = None
+
+
+def _best_cpu_hardware(env: dict) -> str:
+    """The best CPU profile to deploy on right now: highest availability tier
+    first (LOW pools may simply never provision), then the most vCPUs, then
+    the cheaper rate. Falls back to _DEFAULT_CPU_HARDWARE whenever the
+    control-plane query fails (offline, stale CLI, no auth)."""
+    global _hw_cache
+    now = time.monotonic()
+    if _hw_cache is not None and now - _hw_cache[0] < _HW_CACHE_TTL_SECS:
+        return _hw_cache[1]
+    profile = _DEFAULT_CPU_HARDWARE
+    result = _run_c3(["c3", "list", "-al", "--json"], env, ROOT, _C3_CLI_TIMEOUT_SECS)
+    if result is not None and result.returncode == 0 and (result.stdout or "").strip():
+        try:
+            data = json.loads(result.stdout)
+            candidates = []
+            for cls in data.get("hardware") or []:
+                for p in cls.get("profiles") or []:
+                    if p.get("hardware_kind") != "cpu" or not p.get("available"):
+                        continue
+                    candidates.append((
+                        _AVAILABILITY_RANK.get(
+                            str(p.get("availability_tier", "")).lower(), 0),
+                        int(p.get("vcpu") or 0),
+                        -float(p.get("rate_per_hour_gbp") or 0.0),
+                        str(p.get("hardware_profile", "")),
+                    ))
+            candidates = [c for c in candidates if c[3]]
+            if candidates:
+                candidates.sort(reverse=True)
+                profile = candidates[0][3]
+                print(f"    [C3] auto hardware: {profile} "
+                      f"({candidates[0][1]} vCPU, tier rank {candidates[0][0]})")
+        except (ValueError, KeyError, TypeError) as exc:
+            print(f"    [C3] hardware listing unparseable ({exc}) — "
+                  f"using {profile}")
+    _hw_cache = (now, profile)
+    return profile
+
+
 def _docker_requires_accelerator(config: dict) -> str:
     return "cuda" if _is_gpu_config(config) else "none"
 
@@ -1048,7 +1097,6 @@ def run_benchmark_c3(
 
     cfg = dict(config)
     cfg["server_url"] = server
-    cfg["c3_hardware"] = _resolve_c3_hardware(cfg, _arg_value(args, "hardware"))
     # c3_max_parallel_jobs (arg wins, then config, then default) is the
     # fleet-wide FCFS pool size.
     cfg["c3_max_parallel_jobs"] = _arg_value(
@@ -1069,6 +1117,18 @@ def run_benchmark_c3(
     auth_err = _check_c3_auth(env)
     if auth_err:
         return None, auth_err
+
+    # Hardware: an explicit request pins the profile; `auto` resolves to the
+    # GPU default (l40) or, for CPU challenges, to the best CPU box C3 can
+    # deliver right now (largest available — see _best_cpu_hardware).
+    requested = _arg_value(args, "hardware")
+    raw_hw = str(
+        requested if requested is not None else cfg.get("c3_hardware", "")
+    ).strip().lower()
+    if raw_hw in _AUTO_HARDWARE_VALUES and not _is_gpu_config(cfg):
+        cfg["c3_hardware"] = _best_cpu_hardware(env)
+    else:
+        cfg["c3_hardware"] = _resolve_c3_hardware(cfg, requested)
 
     # Balanced intra-benchmark sharding: split this benchmark's instances into
     # min(c3_max_parallel_jobs, total_instances) shard jobs so ONE benchmark
