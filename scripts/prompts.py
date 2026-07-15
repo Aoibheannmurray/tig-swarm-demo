@@ -703,20 +703,35 @@ def _rust_rules_block(config: dict) -> str:
 
 def _time_budget_guidance(config: dict) -> str:
     """Bounding guidance for code prompts: each instance is killed at a hard
-    wall-clock deadline, so solvers must save early and often."""
+    wall-clock deadline, so solvers must save early and often. The deadline is
+    the HARNESS's job, not the algorithm's: reading the clock inside the
+    algorithm (std::time::Instant / SystemTime) is banned because these
+    algorithms are later ported to the upstream TIG monorepo, whose
+    fuel-instrumented runtime requires deterministic control flow — a
+    clock-gated loop won't survive submission."""
     timeout = config.get("timeout", 30)
     if _is_optimizer_hook_challenge(config):
         return (
             f"\nPer-instance time budget: {timeout} seconds — the harness-owned training "
             f"loop is killed at this hard deadline and the best checkpoint it saved is "
             f"evaluated. Keep your optimizer hooks fast so more epochs fit in the budget; "
-            f"the harness calls save_solution for you (you do NOT call it)."
+            f"the harness calls save_solution for you (you do NOT call it). Never read the "
+            f"clock inside your hooks (std::time::Instant / SystemTime): these algorithms "
+            f"are ported to the upstream TIG runtime, which requires deterministic, "
+            f"clock-free control flow."
         )
     return (
         f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
         f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
         f"keep improving and re-saving — the last saved solution is evaluated. If no "
-        f"solution was saved when the deadline hits, the instance counts as infeasible."
+        f"solution was saved when the deadline hits, the instance counts as infeasible. "
+        f"Do NOT read the clock (std::time::Instant / SystemTime) or use wall-time as a "
+        f"stopping condition — the harness owns the deadline, and these algorithms are "
+        f"later ported to the upstream TIG runtime, which requires deterministic, "
+        f"clock-free control flow. Bound your search with tunable HYPERPARAMETERS instead "
+        f"(e.g. num_iterations, restarts, no-improvement patience, convergence tolerance), "
+        f"with defaults sized to finish comfortably inside the time budget — the "
+        f"hyperparameter search can then tune them to fill it."
     )
 
 
@@ -1218,9 +1233,12 @@ def build_runtime_fix_prompt(
         "How to interpret the errors:\n"
         "- 'no solution saved' = the code crashed, panicked, or returned Err() "
         "before ever calling save_solution(), OR the solver ran out of time "
-        f"without saving. Fix: use a time-based loop (std::time::Instant + deadline "
-        f"at {timeout}s minus a few seconds margin) and call save_solution() EARLY "
-        "with your first feasible solution, then keep improving and re-saving.\n"
+        "without saving. Fix: call save_solution() EARLY with your first feasible "
+        "solution, then keep improving and re-saving inside a hyperparameter-bounded "
+        "loop (e.g. num_iterations / patience sized to finish within the time "
+        "budget). Do NOT read the clock (std::time::Instant / SystemTime) as a "
+        "stopping condition — the harness owns the deadline, and clock-free control "
+        "flow is required when the algorithm is ported to the upstream TIG runtime.\n"
         "- Any other error = the code saved a solution but the evaluator "
         "rejected it (constraint violation). Fix: check that your solution "
         "satisfies all feasibility constraints described in the challenge.\n\n"

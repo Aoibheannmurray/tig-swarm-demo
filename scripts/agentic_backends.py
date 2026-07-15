@@ -378,14 +378,25 @@ def _time_budget_parts(challenge: str, config: dict) -> tuple[str, str]:
             f"- Per-instance time budget: {timeout} seconds — the harness-owned training "
             f"loop is killed at this hard deadline and its best checkpoint is scored. Keep "
             f"your optimizer hooks fast so more epochs fit; the harness calls save_solution "
-            f"for you (do NOT call it yourself, and do NOT write your own loop)."
+            f"for you (do NOT call it yourself, and do NOT write your own loop). Never read "
+            f"the clock in your hooks (`std::time::Instant` / `SystemTime`): these "
+            f"algorithms are ported to the upstream TIG runtime, which requires "
+            f"deterministic, clock-free control flow."
         )
         return time_bullet, opt_contract
     time_bullet = (
         f"- Per-instance time budget: {timeout} seconds. The solver is killed at this\n"
-        f"  hard deadline. Use a time-based loop (`std::time::Instant`), call\n"
-        f"  `save_solution()` early with your first feasible solution, then keep\n"
-        f"  improving and re-saving. The last saved solution is what gets scored."
+        f"  hard deadline. Call `save_solution()` early with your first feasible\n"
+        f"  solution, then keep improving and re-saving. The last saved solution is\n"
+        f"  what gets scored.\n"
+        f"- Do NOT read the clock (`std::time::Instant` / `SystemTime`) or use\n"
+        f"  wall-time as a stopping condition — the harness owns the deadline, and\n"
+        f"  these algorithms are later ported to the upstream TIG runtime, which\n"
+        f"  requires deterministic, clock-free control flow. Bound your search with\n"
+        f"  tunable HYPERPARAMETERS instead (num_iterations, restarts,\n"
+        f"  no-improvement patience, convergence tolerance), with defaults sized to\n"
+        f"  finish comfortably inside the time budget — the hyperparameter search\n"
+        f"  can then tune them to fill it."
     )
     return time_bullet, ""
 
