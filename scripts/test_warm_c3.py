@@ -32,8 +32,10 @@ def test_warm_image_resolution():
     assert c3_compute._warm_c3_image({**cfg, "is_gpu": True}) == (
         "docker.io/somens/tig-swarm-warm-gpu:latest"
     )
-    # Opt-in without a namespace can't derive a ref -> plain path.
-    assert c3_compute._warm_c3_image({"c3_warm_images": True}) is None
+    # Opt-in without a namespace defaults to the TIG Foundation's public one.
+    assert c3_compute._warm_c3_image({"c3_warm_images": True}) == (
+        "docker.io/tigfoundation/tig-swarm-warm-cpu:latest"
+    )
     # Env forms.
     os.environ["TIG_C3_WARM_IMAGES"] = "1"
     os.environ["TIG_DOCKERHUB"] = "envns"

@@ -66,9 +66,11 @@ crate source + a pre-built release cargo target into
 uses these). When configured, the C3 job uploads ONLY the algorithm dir +
 scripts + config, injects the algorithm into the baked crate at `/app`, and
 incremental-builds in well under a minute instead of a 10–20 min cold
-compile. Opt in per fleet/agent via `c3_warm_image: <full ref>` (or env
-`TIG_C3_WARM_IMAGE`), or `c3_warm_images: true` + `tig_dockerhub: <ns>` to
-derive `docker.io/<ns>/tig-swarm-warm-{cpu|gpu}:latest`. Unset = the plain
+compile. Opt in per fleet/agent via `c3_warm_images: true` (pulls
+`docker.io/tigfoundation/tig-swarm-warm-{cpu|gpu}:latest` — the TIG
+Foundation's public namespace, published by CI; override the namespace with
+`tig_dockerhub: <ns>` / env `TIG_DOCKERHUB`), or pin an exact ref with
+`c3_warm_image: <full ref>` (or env `TIG_C3_WARM_IMAGE`). Unset = the plain
 full-source path above. Rebuild/republish the images whenever `src/` (the
 challenge harnesses) or the Cargo manifests change — CI does this on push to
 staging; a job-side cmp-guarded overlay keeps a drifted Cargo.toml correct

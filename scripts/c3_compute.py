@@ -239,15 +239,15 @@ def _warm_c3_image(cfg: dict) -> str | None:
     Resolution: explicit ref (`c3_warm_image` config / TIG_C3_WARM_IMAGE env)
     wins; else opt-in via `c3_warm_images: true` (or TIG_C3_WARM_IMAGES=1)
     derives docker.io/<ns>/tig-swarm-warm-{cpu|gpu}:latest from the
-    `tig_dockerhub` config / TIG_DOCKERHUB env namespace."""
+    `tig_dockerhub` config / TIG_DOCKERHUB env namespace (default: the TIG
+    Foundation's public namespace, published by CI build-warm-images.yml)."""
     explicit = cfg.get("c3_warm_image") or os.environ.get("TIG_C3_WARM_IMAGE")
     if explicit:
         return explicit
     if not (cfg.get("c3_warm_images") or os.environ.get("TIG_C3_WARM_IMAGES")):
         return None
-    ns = cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB")
-    if not ns:
-        return None
+    ns = (cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB")
+          or "tigfoundation")
     kind = "gpu" if _is_gpu_config(cfg) else "cpu"
     return f"docker.io/{ns}/tig-swarm-warm-{kind}:latest"
 
