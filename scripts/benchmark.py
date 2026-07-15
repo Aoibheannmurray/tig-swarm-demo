@@ -162,6 +162,10 @@ def load_swarm_config() -> dict:
         "scoring_direction": local.get("scoring_direction", "min"),
         "is_gpu": local.get("is_gpu", False),
         "synced_at": local.get("synced_at"),
+        # Optional: concurrent solver processes per benchmark job (see
+        # _bench_workers). Hosts running big C3 CPU boxes raise this to match
+        # the machine; absent => the conservative legacy default of 4.
+        "bench_workers": local.get("bench_workers"),
     }
     # Advisory probe: tell the user if the host has rotated since the last
     # sync. Never overrides — local stays in charge.
@@ -215,6 +219,32 @@ def build(challenge: str) -> tuple[str, str, str]:
         str(ROOT_DIR / "target/release/tig_evaluator"),
         str(ROOT_DIR / "target/release/tig_generator"),
     )
+
+
+def _bench_workers(cfg: dict, num_instances: int) -> int:
+    """Concurrent solver processes for a CPU benchmark job.
+
+    Resolution: env `TIG_BENCH_WORKERS` > config `bench_workers` > the legacy
+    default of min(4, cpu_count). The default is deliberately conservative —
+    solvers are single-threaded and timeout-bounded, so oversubscribing cores
+    slows every solver down and silently LOWERS scores. Hosts benchmarking on
+    big C3 CPU profiles (48/96 vCPU) raise the knob to match the machine
+    (physical cores are a good ceiling: vCPUs are SMT threads, and two solvers
+    sharing a core each lose real work within their timeout). Keep the value
+    consistent across the fleet — scores are only comparable when every
+    benchmark runs under the same contention."""
+    for raw in (os.environ.get("TIG_BENCH_WORKERS"), cfg.get("bench_workers")):
+        if raw in (None, ""):
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            print(f"  [BENCH] ignoring non-integer bench workers: {raw!r}",
+                  file=sys.stderr)
+            continue
+        if value > 0:
+            return min(num_instances, value)
+    return min(num_instances, min(4, os.cpu_count() or 1))
 
 
 def _track_starts() -> dict[str, int]:
@@ -498,7 +528,8 @@ def _reexec_in_docker(cfg: dict) -> int:
     # benchmark launched by the agent loop tunes/scores with the right
     # seed and solver hyperparameters (subprocess args, not a shell, so the
     # JSON value needs no quoting).
-    for _var in ("TIG_BENCH_SEED", "TIG_HYPERPARAMETERS"):
+    for _var in ("TIG_BENCH_SEED", "TIG_HYPERPARAMETERS", "TIG_TRACK_STARTS",
+                 "TIG_BENCH_WORKERS"):
         _val = os.environ.get(_var)
         if _val is not None:
             env_flags += ["-e", f"{_var}={_val}"]
@@ -1454,7 +1485,7 @@ def main() -> int:
             return 2
         print(f"  {len(instances)} instance(s) total", file=sys.stderr)
 
-        workers = min(len(instances), min(4, os.cpu_count() or 1))
+        workers = _bench_workers(cfg, len(instances))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(run_instance, challenge, tk, iid, ipath, solver, evaluator, timeout,
