@@ -245,6 +245,19 @@ class AdminSeedInactive(AdminAuth):
     source_label: str = "tig-foundation"
 
 
+class AdminSeedFromMainnet(AdminAuth):
+    """Owner-only: fetch the current top-adoption TIG mainnet algorithm(s) and
+    deposit them SERVER-SIDE (the Admin Console talks only to the server). The
+    server does the fetch + reshape itself (server/mainnet_seed.py).
+
+    `challenge=None` seeds every configured challenge. `target` picks the
+    pool(s): the SEED pool (fresh-trajectory start, strategy_tag="mainnet"),
+    the INACTIVE reset pool, or both.
+    """
+    challenge: Optional["ChallengeName"] = None
+    target: Literal["seed_pool", "inactive", "both"] = "seed_pool"
+
+
 class AdminClearInactive(AdminAuth):
     """Owner-only: empty the `inactive_algorithms` pool for a challenge.
 
