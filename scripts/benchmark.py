@@ -217,16 +217,37 @@ def build(challenge: str) -> tuple[str, str, str]:
     )
 
 
+def _track_starts() -> dict[str, int]:
+    """Per-track first-instance offsets from env `TIG_TRACK_STARTS` (JSON
+    `{track_key: start}`), set by a distributed C3 shard job (c3_compute.py).
+    A shard configured with `tracks[t] = count` and `starts[t] = start` runs
+    GLOBAL instances start..start+count-1 of track t — the per-instance seed
+    depends only on the global index, so the union of shard windows is
+    byte-identical to the unsharded run. Absent/unparseable => {} (start 0)."""
+    raw = os.environ.get("TIG_TRACK_STARTS")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return {str(k): int(v) for k, v in parsed.items()}
+    except (ValueError, TypeError, AttributeError):
+        print(f"  [BENCH] ignoring unparseable TIG_TRACK_STARTS: {raw!r}",
+              file=sys.stderr)
+        return {}
+
+
 def materialize_instances(
-    challenge: str, tracks: dict, generator_bin: str, seed: str | None = None
+    challenge: str, tracks: dict, generator_bin: str, seed: str | None = None,
+    starts: dict[str, int] | None = None,
 ) -> list[tuple[str, str, Path]]:
     """Generate instances per the active swarm config, cached on disk.
 
     `tracks` is the `test.json` shape: `{"seed": "test", "track_key": count, ...}`.
     Each (track_key, count) becomes `count` instances under
-    `datasets/<challenge>/generated/<track_key>/{0..count-1}.txt`. Generation
-    is skipped when the cache already has at least `count` files for the
-    track — re-running the wizard with smaller counts won't regenerate.
+    `datasets/<challenge>/generated/<track_key>/{start..start+count-1}.txt`
+    (`start` from `starts`, default 0 — see _track_starts). Generation is
+    skipped when the cache already has every file in the window, so shard
+    windows and re-runs coexist in one cache dir without regenerating.
 
     `seed` overrides the seed read from `tracks` (used by the hyperparameter
     search to materialise a fresh, non-test instance pool). Non-`"test"` seeds
@@ -237,6 +258,7 @@ def materialize_instances(
     """
     if seed is None:
         seed = str(tracks.get("seed", "test"))
+    starts = starts or {}
     out: list[tuple[str, str, Path]] = []
     base = ROOT_DIR / "datasets" / challenge / "generated"
     if seed != "test":
@@ -244,13 +266,15 @@ def materialize_instances(
     for track_key, count in tracks.items():
         if track_key == "seed" or not isinstance(count, int) or count <= 0:
             continue
+        start = max(0, int(starts.get(track_key, 0)))
         track_dir = base / track_key
         track_dir.mkdir(parents=True, exist_ok=True)
-        existing = sorted(p for p in track_dir.glob("*.txt"))
-        if len(existing) < count:
+        window = list(range(start, start + count))
+        missing = [i for i in window if not (track_dir / f"{i}.txt").exists()]
+        if missing:
             print(
-                f"  generating {count - len(existing)} new instances for "
-                f"{challenge}/{track_key} (have {len(existing)})…",
+                f"  generating {len(missing)} new instances for "
+                f"{challenge}/{track_key} (window {start}..{start + count - 1})…",
                 file=sys.stderr,
             )
             subprocess.run(
@@ -258,11 +282,12 @@ def materialize_instances(
                     generator_bin, challenge, track_key,
                     "--seed", seed,
                     "-n", str(count),
+                    "--start", str(start),
                     "-o", str(track_dir),
                 ],
                 check=True, capture_output=True,
             )
-        for i in range(count):
+        for i in window:
             inst = track_dir / f"{i}.txt"
             if inst.exists():
                 out.append((track_key, f"{track_key}/{i}", inst))
@@ -1382,10 +1407,13 @@ def main() -> int:
     seed_override = os.environ.get("TIG_BENCH_SEED")
     seed = seed_override or str(tracks.get("seed", "test"))
     hyperparameters = os.environ.get("TIG_HYPERPARAMETERS") or None
+    starts = _track_starts()
     if seed_override:
         print(f"  [BENCH] seed override: {seed}", file=sys.stderr)
     if hyperparameters:
         print(f"  [BENCH] hyperparameters: {hyperparameters}", file=sys.stderr)
+    if starts:
+        print(f"  [BENCH] shard window starts: {starts}", file=sys.stderr)
 
     results: list[dict] = []
 
@@ -1397,7 +1425,8 @@ def main() -> int:
         for track_key, count in tracks.items():
             if track_key == "seed" or not isinstance(count, int) or count <= 0:
                 continue
-            for i in range(count):
+            t_start = max(0, int(starts.get(track_key, 0)))
+            for i in range(t_start, t_start + count):
                 instance_list.append((track_key, i))
 
         if not instance_list:
@@ -1415,7 +1444,7 @@ def main() -> int:
         solver, evaluator, generator = build(challenge)
 
         print(f"Materialising instances under datasets/{challenge}/generated/…", file=sys.stderr)
-        instances = materialize_instances(challenge, tracks, generator, seed)
+        instances = materialize_instances(challenge, tracks, generator, seed, starts=starts)
         if not instances:
             print(
                 "error: no instances to run. Run `python setup.py` to configure this clone, "
@@ -1442,6 +1471,19 @@ def main() -> int:
         "challenge": challenge,
         **agg,
         "errors": [f"{r['instance']}: {r['error']}" for r in results if "error" in r] or None,
+        # Compact per-instance records so a distributed C3 run can merge shard
+        # outputs and re-aggregate (c3_compute._merge_shard_benchmarks) — the
+        # merged score is then identical to an unsharded run's.
+        "instance_results": [
+            {
+                "instance": r.get("instance"),
+                "track": r.get("track", "unknown"),
+                "feasible": bool(r.get("feasible")),
+                "score": r.get("score"),
+                **({"error": r["error"]} if "error" in r else {}),
+            }
+            for r in results
+        ],
     }
 
     # Per-challenge viz_data aggregation. Driven by `_AGG_EXTRAS` so a

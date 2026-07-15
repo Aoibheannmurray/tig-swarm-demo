@@ -27,6 +27,11 @@ fn cli() -> Command {
                 .value_parser(value_parser!(String)),
         )
         .arg(
+            arg!(--start <START> "First instance index to generate (instances start..start+n-1; the per-instance seed depends only on the global index, so any window of the same run is byte-identical)")
+                .default_value("0")
+                .value_parser(value_parser!(String)),
+        )
+        .arg(
             arg!(-o --out [OUT] "Output directory for instance files")
                 .value_parser(value_parser!(PathBuf)),
         )
@@ -37,6 +42,7 @@ fn run_generate(
     track_id: &str,
     seed: &str,
     n: usize,
+    start: usize,
     out: Option<&PathBuf>,
 ) -> Result<()> {
     let out_dir: PathBuf = out
@@ -59,7 +65,7 @@ fn run_generate(
                     e
                 )
             })?;
-            (0..n).into_par_iter().try_for_each(|i| {
+            (start..start + n).into_par_iter().try_for_each(|i| {
                 let instance_seed =
                     blake3::hash(format!("{}-{}-{}-{}", challenge, track_id, seed, i).as_bytes());
                 let instance =
@@ -81,6 +87,7 @@ fn main() -> Result<()> {
     let track = matches.get_one::<String>("TRACK").unwrap();
     let seed = matches.get_one::<String>("seed").unwrap();
     let n: usize = matches.get_one::<String>("n").unwrap().parse()?;
+    let start: usize = matches.get_one::<String>("start").unwrap().parse()?;
     let out = matches.get_one::<PathBuf>("out");
-    run_generate(challenge, track, seed, n, out)
+    run_generate(challenge, track, seed, n, start, out)
 }

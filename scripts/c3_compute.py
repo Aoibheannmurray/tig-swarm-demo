@@ -30,11 +30,15 @@ import subprocess
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
 import c3_pool
 from challenge_files import ROOT, read_optional
+# Shard merging re-aggregates per-instance results with the SAME math a
+# single job uses, so a sharded score is identical to an unsharded run's.
+from benchmark import aggregate as _bm_aggregate
 
 _POLL_INTERVAL_SECS = 15
 # Hard ceilings for c3 CLI subcommands so a hung CLI (network stall, auth
@@ -303,6 +307,11 @@ fi
         hpo_exports += f"\nexport TIG_BENCH_SEED={_yaml_quote(seed)}"
     if hyperparameters is not None:
         hpo_exports += f"\nexport TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}"
+    # Distributed shard window (see _plan_shards): per-track first-instance
+    # offsets benchmark.py applies so this job runs exactly its slice.
+    starts = {k: int(v) for k, v in (config.get("track_starts") or {}).items()}
+    if starts:
+        hpo_exports += f"\nexport TIG_TRACK_STARTS={_yaml_quote(json.dumps(starts))}"
 
     runner = f"""\
 #!/bin/bash
@@ -436,6 +445,11 @@ fi
         hpo_exports += f"\nexport TIG_BENCH_SEED={_yaml_quote(seed)}"
     if hyperparameters is not None:
         hpo_exports += f"\nexport TIG_HYPERPARAMETERS={_yaml_quote(hyperparameters)}"
+    # Distributed shard window (see _plan_shards): per-track first-instance
+    # offsets benchmark.py applies so this job runs exactly its slice.
+    starts = {k: int(v) for k, v in (config.get("track_starts") or {}).items()}
+    if starts:
+        hpo_exports += f"\nexport TIG_TRACK_STARTS={_yaml_quote(json.dumps(starts))}"
 
     runner = f"""\
 #!/bin/bash
@@ -489,12 +503,98 @@ exit "$status"
 
 
 def _max_parallel(cfg: dict) -> int:
-    """Fleet-wide C3 slot count. Clamped >= 1."""
+    """Fleet-wide C3 slot count = balanced shard count per benchmark. Clamped >= 1."""
     try:
         value = int(cfg.get("c3_max_parallel_jobs", _DEFAULT_MAX_PARALLEL_JOBS))
     except (TypeError, ValueError):
         value = _DEFAULT_MAX_PARALLEL_JOBS
     return max(1, value)
+
+
+def _balanced_sizes(total: int, num_machines: int) -> list[int]:
+    """Split ``total`` instances across ``min(num_machines, total)`` machines as
+    evenly as possible: no two machines differ by more than one instance. The
+    ``total % m`` larger shards come first.
+
+    e.g. (22, 3) -> [8, 7, 7]; (22, 4) -> [6, 6, 5, 5]; (2, 3) -> [1, 1]."""
+    m = min(max(1, int(num_machines)), total)
+    base, rem = divmod(total, m)
+    return [base + 1] * rem + [base] * (m - rem)
+
+
+def _plan_shards(tracks: dict, num_machines: int) -> list[list[dict]]:
+    """Split every track's instances into exactly ``min(num_machines, total)``
+    **balanced** shards (sizes differ by at most one), packing *across* track
+    boundaries so no machine is under-filled.
+
+    Returns a list of shards; each shard is a list of ``{track_key, start,
+    count}`` slices. A shard job runs benchmark.py with ``tracks`` set to its
+    per-track counts and ``TIG_TRACK_STARTS`` to its per-track starts — the
+    per-instance seed depends only on the global index, so the union of shard
+    windows is byte-identical to the unsharded run (see
+    benchmark.materialize_instances).
+
+    e.g. tracks {a: 10, b: 8} over 3 machines (18 instances -> [6, 6, 6]):
+        [a[0:6]], [a[6:10], b[0:2]], [b[2:8]]
+    ``num_machines <= 1`` yields a single shard holding every slice (the
+    single-job behavior). The ``seed`` key and any non-positive / non-int
+    count are skipped (matches benchmark.py)."""
+    units = [
+        (k, v) for k, v in (tracks or {}).items()
+        if k != "seed" and isinstance(v, int) and v > 0
+    ]
+    total = sum(count for _, count in units)
+    if total == 0:
+        return []
+
+    sizes = _balanced_sizes(total, num_machines)
+    shards: list[list[dict]] = []
+    cur: list[dict] = []
+    cur_used = 0
+    cap = sizes[0]
+    for track_key, count in units:
+        pos = 0
+        while pos < count:
+            if cur_used == cap:  # current shard full -> start the next one
+                shards.append(cur)
+                cap = sizes[len(shards)]
+                cur, cur_used = [], 0
+            take = min(cap - cur_used, count - pos)
+            cur.append({"track_key": track_key, "start": pos, "count": take})
+            pos += take
+            cur_used += take
+    if cur:
+        shards.append(cur)
+    return shards
+
+
+def _merge_shard_benchmarks(shard_benches: list[dict], challenge: str) -> dict:
+    """Reassemble per-shard benchmark.json dicts into one, concatenating the
+    per-instance records and re-aggregating with benchmark.aggregate — so the
+    merged score is identical to a single-job run of every instance.
+
+    viz_data merges by key union (it's keyed per instance and shard windows
+    are disjoint). challenge_metrics is omitted on merged runs: it's an
+    opaque per-challenge roll-up computed from the full in-process results
+    list, which shards don't carry."""
+    results: list[dict] = []
+    errors: list[str] = []
+    viz: dict = {}
+    for bench in shard_benches:
+        for r in bench.get("instance_results") or []:
+            results.append(r)
+        for e in bench.get("errors") or []:
+            errors.append(e)
+        if isinstance(bench.get("viz_data"), dict):
+            viz.update(bench["viz_data"])
+    agg = _bm_aggregate(results)
+    return {
+        "challenge": challenge,
+        **agg,
+        "errors": errors or None,
+        "instance_results": results,
+        "viz_data": viz or None,
+    }
 
 
 # ── C3 command parsing / polling ───────────────────────────────────
@@ -924,6 +1024,18 @@ def _run_one_c3_job_inner(
     return bench, ""
 
 
+def _run_one_c3_shard(
+    args: argparse.Namespace, env: dict, stage: Path, label: str,
+    pool,
+) -> tuple[dict | None, str]:
+    """Fleet-wide-cap wrapper around one shard's deploy+poll. Holds a C3 slot
+    from the shared FCFS `pool` for this shard's entire lifetime, so all agents
+    sharing one C3 key never exceed c3_max_parallel_jobs total live C3 jobs
+    (respecting the plan's concurrency limit); extra shards queue FCFS."""
+    with pool.lease():
+        return _run_one_c3_job_inner(args, env, stage, label)
+
+
 def run_benchmark_c3(
     args: argparse.Namespace, config: dict, server: str,
     seed: str | None = None, hyperparameters: str | None = None,
@@ -958,38 +1070,120 @@ def run_benchmark_c3(
     if auth_err:
         return None, auth_err
 
-    mode = "warm" if warm_image else "full-source"
-    print(f"    [C3] Staging {mode} project for {challenge} with image {image}...")
+    # Balanced intra-benchmark sharding: split this benchmark's instances into
+    # min(c3_max_parallel_jobs, total_instances) shard jobs so ONE benchmark
+    # can use every chip the plan allows (e.g. an agent benchmarking while its
+    # fleet-mates wait on LLM responses). Each shard runs its per-track window
+    # (TIG_TRACK_STARTS) and the per-instance results are merged + re-scored,
+    # so the score matches a single-job run exactly.
+    tracks = cfg.get("tracks") or {}
+    shards = _plan_shards(tracks, _max_parallel(cfg))
+    if not shards:
+        return None, f"[C3] No positive-count tracks to benchmark for {challenge}"
 
+    # Fleet-wide FCFS pool: all agents sharing one C3 key gate on it, so
+    # total live jobs never exceed the pool cap. A lone agent (no
+    # C3_POOL_DIR) gets an in-process semaphore instead. run_fleet injects
+    # C3_POOL_SIZE so every agent agrees on one cap.
+    pool_size = int(os.environ.get("C3_POOL_SIZE") or _max_parallel(cfg))
+    slot_pool = c3_pool.get_pool(pool_size, os.environ.get("C3_POOL_DIR"))
+
+    mode = "warm" if warm_image else "full-source"
+    print(
+        f"    [C3] Staging {mode} project for {challenge} with image {image} "
+        f"({len(shards)} shard job(s), fleet pool ≤{pool_size})..."
+    )
+
+    write_project = _write_warm_c3_project if warm_image else _write_c3_project
     with tempfile.TemporaryDirectory(prefix="tig-c3-", ignore_cleanup_errors=True) as tmp:
-        stage = Path(tmp)
+        root = Path(tmp)
+        base = root / "base"
+        base.mkdir()
+        # Stage the shared workspace ONCE; each extra shard is a cheap copytree.
         try:
             if warm_image:
-                _create_warm_workspace(stage, cfg, server)
-                _write_warm_c3_project(
-                    stage, cfg, server, args.c3_time, image,
-                    seed=seed, hyperparameters=hyperparameters,
-                )
+                _create_warm_workspace(base, cfg, server)
             else:
-                _create_workspace(stage, cfg, server)
-                _write_c3_project(
-                    stage, cfg, server, args.c3_time, image,
-                    seed=seed, hyperparameters=hyperparameters,
-                )
+                _create_workspace(base, cfg, server)
         except Exception as exc:
             return None, f"[C3] Failed to create staged project: {exc}"
 
-        # Fleet-wide FCFS pool: all agents sharing one C3 key gate on it, so
-        # total live jobs never exceed the pool cap. A lone agent (no
-        # C3_POOL_DIR) gets an in-process semaphore instead. run_fleet injects
-        # C3_POOL_SIZE so every agent agrees on one cap.
-        pool_size = int(os.environ.get("C3_POOL_SIZE") or _max_parallel(cfg))
-        slot_pool = c3_pool.get_pool(pool_size, os.environ.get("C3_POOL_DIR"))
-        print("    [C3] C3 will upload the staged workspace and pull the Docker Hub image")
-        with slot_pool.lease():
-            bench, err = _run_one_c3_job_inner(args, env, stage, challenge)
-        if bench is None:
-            return None, f"[C3] {err}"
-        return bench, ""
+        if len(shards) == 1:
+            try:
+                write_project(
+                    base, cfg, server, args.c3_time, image,
+                    seed=seed, hyperparameters=hyperparameters,
+                )
+            except Exception as exc:
+                return None, f"[C3] Failed to create staged project: {exc}"
+            print("    [C3] C3 will upload the staged workspace and pull the Docker Hub image")
+            with slot_pool.lease():
+                bench, err = _run_one_c3_job_inner(args, env, base, challenge)
+            if bench is None:
+                return None, f"[C3] {err}"
+            return bench, ""
+
+        jobs: list[tuple[int, Path, str]] = []
+        for idx, shard in enumerate(shards):
+            stage = root / f"shard-{idx}"
+            try:
+                shutil.copytree(base, stage)
+                shard_cfg = dict(cfg)
+                # A shard may hold slices from several tracks (bin-packed);
+                # each distinct track appears at most once per shard, so these
+                # dicts never collide. Keep the tracks' `seed` entry — inside
+                # the job benchmark.py reads the instance seed from it.
+                shard_tracks: dict = {s["track_key"]: s["count"] for s in shard}
+                if "seed" in tracks:
+                    shard_tracks["seed"] = tracks["seed"]
+                shard_cfg["tracks"] = shard_tracks
+                shard_cfg["track_starts"] = {s["track_key"]: s["start"] for s in shard}
+                # The staged .swarm-cache.json was written from the FULL cfg;
+                # rewrite it so this shard's job only runs its own window.
+                _write_container_file(
+                    stage / ".swarm-cache.json",
+                    json.dumps({**shard_cfg, "server_url": server},
+                               indent=2, sort_keys=True) + "\n",
+                )
+                write_project(
+                    stage, shard_cfg, server, args.c3_time, image,
+                    seed=seed, hyperparameters=hyperparameters,
+                )
+            except Exception as exc:
+                return None, f"[C3] Failed to stage shard {idx}: {exc}"
+            label = "+".join(
+                f"{s['track_key']}[{s['start']}:{s['start'] + s['count']}]"
+                for s in shard
+            )
+            jobs.append((idx, stage, label))
+
+        results: list[dict | None] = [None] * len(jobs)
+        errs: list[str] = [""] * len(jobs)
+        # Submit every shard at once; the fleet-wide FCFS pool — not this
+        # executor — is the real concurrency cap, so a thread per shard just
+        # parks on the pool until a slot frees.
+        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+            futures = {
+                executor.submit(_run_one_c3_shard, args, env, stage, label, slot_pool): idx
+                for idx, stage, label in jobs
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    bench, err = future.result()
+                except Exception as exc:  # defensive: never let a thread crash silently
+                    bench, err = None, f"shard raised {exc!r}"
+                results[idx], errs[idx] = bench, err
+
+        # Strict all-or-nothing (mirrors the single-job path): any failed shard
+        # means missing instances, so fail rather than score on a partial set.
+        failed = [(jobs[i][2], errs[i]) for i in range(len(jobs)) if results[i] is None]
+        if failed:
+            detail = "\n".join(f"  {label}: {err}" for label, err in failed)
+            return None, (
+                f"[C3] {len(failed)}/{len(jobs)} shard job(s) failed:\n{detail}"
+            )
+
+        return _merge_shard_benchmarks(results, challenge), ""
 
 

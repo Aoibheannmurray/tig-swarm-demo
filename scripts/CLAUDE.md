@@ -74,8 +74,25 @@ challenge harnesses) or the Cargo manifests change — CI does this on push to
 staging; a job-side cmp-guarded overlay keeps a drifted Cargo.toml correct
 (just slower) in the meantime. See `scripts/test_warm_c3.py`.
 
+**Distributed C3 (balanced sharding + fleet pool).** On the C3 path a
+benchmark's instances are split into exactly
+`min(c3_max_parallel_jobs, total_instances)` **balanced** shards (sizes differ
+by ≤1 instance: 22 over 3 → 8,7,7), packing *across* track boundaries (a shard
+may carry slices from several tracks). Each shard is its own C3 job running
+`benchmark.py` on its per-track window — `TIG_TRACK_STARTS` offsets instance
+indices, and the per-instance seed depends only on the global index
+(`tig_generator --start` / `tig_gpu_benchmark --index`), so shard windows are
+byte-identical to the unsharded run. The per-shard `benchmark.json`s are
+merged (`_merge_shard_benchmarks`) and re-aggregated with `benchmark.aggregate`,
+so the score matches a single-job run exactly — only faster. With
+`c3_max_parallel_jobs=1` a benchmark runs as a single job. One benchmark can
+therefore use every chip the plan allows (e.g. free plan = 3) while the rest
+of the fleet waits on LLM responses. See `scripts/test_c3_sharding.py`.
+Sharding pays off most on warm images (per-shard fixed cost is seconds); on
+the full-source path each shard repeats the cold compile.
+
 **Fleet-wide C3 slot pool.** Every agent in a fleet shares ONE C3 key, so all
-C3 benchmarks gate on a fleet-wide FCFS slot pool (`c3_pool.py`) of
+C3 shard jobs gate on a fleet-wide FCFS slot pool (`c3_pool.py`) of
 `c3_max_parallel_jobs` slots: total live C3 jobs never exceed the plan cap,
 extras queue first-come-first-served. `run_fleet.py` points every agent at one
 pool dir (`.c3-pool/` under the repo/clone root) via `C3_POOL_DIR` and injects
