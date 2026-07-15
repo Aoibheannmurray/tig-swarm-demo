@@ -132,17 +132,38 @@ def _resolve_c3_hardware(config: dict, requested: str | None = None) -> str:
 _AVAILABILITY_RANK = {"high": 3, "medium": 2, "low": 1}
 _HW_CACHE_TTL_SECS = 600
 _hw_cache: tuple[float, str] | None = None
+# Profiles auto-selection must never pick, even when C3 lists them available.
+# cpu-d3-96vcpu-384gb: jobs on the pool die with an internal C3 error
+# (support code C3-JOB-2457736F44XT, 2026-07-15) — even a trivial `nproc` job
+# failed while the 48-vCPU pool ran it fine. Re-test occasionally; extend or
+# override per-fleet via `c3_hardware_blocklist` config / TIG_C3_HW_BLOCKLIST
+# env (comma-separated; merged with this default).
+_DEFAULT_HW_BLOCKLIST = frozenset({"cpu-d3-96vcpu-384gb"})
 
 
-def _best_cpu_hardware(env: dict) -> str:
+def _hw_blocklist(cfg: dict | None) -> frozenset[str]:
+    extra: set[str] = set()
+    raw = (cfg or {}).get("c3_hardware_blocklist")
+    if isinstance(raw, str):
+        extra.update(p.strip() for p in raw.split(",") if p.strip())
+    elif isinstance(raw, (list, tuple, set)):
+        extra.update(str(p).strip() for p in raw if str(p).strip())
+    env_raw = os.environ.get("TIG_C3_HW_BLOCKLIST", "")
+    extra.update(p.strip() for p in env_raw.split(",") if p.strip())
+    return _DEFAULT_HW_BLOCKLIST | extra
+
+
+def _best_cpu_hardware(env: dict, cfg: dict | None = None) -> str:
     """The best CPU profile to deploy on right now: highest availability tier
     first (LOW pools may simply never provision), then the most vCPUs, then
-    the cheaper rate. Falls back to _DEFAULT_CPU_HARDWARE whenever the
-    control-plane query fails (offline, stale CLI, no auth)."""
+    the cheaper rate — skipping blocklisted pools (see _hw_blocklist). Falls
+    back to _DEFAULT_CPU_HARDWARE whenever the control-plane query fails
+    (offline, stale CLI, no auth)."""
     global _hw_cache
     now = time.monotonic()
     if _hw_cache is not None and now - _hw_cache[0] < _HW_CACHE_TTL_SECS:
         return _hw_cache[1]
+    blocked = _hw_blocklist(cfg)
     profile = _DEFAULT_CPU_HARDWARE
     result = _run_c3(["c3", "list", "-al", "--json"], env, ROOT, _C3_CLI_TIMEOUT_SECS)
     if result is not None and result.returncode == 0 and (result.stdout or "").strip():
@@ -153,14 +174,16 @@ def _best_cpu_hardware(env: dict) -> str:
                 for p in cls.get("profiles") or []:
                     if p.get("hardware_kind") != "cpu" or not p.get("available"):
                         continue
+                    name = str(p.get("hardware_profile", ""))
+                    if not name or name in blocked:
+                        continue
                     candidates.append((
                         _AVAILABILITY_RANK.get(
                             str(p.get("availability_tier", "")).lower(), 0),
                         int(p.get("vcpu") or 0),
                         -float(p.get("rate_per_hour_gbp") or 0.0),
-                        str(p.get("hardware_profile", "")),
+                        name,
                     ))
-            candidates = [c for c in candidates if c[3]]
             if candidates:
                 candidates.sort(reverse=True)
                 profile = candidates[0][3]
@@ -1126,7 +1149,7 @@ def run_benchmark_c3(
         requested if requested is not None else cfg.get("c3_hardware", "")
     ).strip().lower()
     if raw_hw in _AUTO_HARDWARE_VALUES and not _is_gpu_config(cfg):
-        cfg["c3_hardware"] = _best_cpu_hardware(env)
+        cfg["c3_hardware"] = _best_cpu_hardware(env, cfg)
     else:
         cfg["c3_hardware"] = _resolve_c3_hardware(cfg, requested)
 

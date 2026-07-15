@@ -37,21 +37,59 @@ def test_picks_largest_available():
     try:
         _with_listing(_listing(
             _profile("cpu-d3-4vcpu-16gb", 4, "medium", True, 0.11),
-            _profile("cpu-d3-96vcpu-384gb", 96, "medium", True, 2.28),
             _profile("cpu-e2-48vcpu-192gb", 48, "medium", True, 1.15),
         ))
-        assert c3_compute._best_cpu_hardware({}) == "cpu-d3-96vcpu-384gb"
+        assert c3_compute._best_cpu_hardware({}) == "cpu-e2-48vcpu-192gb"
     finally:
         c3_compute._run_c3 = orig
         c3_compute._hw_cache = None
     print("PASS test_picks_largest_available")
 
 
+def test_default_blocklist_skips_broken_pool():
+    # cpu-d3-96vcpu-384gb is blocklisted by default (C3-JOB-2457736F44XT):
+    # even when C3 lists it available it must never be auto-picked.
+    orig = c3_compute._run_c3
+    try:
+        _with_listing(_listing(
+            _profile("cpu-d3-96vcpu-384gb", 96, "high", True, 2.28),
+            _profile("cpu-e2-48vcpu-192gb", 48, "medium", True, 1.15),
+        ))
+        assert c3_compute._best_cpu_hardware({}) == "cpu-e2-48vcpu-192gb"
+    finally:
+        c3_compute._run_c3 = orig
+        c3_compute._hw_cache = None
+    print("PASS test_default_blocklist_skips_broken_pool")
+
+
+def test_config_and_env_extend_blocklist():
+    import os
+    orig = c3_compute._run_c3
+    try:
+        listing = _listing(
+            _profile("cpu-e2-48vcpu-192gb", 48, "medium", True, 1.15),
+            _profile("cpu-e2-4vcpu-16gb", 4, "medium", True, 0.11),
+        )
+        _with_listing(listing)
+        cfg = {"c3_hardware_blocklist": "cpu-e2-48vcpu-192gb"}
+        assert c3_compute._best_cpu_hardware({}, cfg) == "cpu-e2-4vcpu-16gb"
+        c3_compute._hw_cache = None
+        os.environ["TIG_C3_HW_BLOCKLIST"] = "cpu-e2-48vcpu-192gb"
+        try:
+            assert c3_compute._best_cpu_hardware({}) == "cpu-e2-4vcpu-16gb"
+        finally:
+            os.environ.pop("TIG_C3_HW_BLOCKLIST")
+    finally:
+        c3_compute._run_c3 = orig
+        c3_compute._hw_cache = None
+    print("PASS test_config_and_env_extend_blocklist")
+
+
 def test_prefers_higher_availability_tier_over_size():
     orig = c3_compute._run_c3
     try:
         _with_listing(_listing(
-            _profile("cpu-d3-96vcpu-384gb", 96, "low", True, 2.28),
+            _profile("cpu-x9-64vcpu-256gb", 64, "low", True, 2.28),
             _profile("cpu-e2-48vcpu-192gb", 48, "high", True, 1.15),
         ))
         assert c3_compute._best_cpu_hardware({}) == "cpu-e2-48vcpu-192gb"
@@ -65,7 +103,7 @@ def test_skips_unavailable_and_gpu_profiles():
     orig = c3_compute._run_c3
     try:
         _with_listing(_listing(
-            _profile("cpu-d3-96vcpu-384gb", 96, "medium", False, 2.28),
+            _profile("cpu-x9-64vcpu-256gb", 64, "medium", False, 2.28),
             {"hardware_profile": "h100-80gb", "hardware_kind": "gpu",
              "vcpu": None, "availability_tier": "high", "available": True,
              "rate_per_hour_gbp": 2.37},
@@ -117,11 +155,11 @@ def test_result_is_cached():
 
         def counting(*a, **k):
             calls.append(1)
-            return _listing(_profile("cpu-d3-96vcpu-384gb", 96, "medium", True, 2.28))
+            return _listing(_profile("cpu-e2-48vcpu-192gb", 48, "medium", True, 1.15))
 
         c3_compute._run_c3 = counting
-        assert c3_compute._best_cpu_hardware({}) == "cpu-d3-96vcpu-384gb"
-        assert c3_compute._best_cpu_hardware({}) == "cpu-d3-96vcpu-384gb"
+        assert c3_compute._best_cpu_hardware({}) == "cpu-e2-48vcpu-192gb"
+        assert c3_compute._best_cpu_hardware({}) == "cpu-e2-48vcpu-192gb"
         assert len(calls) == 1, calls  # second call served from cache
     finally:
         c3_compute._run_c3 = orig
@@ -131,6 +169,8 @@ def test_result_is_cached():
 
 def _main():
     test_picks_largest_available()
+    test_default_blocklist_skips_broken_pool()
+    test_config_and_env_extend_blocklist()
     test_prefers_higher_availability_tier_over_size()
     test_skips_unavailable_and_gpu_profiles()
     test_ties_break_on_cheaper_rate()
