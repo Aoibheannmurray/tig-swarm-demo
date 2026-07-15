@@ -771,6 +771,7 @@ async def upsert_authored_seed(
     created_at: str,
     score: float | None = None,
     kernel_code: str | None = None,
+    algorithm_files: str | None = None,
 ) -> str:
     """Deposit a HOST-AUTHORED seed, keyed by (challenge, strategy_tag).
 
@@ -785,7 +786,7 @@ async def upsert_authored_seed(
     rows for the key (from the era when the endpoint lost its dedupe) are
     collapsed to the newest row as a side effect."""
     cursor = await conn.execute(
-        "SELECT id, algorithm_code, kernel_code FROM seed_pool "
+        "SELECT id, algorithm_code, kernel_code, algorithm_files FROM seed_pool "
         "WHERE challenge = ? AND strategy_tag = ? AND source = 'authored' "
         "ORDER BY id DESC",
         (challenge, strategy_tag),
@@ -801,16 +802,19 @@ async def upsert_authored_seed(
         await insert_seed(
             conn, challenge, strategy_tag, algorithm_code,
             created_at=created_at, source="authored", score=score,
-            feasible=True, kernel_code=kernel_code,
+            feasible=True, kernel_code=kernel_code, algorithm_files=algorithm_files,
         )
         return "inserted"
-    newest_id, newest_code, newest_kernel = rows[0][0], rows[0][1], rows[0][2]
-    if newest_code == algorithm_code and (newest_kernel or None) == (kernel_code or None):
+    newest_id, newest_code, newest_kernel, newest_files = (
+        rows[0][0], rows[0][1], rows[0][2], rows[0][3])
+    if (newest_code == algorithm_code
+            and (newest_kernel or None) == (kernel_code or None)
+            and (newest_files or None) == (algorithm_files or None)):
         return "unchanged"
     await conn.execute(
-        "UPDATE seed_pool SET algorithm_code = ?, kernel_code = ?, score = ?, "
-        "feasible = 1, created_at = ? WHERE id = ?",
-        (algorithm_code, kernel_code, score, created_at, newest_id),
+        "UPDATE seed_pool SET algorithm_code = ?, kernel_code = ?, "
+        "algorithm_files = ?, score = ?, feasible = 1, created_at = ? WHERE id = ?",
+        (algorithm_code, kernel_code, algorithm_files, score, created_at, newest_id),
     )
     return "updated"
 

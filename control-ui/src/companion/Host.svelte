@@ -18,10 +18,14 @@
   let stagLimit = $state(4);
   let recallThreshold = $state(3);
   let seedInactive = $state(false);
+  let seedPoolMainnet = $state(false);
   let useDefaults = $state(true);
   // Per-challenge {track_key: instances} edits for the customize view,
   // seeded from the server's track_defaults (same values the CLI wizard uses).
   let trackEdits: Record<string, Record<string, number>> = $state({});
+  // Per-challenge solver timeout (seconds) for the customize view, seeded
+  // from the registry defaults. Hot-editable later in the Admin Console.
+  let timeoutEdits: Record<string, number> = $state({});
   let deploying = $state(false);
 
   let challengeList = $derived(swarmType === "gpu" ? challenges.gpu : challenges.cpu);
@@ -35,6 +39,40 @@
   let switchTo = $state("");
   let switchMsg = $state("");
 
+  // ── Seed pool ──
+  // The pool lives only in the swarm's DB and is written only by create's
+  // authored-seed deposit; a server DB reset (e.g. redeploy onto a
+  // non-persistent volume) empties it, and agents fall back to the bare stub.
+  let seed: any = $state(null);
+  let seedMsg = $state("");
+  let reseeding = $state(false);
+  let emptyPool = $derived((seed?.empty ?? []).length > 0);
+
+  async function refreshSeed() {
+    try { seed = await localApi.seedStatus(); } catch { seed = null; }
+  }
+
+  let reseedMainnet = $state(false);
+  async function doReseed() {
+    reseeding = true; seedMsg = ""; error = "";
+    try {
+      const r = await localApi.reseed(reseedMainnet);
+      let msg = `Re-seeded ${r.deposited}/${r.total} authored seed(s)` +
+        (r.missing?.length ? ` — still missing: ${r.missing.join(", ")}` : " — pool verified.");
+      if (r.mainnet) {
+        msg += r.mainnet_failed?.length
+          ? ` Mainnet: failed for ${r.mainnet_failed.join(", ")}.`
+          : " Mainnet algorithm deposited.";
+      }
+      seedMsg = msg;
+      await refreshSeed();
+    } catch (e: any) {
+      error = e.message;
+    } finally {
+      reseeding = false;
+    }
+  }
+
   onMount(async () => {
     try {
       await refreshRailway();
@@ -43,8 +81,13 @@
       const edits: Record<string, Record<string, number>> = {};
       for (const c of challenges.all ?? []) edits[c] = { ...(defaults[c] ?? {}) };
       trackEdits = edits;
+      const tdefaults = challenges.timeout_defaults ?? {};
+      timeoutEdits = Object.fromEntries(
+        (challenges.all ?? []).map((c: string) => [c, tdefaults[c] ?? 30]),
+      );
       admin = await localApi.swarmAdmin();
       if (admin?.active_challenge) switchTo = admin.active_challenge;
+      if (admin?.admin_key) refreshSeed();
       // Recover a deploy that's still running (or that finished) from a prior
       // page — e.g. a reload mid-provision — so the UI re-attaches instead of
       // showing an idle create form over a live deploy.
@@ -119,11 +162,15 @@
         stagnation_limit: stagLimit,
         hypothesis_recall_threshold: recallThreshold,
         seed_inactive_pool: seedInactive,
+        seed_pool_mainnet: seedPoolMainnet,
       };
       if (workspace) payload.workspace = workspace;
       if (!useDefaults) {
         payload.tracks = Object.fromEntries(
           challengeList.map((c: string) => [c, trackEdits[c] ?? {}]),
+        );
+        payload.timeouts = Object.fromEntries(
+          challengeList.map((c: string) => [c, timeoutEdits[c] ?? 30]),
         );
       }
       await localApi.swarmCreate(payload);
@@ -273,7 +320,8 @@
     </div>
   </div>
   <div class="field">
-    <label class="check"><input type="checkbox" bind:checked={seedInactive} /> Seed the inactive pool from the top TIG mainnet algorithm</label>
+    <label class="check"><input type="checkbox" bind:checked={seedInactive} /> Seed the inactive pool from the top TIG mainnet algorithm <span class="muted">(drawn on trajectory resets)</span></label>
+    <label class="check"><input type="checkbox" bind:checked={seedPoolMainnet} /> Seed the initial pool from the top TIG mainnet algorithm <span class="muted">(fresh trajectories start from it)</span></label>
   </div>
   <div class="field">
     <label class="check"><input type="checkbox" bind:checked={useDefaults} /> Use recommended benchmark instance counts for every challenge</label>
@@ -289,9 +337,13 @@
               <input type="number" min="0" bind:value={trackEdits[c][key]} />
             </div>
           {/each}
+          <div class="trackrow">
+            <span class="mono">solver timeout (s)</span>
+            <input type="number" min="1" aria-label={`solver timeout for ${c}`} bind:value={timeoutEdits[c]} />
+          </div>
         </div>
       {/each}
-      <div class="hint">Benchmark instances per track for each challenge. 0 disables a track.</div>
+      <div class="hint">Benchmark instances per track for each challenge (0 disables a track), plus each solver's per-instance time budget in seconds.</div>
     </div>
   {/if}
   <div class="actions">
@@ -356,6 +408,39 @@
       <div style="flex:0 0 auto"><button onclick={doSwitch}>Switch</button></div>
     </div>
     {#if switchMsg}<div class="banner ok" style="margin-top:14px">{switchMsg}</div>{/if}
+
+    {#if seed?.configured}
+      <div class="seedpool">
+        <div class="row" style="align-items:baseline">
+          <label style="flex:1">Seed pool</label>
+          <label class="check" style="margin:0 12px 0 0"><input type="checkbox" bind:checked={reseedMainnet} /> from mainnet too</label>
+          <button onclick={doReseed} disabled={reseeding}>
+            {reseeding ? "Re-seeding…" : "Re-seed pool"}
+          </button>
+        </div>
+        {#if emptyPool}
+          <div class="banner warn" style="margin-top:10px">
+            ⚠ Empty seed pool for {seed.empty.join(", ")} — agents fall back to the
+            bare stub and can't produce a feasible solution. This happens after a
+            server DB reset (only <code>create</code> repopulates seeds). Click
+            <b>Re-seed pool</b> to restore the authored seeds.
+          </div>
+        {/if}
+        <ul class="creds" style="margin-top:10px">
+          {#each Object.keys(seed.authored ?? {}) as ch}
+            <li>
+              <span>{ch}</span>
+              <b class={seed.pool_counts?.[ch] === 0 ? "bad" : ""}>
+                {seed.pool_counts?.[ch] ?? "?"} in pool
+                <span class="muted">({(seed.authored[ch] ?? []).join(", ")})</span>
+              </b>
+            </li>
+          {/each}
+        </ul>
+        {#if seedMsg}<div class="banner ok" style="margin-top:10px">{seedMsg}</div>{/if}
+      </div>
+    {/if}
+
     <div class="actions">
       <div class="spacer"></div>
       <a class="btn" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
@@ -378,6 +463,8 @@
   .creds { list-style: none; margin: 6px 0 4px; }
   .creds li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }
   .creds li span { color: var(--ink-dim); }
+  .seedpool { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+  .creds li b.bad { color: #c0392b; }
   .tracks { margin: 4px 0 14px; }
   .trackgroup { padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
   .trackname { font-size: 13px; font-weight: 600; margin-bottom: 6px; }

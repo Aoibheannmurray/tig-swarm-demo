@@ -569,6 +569,12 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "gpu": list(setup_mod.GPU_CHALLENGES.keys()),
             "all": list(setup_mod.CHALLENGES.keys()),
             "track_defaults": track_defaults,
+            # Per-challenge solver timeout `create` uses by default — powers
+            # the host UI's per-challenge timeout field.
+            "timeout_defaults": {
+                ch: meta.get("default_timeout", 30)
+                for ch, meta in setup_mod.CHALLENGES.items()
+            },
         }
 
     # ── Contributor: fleet config + tacit ──
@@ -785,6 +791,28 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                 new_tracks[key] = n
             challenges_cfg[ch]["tracks"] = new_tracks
 
+        # Optional per-challenge solver-timeout overrides from the UI's
+        # customize editor: {challenge: seconds}. Same validation posture as
+        # the tracks overrides — unknown challenges and non-positive values
+        # are rejected.
+        timeout_overrides = payload.get("timeouts") or {}
+        for ch, secs in timeout_overrides.items():
+            if ch not in challenges_cfg:
+                return JSONResponse(
+                    {"error": f"timeout override for unknown challenge {ch!r}"},
+                    status_code=400,
+                )
+            try:
+                n = int(secs)
+            except (TypeError, ValueError):
+                n = -1
+            if n < 1:
+                return JSONResponse(
+                    {"error": f"invalid timeout for {ch}: {secs!r}"},
+                    status_code=400,
+                )
+            challenges_cfg[ch]["timeout"] = n
+
         params = {
             "swarm_name": payload.get("swarm_name", "my-tig-swarm"),
             "workspace": workspace,
@@ -795,6 +823,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "stagnation_limit": int(payload.get("stagnation_limit", 4)),
             "hypothesis_recall_threshold": int(payload.get("hypothesis_recall_threshold", 3)),
             "seed_inactive_pool": bool(payload.get("seed_inactive_pool", False)),
+            "seed_pool_mainnet": bool(payload.get("seed_pool_mainnet", False)),
         }
         try:
             return deploy.start(params)
@@ -812,6 +841,95 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return setup_mod.switch_challenge(challenge)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # ── Seed pool: status + one-click re-seed ──
+    # The seed pool lives ONLY in the swarm's DB and is written ONLY by
+    # create's authored-seed deposit. A server DB reset (e.g. a redeploy onto
+    # a non-persistent volume) re-applies config from env but leaves the pool
+    # empty — so agents get the bare `unimplemented!` stub and nothing scores.
+    # These let the host see the pool state and re-deposit without re-running
+    # a full `create`.
+    def _swarm_challenges(admin: dict) -> set[str] | None:
+        chs = admin.get("challenges")
+        return set(chs.keys()) if isinstance(chs, dict) and chs else None
+
+    @app.get("/local-api/swarm/seed_status")
+    def swarm_seed_status() -> dict:
+        """Per-challenge seed-pool counts on the configured swarm server,
+        alongside the authored seeds available locally to (re)deposit. A
+        challenge whose count is 0 but which has an authored seed is the
+        "empty pool" the UI warns about."""
+        admin = setup_mod.read_swarm_admin()
+        server_url = admin.get("server_url")
+        key = admin.get("admin_key")
+        only = _swarm_challenges(admin)
+        authored: dict[str, list[str]] = {}
+        for s in setup_mod.read_authored_seeds():
+            if only is not None and s["challenge"] not in only:
+                continue
+            authored.setdefault(s["challenge"], []).append(s["strategy_tag"])
+        pool_counts: dict[str, int | None] = {}
+        if server_url and key:
+            for ch in sorted(authored):
+                try:
+                    body = setup_mod.post_json(
+                        f"{server_url.rstrip('/')}/api/admin/seeds",
+                        {"admin_key": key, "challenge": ch}, timeout=10,
+                    )
+                    pool_counts[ch] = body.get("count", 0)
+                except Exception:
+                    pool_counts[ch] = None  # unreachable / old server
+        return {
+            "configured": bool(server_url and key),
+            "authored": authored,
+            "pool_counts": pool_counts,
+            "empty": [ch for ch, tags in authored.items()
+                      if tags and pool_counts.get(ch) == 0],
+        }
+
+    @app.post("/local-api/swarm/reseed")
+    async def swarm_reseed(payload: dict) -> dict:
+        """Re-deposit seeds into the swarm's seed pool. Always re-deposits the
+        host's authored seeds (idempotent upsert by challenge+strategy_tag);
+        with ``{"mainnet": true}`` ALSO deposits each challenge's top TIG
+        mainnet algorithm (strategy_tag="mainnet"), so an existing swarm can
+        gain a mainnet starting point without a full re-create."""
+        admin = setup_mod.read_swarm_admin()
+        server_url = admin.get("server_url")
+        key = admin.get("admin_key")
+        if not (server_url and key):
+            return JSONResponse(
+                {"error": "no swarm.admin.json with server_url + admin_key — "
+                          "create or join a swarm first."},
+                status_code=400,
+            )
+        only = _swarm_challenges(admin)
+        seeds = [s for s in setup_mod.read_authored_seeds()
+                 if only is None or s["challenge"] in only]
+        want_mainnet = bool(payload.get("mainnet"))
+        if not seeds and not want_mainnet:
+            return JSONResponse(
+                {"error": "no authored seeds found under "
+                          "initial_algorithms/<challenge>/seeds/."},
+                status_code=400,
+            )
+        try:
+            failed = setup_mod.seed_pool_from_authored(server_url, key, seeds) if seeds else []
+            missing = setup_mod.verify_seed_pool(server_url, key, seeds) if seeds else []
+            mainnet_failed = []
+            if want_mainnet:
+                mainnet_failed = setup_mod.seed_pool_from_mainnet(
+                    server_url, key, only or set())
+        except Exception as exc:
+            return JSONResponse({"error": f"reseed failed: {exc}"}, status_code=502)
+        return {
+            "deposited": len(seeds) - len(failed),
+            "total": len(seeds),
+            "failed": failed,
+            "missing": missing,
+            "mainnet": want_mainnet,
+            "mainnet_failed": mainnet_failed,
+        }
 
     # ── Local secrets (API keys) — no `export` needed ──
     @app.get("/local-api/secrets")

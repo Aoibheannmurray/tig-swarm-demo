@@ -63,6 +63,11 @@ def main() -> int:
         check(len(p["providers"]) > 0 and len(p["c3_hardware"]) > 0, "providers + hardware listed")
         ch = c.get("/local-api/challenges").json()
         check("cpu" in ch and "gpu" in ch, "challenges split cpu/gpu")
+        check(
+            ch.get("timeout_defaults", {}).get("satisfiability", 0) > 0
+            and all(int(v) > 0 for v in ch.get("timeout_defaults", {}).values()),
+            "per-challenge timeout defaults exposed",
+        )
 
         print("fleet config write/read")
         r = c.post("/local-api/fleet/config", json={

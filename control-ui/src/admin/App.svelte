@@ -257,11 +257,14 @@
     const configured = Object.keys(trackSource).filter((k) => typeof trackSource[k] === "number");
     return [...new Set([...canonical, ...configured])];
   });
+  let timeoutDraft = $state(30);
   $effect(() => {
-    // Re-key the draft when the selected challenge changes (missing = 0).
+    // Re-key the drafts when the selected challenge changes (missing = 0).
     trackChallenge;
     trackDraft = Object.fromEntries(numericTracks.map(
       (k) => [k, typeof trackSource[k] === "number" ? trackSource[k] : 0]));
+    const t = config?.available_challenges?.[trackChallenge]?.timeout;
+    timeoutDraft = typeof t === "number" && t > 0 ? t : 30;
   });
   async function saveTracks() {
     trackMsg = ""; error = "";
@@ -271,10 +274,13 @@
       if (!Number.isFinite(v) || v < 0) { error = `Invalid count for ${k}.`; return; }
       tracks[k] = v;
     }
+    const timeout = Math.floor(timeoutDraft);
+    if (!Number.isFinite(timeout) || timeout < 1) { error = "Invalid solver timeout."; return; }
     try {
-      await hostedApi.updateSwarmConfig(adminKey, { challenges: { [trackChallenge]: { tracks } } });
+      await hostedApi.updateSwarmConfig(
+        adminKey, { challenges: { [trackChallenge]: { tracks, timeout } } });
       config = await hostedApi.swarmConfig();
-      trackMsg = `Instances saved for ${trackChallenge} — applies to the next benchmark each agent runs.`;
+      trackMsg = `Benchmark settings saved for ${trackChallenge} — applies to the next benchmark each agent runs.`;
     } catch (e: any) { error = e.message; }
   }
 
@@ -423,11 +429,13 @@
       </div>
 
       <div class="card">
-        <h2>Instances per track</h2>
+        <h2>Benchmark settings</h2>
         <p class="lede">
-          How many instances each benchmark runs per track. Hot-editable —
-          contributors pick the new counts up on their next sync (more
-          instances = more robust scores, longer benchmarks).
+          How many instances each benchmark runs per track, and each solver's
+          per-instance time budget. Hot-editable — contributors pick the new
+          values up on their next sync (more instances = more robust scores;
+          the timeout is the hard deadline each solver process gets per
+          instance).
         </p>
         <div class="field" style="max-width:260px">
           <label for="tc">Challenge</label>
@@ -441,10 +449,16 @@
             </div>
           </div>
         {/each}
+        <div class="row" style="align-items:center">
+          <div class="mono" style="flex:1">solver timeout (seconds)</div>
+          <div class="field" style="margin-bottom:0;max-width:130px">
+            <input type="number" min="1" aria-label="solver timeout seconds" bind:value={timeoutDraft} />
+          </div>
+        </div>
         {#if numericTracks.length === 0}
           <p class="muted">No instance-count tracks configured for this challenge.</p>
         {:else}
-          <div class="actions"><div class="spacer"></div><button class="primary" onclick={saveTracks}>Save instances</button></div>
+          <div class="actions"><div class="spacer"></div><button class="primary" onclick={saveTracks}>Save settings</button></div>
         {/if}
         {#if trackMsg}<div class="banner ok" style="margin-top:14px">{trackMsg}</div>{/if}
       </div>

@@ -129,6 +129,106 @@ def _top_mainnet_algorithm(challenge: str) -> tuple[str, int] | None:
     return best
 
 
+def _reshaped_mainnet_algo(ch: str) -> tuple[dict | None, str]:
+    """Fetch challenge `ch`'s top-adoption compiled mainnet algorithm and
+    reshape it into the swarm's file layout (in-memory; never touches
+    initial_algorithms/). Shared by the inactive-pool and seed-pool seeders.
+
+    Returns ``({algo_name, adoption, code_files, kernel_code}, "")`` on
+    success — ``code_files`` is a ``{relpath: content}`` map with a ``mod.rs``
+    entry, ``kernel_code`` is the single kernel for back-compat (None when
+    there are zero or many). Returns ``(None, reason)`` on any skip/error so
+    the caller can warn-and-continue."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from download_algorithm import fetch_algorithm, DownloadError
+        from challenge_files import reshape_mainnet_for_swarm
+    except Exception as e:
+        return None, f"could not import seeding helpers: {e}"
+
+    top = _top_mainnet_algorithm(ch)
+    if top is None:
+        return None, "no compiled mainnet algorithm found"
+    algo_name, adoption = top
+    try:
+        files = fetch_algorithm(ch, algo_name)
+    except DownloadError as e:
+        return None, f"fetch of {algo_name} failed ({e})"
+
+    # Keep only compilable source; drop README.md and other companions.
+    code_files = {
+        p: c for p, c in files.items() if p.endswith((".rs", ".cu", ".cuh"))
+    }
+    if "mod.rs" not in code_files:
+        return None, f"upstream {algo_name} has no mod.rs entry (files={sorted(files)})"
+
+    code_files, reshape_err = reshape_mainnet_for_swarm(ch, code_files)
+    if reshape_err:
+        return None, (f"mainnet '{algo_name}' does not fit the swarm format "
+                      f"and could not be converted ({reshape_err})")
+
+    cu_files = sorted(p for p in code_files if p.endswith((".cu", ".cuh")))
+    kernel_code = code_files[cu_files[0]] if len(cu_files) == 1 else None
+    return (
+        {"algo_name": algo_name, "adoption": adoption,
+         "code_files": code_files, "kernel_code": kernel_code},
+        "",
+    )
+
+
+def seed_pool_from_mainnet(
+    server_url: str, admin_key: str, challenges: set[str],
+) -> list[str]:
+    """Deposit each challenge's top mainnet algorithm into the SEED pool (the
+    "initial pool" handed to agents on a fresh trajectory), under
+    ``strategy_tag="mainnet"``, via ``POST /api/admin/seed_pool``. Multi-file
+    aware (the full {relpath: content} map rides in ``algorithm_files``).
+
+    Unlike ``seed_inactive_pool_from_mainnet`` (which loads the *inactive*
+    reset pool), this makes fresh trajectories START from the mainnet
+    algorithm. Idempotent — the server upserts by (challenge, strategy_tag).
+    Best-effort per challenge; returns the labels that failed so the caller
+    can verify/retry."""
+    failed: list[str] = []
+    targets = sorted(challenges)
+    if not targets:
+        return failed
+    print(f"Seeding the seed pool from TIG mainnet ({len(targets)} challenge(s))…")
+    for ch in targets:
+        info, note = _reshaped_mainnet_algo(ch)
+        if info is None:
+            print(f"  {ch}: {note}; skipping seed.")
+            continue
+        code_files = info["code_files"]
+        print(
+            f"  {ch}: top algorithm '{info['algo_name']}' "
+            f"(adoption {info['adoption'] / 1e16:.2f}%); depositing to seed pool…"
+        )
+        payload = {
+            "admin_key": admin_key,
+            "challenge": ch,
+            "strategy_tag": "mainnet",
+            "algorithm_code": code_files["mod.rs"],
+            "algorithm_files": code_files,
+            "kernel_code": info["kernel_code"],
+        }
+        label = f"{ch}/mainnet"
+        try:
+            body = post_json(
+                f"{server_url.rstrip('/')}/api/admin/seed_pool", payload, timeout=10,
+            )
+            status = body.get("action") or ("added" if body.get("seeded") else "already present")
+            print(f"  {label}: seed {status}")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:200]
+            print(f"  {label}: server rejected seed (HTTP {e.code}: {detail}).")
+            failed.append(label)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"  {label}: could not reach {server_url} ({e}).")
+            failed.append(label)
+    return failed
+
+
 def seed_inactive_pool_from_mainnet(
     server_url: str, admin_key: str, challenges: set[str],
 ) -> None:
@@ -149,65 +249,22 @@ def seed_inactive_pool_from_mainnet(
 
     Best-effort throughout: network failures, unknown algorithms, and
     server errors are warned-and-skipped rather than aborting setup."""
-    sys.path.insert(0, str(ROOT / "scripts"))
-    try:
-        from download_algorithm import fetch_algorithm, DownloadError
-        from challenge_files import reshape_mainnet_for_swarm
-    except Exception as e:
-        print(f"  could not import seeding helpers: {e}; skipping seed.")
-        return
-
     targets = sorted(challenges)
     if not targets:
         return
 
     for ch in targets:
-        top = _top_mainnet_algorithm(ch)
-        if top is None:
-            print(f"  {ch}: no compiled mainnet algorithm found; skipping seed.")
+        info, note = _reshaped_mainnet_algo(ch)
+        if info is None:
+            print(f"  {ch}: {note}; skipping seed.")
             continue
-        algo_name, adoption = top
+        algo_name = info["algo_name"]
+        code_files = info["code_files"]
+        kernel_code = info["kernel_code"]
         print(
             f"  {ch}: top algorithm '{algo_name}' "
-            f"(adoption {adoption / 1e16:.2f}%); fetching…"
+            f"(adoption {info['adoption'] / 1e16:.2f}%); depositing to inactive pool…"
         )
-        try:
-            files = fetch_algorithm(ch, algo_name)
-        except DownloadError as e:
-            print(f"  {ch}: fetch of {algo_name} failed ({e}); skipping seed.")
-            continue
-
-        # Keep only compilable source; drop README.md and other companions
-        # (mirrors challenge_files._ALGO_FILE_SUFFIXES). The full map — multiple
-        # `.rs` modules and multiple `.cu` kernels, names preserved — rides in
-        # `algorithm_files`; `algorithm_code` carries the entry file.
-        code_files = {
-            p: c for p, c in files.items()
-            if p.endswith((".rs", ".cu", ".cuh"))
-        }
-        if "mod.rs" not in code_files:
-            print(
-                f"  {ch}: upstream {algo_name} has no mod.rs entry "
-                f"(files={sorted(files)}); skipping seed."
-            )
-            continue
-
-        # Reshape the bundle into the swarm's expected layout (e.g. strip the
-        # harness-owned solve_challenge/training_loop on optimizer-hook
-        # challenges) and validate it. On failure, print an ERROR and skip so
-        # the host notices rather than seeding code the swarm will reject.
-        code_files, reshape_err = reshape_mainnet_for_swarm(ch, code_files)
-        if reshape_err:
-            print(
-                f"  ERROR {ch}: mainnet '{algo_name}' does not fit the swarm "
-                f"format and could not be converted ({reshape_err}); skipping seed."
-            )
-            continue
-
-        cu_files = sorted(p for p in code_files if p.endswith((".cu", ".cuh")))
-        # `kernel_code` is single-kernel back-compat only; with multiple kernels
-        # the map is the source of truth and we leave the scalar None.
-        kernel_code = code_files[cu_files[0]] if len(cu_files) == 1 else None
 
         payload = {
             "admin_key": admin_key,
@@ -636,6 +693,10 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
     hpo_search_budget = params.get("hpo_search_budget", 13)
     hpo_num_suggested_configs = params.get("hpo_num_suggested_configs", 5)
     seed_inactive_pool = params.get("seed_inactive_pool", False)
+    # Seed the SEED (initial) pool from the top mainnet algorithm too, so fresh
+    # trajectories START from it — independent of seed_inactive_pool (which
+    # loads the inactive reset pool). Either, both, or neither.
+    seed_pool_mainnet = params.get("seed_pool_mainnet", False)
     seedable = params.get("seedable")
     if seedable is None:
         seedable = set(challenge_set.keys())
@@ -739,6 +800,10 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         if seed_inactive_pool:
             emit("\nSeeding inactive trajectory pool from TIG mainnet…")
             seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
+
+        if seed_pool_mainnet:
+            emit("\nSeeding the initial (seed) pool from TIG mainnet…")
+            seed_pool_from_mainnet(server_url, admin_key, seedable)
 
         authored_seeds = read_authored_seeds()
         if authored_seeds:
@@ -938,6 +1003,25 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         )
         seed_inactive_pool = False
 
+    # Independently, seed the INITIAL (seed) pool from mainnet so fresh
+    # trajectories start from the top algorithm rather than the stub/authored
+    # seed. Same resolution: flag > wizard prompt.
+    seed_pool_mainnet = _arg_enabled(args, "seed_pool_mainnet")
+    if seedable and not seed_pool_mainnet and not yes:
+        ans = prompt(
+            f"Seed the INITIAL pool (fresh-trajectory start) with the current "
+            f"top-earning TIG mainnet algorithm for "
+            f"{', '.join(sorted(seedable))}? [y/N]",
+            default="N",
+        )
+        seed_pool_mainnet = ans.strip().lower() in ("y", "yes")
+    if seed_pool_mainnet and not seedable:
+        print(
+            "  --seed-pool-mainnet requested but this swarm has no "
+            "challenges; nothing to seed."
+        )
+        seed_pool_mainnet = False
+
     initial_algorithms = read_initial_algorithms()
     challenges_cfg = collect_per_challenge_configs(
         initial_algorithms, use_defaults=use_defaults, challenge_set=challenge_set,
@@ -1006,6 +1090,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         "hpo_search_budget": hpo_search_budget,
         "hpo_num_suggested_configs": hpo_num_suggested_configs,
         "seed_inactive_pool": seed_inactive_pool,
+        "seed_pool_mainnet": seed_pool_mainnet,
         "seedable": seedable,
     })
     server_url = result["server_url"]
@@ -1267,7 +1352,12 @@ def switch_challenge(challenge: str) -> dict:
         refreshed["is_gpu"] = True
     if sub:
         refreshed["tracks"] = sub.get("tracks", {})
-        refreshed["timeout"] = sub.get("timeout", 5)
+        # Only mirror a timeout the server actually sent: a server running
+        # pre-timeout code omits it, and benchmark.py's own 30s fallback is
+        # the right behavior then — NOT the legacy 5s that would silently
+        # starve every solver.
+        if sub.get("timeout") is not None:
+            refreshed["timeout"] = sub["timeout"]
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Carry the stagnation knobs into the host's cache too (switch doesn't
     # fetch /api/swarm_config, so source them from swarm.admin.json).
@@ -1366,7 +1456,12 @@ def run_sync() -> int:
         refreshed["is_gpu"] = True
     if sub:
         refreshed["tracks"] = sub.get("tracks", {})
-        refreshed["timeout"] = sub.get("timeout", 5)
+        # Only mirror a timeout the server actually sent: a server running
+        # pre-timeout code omits it, and benchmark.py's own 30s fallback is
+        # the right behavior then — NOT the legacy 5s that would silently
+        # starve every solver.
+        if sub.get("timeout") is not None:
+            refreshed["timeout"] = sub["timeout"]
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Mirror the client-relevant stagnation knobs so the driver can time
     # tacit-knowledge distillation (see _CACHE_FIELDS).

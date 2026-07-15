@@ -181,9 +181,9 @@ def test_payload_size_limits():
         base.update(overrides)
         return IterationCreate(**base)
 
+    # Real CODE (algorithm_code / algorithm_files) and other-endpoint labels
+    # still hard-reject when oversized — those are load-bearing, not decorative.
     for what, build in [
-        ("notes > 64KB", lambda: _iter(notes="x" * (64 * 1024 + 1))),
-        ("title > 300", lambda: _iter(title="t" * 301)),
         ("algorithm_code > 2MB", lambda: _iter(algorithm_code="x" * (2 * 1024 * 1024 + 1))),
         ("one algorithm_files entry > 2MB",
          lambda: _iter(algorithm_files={"mod.rs": "x" * (2 * 1024 * 1024 + 1)})),
@@ -199,7 +199,14 @@ def test_payload_size_limits():
         except ValidationError:
             continue
         raise AssertionError(f"{what} must be rejected")
-    # Sane payloads still validate.
+    # Agent-authored publish fields are SANITIZED, not rejected — a 422 there
+    # drops the whole iteration's score + hypothesis (see IterationCreate
+    # validators). Over-long title / notes are clamped; oversized solution_data
+    # (optional viz) is dropped; the score still lands.
+    assert len(_iter(title="t" * 301).title) == 300
+    assert len(_iter(notes="x" * (64 * 1024 + 1)).notes) == 64 * 1024
+    assert _iter(solution_data={"i": {"b": "x" * (2 * 1024 * 1024 + 10)}}).solution_data is None
+    # Sane payloads still validate untouched.
     _iter(notes="ok", algorithm_files={"mod.rs": "// fine\n"})
     print("PASS test_payload_size_limits")
 

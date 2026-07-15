@@ -43,7 +43,8 @@ def _load_challenge_registry() -> dict:
 
 
 def get_challenges() -> dict[str, dict]:
-    """{challenge: {scoring_direction, track_keys, strategy_tags, is_gpu}}."""
+    """{challenge: {scoring_direction, track_keys, strategy_tags, is_gpu,
+    default_timeout}}."""
     global _challenges_cache
     if _challenges_cache is None:
         _challenges_cache = {
@@ -52,6 +53,7 @@ def get_challenges() -> dict[str, dict]:
                 "track_keys": list(d.track_keys),
                 "strategy_tags": list(d.strategy_tags),
                 "is_gpu": d.is_gpu,
+                "default_timeout": d.default_timeout,
             }
             for name, d in _load_challenge_registry().items()
         }
