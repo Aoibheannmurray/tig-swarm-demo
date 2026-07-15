@@ -63,6 +63,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -2481,7 +2482,16 @@ def main() -> int:
             else:
                 print(f"  [PUBLISH] Recorded (not a new best)")
         except Exception as e:
-            print(f"  [PUBLISH] FAILED: {e}")
+            # Surface the server's validation detail: a 422 body names the
+            # exact field the schema rejected (e.g. "title too long"), which
+            # the bare HTTPError str() drops — turning a mystery into a fix.
+            detail = ""
+            if isinstance(e, urllib.error.HTTPError):
+                try:
+                    detail = e.read().decode("utf-8", errors="replace")[:600]
+                except Exception:
+                    pass
+            print(f"  [PUBLISH] FAILED: {e}" + (f" — {detail}" if detail else ""))
 
         # The HPO gate's improvement history is recorded server-side (this
         # publish sets beats_trajectory_best) and re-read from /api/state next

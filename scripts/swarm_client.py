@@ -318,15 +318,27 @@ def publish_results(
 ) -> dict:
     code = read_algorithm(config)
     kernel_code = read_optional(kernel_path(config))
+    # Coerce the agent-controlled fields to what the server's IterationCreate
+    # schema accepts, so a stray value can't 422 the whole publish (losing the
+    # iteration's score + hypothesis). `title` is capped at the server's
+    # MAX_LABEL_LEN — agents are ASKED for a short title but LLMs sometimes
+    # overrun it; `score` is coerced to a float (the schema requires one, and
+    # a failed/None benchmark score would otherwise be rejected).
+    _MAX_LABEL_LEN = 300  # mirrors server/models.py MAX_LABEL_LEN
+    title = str(mutation.get("title") or "")[:_MAX_LABEL_LEN]
+    try:
+        score = float(bench.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
     payload = {
         "agent_id": agent_id,
-        "title": mutation.get("title", ""),
-        "description": mutation.get("description", ""),
+        "title": title,
+        "description": str(mutation.get("description") or ""),
         "strategy_tag": mutation.get("strategy_tag", "other"),
         "algorithm_code": code,
-        "score": bench.get("score", 0),
-        "feasible": bench.get("feasible", False),
-        "notes": mutation.get("notes", ""),
+        "score": score,
+        "feasible": bool(bench.get("feasible", False)),
+        "notes": str(mutation.get("notes") or ""),
         "solution_data": bench.get("viz_data"),
         "track_scores": bench.get("track_scores"),
         "challenge": bench.get("challenge"),
