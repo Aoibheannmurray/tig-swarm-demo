@@ -21,7 +21,8 @@ from pathlib import Path
 from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
-    AdminRevoke, AdminSeedInactive, AdminSeedPool, AdminClearInactive,
+    AdminRevoke, AdminSeedInactive, AdminSeedPool, AdminSeedFromMainnet,
+    AdminClearInactive,
     AdminSeedsQuery,
     ContributorConfigPut, MAX_CONTRIB_CONFIG_LEN,
     MessageCreate,
@@ -2975,6 +2976,66 @@ async def admin_seed_pool(req: AdminSeedPool):
         "challenge": req.challenge,
         "strategy_tag": req.strategy_tag,
     }
+
+
+@app.post("/api/admin/seed_from_mainnet")
+async def admin_seed_from_mainnet(req: AdminSeedFromMainnet):
+    """Fetch the top-adoption TIG mainnet algorithm for each targeted
+    challenge and deposit it into the SEED pool (fresh-trajectory start,
+    strategy_tag="mainnet") and/or the INACTIVE reset pool.
+
+    The fetch/reshape runs server-side (server/mainnet_seed.py) so the Admin
+    Console — which only talks to this server — can seed a running swarm from
+    mainnet without the host's companion. Best-effort per challenge; a
+    challenge with no compilable/compatible mainnet algorithm is reported as
+    skipped, never a hard failure."""
+    import mainnet_seed
+
+    await verify_admin(req)
+    if req.challenge:
+        challenges = [req.challenge]
+    else:
+        async with db.connect() as conn:
+            rows = await db.list_challenge_configs(conn)
+        challenges = [r["challenge"] for r in rows]
+    if not challenges:
+        raise HTTPException(status_code=400, detail="no challenges configured to seed")
+
+    want_seed = req.target in ("seed_pool", "both")
+    want_inactive = req.target in ("inactive", "both")
+    results = []
+    for ch in challenges:
+        # Blocking urllib fetch — off the event loop.
+        info, note = await asyncio.to_thread(mainnet_seed.fetch_top_reshaped, ch)
+        if info is None:
+            results.append({"challenge": ch, "ok": False, "reason": note})
+            continue
+        code_files = info["code_files"]
+        files_json = _files_json(code_files)
+        entry = code_files["mod.rs"]
+        actions = {}
+        timestamp = now()
+        async with db.connect() as conn:
+            if want_seed:
+                actions["seed_pool"] = await db.upsert_authored_seed(
+                    conn, ch, "mainnet", entry, created_at=timestamp,
+                    kernel_code=info["kernel_code"], algorithm_files=files_json,
+                )
+            if want_inactive:
+                agent_id = await db.ensure_synthetic_agent(conn, "tig-foundation", timestamp)
+                if await db.count_inactive_from_agent(conn, agent_id, ch):
+                    actions["inactive"] = "already_seeded"
+                else:
+                    await db.deposit_inactive(
+                        conn, agent_id, ch, entry, None, timestamp,
+                        kernel_code=info["kernel_code"], algorithm_files=files_json)
+                    actions["inactive"] = "seeded"
+            await conn.commit()
+        results.append({
+            "challenge": ch, "ok": True, "algorithm": info["algo_name"],
+            "adoption_pct": round(info["adoption"] / 1e16, 4), "actions": actions,
+        })
+    return {"target": req.target, "results": results}
 
 
 @app.post("/api/admin/seeds")

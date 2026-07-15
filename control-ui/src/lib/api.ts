@@ -123,6 +123,9 @@ export const hostedApi = {
     fetch(`${hostedBase()}/api/admin/seed_inactive`, post({ admin_key: adminKey, challenge })).then(jsonOrThrow),
   listSeeds: (adminKey: string, challenge: string) =>
     fetch(`${hostedBase()}/api/admin/seeds`, post({ admin_key: adminKey, challenge })).then(jsonOrThrow),
+  seedFromMainnet: (adminKey: string, challenge: string | null, target: string) =>
+    fetch(`${hostedBase()}/api/admin/seed_from_mainnet`,
+      post({ admin_key: adminKey, challenge, target })).then(jsonOrThrow),
   clearInactive: (adminKey: string, challenge: string) =>
     fetch(`${hostedBase()}/api/admin/clear_inactive`, post({ admin_key: adminKey, challenge })).then(jsonOrThrow),
   resetChallenge: (adminKey: string, challenge: string) =>

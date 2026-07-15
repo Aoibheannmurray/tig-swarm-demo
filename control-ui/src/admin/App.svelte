@@ -172,17 +172,37 @@
     }
   }
   $effect(() => { if (authed && tab === "pools" && poolChallenge) loadSeeds(); });
-  async function pool(action: "seed" | "clear" | "reset") {
+  async function pool(action: "clear" | "reset") {
     poolMsg = ""; error = "";
     try {
-      if (action === "seed") await hostedApi.seedInactive(adminKey, poolChallenge);
-      else if (action === "clear") await hostedApi.clearInactive(adminKey, poolChallenge);
+      if (action === "clear") await hostedApi.clearInactive(adminKey, poolChallenge);
       else {
         if (!confirm(`Reset the ${poolChallenge} leaderboard? This clears its best history.`)) return;
         await hostedApi.resetChallenge(adminKey, poolChallenge);
       }
       poolMsg = `${action} on ${poolChallenge} done.`;
     } catch (e: any) { error = e.message; }
+  }
+
+  // Server-side mainnet seeding: the server fetches + reshapes the top
+  // mainnet algorithm and deposits it into the chosen pool(s). `poolChallenge`
+  // seeds just that one; the "all challenges" toggle seeds every configured one.
+  let poolTarget = $state("seed_pool");
+  let poolAllChallenges = $state(false);
+  let seedingMainnet = $state(false);
+  async function seedMainnet() {
+    poolMsg = ""; error = ""; seedingMainnet = true;
+    try {
+      const r = await hostedApi.seedFromMainnet(
+        adminKey, poolAllChallenges ? null : poolChallenge, poolTarget);
+      const ok = (r.results ?? []).filter((x: any) => x.ok);
+      const skipped = (r.results ?? []).filter((x: any) => !x.ok);
+      poolMsg = `Mainnet seeded into ${poolTarget.replace("_", " ")}: `
+        + (ok.length ? ok.map((x: any) => `${x.challenge} (${x.algorithm})`).join(", ") : "none")
+        + (skipped.length ? ` — skipped ${skipped.map((x: any) => x.challenge).join(", ")}` : "");
+      await loadSeeds();
+    } catch (e: any) { error = e.message; }
+    finally { seedingMainnet = false; }
   }
 
   let challengeNames = $derived(config ? Object.keys(config.available_challenges ?? {}) : []);
@@ -481,8 +501,28 @@
           <label for="pc">Challenge</label>
           <select id="pc" bind:value={poolChallenge}>{#each challengeNames as c}<option value={c}>{c}</option>{/each}</select>
         </div>
+        <div class="row" style="align-items:flex-end;gap:12px">
+          <div class="field" style="margin-bottom:0;max-width:220px">
+            <label for="pt">Seed from mainnet into</label>
+            <select id="pt" bind:value={poolTarget}>
+              <option value="seed_pool">Initial pool (fresh-trajectory start)</option>
+              <option value="inactive">Inactive pool (trajectory resets)</option>
+              <option value="both">Both pools</option>
+            </select>
+          </div>
+          <label class="check" style="margin-bottom:8px"><input type="checkbox" bind:checked={poolAllChallenges} /> all challenges</label>
+          <div style="flex:0 0 auto;margin-bottom:2px">
+            <button class="primary" onclick={seedMainnet} disabled={seedingMainnet}>
+              {seedingMainnet ? "Seeding…" : "Seed from mainnet"}
+            </button>
+          </div>
+        </div>
+        <p class="lede">
+          Fetches the current top-adoption TIG mainnet algorithm (server-side)
+          and deposits it {poolAllChallenges ? "for every configured challenge" : `for ${poolChallenge}`}.
+          Multi-file aware; a challenge with no compatible mainnet algorithm is skipped.
+        </p>
         <div class="actions" style="justify-content:flex-start">
-          <button onclick={() => pool("seed")}>Seed inactive from mainnet</button>
           <button onclick={() => pool("clear")}>Clear inactive pool</button>
           <button class="danger" onclick={() => pool("reset")}>Reset leaderboard</button>
         </div>
