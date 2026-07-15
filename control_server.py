@@ -569,6 +569,12 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "gpu": list(setup_mod.GPU_CHALLENGES.keys()),
             "all": list(setup_mod.CHALLENGES.keys()),
             "track_defaults": track_defaults,
+            # Per-challenge solver timeout `create` uses by default — powers
+            # the host UI's per-challenge timeout field.
+            "timeout_defaults": {
+                ch: meta.get("default_timeout", 30)
+                for ch, meta in setup_mod.CHALLENGES.items()
+            },
         }
 
     # ── Contributor: fleet config + tacit ──
@@ -784,6 +790,28 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                     )
                 new_tracks[key] = n
             challenges_cfg[ch]["tracks"] = new_tracks
+
+        # Optional per-challenge solver-timeout overrides from the UI's
+        # customize editor: {challenge: seconds}. Same validation posture as
+        # the tracks overrides — unknown challenges and non-positive values
+        # are rejected.
+        timeout_overrides = payload.get("timeouts") or {}
+        for ch, secs in timeout_overrides.items():
+            if ch not in challenges_cfg:
+                return JSONResponse(
+                    {"error": f"timeout override for unknown challenge {ch!r}"},
+                    status_code=400,
+                )
+            try:
+                n = int(secs)
+            except (TypeError, ValueError):
+                n = -1
+            if n < 1:
+                return JSONResponse(
+                    {"error": f"invalid timeout for {ch}: {secs!r}"},
+                    status_code=400,
+                )
+            challenges_cfg[ch]["timeout"] = n
 
         params = {
             "swarm_name": payload.get("swarm_name", "my-tig-swarm"),

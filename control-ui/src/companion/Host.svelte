@@ -22,6 +22,9 @@
   // Per-challenge {track_key: instances} edits for the customize view,
   // seeded from the server's track_defaults (same values the CLI wizard uses).
   let trackEdits: Record<string, Record<string, number>> = $state({});
+  // Per-challenge solver timeout (seconds) for the customize view, seeded
+  // from the registry defaults. Hot-editable later in the Admin Console.
+  let timeoutEdits: Record<string, number> = $state({});
   let deploying = $state(false);
 
   let challengeList = $derived(swarmType === "gpu" ? challenges.gpu : challenges.cpu);
@@ -43,6 +46,10 @@
       const edits: Record<string, Record<string, number>> = {};
       for (const c of challenges.all ?? []) edits[c] = { ...(defaults[c] ?? {}) };
       trackEdits = edits;
+      const tdefaults = challenges.timeout_defaults ?? {};
+      timeoutEdits = Object.fromEntries(
+        (challenges.all ?? []).map((c: string) => [c, tdefaults[c] ?? 30]),
+      );
       admin = await localApi.swarmAdmin();
       if (admin?.active_challenge) switchTo = admin.active_challenge;
       // Recover a deploy that's still running (or that finished) from a prior
@@ -124,6 +131,9 @@
       if (!useDefaults) {
         payload.tracks = Object.fromEntries(
           challengeList.map((c: string) => [c, trackEdits[c] ?? {}]),
+        );
+        payload.timeouts = Object.fromEntries(
+          challengeList.map((c: string) => [c, timeoutEdits[c] ?? 30]),
         );
       }
       await localApi.swarmCreate(payload);
@@ -289,9 +299,13 @@
               <input type="number" min="0" bind:value={trackEdits[c][key]} />
             </div>
           {/each}
+          <div class="trackrow">
+            <span class="mono">solver timeout (s)</span>
+            <input type="number" min="1" aria-label={`solver timeout for ${c}`} bind:value={timeoutEdits[c]} />
+          </div>
         </div>
       {/each}
-      <div class="hint">Benchmark instances per track for each challenge. 0 disables a track.</div>
+      <div class="hint">Benchmark instances per track for each challenge (0 disables a track), plus each solver's per-instance time budget in seconds.</div>
     </div>
   {/if}
   <div class="actions">
