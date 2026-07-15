@@ -2109,6 +2109,25 @@ async def create_iteration(
     counter bookkeeping → maybe harvest a seed → commit → broadcast.
     """
     require_token_matches(token_agent_id, req.agent_id)
+    # A publish MUST state the challenge it was benchmarked against. The old
+    # behavior — falling back to the swarm's *current* `active_challenge` when
+    # the field was omitted (`resolve_challenge`) — is a race: if the host
+    # switched the active challenge between an agent's benchmark and this
+    # publish, the result would be recorded under the NEW challenge, tagging the
+    # old challenge's code onto the new challenge's trajectory. Require it
+    # explicitly so a result is always attributed to the challenge it actually
+    # ran on. The client always sends it (benchmark.py stamps the benchmarked
+    # challenge; publish falls back to the synced config challenge), so this
+    # only rejects a genuinely malformed publish.
+    if req.challenge is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "publish must include the benchmarked 'challenge'; refusing to "
+                "infer it from the swarm's active challenge (which may have "
+                "changed since this result was benchmarked)."
+            ),
+        )
     challenge = await resolve_challenge(req.challenge)
     direction = await get_direction(challenge)
     challenge_cfg = await get_challenge_config_cached(challenge)
