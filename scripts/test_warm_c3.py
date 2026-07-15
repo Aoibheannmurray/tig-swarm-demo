@@ -45,14 +45,33 @@ def test_warm_image_resolution():
 
 
 def test_warm_workspace_stages_only_the_essentials():
-    with tempfile.TemporaryDirectory() as tmp:
-        stage = Path(tmp)
-        c3_compute._create_warm_workspace(
-            stage,
-            {"challenge": "knapsack", "tracks": {"seed": "test"}},
-            "https://example.invalid",
-        )
+    # Hermetic fake repo root: src/<ch>/algorithm is gitignored, so the REAL
+    # ROOT has no algorithm on a fresh checkout (CI's python job doesn't seed).
+    orig_root = c3_compute.ROOT
+    with tempfile.TemporaryDirectory() as fake_root, \
+            tempfile.TemporaryDirectory() as tmp:
+        root = Path(fake_root)
+        (root / "Cargo.toml").write_text("[package]\n")
+        (root / "Cargo.lock").write_text("# lock\n")
+        algo = root / "src" / "knapsack" / "algorithm"
+        algo.mkdir(parents=True)
+        (algo / "mod.rs").write_text("// algo\n")
+        (algo / "helpers.rs").write_text("// sidecar\n")
+        scripts = root / "scripts"
+        scripts.mkdir()
+        (scripts / "benchmark.py").write_text("# bench\n")
+        c3_compute.ROOT = root
+        try:
+            stage = Path(tmp)
+            c3_compute._create_warm_workspace(
+                stage,
+                {"challenge": "knapsack", "tracks": {"seed": "test"}},
+                "https://example.invalid",
+            )
+        finally:
+            c3_compute.ROOT = orig_root
         assert (stage / "algorithm" / "mod.rs").exists()
+        assert (stage / "algorithm" / "helpers.rs").exists()  # multi-file sidecars ship
         assert (stage / "scripts" / "benchmark.py").exists()
         assert (stage / "Cargo.toml").exists()
         assert (stage / "Cargo.lock").exists()
