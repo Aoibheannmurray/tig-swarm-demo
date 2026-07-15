@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Per-package codegen-units. We PROVED the whole loop is one 302s file: tig_algorithms
-# at codegen-units=1. A blanket codegen-units=16 fails to link because the fuel pass
-# defines crate-level singletons (__fuel_remaining, __check_fuel, ...) in the "first"
-# crate (tig_challenges), which then collide when tig_challenges is split. This arm
-# splits ONLY tig_algorithms (the hog) via a Cargo per-package profile override,
-# keeping tig_challenges (and everything else) at one unit so the fuel singletons stay
-# unique. Expectation: tig_algorithms fans out into ~16 .ll units processed in parallel,
-# collapsing the loop, and it LINKS. amd64, compile-only, no GPU (fuel-identity is a
-# later GPU gate). A = current (cu=1 everywhere), B = tig_algorithms cu=16.
-set -eu   # NOT pipefail: head on a log pipe legitimately SIGPIPEs the producer.
+# llvm-split fuel-neutral prototype, on amd64 (the target: x86_64 has NO default
+# MachineOutliner, unlike arm64). Both arms keep codegen-units=1 (identical rustc IR);
+# LLSPLIT only partitions the already-optimized tig_algorithms.ll for parallel
+# instrumentation. Measures speed AND compares the stripped .so — separating CODE
+# (.text, type t/T) from DATA symbols, since only code changes matter for fuel.
+#   A = build_so.debug0   (cu=1, single tig_algorithms.ll)
+#   B = build_so.llsplit  (cu=1, split into 16)
+set -eu
 
 CH=hypergraph
 SLOT="tig-algorithms/src/${CH}/swarm_algo"
@@ -24,46 +22,36 @@ mkdir -p "$SLOT"
 cp /swarm/fixtures/hypergraph/mod.rs "${SLOT}/mod.rs"
 cp /swarm/fixtures/hypergraph/kernels.cu "${SLOT}/kernels.cu" 2>/dev/null || true
 
-cp Cargo.toml /tmp/root.toml.orig
-
-add_pkg_override() {   # split ONLY tig-algorithms; global stays cu=1 from [profile.release]
-  cat >> Cargo.toml <<'EOF'
-
-[profile.release.package.tig-algorithms]
-codegen-units = 16
-EOF
-  echo "--- appended per-package override ---"; tail -4 Cargo.toml
-}
-restore_root() { cp /tmp/root.toml.orig Cargo.toml; }
-
-run() {  # $1=build_so variant  $2=label  $3=saved-so path
+run() {  # $1=build_so  $2=label  $3=saved.so
   rm -rf target
   install -m 0755 "$1" /usr/local/bin/tig-scripts/build_so
-  local t0 t1
-  t0=$(date +%s)
+  local t0 t1; t0=$(date +%s)
   build_algorithm swarm_algo >/tmp/m.log 2>&1 || { echo "$2 BUILD FAILED"; tail -60 /tmp/m.log; return 1; }
   t1=$(date +%s)
   echo "### $2 total=$((t1-t0))s"
   grep -E '^\[phase\]' /tmp/m.log | sed "s/^/### $2 /"
-  echo "### $2 tig_algorithms .ll units: $(ls -1 ${LLDIR}/tig_algorithms*.ll 2>/dev/null | wc -l)  bytes=$(cat ${LLDIR}/tig_algorithms*.ll 2>/dev/null | wc -c | awk '{printf "%.0fMB", $1/1048576}')"
-  echo "### $2 slowest [file] steps:"; grep -E '^\[file\]' /tmp/m.log | sort -k2 -rn | head -8 | sed "s/^/###   /"
+  echo "### $2 tig_algorithms .ll units: $(ls -1 ${LLDIR}/tig_algorithms*.ll 2>/dev/null | wc -l)"
   cp "$OUT" "$3" 2>/dev/null || true
 }
 
-echo "::group::A  codegen-units=1 everywhere (current)"
-restore_root
-run /swarm/scripts/build_so.debug0 "CU1" /tmp/so_cu1.so || true
-echo "::endgroup::"
+echo "::group::A  cu=1 (current)";      run /swarm/scripts/build_so.debug0  CU1     /tmp/so_cu1.so     || true; echo "::endgroup::"
+echo "::group::B  llvm-split (cu=1)";    run /swarm/scripts/build_so.llsplit LLSPLIT /tmp/so_split.so   || true; echo "::endgroup::"
 
-echo "::group::B  tig_algorithms codegen-units=16 (per-package)"
-add_pkg_override
-run /swarm/scripts/build_so.cgupkg "PKG16" /tmp/so_pkg16.so || true
-restore_root
-echo "::endgroup::"
-
-echo "==================== PER-PACKAGE CODEGEN-UNITS ===================="
-echo "CU1   stripped .so=$( [ -f /tmp/so_cu1.so ]   && { strip --strip-debug /tmp/so_cu1.so 2>/dev/null;   ls -lh /tmp/so_cu1.so|awk '{print $5}'; }   || echo n/a )"
-echo "PKG16 stripped .so=$( [ -f /tmp/so_pkg16.so ] && { strip --strip-debug /tmp/so_pkg16.so 2>/dev/null; ls -lh /tmp/so_pkg16.so|awk '{print $5}'; } || echo n/a )"
-echo "VERDICT: win if PKG16 BUILDS, tig_algorithms fans into multiple .ll units, and"
-echo "         loop/total << CU1. Fuel-identity then confirmed on GPU before shipping."
-echo "=================================================================="
+echo "==================== CODE-IDENTITY (amd64, .text only) ===================="
+[ -f /tmp/so_cu1.so ] && [ -f /tmp/so_split.so ] || { echo "missing a .so, cannot compare"; exit 0; }
+strip --strip-debug /tmp/so_cu1.so 2>/dev/null || true; strip --strip-debug /tmp/so_split.so 2>/dev/null || true
+# CODE = text symbols (nm type t/T); DATA = the rest (r/R/d/D/b/B ...)
+code() { nm --print-size --defined-only "$1" 2>/dev/null | awk '$3=="t"||$3=="T"{print $4, $2}' | sort; }
+data() { nm --print-size --defined-only "$1" 2>/dev/null | awk '$3!="t"&&$3!="T"{print $4, $2}' | sort; }
+code /tmp/so_cu1.so >/tmp/c1.code; code /tmp/so_split.so >/tmp/c2.code
+echo "CODE symbols: CU1=$(wc -l </tmp/c1.code)  LLSPLIT=$(wc -l </tmp/c2.code)"
+echo "DATA symbols: CU1=$(data /tmp/so_cu1.so|wc -l)  LLSPLIT=$(data /tmp/so_split.so|wc -l)"
+CH1=$(cut -d' ' -f2 /tmp/c1.code|sort|sha256sum|cut -c1-16); CH2=$(cut -d' ' -f2 /tmp/c2.code|sort|sha256sum|cut -c1-16)
+echo "CODE size-multiset hash: CU1=$CH1  LLSPLIT=$CH2  -> $([ "$CH1" = "$CH2" ] && echo SAME || echo DIFFERENT)"
+echo "CODE symbols only-in-CU1=$(comm -23 <(cut -d' ' -f1 /tmp/c1.code) <(cut -d' ' -f1 /tmp/c2.code)|wc -l)  only-in-LLSPLIT=$(comm -13 <(cut -d' ' -f1 /tmp/c1.code) <(cut -d' ' -f1 /tmp/c2.code)|wc -l)"
+echo "CODE shared-name DIFFERENT size: $(join /tmp/c1.code /tmp/c2.code|awk '$2!=$3'|wc -l)"
+echo "  examples (name cu1 llsplit):"; join /tmp/c1.code /tmp/c2.code|awk '$2!=$3{print "    "$1,$2,$3}'|head -6
+echo "  only-in-LLSPLIT code names:"; comm -13 <(cut -d' ' -f1 /tmp/c1.code) <(cut -d' ' -f1 /tmp/c2.code)|head -6|sed 's/^/    /'
+echo "VERDICT: if CODE size-multiset SAME and no only-in/size-diff, the executed code is"
+echo "         identical -> fuel identical (data-only differences are fuel-irrelevant)."
+echo "=========================================================================="
