@@ -1267,7 +1267,12 @@ def switch_challenge(challenge: str) -> dict:
         refreshed["is_gpu"] = True
     if sub:
         refreshed["tracks"] = sub.get("tracks", {})
-        refreshed["timeout"] = sub.get("timeout", 5)
+        # Only mirror a timeout the server actually sent: a server running
+        # pre-timeout code omits it, and benchmark.py's own 30s fallback is
+        # the right behavior then — NOT the legacy 5s that would silently
+        # starve every solver.
+        if sub.get("timeout") is not None:
+            refreshed["timeout"] = sub["timeout"]
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Carry the stagnation knobs into the host's cache too (switch doesn't
     # fetch /api/swarm_config, so source them from swarm.admin.json).
@@ -1366,7 +1371,12 @@ def run_sync() -> int:
         refreshed["is_gpu"] = True
     if sub:
         refreshed["tracks"] = sub.get("tracks", {})
-        refreshed["timeout"] = sub.get("timeout", 5)
+        # Only mirror a timeout the server actually sent: a server running
+        # pre-timeout code omits it, and benchmark.py's own 30s fallback is
+        # the right behavior then — NOT the legacy 5s that would silently
+        # starve every solver.
+        if sub.get("timeout") is not None:
+            refreshed["timeout"] = sub["timeout"]
         refreshed["scoring_direction"] = sub.get("scoring_direction", "max")
     # Mirror the client-relevant stagnation knobs so the driver can time
     # tacit-knowledge distillation (see _CACHE_FIELDS).
