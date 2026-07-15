@@ -841,6 +841,86 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+    # ── Seed pool: status + one-click re-seed ──
+    # The seed pool lives ONLY in the swarm's DB and is written ONLY by
+    # create's authored-seed deposit. A server DB reset (e.g. a redeploy onto
+    # a non-persistent volume) re-applies config from env but leaves the pool
+    # empty — so agents get the bare `unimplemented!` stub and nothing scores.
+    # These let the host see the pool state and re-deposit without re-running
+    # a full `create`.
+    def _swarm_challenges(admin: dict) -> set[str] | None:
+        chs = admin.get("challenges")
+        return set(chs.keys()) if isinstance(chs, dict) and chs else None
+
+    @app.get("/local-api/swarm/seed_status")
+    def swarm_seed_status() -> dict:
+        """Per-challenge seed-pool counts on the configured swarm server,
+        alongside the authored seeds available locally to (re)deposit. A
+        challenge whose count is 0 but which has an authored seed is the
+        "empty pool" the UI warns about."""
+        admin = setup_mod.read_swarm_admin()
+        server_url = admin.get("server_url")
+        key = admin.get("admin_key")
+        only = _swarm_challenges(admin)
+        authored: dict[str, list[str]] = {}
+        for s in setup_mod.read_authored_seeds():
+            if only is not None and s["challenge"] not in only:
+                continue
+            authored.setdefault(s["challenge"], []).append(s["strategy_tag"])
+        pool_counts: dict[str, int | None] = {}
+        if server_url and key:
+            for ch in sorted(authored):
+                try:
+                    body = setup_mod.post_json(
+                        f"{server_url.rstrip('/')}/api/admin/seeds",
+                        {"admin_key": key, "challenge": ch}, timeout=10,
+                    )
+                    pool_counts[ch] = body.get("count", 0)
+                except Exception:
+                    pool_counts[ch] = None  # unreachable / old server
+        return {
+            "configured": bool(server_url and key),
+            "authored": authored,
+            "pool_counts": pool_counts,
+            "empty": [ch for ch, tags in authored.items()
+                      if tags and pool_counts.get(ch) == 0],
+        }
+
+    @app.post("/local-api/swarm/reseed")
+    async def swarm_reseed(payload: dict) -> dict:
+        """Re-deposit the host's authored seeds into the swarm's seed pool.
+        Idempotent — the server upserts by (challenge, strategy_tag), so an
+        unchanged seed is a no-op and an edited one replaces the pool copy."""
+        admin = setup_mod.read_swarm_admin()
+        server_url = admin.get("server_url")
+        key = admin.get("admin_key")
+        if not (server_url and key):
+            return JSONResponse(
+                {"error": "no swarm.admin.json with server_url + admin_key — "
+                          "create or join a swarm first."},
+                status_code=400,
+            )
+        only = _swarm_challenges(admin)
+        seeds = [s for s in setup_mod.read_authored_seeds()
+                 if only is None or s["challenge"] in only]
+        if not seeds:
+            return JSONResponse(
+                {"error": "no authored seeds found under "
+                          "initial_algorithms/<challenge>/seeds/."},
+                status_code=400,
+            )
+        try:
+            failed = setup_mod.seed_pool_from_authored(server_url, key, seeds)
+            missing = setup_mod.verify_seed_pool(server_url, key, seeds)
+        except Exception as exc:
+            return JSONResponse({"error": f"reseed failed: {exc}"}, status_code=502)
+        return {
+            "deposited": len(seeds) - len(failed),
+            "total": len(seeds),
+            "failed": failed,
+            "missing": missing,
+        }
+
     # ── Local secrets (API keys) — no `export` needed ──
     @app.get("/local-api/secrets")
     def secrets_status() -> dict:

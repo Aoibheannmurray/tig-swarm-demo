@@ -1270,6 +1270,43 @@ def _print_timing_summary(results: list[dict]) -> None:
         )
 
 
+# viz_data is decorative per-instance geometry the dashboard overlays; the
+# server caps a publish's solution_data at 2MB (MAX_CODE_LEN) and rejects the
+# WHOLE publish — score included — if it overflows. A big challenge like VRP
+# (up to 100 instances × ~1000 customers of route geometry ≈ several MB) blows
+# that easily, so bound viz_data to a byte budget well under the cap: include
+# whole instances until the next would exceed it. The dashboard renders
+# whatever instances are present, so a representative subset visualizes fine.
+VIZ_DATA_BUDGET = 1_500_000  # ~1.5MB serialized, comfortably under the 2MB cap
+
+
+def _bounded_viz_data(results: list[dict], per_field: str) -> dict | None:
+    """Assemble {instance: extras} for viz, capped at VIZ_DATA_BUDGET bytes of
+    serialized JSON so an oversized payload can't 422 the publish. Instances
+    are taken in result order; the count kept/dropped is logged."""
+    viz: dict = {}
+    used = 0
+    dropped = 0
+    for r in results:
+        payload = r.get(per_field)
+        if not payload:
+            continue
+        size = len(json.dumps({r["instance"]: payload}))
+        if viz and used + size > VIZ_DATA_BUDGET:
+            dropped += 1
+            continue
+        viz[r["instance"]] = payload
+        used += size
+    if dropped:
+        print(
+            f"  [BENCH] viz_data capped at {len(viz)} instance(s) "
+            f"(~{used // 1024}KB); dropped {dropped} to stay under the "
+            f"{VIZ_DATA_BUDGET // 1024}KB budget.",
+            file=sys.stderr,
+        )
+    return viz or None
+
+
 def aggregate(results: list[dict]) -> dict:
     """Group per-instance qualities by track, average each track, then
     combine via shifted geometric mean. Infeasible instances contribute
@@ -1525,12 +1562,7 @@ def main() -> int:
     if per_field is None:
         out["viz_data"] = None
     else:
-        viz = {
-            r["instance"]: r[per_field]
-            for r in results
-            if r.get(per_field)
-        } or None
-        out["viz_data"] = viz
+        out["viz_data"] = _bounded_viz_data(results, per_field)
 
     # Per-challenge aggregate metrics, dispatched from `_AGG_METRICS`.
     # Surfaced on the published payload under `challenge_metrics` (a generic

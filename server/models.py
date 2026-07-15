@@ -127,11 +127,52 @@ class IterationCreate(BaseModel):
     # stagnation.
     iteration_type: str = "mutation"
 
+    # Sanitize the agent-controlled label/score fields rather than 422 the
+    # whole publish — a rejected iteration loses its score, hypothesis and
+    # token accounting. These run `mode="before"` so the coerced value then
+    # satisfies the field's own type/length constraints. Titles come from
+    # agent-authored hypotheses (LLMs sometimes exceed MAX_LABEL_LEN); a
+    # None/missing score is a failed or unbenchmarkable attempt.
+    @field_validator("title", mode="before")
+    @classmethod
+    def _clamp_title(cls, v):
+        return str(v)[:MAX_LABEL_LEN] if v is not None else ""
+
+    @field_validator("notes", mode="before")
+    @classmethod
+    def _clamp_notes(cls, v):
+        return str(v)[:MAX_NOTES_LEN] if v is not None else ""
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _coerce_description(cls, v):
+        return "" if v is None else str(v)
+
+    @field_validator("feasible", mode="before")
+    @classmethod
+    def _coerce_feasible(cls, v):
+        return False if v is None else v
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _coerce_score(cls, v):
+        if v is None:
+            return 0.0
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
     @field_validator("solution_data")
     @classmethod
     def _solution_data_size(cls, v):
+        # solution_data is OPTIONAL viz decoration. If it overflows the cap,
+        # DROP it (keep the publish's score + hypothesis) rather than 422 the
+        # whole iteration — losing a real score to oversized viz is the worse
+        # failure. The client (benchmark.py _bounded_viz_data) already keeps it
+        # under budget; this is the server-side backstop for older clients.
         if v is not None and len(json.dumps(v)) > MAX_CODE_LEN:
-            raise ValueError("solution_data too large")
+            return None
         return v
 
     @field_validator("algorithm_files")
