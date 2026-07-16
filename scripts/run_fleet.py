@@ -92,6 +92,10 @@ _AGENT_CONFIG_KEYS = (
     # benchmark. Best set once at the top level (all agents share ONE C3 key and
     # thus one FCFS slot pool); a per-agent value still overrides the pool size.
     "c3_max_parallel_jobs",
+    # C3 warm-image fast path (c3_compute._warm_c3_image): boolean opt-in,
+    # explicit image ref, and Docker Hub namespace override. Best set once at
+    # the top level; per-agent values still override.
+    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
     # Per-agent C3 API key (raw value). Omit to inherit the top-level fleet
     # `c3_api_key`, the C3_API_KEY env var, or the `c3 login` session — in that
     # order. Lets each agent bill C3 to a different key without separate fleets.
@@ -144,6 +148,8 @@ _FLEET_WIDE_DEFAULT_KEYS = (
     # Distributed C3 benchmarking: set once at the top level and every agent
     # inherits (per-agent entry still overrides via setdefault).
     "c3_max_parallel_jobs",
+    # C3 warm-image fast path — same fleet-wide inheritance.
+    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
 )
 
 # Fleet-entry fields the monitor loop re-syncs into a running worktree's
@@ -970,6 +976,16 @@ def cmd_run(
         # coordinate FCFS through it.
         env["C3_POOL_DIR"] = str(ROOT / ".c3-pool")
         env["C3_POOL_SIZE"] = str(fleet_pool_size)
+        # C3 warm-image opt-in, delivered via env as well as agent.config.json:
+        # worktrees live on persistent fleet/<name> branches whose scripts/ may
+        # predate the config passthrough, but c3_compute._warm_c3_image has
+        # honored these env vars from the start.
+        if agent.get("c3_warm_images"):
+            env["TIG_C3_WARM_IMAGES"] = "1"
+        if agent.get("c3_warm_image"):
+            env["TIG_C3_WARM_IMAGE"] = str(agent["c3_warm_image"])
+        if agent.get("tig_dockerhub"):
+            env["TIG_DOCKERHUB"] = str(agent["tig_dockerhub"])
         # Stdout is piped (not a TTY), so Python would block-buffer the child's
         # output and the fleet would look silent until buffers fill. Force
         # line-buffered I/O so [BENCH]/registration prints stream live.

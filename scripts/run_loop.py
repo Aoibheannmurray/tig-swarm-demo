@@ -2012,15 +2012,18 @@ def main() -> int:
             print(f"  [SEED] seeded_start changed: {seeded_start} -> {live_seeded}")
             seeded_start = live_seeded
 
-        # Surface host-tunable HPO + cleaner knobs (materialized into
-        # agent.config.json from fleet.config.json) onto `config`, which the
-        # gate/search/cleaner read. Absent keys fall back to the defaults
-        # baked into _maybe_tune_hyperparameters / the _CLEANER_* constants.
+        # Surface host-tunable HPO + cleaner knobs and the C3 warm-image
+        # opt-in (materialized into agent.config.json from fleet.config.json)
+        # onto `config`, which the gate/search/cleaner and c3_compute read.
+        # Absent keys fall back to the defaults baked into
+        # _maybe_tune_hyperparameters / the _CLEANER_* constants /
+        # c3_compute._warm_c3_image (unset = full-source staging).
         for _hpo_key in ("hpo_min_improvements", "hpo_first_tune_improvements",
                          "hpo_num_suggested_configs",
                          "hpo_search_budget", "hpo_seed",
                          "cleaner_trigger_chars", "cleaner_target_pct",
-                         "cleaner_score_delta_pct", "cleaner_cooldown_iters"):
+                         "cleaner_score_delta_pct", "cleaner_cooldown_iters",
+                         "c3_warm_images", "c3_warm_image", "tig_dockerhub"):
             if _hpo_key in _agent_cfg:
                 config[_hpo_key] = _agent_cfg[_hpo_key]
 
