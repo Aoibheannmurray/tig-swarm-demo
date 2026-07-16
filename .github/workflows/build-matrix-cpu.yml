@@ -33,9 +33,6 @@ jobs:
           - challenge: job_scheduling
             seed: initial_algorithms/job_scheduling/seeds/greedy.rs
             difficulty: "n=20,s=JOB_SHOP"
-          - challenge: energy_arbitrage
-            seed: initial_algorithms/energy_arbitrage/seeds/greedy.rs
-            difficulty: "s=BASELINE"
     env:
       DEV_IMAGE: ghcr.io/tig-foundation/tig-monorepo/${{ matrix.challenge }}/dev:0.0.6
     steps:

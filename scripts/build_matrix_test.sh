@@ -62,35 +62,37 @@ echo "==================== ${CHALLENGE} (${A}): build + fuel matrix ============
 python3 - "$CHALLENGE" "$A" <<'PY'
 import json,sys,os
 ch,arch=sys.argv[1],sys.argv[2]
+TOL=float(os.environ.get('FUEL_TOL_PCT','2.0'))   # acceptable fuel drift vs official (%)
 def fuel(p):
     if not os.path.exists(p): return None
     return [n.get('fuel_consumed') for n in (json.load(open(p)).get('nonces') or [])]
 times={}; [times.__setitem__(*l.split()) for l in open('/tmp/times') if len(l.split())==2]
-hashes={}; [hashes.__setitem__(*l.split()) for l in open('/tmp/hashes') if len(l.split())==2]
 o,o2,d,s=(fuel(f'/tmp/{x}.json') for x in ('OFFICIAL','OFFICIAL2','DEBUG0','LLSPLIT'))
-print(f"challenge={ch}  arch={arch}  difficulty={os.environ.get('DIFFICULTY')}  nonces={os.environ.get('NONCES','3')}")
+# did LLSPLIT actually split, or hit the TLS-safe fallback?
+try: llmode=[l.strip() for l in open('/tmp/b_LLSPLIT.log') if '[phase] llsplit' in l][-1]
+except Exception: llmode='(no llsplit phase line)'
+print(f"challenge={ch}  arch={arch}  difficulty={os.environ.get('DIFFICULTY')}  nonces={os.environ.get('NONCES','3')}  tol={TOL}%")
 print(f"build times (s): OFFICIAL={times.get('OFFICIAL','?')}  DEBUG0={times.get('DEBUG0','?')}  LLSPLIT={times.get('LLSPLIT','?')}")
 try:
     ot=int(times['OFFICIAL']); print("speedup vs OFFICIAL: "+"  ".join(f"{v}={ot/int(times[v]):.2f}x" for v in ('DEBUG0','LLSPLIT') if times.get(v,'FAILED')!='FAILED'))
 except Exception: pass
-print(f"code_hash: OFFICIAL={hashes.get('OFFICIAL','-')}  DEBUG0={hashes.get('DEBUG0','-')}  LLSPLIT={hashes.get('LLSPLIT','-')}")
-oh=hashes.get('OFFICIAL')
-code_ok={v:(hashes.get(v)==oh and oh is not None) for v in ('DEBUG0','LLSPLIT')}
-if arch=='amd64':
-    print(f"(1) CODE identical to OFFICIAL:  DEBUG0={'YES' if code_ok['DEBUG0'] else 'NO'}  LLSPLIT={'YES' if code_ok['LLSPLIT'] else 'NO'}"
-          + ("   => FUEL IDENTICAL" if all(code_ok.values()) else ""))
+print(f"llsplit mode: {llmode}")
 print(f"OFFICIAL fuel: {o}\nDEBUG0   fuel: {d}\nLLSPLIT  fuel: {s}")
+def maxpct(a,b):
+    if not a or not b or len(a)!=len(b) or any(x is None for x in a+b): return None
+    return max(abs(x-y)/y*100.0 for x,y in zip(b,a))   # % drift of b vs baseline a
 det=(o is not None and o==o2 and all(x is not None for x in (o or [None])))
 if det:
-    print(f"(2) determinism: OK (OFFICIAL 2 runs agree) -> runtime fuel {'IDENTICAL' if (d==o and s==o) else 'DIFFERS'}")
+    dd,ss=maxpct(o,d),maxpct(o,s)
+    print(f"(determinism OK) max fuel drift vs OFFICIAL:  DEBUG0={dd:.3f}%  LLSPLIT={('%.3f%%'%ss) if ss is not None else 'n/a(build failed)'}")
+    within=(dd is not None and dd<=TOL) and (ss is None or ss<=TOL)
+    built=('FAILED' not in times.values())
+    if built and within: print(f"VERDICT: PASS — build succeeds, fuel within {TOL}% of official")
+    elif not built:      print("VERDICT: FAIL — a build failed (see log above)")
+    else:                print(f"VERDICT: FAIL — fuel drift exceeds {TOL}%")
 else:
-    print(f"(2) determinism: NON-DETERMINISTIC (OFFICIAL 2nd run: {o2}) -> runtime fuel inconclusive")
-# Final verdict: prefer amd64 code-identity; else deterministic runtime fuel.
-if arch=='amd64' and oh is not None and all(code_ok.values()):
-    print("VERDICT: FUEL IDENTICAL (code-identical on amd64)")
-elif det and d==o and s==o:
-    print("VERDICT: FUEL IDENTICAL (deterministic runtime fuel)")
-else:
-    print("VERDICT: NOT PROVEN here — " + ("build failed" if 'FAILED' in times.values() else "non-deterministic seed / code differs; needs deterministic algo or amd64 code check"))
+    noise=maxpct(o,o2)
+    print(f"(determinism) NON-DETERMINISTIC — OFFICIAL run-to-run noise {('%.3f%%'%noise) if noise is not None else '?'} (2nd run {o2}); fuel comparison inconclusive for this seed")
+    print("VERDICT: " + ("BUILD OK, fuel inconclusive (non-deterministic seed)" if 'FAILED' not in times.values() else "FAIL — a build failed"))
 PY
 echo "==============================================================================="

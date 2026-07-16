@@ -53,16 +53,26 @@ _T_SPLIT0=$(date +%s)
 LLSPLIT_N="${LLSPLIT_N:-16}"
 _ta="target/$RUST_TARGET/release/deps/tig_algorithms.ll"
 if [ -f "$_ta" ] && [ "$LLSPLIT_N" -gt 1 ]; then
-    _dir=$(dirname "$_ta")
-    llvm-split -j "$LLSPLIT_N" -o "$_dir/__ta_part" "$_ta"
-    _i=0
-    for _p in "$_dir"/__ta_part*; do
-        [ -e "$_p" ] || continue
-        mv "$_p" "$_dir/tig_algorithms_split_${_i}.ll"
-        _i=$((_i+1))
-    done
-    rm -f "$_ta"
-    echo "[phase] llsplit: $(( $(date +%s)-_T_SPLIT0 ))s (${_i} parts of $LLSPLIT_N requested)"
+    # TLS-SAFE GUARD: if the crate has any thread_local static, llvm-split can place it
+    # (or a reference to it) in a different partition than its definition, producing a
+    # "TLS reference mismatches non-TLS reference" link error (observed: knapsack
+    # TABU_CTX, job_scheduling). Splitting TLS across modules isn't sound, so skip the
+    # split for such crates and process the single file — still gets debuginfo=0's win,
+    # just no loop parallelization for this (usually small, CPU) crate.
+    if grep -q 'thread_local' "$_ta"; then
+        echo "[phase] llsplit: SKIPPED — tig_algorithms.ll has thread_local statics (splitting TLS across partitions breaks linkage); falling back to single-unit for this crate."
+    else
+        _dir=$(dirname "$_ta")
+        llvm-split -j "$LLSPLIT_N" -o "$_dir/__ta_part" "$_ta"
+        _i=0
+        for _p in "$_dir"/__ta_part*; do
+            [ -e "$_p" ] || continue
+            mv "$_p" "$_dir/tig_algorithms_split_${_i}.ll"
+            _i=$((_i+1))
+        done
+        rm -f "$_ta"
+        echo "[phase] llsplit: $(( $(date +%s)-_T_SPLIT0 ))s (${_i} parts of $LLSPLIT_N requested)"
+    fi
 fi
 
 ll_files=()
