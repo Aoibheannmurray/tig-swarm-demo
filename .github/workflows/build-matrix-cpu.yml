@@ -1,0 +1,67 @@
+name: build-matrix-cpu
+
+# Build-variant matrix for the 5 CPU challenges on amd64. For each challenge, builds
+# its seed algorithm 3 ways (OFFICIAL debuginfo=2 / DEBUG0 / LLSPLIT), reports build
+# time, and proves fuel-identity by comparing the stripped .so CODE (identical code =>
+# identical fuel for every input — deterministic and immune to seed non-determinism).
+# CPU challenges need no GPU to build, so this runs on stock amd64 runners.
+on:
+  push:
+    branches: [build-matrix-cpu]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - challenge: satisfiability
+            seed: initial_algorithms/satisfiability/seeds/local_search.rs
+            difficulty: "n_vars=50,ratio=425"
+          - challenge: vehicle_routing
+            seed: initial_algorithms/vehicle_routing/seeds/construction.rs
+            difficulty: "n_nodes=50"
+          - challenge: knapsack
+            seed: initial_algorithms/knapsack/seeds/greedy.rs
+            difficulty: "n_items=50,budget=50"
+          - challenge: job_scheduling
+            seed: initial_algorithms/job_scheduling/seeds/greedy.rs
+            difficulty: "n=20,s=JOB_SHOP"
+          - challenge: energy_arbitrage
+            seed: initial_algorithms/energy_arbitrage/seeds/greedy.rs
+            difficulty: "s=BASELINE"
+    env:
+      DEV_IMAGE: ghcr.io/tig-foundation/tig-monorepo/${{ matrix.challenge }}/dev:0.0.6
+    steps:
+      - name: Checkout swarm repo
+        uses: actions/checkout@v4
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache || true
+          df -h /
+
+      - name: Checkout pinned TIG monorepo source
+        uses: actions/checkout@v4
+        with:
+          repository: tig-foundation/tig-monorepo
+          path: _tig-monorepo
+
+      - name: Build-variant matrix (${{ matrix.challenge }})
+        run: |
+          set -euo pipefail
+          docker pull "$DEV_IMAGE"
+          docker run --rm \
+            -e CHALLENGE='${{ matrix.challenge }}' \
+            -e SEED='${{ matrix.seed }}' \
+            -e DIFFICULTY='${{ matrix.difficulty }}' \
+            -e NONCES=3 \
+            -v "$PWD/_tig-monorepo:/work" -v "$PWD:/swarm" \
+            --entrypoint bash "$DEV_IMAGE" \
+            /swarm/scripts/build_matrix_test.sh
