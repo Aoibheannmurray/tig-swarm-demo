@@ -80,6 +80,11 @@ UI_DIST = UI_SRC_ROOT / "dist"
 UI_BUILD_STAMP = UI_DIST / ".buildstamp"
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
 TACIT_PATH = ROOT / "tacit_knowledge.md"
+# Runtime record of where the companion for THIS checkout actually listens
+# (host/port/pid). Re-runs read it to reopen the live session even when it sits
+# on a non-default port (--port, or fallen forward past a collision) instead of
+# starting a duplicate on 8787 and printing a link the user's session isn't on.
+COMPANION_PORT_FILE = ROOT / ".companion-port.json"
 
 
 def _ui_source_digest() -> str:
@@ -1294,6 +1299,46 @@ def _probe_companion(host: str, port: int) -> dict | None:
         return None
 
 
+def _read_companion_portfile() -> dict | None:
+    try:
+        body = json.loads(COMPANION_PORT_FILE.read_text(encoding="utf-8"))
+        return body if isinstance(body, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_companion_portfile(host: str, port: int) -> None:
+    try:
+        COMPANION_PORT_FILE.write_text(
+            json.dumps({"host": host, "port": port, "pid": os.getpid()}) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # purely quality-of-life; never block startup on it
+
+
+def _clear_companion_portfile() -> None:
+    """Remove the portfile on exit — but only if it still records THIS process
+    (a younger companion may have overwritten it; its record must survive)."""
+    body = _read_companion_portfile()
+    if body and body.get("pid") == os.getpid():
+        try:
+            COMPANION_PORT_FILE.unlink()
+        except OSError:
+            pass
+
+
+def _reopen_running(url: str, no_browser: bool) -> int:
+    print(f"TIG Swarm Control is already running — opening {url}")
+    print("  (Ctrl-C in ITS terminal stops it.)")
+    if not no_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+    return 0
+
+
 def _same_root(cwd: object) -> bool:
     """Does a probed companion serve THIS repo checkout? Distinguishes 'reopen
     the one that's already running' from 'a companion for some other clone is
@@ -1306,11 +1351,17 @@ def _same_root(cwd: object) -> bool:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Local control-plane UI for the TIG swarm.")
-    p.add_argument("--host", default="127.0.0.1", help="Bind address (default: localhost).")
-    p.add_argument("--port", type=int, default=8787, help="Port (default: 8787).")
+    p.add_argument("--host", default=None, help="Bind address (default: localhost).")
+    p.add_argument("--port", type=int, default=None, help="Port (default: 8787).")
     p.add_argument("--no-browser", action="store_true",
                    help="Don't auto-open a browser tab.")
     args = p.parse_args()
+
+    # None defaults let us tell "user asked for this exact placement" from
+    # "just open my companion" — only the latter may be redirected to an
+    # already-running instance on some other port (portfile check below).
+    explicit_placement = args.host is not None or args.port is not None
+    host = args.host if args.host is not None else "127.0.0.1"
 
     # The user drives everything from the browser; this process's terminal may
     # exist but nobody is watching it. Tell secrets_local never to input() —
@@ -1325,7 +1376,25 @@ def main() -> int:
     # Binding anything other than loopback exposes host credentials and fleet
     # controls to the network. Treat it as an explicit opt-out of the
     # DNS-rebinding/Host guard, and make the risk loud.
-    is_loopback_bind = _host_is_loopback(args.host)
+    is_loopback_bind = _host_is_loopback(host)
+
+    # A companion for this checkout may already be live on a NON-default port
+    # (started with --port, or fallen forward past a collision below). Its
+    # portfile records where it actually listens — reopen THAT link instead of
+    # starting a duplicate on 8787 and printing a URL the user's session isn't
+    # on. Stale records (dead pid, foreign occupant) just fall through.
+    if not explicit_placement:
+        recorded = _read_companion_portfile()
+        if recorded:
+            r_host = str(recorded.get("host") or "127.0.0.1")
+            probe_host = "127.0.0.1" if r_host in ("0.0.0.0", "::") else r_host
+            r_port = recorded.get("port")
+            if isinstance(r_port, int) and not _port_free(probe_host, r_port):
+                occupant = _probe_companion(probe_host, r_port)
+                if occupant and _same_root(occupant.get("cwd")):
+                    return _reopen_running(
+                        f"http://{probe_host}:{r_port}/", args.no_browser
+                    )
 
     # Port collision handling — re-running the join one-liner must be
     # idempotent, not "[Errno 48] address already in use":
@@ -1333,21 +1402,13 @@ def main() -> int:
     #     reopen the browser at it and exit;
     #   * otherwise (another app, or a companion for a different checkout)
     #     fall forward to the next free port.
-    port = args.port
-    if not _port_free(args.host, port):
-        occupant = _probe_companion(args.host, port)
+    port = args.port if args.port is not None else 8787
+    if not _port_free(host, port):
+        occupant = _probe_companion(host, port)
         if occupant and _same_root(occupant.get("cwd")):
-            existing = f"http://{args.host}:{port}/"
-            print(f"TIG Swarm Control is already running — opening {existing}")
-            print("  (Ctrl-C in ITS terminal stops it.)")
-            if not args.no_browser:
-                try:
-                    webbrowser.open(existing)
-                except Exception:
-                    pass
-            return 0
+            return _reopen_running(f"http://{host}:{port}/", args.no_browser)
         for candidate in range(port + 1, port + 21):
-            if _port_free(args.host, candidate):
+            if _port_free(host, candidate):
                 print(f"  port {port} is in use — using {candidate} instead.")
                 port = candidate
                 break
@@ -1357,7 +1418,7 @@ def main() -> int:
                 f"(macOS/Linux: `lsof -ti :{port} | xargs kill`) or pass --port."
             )
 
-    url = f"http://{args.host}:{port}/"
+    url = f"http://{host}:{port}/"
     print(f"TIG Swarm Control — {url}")
     print("  (Ctrl-C stops the companion; a running fleet stops with it.)")
     if not is_loopback_bind:
@@ -1373,12 +1434,16 @@ def main() -> int:
         except Exception:
             pass
 
-    uvicorn.run(
-        create_app(allow_remote=not is_loopback_bind),
-        host=args.host,
-        port=port,
-        log_level="warning",
-    )
+    _write_companion_portfile(host, port)
+    try:
+        uvicorn.run(
+            create_app(allow_remote=not is_loopback_bind),
+            host=host,
+            port=port,
+            log_level="warning",
+        )
+    finally:
+        _clear_companion_portfile()
     return 0
 
 
