@@ -328,11 +328,24 @@ def _run_benchmark_local(
         err = result.stderr or result.stdout or "Benchmark failed"
         print(f"  Benchmark failed:\n{err[-2000:]}", file=sys.stderr)
         return None, err
+    # The GPU toolchain image (nvidia/cuda) prints a "== CUDA ==" banner to
+    # stdout via its entrypoint, ahead of benchmark.py's JSON. Try a clean
+    # parse first, then fall back to slicing out the JSON object (first "{"
+    # to last "}") so that banner — which contains no braces — is ignored.
+    raw = result.stdout or ""
     try:
-        return json.loads(result.stdout), ""
+        return json.loads(raw), ""
     except json.JSONDecodeError:
-        print(f"  Benchmark output not valid JSON:\n{result.stdout[:300]}", file=sys.stderr)
-        return None, "Benchmark output was not valid JSON"
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(raw[start:end + 1]), ""
+        except json.JSONDecodeError:
+            pass
+    print(f"  Benchmark output not valid JSON:\n{raw[:300]}", file=sys.stderr)
+    return None, "Benchmark output was not valid JSON"
 
 
 _BENCH_HEARTBEAT_INTERVAL_S = 300

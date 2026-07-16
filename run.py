@@ -26,6 +26,7 @@ The underlying scripts still work for power-user / scripted flows:
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -240,6 +241,64 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
         )
 
 
+def _gpu_local_preflight(agents: list[dict]) -> str | None:
+    """When a local-compute agent is locked onto a GPU challenge, verify the
+    host can actually pass a GPU into Docker. Returns an actionable message if
+    it can't, else None.
+
+    The plain docker-on-PATH check is not enough for GPU challenges:
+    `benchmark.py` launches the GPU container with `--gpus all`, which needs
+    the NVIDIA Container Toolkit wired into Docker. Without it the benchmark
+    dies mid-run with `could not select device driver "" with capabilities:
+    [[gpu]]`. This surfaces the same problem as a startup message instead.
+
+    Best-effort and NVIDIA-focused (the only GPU path the benchmark uses). We
+    gate on the locked challenge's `is_gpu` from .swarm-cache.json; before the
+    first sync that flag is unknown, so we skip (the mid-run error still
+    applies then, as before). A false pass just falls back to today's
+    behavior — it never blocks a CPU fleet or a working GPU host.
+    """
+    uses_local = any((a.get("compute") or "local") == "local" for a in agents)
+    if not uses_local:
+        return None
+    try:
+        cached = json.loads((ROOT / ".swarm-cache.json").read_text())
+        is_gpu = bool(cached.get("is_gpu"))
+    except (OSError, ValueError):
+        return None  # no locked challenge yet — can't tell; skip
+    if not is_gpu:
+        return None
+
+    if shutil.which("nvidia-smi") is None:
+        return (
+            "This fleet has a local-compute agent on a GPU challenge, but no "
+            "NVIDIA GPU is visible on this host (`nvidia-smi` not found).\n"
+            "Run it on a machine with an NVIDIA GPU + driver, or switch the "
+            "agent to C3 cloud compute (no local GPU needed)."
+        )
+    # GPU + driver present, but `--gpus all` also needs the NVIDIA Container
+    # Toolkit wired into Docker; its absence is exactly what produces the
+    # device-driver error, so check for the binaries it installs.
+    has_toolkit = any(
+        shutil.which(b) is not None
+        for b in ("nvidia-ctk", "nvidia-container-runtime", "nvidia-container-cli")
+    )
+    if not has_toolkit:
+        return (
+            "This fleet has a local-compute agent on a GPU challenge and an "
+            "NVIDIA GPU is present, but Docker can't pass it through: the "
+            "NVIDIA Container Toolkit isn't installed.\nWithout it the "
+            'benchmark fails with `could not select device driver "" with '
+            "capabilities: [[gpu]]`.\n\nInstall it and wire it into Docker:\n"
+            "  sudo apt-get install -y nvidia-container-toolkit\n"
+            "  sudo nvidia-ctk runtime configure --runtime=docker\n"
+            "  sudo systemctl restart docker\n"
+            "(see NVIDIA's install guide for non-apt distros), or switch the "
+            "agent to C3 cloud compute."
+        )
+    return None
+
+
 def main() -> int:
     # `--join <link>` writes fleet.config.json from an invite link and then
     # launches — the one-command onboarding path. Consume the flag + its value
@@ -297,6 +356,14 @@ def main() -> int:
             "needed).",
             file=sys.stderr,
         )
+        return 1
+
+    # GPU challenges additionally need the NVIDIA Container Toolkit so Docker
+    # can pass a GPU into the benchmark container (`--gpus all`). Catch a
+    # missing toolkit / GPU now instead of mid-benchmark.
+    gpu_problem = _gpu_local_preflight(agents)
+    if gpu_problem:
+        print(gpu_problem, file=sys.stderr)
         return 1
 
     try:
