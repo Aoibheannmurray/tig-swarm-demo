@@ -341,7 +341,13 @@ def publish_results(
         "notes": str(mutation.get("notes") or ""),
         "solution_data": bench.get("viz_data"),
         "track_scores": bench.get("track_scores"),
-        "challenge": bench.get("challenge"),
+        # Always attribute the result to the challenge it was benchmarked on.
+        # `bench["challenge"]` is stamped by benchmark.py; fall back to the
+        # synced config's challenge (same iteration, so identical) rather than
+        # ever sending null — the server refuses a challenge-less publish
+        # instead of inferring it from the (possibly since-switched) active
+        # challenge.
+        "challenge": bench.get("challenge") or config.get("challenge"),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "estimated_cost": estimated_cost,
