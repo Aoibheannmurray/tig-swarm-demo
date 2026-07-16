@@ -263,9 +263,8 @@ class FleetController:
         if uses_local and shutil.which("docker") is None:
             raise RuntimeError(
                 "This fleet has agents on local compute, but Docker isn't "
-                "installed. Install Docker Desktop "
-                "(https://www.docker.com/products/docker-desktop/) and start it, "
-                "or switch those agents to C3 cloud compute (no local Docker needed)."
+                "installed.\n\n" + _docker_manual_hint() + "\n\nOr switch those "
+                "agents to C3 cloud compute (no local Docker needed)."
             )
 
         self._stop = threading.Event()
@@ -611,6 +610,178 @@ class RailwayInstallController:
         return self.status()
 
 
+# ── Docker install ─────────────────────────────────────────────────────
+
+# Docker's official convenience script — the same contract as
+# railway.com/install.sh above: vendor-maintained, and it detects the distro and
+# codename itself, so a brand-new Ubuntu works the day Docker publishes for it
+# and we never carry a table of release names here.
+#
+# Unlike Railway's, it needs root: Docker Engine is a system daemon, not a binary
+# dropped in $HOME. That single fact drives everything below.
+_DOCKER_GET_URL = "https://get.docker.com"
+
+
+def _docker_manual_hint() -> str:
+    """Copy-pasteable fallback for when we can't install it ourselves. Platform
+    specific, because the right *product* differs: Desktop is a GUI app for
+    Mac/Windows, Engine is the daemon on Linux — telling a headless Linux box to
+    install Docker Desktop is a dead end."""
+    if os.name == "nt":
+        return ("Install Docker Desktop "
+                "(https://www.docker.com/products/docker-desktop/), start it, "
+                "then click Recheck.")
+    if sys.platform == "darwin":
+        return ("Install Docker Desktop "
+                "(https://www.docker.com/products/docker-desktop/) or OrbStack, "
+                "start it, then click Recheck.")
+    return ("Install Docker Engine with:\n"
+            "    curl -fsSL https://get.docker.com | sudo sh\n"
+            "    sudo systemctl enable --now docker\n"
+            "then click Recheck.")
+
+
+def _docker_privilege() -> str:
+    """How this process can reach root: 'root', 'sudo' (passwordless), or 'none'.
+
+    `sudo -n true` is the only honest probe. sudo with no controlling TTY can't
+    prompt, so if it isn't already passwordless (or the timestamp is cached) the
+    install would block forever on a password nobody can see — we'd rather find
+    that out here and refuse than hang the UI on 'pending'."""
+    if os.name == "nt":
+        return "none"
+    if os.geteuid() == 0:
+        return "root"
+    if _cmd_ok(["sudo", "-n", "true"]):
+        return "sudo"
+    return "none"
+
+
+def docker_install_support() -> dict:
+    """Can we install Docker for the user on THIS machine, and how?
+
+    Advisory, for the UI: `supported` gates the install button and `reason`
+    explains a refusal, so the wizard can offer the one-click path where it
+    genuinely works and honest instructions everywhere else. Linux is the only
+    platform we can drive unattended — macOS/Windows mean a GUI installer."""
+    if os.name == "nt" or sys.platform == "darwin":
+        return {"supported": False, "method": None,
+                "reason": "Automatic install is Linux-only.",
+                "manual": _docker_manual_hint()}
+    priv = _docker_privilege()
+    if priv == "none":
+        return {"supported": False, "method": None,
+                "reason": ("Installing Docker Engine needs root, and this "
+                           "companion can't get it without a password prompt "
+                           "it has no way to show you."),
+                "manual": _docker_manual_hint()}
+    return {"supported": True, "method": priv, "reason": None,
+            "manual": _docker_manual_hint()}
+
+
+class DockerInstallController:
+    """Installs Docker Engine via Docker's convenience script so a Linux
+    contributor on local compute can get unblocked from the UI. Mirrors
+    RailwayInstallController: POST starts it, the UI polls status() until the
+    process exits, then re-reads preflight (now `docker.installed`).
+
+    Two things differ from the Railway install, both because this needs root:
+
+      - start() refuses up front (see docker_install_support) instead of hanging
+        on an invisible sudo password prompt.
+      - The script installs the engine, but a *non-root* installer leaves the
+        calling user unable to talk to the socket until their new `docker` group
+        membership is picked up — which takes a fresh login. We add the group,
+        then report `needs_relogin` rather than pretending installed == usable
+        and letting the fleet die mid-benchmark on a permission denial.
+
+    One attempt at a time; a new start() kills any pending run."""
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self.state = "idle"  # idle | pending | done | error
+        self.output = ""
+        self.error: str | None = None
+        self.needs_relogin = False
+
+    def status(self) -> dict:
+        return {"state": self.state, "output": self.output[-4000:],
+                "error": self.error, "needs_relogin": self.needs_relogin}
+
+    def start(self) -> dict:
+        support = docker_install_support()
+        if not support["supported"]:
+            self.state = "error"
+            self.error = f"{support['reason']}\n\n{support['manual']}"
+            return self.status()
+        sudo = "" if support["method"] == "root" else "sudo -n "
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.kill()
+            self.state = "pending"
+            self.output = ""
+            self.error = None
+            self.needs_relogin = False
+            # get.docker.com enables the unit on systemd hosts, but not on every
+            # init/container combo — enabling again is idempotent and cheap, so
+            # do it explicitly and tolerate failure (`|| true`) rather than fail
+            # an otherwise-good install on a non-systemd box.
+            lines = [
+                "set -e",
+                f"curl -fsSL {_DOCKER_GET_URL} | {sudo}sh",
+                f"{sudo}systemctl enable --now docker || true",
+            ]
+            if support["method"] == "sudo":
+                lines.append(f'{sudo}usermod -aG docker "$(id -un)" || true')
+            try:
+                proc = subprocess.Popen(
+                    ["bash", "-c", "\n".join(lines)],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, text=True,
+                    encoding="utf-8", errors="replace", cwd=str(ROOT),
+                )
+            except OSError as exc:
+                self.state = "error"
+                self.error = f"could not start the installer: {exc}"
+                return self.status()
+            self._proc = proc
+
+        def _watch() -> None:
+            assert proc.stdout is not None
+            try:
+                for line in proc.stdout:
+                    # The script colorizes; strip ANSI so the UI's log pane shows
+                    # plain text, not escape gibberish.
+                    self.output += RailwayLoginController._ANSI_RE.sub("", line)
+            finally:
+                proc.stdout.close()
+            proc.wait()
+            if proc is not self._proc:
+                return  # a newer run superseded this one
+            if proc.returncode != 0:
+                self.state = "error"
+                self.error = (
+                    f"installer exited {proc.returncode} — see the log below.\n\n"
+                    + support["manual"]
+                )
+                return
+            if shutil.which("docker") is None:
+                self.state = "error"
+                self.error = ("The installer finished but left no `docker` on "
+                              "PATH.\n\n" + support["manual"])
+                return
+            self.needs_relogin = (
+                support["method"] == "sudo" and not _cmd_ok(["docker", "info"])
+            )
+            self.state = "done"
+
+        self._thread = threading.Thread(target=_watch, daemon=True)
+        self._thread.start()
+        return self.status()
+
+
 # ── App factory ────────────────────────────────────────────────────────
 
 
@@ -632,7 +803,9 @@ def preflight_status() -> dict:
                 key pasted in the wizard) means no local Docker is needed at all.
       - docker: only needed for `compute: local`. The fleet auto-starts the
                 daemon if Docker is *installed*, so `installed` is the check that
-                matters; `running` is extra signal.
+                matters; `running` is extra signal. `install_support` tells the
+                UI whether we can offer the one-click install here (Linux + root
+                or passwordless sudo) or must fall back to `manual` instructions.
     """
     docker_installed = shutil.which("docker") is not None
     c3_installed = shutil.which("c3") is not None
@@ -640,6 +813,7 @@ def preflight_status() -> dict:
         "docker": {
             "installed": docker_installed,
             "running": docker_installed and _cmd_ok(["docker", "info"]),
+            "install_support": docker_install_support(),
         },
         "c3": {
             "cli_installed": c3_installed,
@@ -691,6 +865,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     deploy = DeployController(hub)
     railway_login = RailwayLoginController()
     railway_install = RailwayInstallController()
+    docker_install = DockerInstallController()
 
     # DNS-rebinding guard. This companion serves host credentials (e.g.
     # /local-api/swarm/admin returns the admin_key) and can start/stop fleets,
@@ -907,6 +1082,17 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     @app.get("/local-api/railway/install")
     async def railway_install_status() -> dict:
         return railway_install.status()
+
+    @app.post("/local-api/docker/install")
+    async def docker_install_start() -> dict:
+        """Install Docker Engine (Linux, root or passwordless sudo). Returns
+        immediately; the UI polls the GET below until it exits, then re-reads
+        preflight."""
+        return docker_install.start()
+
+    @app.get("/local-api/docker/install")
+    async def docker_install_status() -> dict:
+        return docker_install.status()
 
     @app.post("/local-api/railway/login")
     async def railway_login_start() -> dict:
