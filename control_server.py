@@ -72,9 +72,78 @@ import run_fleet
 import secrets_local
 import setup as setup_mod
 
-UI_DIST = ROOT / "control-ui" / "dist"
+UI_SRC_ROOT = ROOT / "control-ui"
+UI_DIST = UI_SRC_ROOT / "dist"
+# Written into dist/ after every rebuild (and committed with it); lets startup
+# tell "bundle matches the sources" from "someone edited src/ and forgot to
+# rebuild" without trusting mtimes, which a git checkout scrambles.
+UI_BUILD_STAMP = UI_DIST / ".buildstamp"
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
 TACIT_PATH = ROOT / "tacit_knowledge.md"
+
+
+def _ui_source_digest() -> str:
+    """Content hash of everything that feeds the Svelte build — sources, static
+    assets, entry HTML, configs, lockfile — with dist/, node_modules/, and
+    hidden files excluded (dotfile junk like .DS_Store must not perturb the
+    digest across machines)."""
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(UI_SRC_ROOT):
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in ("dist", "node_modules") and not d.startswith(".")
+        )
+        for name in sorted(filenames):
+            if name.startswith("."):
+                continue
+            path = Path(dirpath) / name
+            h.update(path.relative_to(UI_SRC_ROOT).as_posix().encode())
+            h.update(b"\0")
+            h.update(path.read_bytes())
+            h.update(b"\0")
+    return h.hexdigest()
+
+
+def _freshen_ui_bundle() -> None:
+    """Rebuild control-ui/dist when the committed bundle no longer matches the
+    sources. The companion serves the *built* bundle, so an edit under
+    control-ui/ that isn't followed by `npm run build` silently keeps serving
+    the old UI. A failed or impossible rebuild degrades to a loud warning and
+    the stale bundle — never a startup failure."""
+    try:
+        digest = _ui_source_digest()
+    except OSError as exc:
+        print(f"  ⚠  couldn't fingerprint control-ui sources ({exc}); serving dist as-is.")
+        return
+    try:
+        stamp = UI_BUILD_STAMP.read_text(encoding="utf-8").strip()
+    except OSError:
+        stamp = None
+    if stamp == digest and UI_DIST.exists():
+        return
+    npm = shutil.which("npm")
+    if npm is None:
+        print(
+            "  ⚠  control-ui/dist is out of date with the control-ui sources "
+            "and npm isn't installed, so the companion is serving the OLD UI. "
+            "Rebuild with:\n"
+            "        cd control-ui && npm install && npm run build"
+        )
+        return
+    print("  control-ui sources changed — rebuilding the UI bundle…")
+    try:
+        if not (UI_SRC_ROOT / "node_modules").exists():
+            subprocess.run([npm, "install"], cwd=str(UI_SRC_ROOT), check=True, timeout=600)
+        subprocess.run([npm, "run", "build"], cwd=str(UI_SRC_ROOT), check=True, timeout=600)
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"  ⚠  UI rebuild failed ({exc}); serving the previous bundle.")
+        return
+    try:
+        UI_BUILD_STAMP.write_text(digest + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"  ⚠  rebuilt, but couldn't write {UI_BUILD_STAMP.name} ({exc}); "
+              "the next start will rebuild again.")
+    print("  UI bundle rebuilt.")
 
 
 # ── Event hub: bridge worker-thread callbacks → async WebSocket clients ──
@@ -1248,6 +1317,10 @@ def main() -> int:
     # a missing key must fail fast with "add it in the Keys panel", not hang
     # the fleet launch on an invisible terminal prompt.
     os.environ["TIG_SWARM_NO_PROMPT"] = "1"
+
+    # Serve a bundle that matches the sources — rebuild (or warn) BEFORE the
+    # app mounts dist, or an edited control-ui silently ships the old UI.
+    _freshen_ui_bundle()
 
     # Binding anything other than loopback exposes host credentials and fleet
     # controls to the network. Treat it as an explicit opt-out of the
