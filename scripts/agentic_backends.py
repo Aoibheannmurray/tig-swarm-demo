@@ -314,7 +314,12 @@ _SOLVER_CONSTRAINTS_TEMPLATE = """\
 ## Solver constraints
 
 - The existing `use` imports at the top of the starting file must remain
-  (e.g. `use tig_challenges::<challenge>::*;`).
+  (e.g. `use tig_challenges::<challenge>::*;`). In particular keep
+  `use serde_json::{{Map, Value}};` whenever the entry-point signature
+  mentions `&Option<Map<String, Value>>`, and give every `std::collections`
+  type you use (`HashMap`, `VecDeque`, `BinaryHeap`, …) its
+  `use std::collections::...;` line in the SAME file — a dropped import
+  fails the official build with E0425 and the whole iteration is discarded.
 {entry_points_bullet}
 {time_bullet}
 - Do not remove `unsafe` blocks that are already there; do not add new

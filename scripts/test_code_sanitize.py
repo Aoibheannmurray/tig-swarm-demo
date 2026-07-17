@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from challenge_files import (  # noqa: E402
     _safe_write,
+    ensure_common_imports,
     find_suspicious_non_ascii,
     sanitize_source,
     validate_code,
@@ -101,6 +102,46 @@ def test_safe_write_is_lf_sanitized_and_crash_proof():
         print("PASS _safe_write forces LF, sanitizes, and survives a surrogate")
 
 
+def test_ensure_common_imports_reinserts_dropped():
+    # The live opus-008 failure: entry signature uses Map/Value + VecDeque,
+    # but the model dropped the imports while rewriting the import block.
+    code = (
+        "use tig_challenges::hypergraph::*;\n"
+        "use anyhow::Result;\n\n"
+        "pub fn solve_challenge(c: &Challenge, save: &dyn Fn(&Solution) -> Result<()>,\n"
+        "    hp: &Option<Map<String, Value>>) -> Result<()> {\n"
+        "    let mut q: VecDeque<usize> = VecDeque::new();\n"
+        "    Ok(())\n}\n"
+    )
+    fixed = ensure_common_imports(code)
+    assert "use serde_json::Map;" in fixed
+    assert "use serde_json::Value;" in fixed
+    assert "use std::collections::VecDeque;" in fixed
+    # Inserted into the import block, before the first existing `use`.
+    assert fixed.index("use serde_json::Map;") < fixed.index("use anyhow::Result;")
+    print("PASS ensure_common_imports re-inserts dropped imports")
+
+
+def test_ensure_common_imports_leaves_correct_code_alone():
+    # Already imported (grouped form) → untouched, byte for byte.
+    code = (
+        "use serde_json::{Map, Value};\n"
+        "use std::collections::{HashMap, VecDeque};\n"
+        "fn f(hp: &Option<Map<String, Value>>) -> HashMap<u32, VecDeque<u32>> { todo!() }\n"
+    )
+    assert ensure_common_imports(code) == code
+    # Fully-qualified use needs no import.
+    fq = "fn f() { let m = std::collections::HashMap::<u32, u32>::new(); }\n"
+    assert ensure_common_imports(fq) == fq
+    # Locally-defined name must not get a conflicting import.
+    local = "struct Value { x: u32 }\nfn f(v: Value) -> u32 { v.x }\n"
+    assert ensure_common_imports(local) == local
+    # Names absent entirely → untouched.
+    plain = "use anyhow::Result;\nfn f() -> Result<()> { Ok(()) }\n"
+    assert ensure_common_imports(plain) == plain
+    print("PASS ensure_common_imports leaves correct code alone")
+
+
 if __name__ == "__main__":
     test_sanitize_rewrites_confusables()
     test_sanitize_leaves_plain_ascii_untouched()
@@ -111,4 +152,6 @@ if __name__ == "__main__":
     test_validate_accepts_reversible_confusables()
     test_validate_passes_clean_code()
     test_safe_write_is_lf_sanitized_and_crash_proof()
+    test_ensure_common_imports_reinserts_dropped()
+    test_ensure_common_imports_leaves_correct_code_alone()
     print("\nAll code-sanitize tests passed.")

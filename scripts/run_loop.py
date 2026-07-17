@@ -95,6 +95,7 @@ import cleaner_prepass
 from challenge_files import (
     ChallengeFiles,
     ensure_challenge_import,
+    ensure_common_imports,
     is_stub_code,
     read_challenge_md,
     validate_code,
@@ -718,9 +719,9 @@ def _generate_code_search_replace(
         print("  [SR] no edits applied — skipping iteration")
         return None, None, input_tokens, output_tokens
 
-    entry_code = ensure_challenge_import(
+    entry_code = ensure_common_imports(ensure_challenge_import(
         file_map.get(files.entry_name, ""), config["challenge"]
-    )
+    ))
     file_map[files.entry_name] = entry_code
     violation = validate_code(entry_code, config)
     if violation:
@@ -803,7 +804,8 @@ def _generate_code(
             continue
 
         print(f"  [LLM] Code validated OK")
-        return parsed, parsed_kernel, input_tokens, output_tokens
+        return (ensure_common_imports(parsed), parsed_kernel,
+                input_tokens, output_tokens)
 
     return None, None, input_tokens, output_tokens
 
@@ -2319,8 +2321,10 @@ def main() -> int:
             # The agent often rewrites the import block and drops the required
             # `use tig_challenges::<ch>::*;` anchor (or spells it the long
             # way), which would otherwise discard the whole run. Re-insert it
-            # (migrating any legacy `use super::*;`) before validating.
-            code = ensure_challenge_import(code, config["challenge"])
+            # (migrating any legacy `use super::*;`) before validating — and
+            # likewise the serde_json / std::collections imports it strands.
+            code = ensure_common_imports(
+                ensure_challenge_import(code, config["challenge"]))
             violation = validate_code(code, config)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")

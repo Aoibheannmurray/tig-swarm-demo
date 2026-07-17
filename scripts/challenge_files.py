@@ -356,6 +356,63 @@ def ensure_challenge_import(code: str, challenge: str) -> str:
     return anchor + "\n" + code
 
 
+# Names the LLM most often strands while rewriting the entry file's import
+# block, mapped to the `use` line that restores each. `Map`/`Value` are the
+# big one: the solve_challenge / hyperparameters signature needs
+# `&Option<Map<String, Value>>`, and dropping `use serde_json::{Map, Value};`
+# was the single most common compile failure on live swarms (E0425 ×78 in one
+# opus-008 session). The rest are the std::collections regulars.
+_COMMON_IMPORTS = {
+    "Map": "use serde_json::Map;",
+    "Value": "use serde_json::Value;",
+    "VecDeque": "use std::collections::VecDeque;",
+    "BinaryHeap": "use std::collections::BinaryHeap;",
+    "BTreeMap": "use std::collections::BTreeMap;",
+    "BTreeSet": "use std::collections::BTreeSet;",
+    "HashMap": "use std::collections::HashMap;",
+    "HashSet": "use std::collections::HashSet;",
+    "Reverse": "use std::cmp::Reverse;",
+}
+
+
+def ensure_common_imports(code: str) -> str:
+    """Re-insert stdlib/serde imports the model dropped from the entry file.
+
+    Same philosophy as ensure_challenge_import: a deterministic re-insert
+    costs nothing, while the alternative is a failed benchmark plus an LLM
+    compile-fix round-trip. Conservative — a name is only added when it's
+    used in the code, appears in NO existing `use` line, isn't referenced
+    fully-qualified (which needs no import), and isn't defined locally.
+    Worst case is an unused-import warning, never an error.
+    """
+    if not code:
+        return code
+    lines = code.splitlines(keepends=True)
+    use_text = "".join(l for l in lines if l.lstrip().startswith("use "))
+    body_text = "".join(l for l in lines if not l.lstrip().startswith("use "))
+
+    missing: list[str] = []
+    for name, use_line in _COMMON_IMPORTS.items():
+        if not re.search(rf"\b{name}\b", body_text):
+            continue  # not used
+        if re.search(rf"\b{name}\b", use_text):
+            continue  # already imported (or aliased in) somewhere
+        if re.search(rf"::{name}\b", body_text):
+            continue  # used fully-qualified — needs no import
+        if re.search(rf"\b(?:struct|enum|type|trait|mod)\s+{name}\b", body_text):
+            continue  # locally defined
+        missing.append(use_line)
+    if not missing:
+        return code
+
+    block = "".join(l + "\n" for l in missing)
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("use "):
+            lines.insert(i, block)
+            return "".join(lines)
+    return block + code
+
+
 # Anchor probes for chopping chatty-LLM prose that precedes the code. Exact
 # import lines only (never a bare "use " — prose can start a line with it).
 _PROSE_CHOP_PROBES = ("use tig_challenges::", "use super::*;", "use crate::")

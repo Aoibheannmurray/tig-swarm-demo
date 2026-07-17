@@ -365,6 +365,11 @@ RUST RULES (the output is compiled as-is — it MUST build):
 - KEEP the existing `use` lines at the top of the starting file (e.g.
   `use tig_challenges::...;`, `use anyhow::...;`) — dropping a needed import makes
   the file fail to compile with `E0425: cannot find type ... in this scope`.
+  In particular `use serde_json::{Map, Value};` is REQUIRED whenever the
+  entry-point signature mentions `&Option<Map<String, Value>>` — never drop
+  it while rewriting the import block. Likewise every `std::collections`
+  type you use (`HashMap`, `VecDeque`, `BinaryHeap`, …) needs its
+  `use std::collections::...;` line in the SAME file that uses it.
 - Keep the EXACT signatures of the harness entry-point function(s) you were
   given and don't rename them: for MOST challenges that is `fn solve_challenge(`
   (call the provided `save_solution` closure to record solutions); for
