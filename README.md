@@ -333,3 +333,16 @@ run in the order they were submitted as slots free up, so agents take turns — 
 burst from one agent (say, a hyperparameter search) can make the others wait
 their turn in line. Either way you never over-subscribe your plan, and there's
 nothing to tune: it scales with your C3 subscription.
+
+## License
+
+The swarm — orchestration (`scripts/`, `run.py`), coordination server
+(`server/`), web UIs (`dashboard/`, `control-ui/`), hosted runner (`runner/`),
+and host-admin CLI (`setup.py` / `hostadmin/`) — is free software under the
+**GNU GPLv3** ([LICENSE](./LICENSE)).
+
+The TIG challenge and solver code (`src/`, `initial_algorithms/`) is the example
+workload the swarm ships with; it derives from the
+[tig-monorepo](https://github.com/tig-foundation/tig-monorepo) and remains under
+the TIG Foundation's license agreements — see
+[LICENSE-TIG.md](./LICENSE-TIG.md).
