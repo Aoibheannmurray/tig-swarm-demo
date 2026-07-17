@@ -57,6 +57,8 @@ def test_warm_workspace_stages_only_the_essentials():
         algo.mkdir(parents=True)
         (algo / "mod.rs").write_text("// algo\n")
         (algo / "helpers.rs").write_text("// sidecar\n")
+        (root / "src" / "knapsack" / "mod.rs").write_text("// harness\n")
+        (root / "src" / "lib.rs").write_text("// lib\n")
         scripts = root / "scripts"
         scripts.mkdir()
         (scripts / "benchmark.py").write_text("# bench\n")
@@ -76,8 +78,12 @@ def test_warm_workspace_stages_only_the_essentials():
         assert (stage / "Cargo.toml").exists()
         assert (stage / "Cargo.lock").exists()
         assert (stage / ".swarm-cache.json").exists()
-        # The whole point: no crate source, no challenge harness upload.
-        assert not (stage / "src").exists()
+        # The crate source (harnesses) rides along so a stale cached warm
+        # image on a C3 node still builds against the current harness — but
+        # algorithm dirs are excluded (uploaded once via stage/algorithm).
+        assert (stage / "src" / "lib.rs").exists()
+        assert (stage / "src" / "knapsack" / "mod.rs").exists()
+        assert not (stage / "src" / "knapsack" / "algorithm").exists()
     print("PASS test_warm_workspace_stages_only_the_essentials")
 
 
@@ -105,6 +111,10 @@ def test_warm_runner_injects_algorithm_and_uses_baked_target():
         assert '[ ! -d "$APP/target/release" ]' in runner
         # cmp-guarded manifest overlay (no-drift case stays a pure cache hit).
         assert 'cmp -s Cargo.toml "$APP/Cargo.toml"' in runner
+        # cmp-guarded crate-source overlay (stale cached image self-corrects),
+        # ordered BEFORE the algorithm injection so the injected dir wins.
+        assert runner.index('cmp -s "$f" "$APP/src/$f"') < runner.index(
+            'rm -rf "$APP/src/knapsack/algorithm"')
         # No toolchain bootstrap in the warm runner.
         assert "apt-get" not in runner
         assert "rustup" not in runner

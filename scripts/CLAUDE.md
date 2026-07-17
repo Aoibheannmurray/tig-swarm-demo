@@ -73,8 +73,12 @@ Foundation's public namespace, published by CI; override the namespace with
 `c3_warm_image: <full ref>` (or env `TIG_C3_WARM_IMAGE`). Unset = the plain
 full-source path above. Rebuild/republish the images whenever `src/` (the
 challenge harnesses) or the Cargo manifests change — CI does this on push to
-staging; a job-side cmp-guarded overlay keeps a drifted Cargo.toml correct
-(just slower) in the meantime. See `scripts/test_warm_c3.py`.
+staging; a job-side cmp-guarded overlay of the Cargo manifests AND the
+`src/` harness tree (uploaded with algorithm dirs excluded, ~0.5MB) keeps a
+drifted or stale-cached image correct (just slower) in the meantime — C3
+nodes cache `:latest`, so without the src overlay a stale node fails the
+build with method-not-found errors on APIs the current crate supports. See
+`scripts/test_warm_c3.py`.
 
 **Distributed C3 (balanced sharding + fleet pool).** On the C3 path a
 benchmark's instances are split into exactly

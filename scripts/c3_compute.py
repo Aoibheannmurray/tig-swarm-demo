@@ -438,16 +438,30 @@ exit "$status"
 
 
 def _create_warm_workspace(stage: Path, config: dict, server: str) -> dict:
-    """Stage the MINIMAL upload for a warm-image job: the algorithm dir
-    (multi-file sources + CUDA kernels), current scripts/, Cargo manifests
-    (cmp-guarded overlay in the runner) and the locked config. The crate
-    source + warm cargo target are already in the image at /app."""
+    """Stage the upload for a warm-image job: the algorithm dir (multi-file
+    sources + CUDA kernels), current scripts/, Cargo manifests + the crate
+    source (both cmp-guarded overlays in the runner) and the locked config.
+    The pre-built cargo target is already in the image at /app.
+
+    src/ (the challenge harnesses, ~0.5MB with algorithm dirs excluded) rides
+    along so a C3 node serving a STALE cached :latest warm image still builds
+    against the current harness/cudarc pairing — without it, an algorithm
+    written against the current API fails on such a node with
+    method-not-found errors (seen live: `memcpy_dtov` E0599s on hypergraph
+    while other shards of the same benchmark compiled fine). The runner's
+    per-file cmp guard keeps every baked mtime when nothing drifted, so an
+    up-to-date image stays a pure cache hit."""
     challenge = config.get("challenge", "unknown")
     staged_config = dict(config)
     staged_config["server_url"] = server
 
     for name in ("Cargo.toml", "Cargo.lock"):
         _copy_required(ROOT / name, stage / name)
+
+    shutil.copytree(
+        ROOT / "src", stage / "src",
+        ignore=shutil.ignore_patterns("algorithm", "__pycache__", "target"),
+    )
 
     _copy_required(ROOT / "src" / challenge / "algorithm", stage / "algorithm")
 
@@ -549,6 +563,20 @@ cp .swarm-cache.json "$APP/.swarm-cache.json"
 cp -f scripts/*.py "$APP/scripts/"
 cmp -s Cargo.toml "$APP/Cargo.toml" || cp Cargo.toml "$APP/Cargo.toml"
 cmp -s Cargo.lock "$APP/Cargo.lock" || cp Cargo.lock "$APP/Cargo.lock"
+
+# Overlay the current crate source (challenge harnesses) file-by-file, same
+# cmp guard: an up-to-date image keeps every baked mtime (pure cache hit),
+# while a node stuck on a stale cached :latest rebuilds against the CURRENT
+# harness/cudarc pairing instead of failing the algorithm build with
+# method-not-found errors.
+if [ -d src ]; then
+  ( cd src && find . -type f | while IFS= read -r f; do
+      if ! cmp -s "$f" "$APP/src/$f"; then
+        mkdir -p "$APP/src/$(dirname "$f")"
+        cp "$f" "$APP/src/$f"
+      fi
+    done )
+fi
 
 # Inject ONLY the algorithm (whole dir: multi-file sources + CUDA kernels).
 rm -rf "$APP/src/{challenge}/algorithm"
