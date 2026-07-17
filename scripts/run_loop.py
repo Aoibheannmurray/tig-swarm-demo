@@ -925,12 +925,26 @@ def _benchmark_with_compile_fix(
         if bench is not None:
             return bench, "", code_changed, input_tokens, output_tokens
 
-        infra_markers = ["401", "API Error", "c3 CLI not found",
+        # Rustc/cargo output means a CODE problem no matter what else the log
+        # contains — decide that FIRST. The bare-number infra markers below
+        # used to be substring-matched against the whole error, so scores and
+        # track names (e.g. `n_h_edges=50000` ⊃ "500") misrouted every
+        # compile error into this branch, silently skipping the LLM compile
+        # fix. Numeric HTTP codes now only match as standalone words.
+        is_code_error = "error[" in build_err or (
+            "error:" in build_err and "Compiling" in build_err)
+        infra_markers = ["API Error", "c3 CLI not found",
                          "c3 CLI is out of date", "Docker image",
-                         "Could not parse job ID", "timeout", "403", "500"]
-        if any(m in build_err for m in infra_markers):
-            print(f"  [BENCH] INFRASTRUCTURE ERROR (not a code problem):")
-            print(f"          {build_err[:300]}")
+                         "Could not parse job ID", "timeout"]
+        is_infra = not is_code_error and (
+            any(m in build_err for m in infra_markers)
+            or re.search(r"\b(401|403|500)\b", build_err)
+        )
+        if is_infra:
+            # One line only — the caller's "[BENCH] FAILED — build_err: …"
+            # already shows the error head; printing it here too doubled it.
+            print(f"  [BENCH] Infrastructure error (not a code problem) — "
+                  f"skipping the LLM compile fix")
             return None, build_err, code_changed, input_tokens, output_tokens
 
         if attempt >= max_retries:

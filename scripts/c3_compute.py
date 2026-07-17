@@ -793,6 +793,10 @@ def _poll_c3_job(
     wait_secs = timeout_secs if timeout_secs is not None else max(1800, walltime_secs + 2700)
     deadline = time.monotonic() + wait_secs
     poll = 0
+    # Log on status CHANGE plus a ~5-minute heartbeat, not every minute:
+    # with sharding there are several concurrent polls and the old cadence
+    # filled the console with identical RUNNING lines.
+    last_printed: str | None = None
     while time.monotonic() < deadline:
         status = _read_job_status(job_id, env, cwd)
         if status:
@@ -800,9 +804,10 @@ def _poll_c3_job(
                 return "completed"
             if any(s in status for s in _TERMINAL_BAD):
                 return "failed"
-            if poll % 4 == 0:
+            if status != last_printed or poll % 20 == 0:
                 print(f"    [C3] {job_id}: {status}")
-        elif poll % 4 == 0:
+                last_printed = status
+        elif poll % 20 == 0:
             print(f"    [C3] Still waiting on {job_id} (poll {poll + 1})...")
         poll += 1
         time.sleep(_POLL_INTERVAL_SECS)
@@ -1025,7 +1030,7 @@ def _update_c3_cli_once() -> bool:
 
 def _run_one_c3_job_inner(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
-    _cli_updated: bool = False,
+    _cli_updated: bool = False, echo_stderr: bool = True,
 ) -> tuple[dict | None, str]:
     """Deploy one already-staged benchmark job, poll it, pull artifacts, and
     return its ``benchmark.json`` dict. ``stage`` must already contain the
@@ -1061,7 +1066,8 @@ def _run_one_c3_job_inner(
             # dir is untouched by a failed deploy, so a straight re-run is safe.
             if not _cli_updated and _update_c3_cli_once():
                 return _run_one_c3_job_inner(
-                    args, env, stage, label, _cli_updated=True
+                    args, env, stage, label, _cli_updated=True,
+                    echo_stderr=echo_stderr,
                 )
             return None, stale
         # Retry only the object-store throttle (see _DEPLOY_RETRY_SIGNATURES);
@@ -1100,7 +1106,13 @@ def _run_one_c3_job_inner(
     if status != "completed":
         bench_stderr = _read_benchmark_stderr(stage)
         if bench_stderr:
-            print(f"    [C3][{label}] Last 4000 chars of benchmark.stderr:\n{bench_stderr[-4000:]}")
+            # Don't dump the stderr here: sibling shards usually fail with the
+            # IDENTICAL error (they compile the same code), so per-shard dumps
+            # printed the same cargo errors once per shard. The full text
+            # rides in the returned err; run_benchmark_c3 dedupes across
+            # shards and prints each distinct error once.
+            print(f"    [C3][{label}] job failed — captured "
+                  f"{len(bench_stderr)} chars of benchmark.stderr")
         logs_out = _read_logs(job_id, env, stage)
         details = "\n".join(
             part
@@ -1116,11 +1128,21 @@ def _run_one_c3_job_inner(
         logs_out = _read_logs(job_id, env, stage)
         return None, f"job {job_id} completed but benchmark.json was not found or parseable\n{perr}\n{logs_out[-3000:]}"
     # benchmark.py writes the per-instance log + timing summary to stderr
-    # (stdout is reserved for the benchmark.json payload). Echo it on success
-    # too so timing is visible on a practice bench, not just on a crash.
+    # (stdout is reserved for the benchmark.json payload). Echo it in full on
+    # a single-job run so timing is visible on a practice bench — but shard
+    # jobs (echo_stderr=False) get a one-line summary instead: N shards each
+    # dumping every per-instance line drowned the console, and the merged
+    # per-track scores are printed by the caller anyway. TIG_C3_VERBOSE=1
+    # restores the full per-shard dump when debugging.
     bench_stderr = _read_benchmark_stderr(stage)
     if bench_stderr:
-        print(f"    [C3][{label}] benchmark.stderr:\n{bench_stderr}")
+        if echo_stderr or os.environ.get("TIG_C3_VERBOSE"):
+            print(f"    [C3][{label}] benchmark.stderr:\n{bench_stderr}")
+        else:
+            feasible = len(re.findall(r"\bfeasible\b", bench_stderr))
+            infeasible = len(re.findall(r"\binfeasible\b", bench_stderr))
+            print(f"    [C3][{label}] shard done: "
+                  f"{feasible + infeasible} instance(s), {feasible} feasible")
     return bench, ""
 
 
@@ -1133,7 +1155,7 @@ def _run_one_c3_shard(
     sharing one C3 key never exceed c3_max_parallel_jobs total live C3 jobs
     (respecting the plan's concurrency limit); extra shards queue FCFS."""
     with pool.lease():
-        return _run_one_c3_job_inner(args, env, stage, label)
+        return _run_one_c3_job_inner(args, env, stage, label, echo_stderr=False)
 
 
 def run_benchmark_c3(
@@ -1288,11 +1310,30 @@ def run_benchmark_c3(
 
         # Strict all-or-nothing (mirrors the single-job path): any failed shard
         # means missing instances, so fail rather than score on a partial set.
-        failed = [(jobs[i][2], errs[i]) for i in range(len(jobs)) if results[i] is None]
+        failed = [(i, jobs[i][2], errs[i]) for i in range(len(jobs))
+                  if results[i] is None]
         if failed:
-            detail = "\n".join(f"  {label}: {err}" for label, err in failed)
+            # Shards compile the same code, so they usually fail with the
+            # IDENTICAL error. Group by the error body (everything after the
+            # per-shard "job <id> <status>" head) and show each distinct
+            # error ONCE — the old per-shard dump printed the same cargo
+            # errors N times per benchmark.
+            groups: dict[str, list[str]] = {}
+            heads: dict[str, str] = {}
+            for idx, _label, err in failed:
+                head, _, body = err.partition("\n")
+                key = body.strip()
+                groups.setdefault(key, []).append(str(idx))
+                heads.setdefault(key, head)
+            parts = []
+            for body, shard_ids in groups.items():
+                where = f"shard(s) {','.join(shard_ids)}: {heads[body]}"
+                parts.append(f"  {where}\n{body}" if body else f"  {where}")
+            distinct = (f", {len(groups)} distinct error(s)"
+                        if len(failed) > 1 else "")
             return None, (
-                f"[C3] {len(failed)}/{len(jobs)} shard job(s) failed:\n{detail}"
+                f"[C3] {len(failed)}/{len(jobs)} shard job(s) failed"
+                f"{distinct}:\n" + "\n".join(parts)
             )
 
         return _merge_shard_benchmarks(results, challenge), ""
