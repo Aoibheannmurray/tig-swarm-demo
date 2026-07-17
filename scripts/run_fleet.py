@@ -135,6 +135,10 @@ _AGENT_CONFIG_KEYS = (
     # Cleaner knobs (docs/cleaner-agent-plan.md) — same passthrough pattern.
     "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
     "cleaner_cooldown_iters",
+    # Freeze guard: consecutive token-spending iterations without a successful
+    # benchmark before the agent exits (run_loop.py's
+    # _NO_BENCHMARK_FREEZE_LIMIT). Default 10; 0 disables.
+    "no_benchmark_freeze_limit",
 )
 
 # Top-level fleet keys that become fleet-wide defaults inherited by every agent
@@ -145,6 +149,7 @@ _FLEET_WIDE_DEFAULT_KEYS = (
     "hpo_seed",
     "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
     "cleaner_cooldown_iters",
+    "no_benchmark_freeze_limit",
     # Distributed C3 benchmarking: set once at the top level and every agent
     # inherits (per-agent entry still overrides via setdefault).
     "c3_max_parallel_jobs",
@@ -393,7 +398,49 @@ def _branch_exists(branch: str) -> bool:
     return bool(_git(["branch", "--list", branch]))
 
 
-def _ensure_worktree(name: str) -> Path:
+def _git_in(path: Path, args: list[str]) -> str:
+    """Run git inside a specific worktree (``_git`` is pinned to ROOT)."""
+    result = subprocess.run(
+        ["git", "-C", str(path)] + args, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git -C {path} {' '.join(args)} failed:\n{result.stderr.strip()}"
+        )
+    return result.stdout.strip()
+
+
+def _refresh_worktree(path: Path, name: str, log=print) -> None:
+    """Reset an agent worktree's code to the repo's current HEAD commit.
+
+    Worktrees persist across fleet restarts (identity + cargo cache live
+    there), and their `fleet/<name>` branch stays wherever it was when the
+    worktree was FIRST created — so without this reset, a stopped-and-
+    restarted fleet keeps running months-old orchestration code and bug
+    fixes silently never reach the agents (this is how the vrp-swarm
+    benchmark-heartbeat fix sat inert for two weeks). `reset --hard` moves
+    only TRACKED files: agent.config.json, .swarm-cache.json, and
+    tacit_knowledge_personal.md are untracked and survive, and algorithm
+    files are rewritten from server state at the top of every iteration.
+
+    Best-effort: a failed reset (e.g. a stale index.lock) logs a warning and
+    launches on the existing code — the pre-refresh status quo — rather than
+    blocking the fleet.
+    """
+    try:
+        head = _git(["rev-parse", "HEAD"])
+        current = _git_in(path, ["rev-parse", "HEAD"])
+        _git_in(path, ["reset", "--hard", head])
+        if current != head:
+            log(f"  [fleet] {name}: worktree code refreshed "
+                f"{current[:7]} -> {head[:7]}")
+    except (RuntimeError, OSError) as e:
+        log(f"  [fleet] WARNING: could not refresh {name}'s worktree to "
+            f"current HEAD ({e}); launching with its existing code")
+
+
+def _ensure_worktree(name: str, log=print) -> Path:
     path = WORKTREES_DIR / name
     branch = f"fleet/{name}"
     known = _existing_worktree_paths()
@@ -410,6 +457,10 @@ def _ensure_worktree(name: str) -> Path:
         else:
             _git(["worktree", "add", "-b", branch, str(path)])
 
+    # Both branches above need the refresh: a reused worktree AND a fresh
+    # `worktree add <existing fleet/... branch>` both check out wherever that
+    # branch last pointed, not current HEAD.
+    _refresh_worktree(path, name, log=log)
     return path
 
 
@@ -954,7 +1005,7 @@ def cmd_run(
         name = agent["name"]
         _fleet_log(f"  [fleet] preparing {name}… (worktree + swarm state; first "
                    f"run compiles, which can take a few minutes)")
-        path = _ensure_worktree(name)
+        path = _ensure_worktree(name, log=_fleet_log)
         _seed_worktree(path, agent, fleet_tacit, server_url, username, swarm_password)
 
         env = os.environ.copy()

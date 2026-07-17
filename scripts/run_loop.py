@@ -283,9 +283,24 @@ def _compose_tig_user_id(username: str, agent_id: str) -> str:
     return "unknown"
 
 
-def _attach_benchmark_identity(config: dict, username: str, agent_id: str) -> str:
+def _attach_benchmark_identity(
+    config: dict, username: str, agent_id: str,
+    agent_token: str | None = None,
+) -> str:
+    """Stamp the agent's identity onto `config` for the benchmark path.
+
+    `config` comes from .swarm-cache.json (load_config), which carries NO
+    identity — but run_benchmark reads `agent_id`/`agent_token` off it to
+    start the mid-benchmark heartbeat thread. Before these two keys were
+    stamped here, that guard was never true and long benchmarks ran silent:
+    the server's inactive_minutes sweep reaped the trajectory mid-benchmark
+    and every publish landed on a fresh one (the vrp-swarm fable004 churn).
+    """
     tig_user_id = _compose_tig_user_id(username, agent_id)
     config["tig_user_id"] = tig_user_id
+    config["agent_id"] = agent_id
+    if agent_token:
+        config["agent_token"] = agent_token
     os.environ["TIG_USER_ID"] = tig_user_id
     return tig_user_id
 
@@ -376,6 +391,12 @@ def run_benchmark(
             server, agent_id, agent_token,
             interval_s=_BENCH_HEARTBEAT_INTERVAL_S, label="BENCH",
         )
+    else:
+        # _attach_benchmark_identity stamps both keys every iteration; if
+        # they're missing the trajectory WILL be reaped once the benchmark
+        # outlives inactive_minutes. Say so instead of failing silently.
+        print("  [BENCH] WARNING: no agent identity on config — heartbeats "
+              "disabled for this benchmark (trajectory may be reaped)")
     try:
         if args.compute == "local":
             return _run_benchmark_local(seed, hyperparameters, job_slots=job_slots)
@@ -456,6 +477,31 @@ _CLEANER_COOLDOWN_ITERS = 15
 # Above this fraction of the trigger, prompts get a "prefer size-reducing
 # edits" warning — bloat prevented is a benchmark never spent.
 _CLEANER_WARN_FRACTION = 0.8
+
+
+# ── Benchmark-failure freeze guard ──
+#
+# Consecutive iterations that spent LLM/agent effort but ended WITHOUT a
+# successful benchmark before the agent freezes (posts one feed message and
+# exits). Catches a broken benchmark path — C3 outage, exhausted C3 credit,
+# broken Docker — that would otherwise burn API tokens every iteration
+# producing code that never gets scored. Only token-spending failures count:
+# pure no-token skips (server unreachable, LLM transport errors, an exploiter
+# idling for a seed) don't, so a brief server or provider outage can't kill
+# the fleet. The counter also resets on a challenge switch. Host-tunable via
+# `no_benchmark_freeze_limit` in fleet.config.json (top-level = fleet-wide,
+# per-agent overrides); 0 disables. Unfreeze = fix the benchmark path and
+# restart the fleet/agent.
+_NO_BENCHMARK_FREEZE_LIMIT = 10
+
+
+def _freeze_limit(config: dict) -> int:
+    """Resolve `no_benchmark_freeze_limit` from config (0 disables)."""
+    try:
+        return max(0, int(config.get("no_benchmark_freeze_limit",
+                                     _NO_BENCHMARK_FREEZE_LIMIT)))
+    except (TypeError, ValueError):
+        return _NO_BENCHMARK_FREEZE_LIMIT
 
 
 def _cleaner_size_warning(file_map: dict, config: dict) -> str:
@@ -1915,7 +1961,7 @@ def main() -> int:
     config = load_config()
     config["log_prompts"] = log_prompts
     config["detailed_prompts"] = detailed_prompts
-    _attach_benchmark_identity(config, username, agent_id)
+    _attach_benchmark_identity(config, username, agent_id, agent_token)
     challenge_md = read_challenge_md()
 
     # Agentic mode (claude-code-agentic): tooled headless Claude Code inside a
@@ -1973,6 +2019,10 @@ def main() -> int:
     # docs/hyperparameter-search-plan.md.
     iteration = 0
     consecutive_sr_skips = 0  # no-edit S/R skips in a row (see the fallback below)
+    # Token-spending iterations in a row that ended without a successful
+    # benchmark, and the challenge they accrued on (see the freeze guard).
+    bench_failures = 0
+    bench_fail_challenge: str | None = None
     # Iteration of the last cleaner attempt (accepted or rejected) — enforces
     # cleaner_cooldown_iters so a rejected clean can't burn a benchmark every
     # single iteration on unchanged code.
@@ -1992,7 +2042,7 @@ def main() -> int:
         config = load_config()
         config["log_prompts"] = log_prompts
         config["detailed_prompts"] = detailed_prompts
-        _attach_benchmark_identity(config, username, agent_id)
+        _attach_benchmark_identity(config, username, agent_id, agent_token)
         challenge_md = read_challenge_md()
         # Pin the iteration's challenge here so chat messages and any other
         # follow-up writes stay attributed to it even if the host runs
@@ -2012,9 +2062,10 @@ def main() -> int:
             print(f"  [SEED] seeded_start changed: {seeded_start} -> {live_seeded}")
             seeded_start = live_seeded
 
-        # Surface host-tunable HPO + cleaner knobs and the C3 warm-image
-        # opt-in (materialized into agent.config.json from fleet.config.json)
-        # onto `config`, which the gate/search/cleaner and c3_compute read.
+        # Surface host-tunable HPO + cleaner + freeze knobs and the C3
+        # warm-image opt-in (materialized into agent.config.json from
+        # fleet.config.json) onto `config`, which the gate/search/cleaner,
+        # the freeze guard, and c3_compute read.
         # Absent keys fall back to the defaults baked into
         # _maybe_tune_hyperparameters / the _CLEANER_* constants /
         # c3_compute._warm_c3_image (unset = full-source staging).
@@ -2023,6 +2074,7 @@ def main() -> int:
                          "hpo_search_budget", "hpo_seed",
                          "cleaner_trigger_chars", "cleaner_target_pct",
                          "cleaner_score_delta_pct", "cleaner_cooldown_iters",
+                         "no_benchmark_freeze_limit",
                          "c3_warm_images", "c3_warm_image", "tig_dockerhub"):
             if _hpo_key in _agent_cfg:
                 config[_hpo_key] = _agent_cfg[_hpo_key]
@@ -2032,6 +2084,41 @@ def main() -> int:
             config["available_challenges"] = swarm_cfg.get("available_challenges", {})
         except Exception:
             pass
+
+        # ── Benchmark-failure freeze guard ─────────────────────
+        # (see _NO_BENCHMARK_FREEZE_LIMIT). Checked before any state fetch or
+        # LLM call so a frozen agent's exit iteration spends nothing. The
+        # counter resets on a challenge switch — the failures belonged to the
+        # old challenge's benchmark path.
+        freeze_limit = _freeze_limit(config)
+        if iter_challenge != bench_fail_challenge:
+            if bench_failures:
+                print(f"  [FREEZE] challenge switched — resetting the "
+                      f"no-benchmark counter ({bench_failures} → 0)")
+            bench_failures = 0
+            bench_fail_challenge = iter_challenge
+        if freeze_limit and bench_failures >= freeze_limit:
+            freeze_msg = (
+                f"frozen: {bench_failures} consecutive iterations spent LLM "
+                f"effort without a successful benchmark "
+                f"(no_benchmark_freeze_limit={freeze_limit}). Stopping so no "
+                f"more API tokens are wasted — fix the benchmark path "
+                f"(compute provider / Docker) and restart the fleet to resume."
+            )
+            print(f"  [FREEZE] Agent {freeze_msg}")
+            post_message(server, agent_name, agent_id, f"[freeze] {freeze_msg}",
+                         challenge=iter_challenge, agent_token=agent_token)
+            return 0
+
+        def _note_bench_failure() -> None:
+            """Count a token-spending iteration that ended benchmark-less."""
+            nonlocal bench_failures
+            bench_failures += 1
+            if freeze_limit:
+                print(f"  [FREEZE] {bench_failures}/{freeze_limit} consecutive "
+                      f"iterations without a successful benchmark"
+                      + (" — freezing next iteration"
+                         if bench_failures >= freeze_limit else ""))
 
         # ── Get state ──────────────────────────────────────────
         print("  [STATE] Fetching agent state…")
@@ -2166,6 +2253,7 @@ def main() -> int:
                              challenge=seed_bench.get("challenge") or iter_challenge,
                              agent_token=agent_token)
                 send_heartbeat(server, agent_id, agent_token=agent_token)
+                bench_failures = 0  # the seed benchmark succeeded
                 continue
 
         if bootstrap:
@@ -2195,6 +2283,7 @@ def main() -> int:
                              f"[refactor] cleaned trajectory best "
                              f"({total_algo_chars} chars → smaller); score kept",
                              challenge=iter_challenge, agent_token=agent_token)
+                bench_failures = 0  # the cleaner's benchmark succeeded
                 continue
             # Rejected/no-op: files are restored; fall through to a normal
             # iteration. The cooldown stops immediate retries either way.
@@ -2224,6 +2313,7 @@ def main() -> int:
                 # Local-only failure: don't broadcast to the swarm feed.
                 # A backend that consistently produces no code would otherwise
                 # spam every dashboard viewer once per iteration.
+                _note_bench_failure()
                 continue
 
             # The agent often rewrites the import block and drops the required
@@ -2236,6 +2326,7 @@ def main() -> int:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
                 if best_code:
                     files.write(best_code, best_kernel)
+                _note_bench_failure()
                 continue
 
             # Copy the worktree's edited files into the main checkout so the
@@ -2263,6 +2354,7 @@ def main() -> int:
                 print(f"  [BENCH] Restoring previous code and continuing")
                 if best_code:
                     files.write(best_code, best_kernel)
+                _note_bench_failure()
                 continue
 
             _print_bench_result(bench)
@@ -2346,6 +2438,7 @@ def main() -> int:
                     consecutive_sr_skips = 0
                 if not code:
                     print(f"  [SKIP] No valid code produced — skipping to next iteration")
+                    _note_bench_failure()
                     continue
             else:
                 consecutive_sr_skips = 0
@@ -2389,6 +2482,7 @@ def main() -> int:
                 print(f"  [BENCH] Restoring previous code and continuing")
                 if best_code:
                     files.write(best_code, best_kernel)
+                _note_bench_failure()
                 continue
 
             _print_bench_result(bench)
@@ -2406,6 +2500,7 @@ def main() -> int:
 
             if bench is None:
                 print(f"  [BENCH] Benchmark failed after runtime fix — skipping iteration")
+                _note_bench_failure()
                 continue
 
             # ── Re-describe hypothesis if code changed ─────────
@@ -2440,6 +2535,10 @@ def main() -> int:
                     title = hypothesis.get("title", "?")
                 except Exception as e:
                     print(f"  Re-describe failed: {e} — using original hypothesis", file=sys.stderr)
+
+        # A benchmark completed (both modes converge here with a real
+        # `bench`) — the freeze guard's failure streak is over.
+        bench_failures = 0
 
         # ── Hyperparameter search (gated) ──────────────────────
         # `bench` here is the default-config score (test seed). If the gate is

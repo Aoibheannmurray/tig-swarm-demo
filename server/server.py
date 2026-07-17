@@ -912,6 +912,7 @@ _CONTRIB_AGENT_KEYS = frozenset({
     "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
     "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
     "cleaner_cooldown_iters",
+    "no_benchmark_freeze_limit",
 })
 # Top-level keys: the agents array + the fleet-wide default knobs run_fleet
 # inherits into every agent. Credentials (server_url/username/swarm_password)
@@ -923,6 +924,7 @@ _CONTRIB_TOP_KEYS = frozenset({
     "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
     "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
     "cleaner_cooldown_iters",
+    "no_benchmark_freeze_limit",
     "c3_max_parallel_jobs",
 })
 _CONTRIB_MAX_AGENTS = 32
