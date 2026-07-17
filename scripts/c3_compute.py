@@ -1284,10 +1284,18 @@ def run_benchmark_c3(
                 )
             except Exception as exc:
                 return None, f"[C3] Failed to stage shard {idx}: {exc}"
-            label = "+".join(
-                f"{s['track_key']}[{s['start']}:{s['start'] + s['count']}]"
-                for s in shard
-            )
+            # Short console label — the full per-track window mapping
+            # (`n_h_edges=20000[14:20]+…`) prefixed EVERY log line and made
+            # sharded runs unreadable. It's diagnostic detail: shown once
+            # under TIG_C3_VERBOSE=1, and always recoverable from the shard
+            # job's own stderr ("[BENCH] shard window starts: …").
+            label = f"shard {idx + 1}/{len(shards)}"
+            if os.environ.get("TIG_C3_VERBOSE"):
+                windows = "+".join(
+                    f"{s['track_key']}[{s['start']}:{s['start'] + s['count']}]"
+                    for s in shard
+                )
+                print(f"    [C3] {label}: {windows}")
             jobs.append((idx, stage, label))
 
         results: list[dict | None] = [None] * len(jobs)
@@ -1323,7 +1331,7 @@ def run_benchmark_c3(
             for idx, _label, err in failed:
                 head, _, body = err.partition("\n")
                 key = body.strip()
-                groups.setdefault(key, []).append(str(idx))
+                groups.setdefault(key, []).append(str(idx + 1))
                 heads.setdefault(key, head)
             parts = []
             for body, shard_ids in groups.items():
