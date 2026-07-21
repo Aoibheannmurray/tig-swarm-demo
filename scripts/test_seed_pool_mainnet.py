@@ -57,32 +57,78 @@ def test_skips_challenge_with_no_mainnet_algo():
     print("PASS test_skips_challenge_with_no_mainnet_algo")
 
 
+class _FakeTime:
+    """Deterministic clock so the deposit retries don't really sleep."""
+    def __init__(self):
+        self.now = 0.0
+    def time(self):
+        return self.now
+    def sleep(self, s):
+        self.now += s
+
+
 def test_http_failure_is_reported_not_raised():
+    """A 500 is retryable, so the deposit backs off and retries — but once the
+    attempts are spent it is REPORTED as a failed label, never raised (one bad
+    challenge must not abort a create) and never silently swallowed."""
     import urllib.error
     files = {"mod.rs": "// entry"}
     reshaped = {"knapsack": ({"algo_name": "a", "adoption": 1,
                               "code_files": files, "kernel_code": None}, "")}
     orig_reshape = sw._reshaped_mainnet_algo
-    orig_post = sw.post_json
+    orig_post, orig_time = sw.post_json, sw.time
+    calls = {"n": 0}
 
     def boom(url, payload, timeout=10):
+        calls["n"] += 1
         raise urllib.error.HTTPError(url, 500, "boom", {}, None)
 
     sw._reshaped_mainnet_algo = lambda ch: reshaped.get(ch, (None, "none"))
-    sw.post_json = boom
+    sw.post_json, sw.time = boom, _FakeTime()
     try:
         failed = sw.seed_pool_from_mainnet("https://s.invalid", "KEY", {"knapsack"})
     finally:
         sw._reshaped_mainnet_algo = orig_reshape
-        sw.post_json = orig_post
+        sw.post_json, sw.time = orig_post, orig_time
     assert failed == ["knapsack/mainnet"], failed  # reported, not raised
+    assert calls["n"] > 1, "a 500 must be retried before giving up"
     print("PASS test_http_failure_is_reported_not_raised")
+
+
+def test_bad_admin_key_is_not_retried():
+    """A 401 is the host's mistake, not the platform's — fail on the first
+    response instead of backing off through the whole retry budget."""
+    import urllib.error
+    import io
+    files = {"mod.rs": "// entry"}
+    reshaped = {"knapsack": ({"algo_name": "a", "adoption": 1,
+                              "code_files": files, "kernel_code": None}, "")}
+    orig_reshape = sw._reshaped_mainnet_algo
+    orig_post, orig_time = sw.post_json, sw.time
+    calls = {"n": 0}
+
+    def denied(url, payload, timeout=10):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(
+            url, 401, "denied", {}, io.BytesIO(b'{"detail":"bad admin key"}'))
+
+    sw._reshaped_mainnet_algo = lambda ch: reshaped.get(ch, (None, "none"))
+    sw.post_json, sw.time = denied, _FakeTime()
+    try:
+        failed = sw.seed_pool_from_mainnet("https://s.invalid", "KEY", {"knapsack"})
+    finally:
+        sw._reshaped_mainnet_algo = orig_reshape
+        sw.post_json, sw.time = orig_post, orig_time
+    assert failed == ["knapsack/mainnet"], failed
+    assert calls["n"] == 1, f"401 retried {calls['n']}x — should fail fast"
+    print("PASS test_bad_admin_key_is_not_retried")
 
 
 def _main():
     test_deposits_multifile_mainnet_to_seed_pool()
     test_skips_challenge_with_no_mainnet_algo()
     test_http_failure_is_reported_not_raised()
+    test_bad_admin_key_is_not_retried()
     print("\nAll seed-pool-mainnet tests passed.")
 
 

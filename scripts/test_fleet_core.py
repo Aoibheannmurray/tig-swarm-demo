@@ -124,7 +124,7 @@ def test_create_swarm_stubbed() -> None:
         "push_config_to_server": lambda url, key, cfg: True,
         "read_initial_algorithms": lambda: {},
         "seed_inactive_pool_from_mainnet": lambda *a, **k: calls.append("seed"),
-        "read_authored_seeds": lambda: {},
+        "read_authored_seeds": lambda: [],
         "template_files": lambda *a, **k: calls.append("template"),
         "write_challenge_md": lambda ch: calls.append("challenge_md"),
         "write_swarm_admin": lambda cfg: calls.append("admin"),
