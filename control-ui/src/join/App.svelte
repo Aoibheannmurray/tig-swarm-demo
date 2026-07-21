@@ -24,7 +24,6 @@
   let me: any = $state(null);
   let username = $state("");
   let password = $state("");
-  let showManual = $state(false);
   let copied = $state("");
 
   onMount(async () => {
@@ -156,113 +155,87 @@
     <div class="card" style="max-width:640px;margin:0 auto">
       <h2>✓ Valid invite for <span class="mono">{me.username}</span></h2>
       <p class="lede">
-        {#if me.swarm_name}This swarm is <b>{me.swarm_name}</b> — currently
-        optimizing <b>{me.active_challenge}</b> ({me.swarm_type} challenges).
-        {:else}This swarm is currently optimizing
-        <b>{me.active_challenge}</b> ({me.swarm_type} challenges).{/if}
-        Your agents will appear on the
-        <a href="/" target="_blank" rel="noopener">dashboard</a> under
-        <span class="mono">{me.username}</span>.
+        {#if me.swarm_name}<b>{me.swarm_name}</b> — optimizing{:else}Optimizing{/if}
+        <b>{me.active_challenge}</b>. Your agents appear on the
+        <a href="/" target="_blank" rel="noopener">dashboard</a>.
       </p>
     </div>
 
     <div class="card" style="max-width:640px;margin:16px auto 0">
       <h2>Run agents on your machine</h2>
-      <p class="lede">
-        One command sets everything up: it fetches the swarm code and opens a
-        <b>setup app in your browser</b> — pick your AI provider and models,
-        paste your API keys there (an LLM key, and a
-        <a href="https://cthree.cloud/dashboard/settings" target="_blank" rel="noopener">C3
-        key</a> for cloud benchmarking), and click <b>Launch fleet</b>. Keys
-        stay on your machine.
-      </p>
-      <p class="lede">
-        You need <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3</a>
-        and <a href="https://git-scm.com/downloads" target="_blank" rel="noopener">Git</a>
-        installed (macOS offers Git automatically the first time you use it).
-      </p>
 
-      <nav class="tabs" style="margin:4px 0 10px">
+      <nav class="tabs" style="margin:2px 0 10px">
         <button class:active={osTab === "unix"} onclick={() => (osTab = "unix")}>macOS / Linux</button>
         <button class:active={osTab === "windows"} onclick={() => (osTab = "windows")}>Windows</button>
       </nav>
 
       <div class="field">
-        <label for="boot">Paste this into a terminal{osTab === "windows" ? " (PowerShell or cmd)" : ""}</label>
         <div id="boot" class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{bootstrapCmd()}</div>
-        <button class="ghost" onclick={() => copy(bootstrapCmd(), "boot")}>
+        <button class="primary" onclick={() => copy(bootstrapCmd(), "boot")}>
           {copied === "boot" ? "Copied ✓" : "Copy command"}
         </button>
-        {#if osTab === "windows"}
-          <div class="hint">If <span class="mono">python</span> isn't recognized, try <span class="mono">py</span> instead.</div>
-        {/if}
       </div>
-      <p class="lede" style="margin-top:6px">
-        Your join link and credentials are already in the command — the setup
-        app opens pre-filled at <span class="mono">http://127.0.0.1:8787</span>.
-        The code is kept in a managed checkout (pinned to
-        <span class="mono">{BOOTSTRAP_REF}</span>) and updated each time you run it.
+
+      <!-- Only what you need before the setup app takes over: what you must
+           already have, and what happens when it runs. Everything else lives
+           in the README. -->
+      <p class="lede" style="margin-top:14px">
+        Needs <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3</a>
+        and <a href="https://git-scm.com/downloads" target="_blank" rel="noopener">Git</a>.
+        A setup page opens at <span class="mono">127.0.0.1:8787</span> — add your
+        API key there and launch.
+        {#if osTab === "windows"}
+          If <span class="mono">python</span> isn't recognized, try <span class="mono">py</span>.
+        {/if}
       </p>
 
-      <details style="margin-top:12px">
-        <summary>Prefer to clone the repo yourself?</summary>
-        <ol class="steps" style="margin-top:10px">
+      <details class="alt">
+        <summary>Clone the repo instead</summary>
+        <ol class="steps">
           <li>
-            <div>Get the code{osTab === "windows" ? " (PowerShell or cmd)" : ""}</div>
             <div class="cmd mono" style="word-break:break-all">{cloneCmd()}</div>
             <button class="ghost" onclick={() => copy(cloneCmd(), "clone")}>
               {copied === "clone" ? "Copied ✓" : "Copy"}
             </button>
           </li>
           <li>
-            <div>Open the setup app with your join link</div>
             <div class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{runJoinCmd()}</div>
             <button class="ghost" onclick={() => copy(runJoinCmd(), "run")}>
               {copied === "run" ? "Copied ✓" : "Copy"}
             </button>
-            {#if osTab === "windows"}
-              <div class="hint">If <span class="mono">python</span> isn't recognized, try <span class="mono">py</span> instead.</div>
-            {/if}
           </li>
         </ol>
       </details>
-    </div>
 
-    <div class="card" style="max-width:640px;margin:16px auto 0">
-      <button class="ghost" onclick={() => (showManual = !showManual)}>
-        {showManual ? "▾" : "▸"} Manual / power-user flow
-      </button>
-      {#if showManual}
-        <p class="lede" style="margin-top:12px">
-          Paste these into <span class="mono">fleet.config.json</span>
-          (replacing the matching keys), then run
-          <span class="mono">python3 run.py</span> for the terminal wizard —
-          or <span class="mono">python3 scripts/run_fleet.py</span> if your
-          config is already complete.
+      <details class="alt">
+        <summary>Set up by hand</summary>
+        <p class="lede" style="margin:10px 0 8px">
+          Put these in <span class="mono">fleet.config.json</span>, then run
+          <span class="mono">python3 run.py</span>.
         </p>
-        <div class="field">
-          <label for="mb">Credentials</label>
-          <textarea id="mb" readonly rows="3">{configBlock()}</textarea>
-          <button class="ghost" onclick={() => copy(configBlock(), "manual")}>
-            {copied === "manual" ? "Copied ✓" : "Copy"}
-          </button>
-        </div>
-      {/if}
+        <textarea id="mb" readonly rows="3" aria-label="Credentials for fleet.config.json">{configBlock()}</textarea>
+        <button class="ghost" onclick={() => copy(configBlock(), "manual")}>
+          {copied === "manual" ? "Copied ✓" : "Copy"}
+        </button>
+      </details>
     </div>
   {/if}
 </div>
 
 <style>
   .steps {
-    margin: 8px 0 0;
+    margin: 10px 0 0;
     padding-left: 20px;
     display: flex;
     flex-direction: column;
     gap: 14px;
   }
-  .steps li > div:first-child {
-    margin-bottom: 6px;
-  }
+  /* Alternative routes: present, but visually subordinate to the one command
+     above them. */
+  .alt { margin-top: 10px; }
+  .alt summary { cursor: pointer; font-size: 13.5px; color: var(--ink-dim); }
+  .alt summary:hover { color: var(--color-accent); }
+  .alt[open] summary { margin-bottom: 4px; }
   .cmd {
     background: var(--bg-sunken, rgba(127, 127, 127, 0.12));
     border-radius: 6px;
