@@ -81,12 +81,70 @@
   {#if error}<div class="banner err">{error}</div>{/if}
 
   {#if view === "landing"}
+    <!-- Returning-visit shortcut. The role choice leads the page (it's what a
+         first-time visitor needs), but someone who already has a fleet came
+         back to start or watch it — this jumps them there without scrolling
+         past a decision they've already made. -->
+    {#if fleetConfig}
+      <a class="resume" href="#fleet">
+        <span class="pill {running ? 'ok' : 'info'}">{running ? "running" : "ready"}</span>
+        <span>Your fleet — <b>{agentEntries.length}</b>
+          {agentEntries.length === 1 ? "agent" : "agents"} as <b>{fleetConfig.username}</b></span>
+        <span class="spacer"></span>
+        <span class="resume-go">Go to fleet ↓</span>
+      </a>
+    {/if}
+
+    <div class="card intro">
+      <h2>Run the swarm without the command line</h2>
+      <p class="lede">
+        A local companion for standing up and joining a Prometheus swarm. The
+        classic CLI (<code>python setup.py</code>, <code>python run.py</code>)
+        still works if you prefer it.
+      </p>
+    </div>
+
+    <h3 class="secheading">Which are you?</h3>
+    <div class="choices">
+      <button class="choice" onclick={() => (view = "contributor")}>
+        <span class="ch-head">
+          <span class="pill">Contributor</span>
+          <span class="spacer"></span>
+          <span class="ch-arrow">→</span>
+        </span>
+        <span class="ch-title">{fleetConfig ? "Join another swarm" : "Join a swarm"}</span>
+        <span class="ch-desc">
+          Someone shared a join link with you. Point agents on this machine at
+          their swarm — pick your provider, models and how many agents, then
+          launch.
+        </span>
+        <span class="ch-needs">You'll need a <b>join link</b> and an <b>API key</b> (or a signed-in Claude/Codex CLI)</span>
+      </button>
+      <button class="choice" onclick={() => (view = "host")}>
+        <span class="ch-head">
+          <span class="pill info">Host</span>
+          <span class="spacer"></span>
+          <span class="ch-arrow">→</span>
+        </span>
+        <span class="ch-title">Create a swarm</span>
+        <span class="ch-desc">
+          Stand up the coordination server everyone else joins — pick the
+          challenge, seed the algorithm pool, and invite contributors.
+        </span>
+        <span class="ch-needs">You'll need a <b>Railway account</b></span>
+      </button>
+    </div>
+    <p class="helper muted">
+      Not sure? If someone sent you a link, you're a contributor. You can be
+      both — hosts usually run a fleet of their own too.
+    </p>
+
     <!-- Your fleet / joined swarm -->
     {#if fleetConfig}
+      <h3 class="secheading" id="fleet">Your fleet</h3>
       <div class="card fleetcard">
         <div class="fleet-head">
           <div>
-            <h2>Your fleet</h2>
             <div class="swarm-meta">
               <span class="muted">joined as</span> <b>{fleetConfig.username}</b>
               <span class="muted">·</span>
@@ -126,28 +184,6 @@
       </div>
     {/if}
 
-    <div class="card intro">
-      <h2>{fleetConfig ? "Do more" : "Run the swarm without the command line"}</h2>
-      <p class="lede">
-        A local companion for standing up and joining a Prometheus swarm. The
-        classic CLI (<code>python setup.py</code>, <code>python run.py</code>)
-        still works if you prefer it.
-      </p>
-    </div>
-
-    <div class="choices">
-      <button class="choice" onclick={() => (view = "contributor")}>
-        <span class="pill">Contributor</span>
-        <span class="ch-title">{fleetConfig ? "Join another / reconfigure" : "Join a swarm"}</span>
-        <span class="ch-desc">Configure your agents (provider, model, count, compute), add tacit knowledge, then launch.</span>
-      </button>
-      <button class="choice" onclick={() => (view = "host")}>
-        <span class="pill info">Host</span>
-        <span class="ch-title">Create &amp; manage a swarm</span>
-        <span class="ch-desc">Provision on Railway, pick the active challenge, seed the pool, switch challenges, open the Admin Console.</span>
-      </button>
-    </div>
-
     {#if env}
       <div class="statusline muted">
         <span class="pill ok">companion online</span>
@@ -169,6 +205,15 @@
 
 <style>
   .intro { background: transparent; border: none; box-shadow: none; padding: 8px 0 4px; }
+
+  /* Section label — gives the page a visible spine (choose a role → your
+     fleet) instead of a flat stack of cards. */
+  .secheading {
+    font-family: var(--ui); font-size: 11px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-dim);
+    margin: 26px 0 12px;
+  }
+
   .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   @media (max-width: 720px) { .choices { grid-template-columns: 1fr; } }
   .choice {
@@ -178,13 +223,35 @@
     transition: border-color 0.15s, transform 0.08s;
   }
   .choice:hover { border-color: var(--color-accent); transform: translateY(-1px); }
+  .ch-head { display: flex; align-items: center; gap: 8px; }
+  .ch-head .spacer { flex: 1; }
+  .ch-arrow { color: var(--ink-faint); font-size: 17px; transition: color 0.15s, transform 0.15s; }
+  .choice:hover .ch-arrow { color: var(--color-accent); transform: translateX(3px); }
   .ch-title { font-family: var(--display); font-style: italic; font-size: 22px; font-weight: 600; }
   .ch-desc { font-size: 13.5px; color: var(--ink-mid); }
+  /* The prerequisite line: the thing that actually tells someone whether they
+     can start down this path right now. */
+  .ch-needs {
+    margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border-subtle);
+    font-size: 12.5px; color: var(--ink-dim);
+  }
+  .helper { font-size: 13px; margin-top: 12px; }
   .statusline { display: flex; gap: 10px; align-items: center; margin-top: 22px; font-size: 13px; flex-wrap: wrap; }
+
+  /* Returning-visit strip above the fold. */
+  .resume {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 11px 14px; margin-bottom: 18px;
+    background: var(--bg-card); border: 1px solid var(--border-subtle);
+    border-radius: var(--radius); font-size: 13.5px; color: var(--ink);
+    text-decoration: none; transition: border-color 0.15s;
+  }
+  .resume:hover { border-color: var(--color-accent); }
+  .resume .spacer { flex: 1; }
+  .resume-go { color: var(--color-accent); font-weight: 600; white-space: nowrap; }
 
   .fleetcard { border-color: var(--border-default); }
   .fleet-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 16px; }
-  .fleet-head h2 { margin: 0 0 2px; }
   .swarm-meta { font-size: 13px; }
   .agentgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-bottom: 4px; }
   .agentcard { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 11px 12px; background: var(--bg-page); border: 1px solid var(--border-subtle); border-radius: 6px; font-size: 13px; }
