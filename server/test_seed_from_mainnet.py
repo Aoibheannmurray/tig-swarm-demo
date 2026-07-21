@@ -25,7 +25,6 @@ _INFO = {
 
 def _fresh():
     os.environ["DATA_DIR"] = tempfile.mkdtemp()
-    os.environ["TIG_INITIAL_ALGORITHMS_DIR"] = tempfile.mkdtemp()
     for mod in ("db", "server", "mainnet_seed"):
         sys.modules.pop(mod, None)
     import db

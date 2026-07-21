@@ -67,8 +67,7 @@ It provisions a Railway service built from this `Dockerfile` (via
 `RAILWAY_DOCKERFILE_PATH`), generates `RUNNER_SECRET_KEY`, wires in the swarm's
 URL + admin key, attaches a `/data` volume, waits for `/api/runner/health`, and
 runs `set-runner` to enable the join page's "Run in the cloud" tab. Re-run to
-update. The manual dashboard steps are in
-[../deploy/DEPLOY_ON_RAILWAY.md](../deploy/DEPLOY_ON_RAILWAY.md).
+update.
 
 ## Run locally
 

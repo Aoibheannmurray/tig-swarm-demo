@@ -21,7 +21,6 @@ CHALLENGE = "job_scheduling"
 def _fresh_modules():
     tmp = tempfile.mkdtemp()
     os.environ["DATA_DIR"] = tmp
-    os.environ["TIG_INITIAL_ALGORITHMS_DIR"] = tempfile.mkdtemp()
     for mod in ("db", "server"):
         sys.modules.pop(mod, None)
     import db

@@ -17,17 +17,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Isolate from the repo's real initial_algorithms/ (first-boot would seed the
-# pool and skew counts) — same pattern as test_role_multifile_hpo.py.
-os.environ["TIG_INITIAL_ALGORITHMS_DIR"] = tempfile.mkdtemp()
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def _fresh_db():
     tmp = tempfile.mkdtemp()
     os.environ["DATA_DIR"] = tmp
-    for mod in ("db", "first_boot", "challenges"):
+    for mod in ("db", "challenges"):
         sys.modules.pop(mod, None)
     import db
     return db

@@ -20,9 +20,6 @@ TS = "2026-07-10T00:00:00Z"
 def _fresh_modules():
     tmp = tempfile.mkdtemp()
     os.environ["DATA_DIR"] = tmp
-    # Keep first-boot bundle seeding away from the counts below (same
-    # isolation as test_first_boot.py / test_role_multifile_hpo.py).
-    os.environ["TIG_INITIAL_ALGORITHMS_DIR"] = tempfile.mkdtemp()
     for mod in ("db", "server"):
         sys.modules.pop(mod, None)
     import db

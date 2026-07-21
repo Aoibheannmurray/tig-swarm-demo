@@ -22,17 +22,10 @@ SEED_CODE = "// pool seed"
 
 
 def _fresh_modules():
-    """Re-import db + server against a brand-new temp DB. Returns (db, server).
-
-    Also points first-boot bundle seeding (server/first_boot.py, for
-    browser-only host deploys) at an EMPTY dir: without this, init_db
-    pre-populates seed_pool from initial_algorithms/, making "empty pool"
-    scenarios impossible and seed-pick assertions flaky (random draw across
-    the extra seeds)."""
+    """Re-import db + server against a brand-new temp DB. Returns (db, server)."""
     tmp = tempfile.mkdtemp()
     os.environ["DATA_DIR"] = tmp
-    os.environ["TIG_INITIAL_ALGORITHMS_DIR"] = tempfile.mkdtemp()
-    for mod in ("db", "first_boot", "server"):
+    for mod in ("db", "server"):
         sys.modules.pop(mod, None)
     import db
     import server

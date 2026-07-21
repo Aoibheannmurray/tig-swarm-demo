@@ -21,13 +21,6 @@ WORKDIR /app
 COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server/ .
-# Algorithm snapshot for browser-only ("Deploy on Railway") deploys: the
-# server seeds initial code + the pool from these on first boot when no host
-# clone ran `setup.py create` (server/first_boot.py). Text sources; harmless
-# for normal deploys (first-boot fill only touches empty slots).
-# NOTE: initial_algorithms/ MUST stay out of .ignore, or `railway up`'s upload
-# snapshot omits it and this COPY fails ("/initial_algorithms: not found").
-COPY initial_algorithms/ ./initial_algorithms/
 COPY --from=dashboard /dashboard/dist ./static/
 # Admin Console served at /admin/, contributor join page at /join/. Copy only
 # those entries + the content-hashed asset chunks — NOT the companion's

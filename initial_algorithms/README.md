@@ -13,8 +13,8 @@ initial_algorithms/<challenge>/
 ## Stub — `<challenge>/stub/` (`mod.rs` [+ `*.cu`, + sibling modules])
 
 The challenge's starting code — what the server broadcasts on iteration 1 and
-on fresh-start trajectory resets (`read_initial_algorithms`,
-`server/first_boot.py`). Its sophistication varies by design:
+on fresh-start trajectory resets (`read_initial_algorithms`). Its sophistication
+varies by design:
 
 - **CPU challenges** ship the bare `unimplemented!()` placeholder. Handed to
   **frontier-tier explorer** agents, which are expected to bootstrap a
