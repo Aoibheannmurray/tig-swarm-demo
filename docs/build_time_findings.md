@@ -21,8 +21,8 @@ The production swarm architecture also changed after this investigation began:
 - Therefore, do **not** reintroduce `Dockerfile.bench` or publish replacement
   `tig-bench-*` images for this optimization.
 - The live metered TIG path is the standalone `c3_tig_bench.py` tool. The rollout
-  branch stages `scripts/build_so.llsplit` there behind `--build-so optimized`;
-  the default remains `--build-so official` until a matched AMD64/L40 canary passes.
+  stages `scripts/build_so.llsplit` there. The matched AMD64/L40 canary passed, so
+  `optimized` is now the default; `--build-so official` remains the rollback switch.
 
 ### ARM64 rollout evidence (2026-07-21)
 
@@ -39,9 +39,33 @@ discovered:
 | Fuel, three deterministic nonces | official = optimized = `[3214, 4165, 5089]` (0.000% drift) |
 
 The temporary official satisfiability image was removed after the test. No Docker
-Hub or production image tag was changed. The remaining gate is a matched
-official-vs-optimized run through `c3_tig_bench.py` on AMD64/L40, comparing total
-build time, `fuel_consumed`, `runtime_signature`, quality, and feasibility.
+Hub or production image tag was changed.
+
+### AMD64/L40 rollout gate (2026-07-21)
+
+Matched cold runs used the current TIG monorepo, `hyper_advanced_v2`, track
+`n_h_edges=10000`, seed `buildso-rollout`, nonces 0–3, fuel budget `5e12`, one
+worker, and the same pinned `nextgen/CANADA-1/l40` pool. No binary cache was reused.
+
+| check | official | optimized | result |
+|---|---:|---:|---|
+| C3 job | `job_1784650835455_6e552r` | `job_1784652082075_sib6nb` | both succeeded |
+| Algorithm build | 884 s | 296 s | **2.99× faster; 66.5% less time** |
+| Optimized phases | — | cargo 221 s; split 15 s; loop 74 s including split | 16 partitions processed concurrently |
+| Feasible solutions | 4/4 | 4/4 | exact match |
+| Quality `[nonce 0..3]` | `[158803, 176360, 159916, 150047]` | same | exact match |
+| Fuel `[nonce 0..3]` | `[114874128, 116626802, 121573171, 117706504]` | same | **0.000% drift** |
+| Mean solve runtime | 1.079 s | 1.085 s | effectively unchanged |
+
+`runtime_signature` differed because `debuginfo=0` changes generated CPU code.
+That diagnostic was recorded to make the difference explicit, but it is not the
+accepted rollout gate; the maintainer-approved gate is fuel within 2%, valid
+solutions, unchanged quality, and successful verification. This run exceeded that
+bar by producing exactly equal fuel and output on every nonce.
+
+**Decision:** promote `optimized` as the default in `c3_tig_bench.py`, retain
+`--build-so official` for immediate rollback, and do not alter the normal swarm
+build path or create custom TIG Docker images.
 
 ---
 

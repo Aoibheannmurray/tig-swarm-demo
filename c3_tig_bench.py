@@ -15,7 +15,7 @@ Usage:
       --tracks n_hidden=4 --nonces 100 --seed test --walltime 01:30:00 \
       --out reports/tig_bench_n4.json
 
-Build-time rollout canary:
+Build-time rollout (optimized is the default; official remains the fallback):
   python3 c3_tig_bench.py --challenge hypergraph --build <algorithm> \
       --build-so optimized --tracks <track> --nonces 4 \
       --out reports/buildso_optimized.json
@@ -41,6 +41,7 @@ from pathlib import Path
 # tig-monorepo checkout to stage from: --monorepo > $TIG_MONOREPO > ./tig-monorepo.
 DEFAULT_MONOREPO = Path(__file__).resolve().parent / "tig-monorepo"
 OPTIMIZED_BUILD_SO = Path(__file__).resolve().parent / "scripts" / "build_so.llsplit"
+DEFAULT_BUILD_SO = "optimized"
 IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 POLL_SECS = 20
 
@@ -361,8 +362,8 @@ def main() -> int:
     ap.add_argument("--binaries-cache", default=None,
                     help="local tig-binaries.tar.zst from a previous job (skips harness build)")
     ap.add_argument("--build-so", choices=("official", "optimized"),
-                    default="official",
-                    help="TIG build_so implementation (default: official; optimized is the rollout canary)")
+                    default=DEFAULT_BUILD_SO,
+                    help="TIG build_so implementation (default: optimized; official is the fallback)")
     ap.add_argument("--monorepo", default=None,
                     help="path to a tig-monorepo checkout "
                          "(default: $TIG_MONOREPO, then ./tig-monorepo)")

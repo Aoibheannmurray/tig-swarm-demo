@@ -52,8 +52,13 @@ def test_benchmark_result_captures_fuel_identity_fields() -> None:
     assert '"runtime_signature": runtime_data.get("runtime_signature")' in bench.BENCH_PY
 
 
+def test_optimized_build_so_is_the_metered_default() -> None:
+    assert bench.DEFAULT_BUILD_SO == "optimized"
+
+
 if __name__ == "__main__":
     test_stage_workspace_build_so_is_opt_in()
     test_runner_installs_canary_and_records_build_time()
     test_benchmark_result_captures_fuel_identity_fields()
+    test_optimized_build_so_is_the_metered_default()
     print("All c3_tig_bench tests passed.")
