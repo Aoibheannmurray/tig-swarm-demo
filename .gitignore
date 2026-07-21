@@ -13,9 +13,12 @@ __pycache__/
 .c3
 .c3.local
 c3-artifacts/
-job_*/
-# …but the job_scheduling challenge's seed/algorithm dir is real source, not a job artifact.
-!initial_algorithms/job_scheduling/
+# C3 job artifact dirs, ROOT-ANCHORED. Unanchored (`job_*/`) this also matched
+# `src/job_scheduling/` and `initial_algorithms/job_scheduling/` — real source
+# — so new files under them were silently unstageable: `git add` reported no
+# error and staged nothing. C3 stages jobs in a tempdir (c3_compute.py), so the
+# only place a stray `job_<id>/` lands is a manual `c3 pull` at the repo root.
+/job_*/
 fly.toml
 Procfile
 runtime.txt

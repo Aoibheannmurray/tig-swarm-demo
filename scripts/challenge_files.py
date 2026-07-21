@@ -473,8 +473,76 @@ _OPTIMIZER_HOOKS = (
 )
 
 
-def validate_code(code: str, config: dict | None = None) -> str | None:
+def _is_declarations_only_entry(code: str) -> bool:
+    """True for an entry file that only declares and re-exports submodules —
+    no function bodies of its own (mainnet's mod.rs for a split algorithm).
+
+    Such a file names no challenge types, so requiring
+    `use tig_challenges::<ch>::*;` in it would force an import that rustc then
+    warns is unused. The submodules that DO use the types carry their own."""
+    return "fn " not in code and "pub mod " in code
+
+
+def solve_challenge_reachable(
+    entry_code: str, files: dict[str, str] | None = None,
+) -> bool:
+    """True if `solve_challenge` is callable as `<algorithm>::solve_challenge`.
+
+    TIG's harness calls `{ALGORITHM}::solve_challenge(...)`, so what matters is
+    that the name RESOLVES at the algorithm module root — not that its `fn`
+    body sits in the entry file. Two valid shapes:
+
+        // 1. defined inline (the single-file shape)
+        pub fn solve_challenge(...) -> Result<()> { ... }
+
+        // 2. defined in a submodule and re-exported (mainnet's shape for
+        //    large algorithms, e.g. job_scheduling/adaptive_js_v9)
+        pub mod solver;
+        pub use solver::{solve_challenge, help};
+
+    Requiring shape 1 rejected legitimate mainnet bundles at seed time and
+    would have frozen any agent that refactored into submodules — every
+    subsequent edit failing validation on a file that was never wrong.
+
+    Shape 2 needs BOTH halves: a definition somewhere in the bundle, and a
+    re-export from the entry that carries it (named, or a glob of the module
+    that defines it). A definition with no re-export does not compile against
+    the harness, so it is correctly still a failure."""
+    if "fn solve_challenge(" in entry_code:
+        return True
+    if not files:
+        return False
+    definers = [
+        rel for rel, content in files.items()
+        if rel.endswith(".rs") and "fn solve_challenge(" in content
+    ]
+    if not definers:
+        return False
+    for line in entry_code.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("pub use "):
+            continue
+        if "solve_challenge" in stripped:
+            return True
+        # A glob re-export counts only if it pulls from a module that actually
+        # defines solve_challenge — `pub use helpers::*;` must not vouch for it.
+        if stripped.rstrip(";").endswith("::*"):
+            path = stripped[len("pub use "):].rstrip(";").removesuffix("::*")
+            module = path.rsplit("::", 1)[-1].strip()
+            if any(Path(d).stem == module for d in definers):
+                return True
+    return False
+
+
+def validate_code(
+    code: str, config: dict | None = None, files: dict[str, str] | None = None,
+) -> str | None:
     """Basic sanity check on LLM-generated code.
+
+    `files` is the full {relpath: content} bundle when the algorithm is
+    multi-file. Pass it whenever it's available: without it, only the entry
+    file is visible and a `solve_challenge` living in a submodule reads as
+    missing (see `solve_challenge_reachable`).
 
     Returns None if valid, or an error description."""
     # Charset guard: catch corruption that survives sanitization (e.g. `¤` from
@@ -492,7 +560,7 @@ def validate_code(code: str, config: dict | None = None) -> str | None:
             f"({len(bad)} suspicious character(s) found.)"
         )
     challenge = (config or {}).get("challenge")
-    if challenge:
+    if challenge and not _is_declarations_only_entry(code):
         anchor = f"use tig_challenges::{challenge}::*;"
         # Legacy `use super::*;` is accepted (pre-parity trajectories adopted
         # from the server) — ensure_challenge_import migrates it on the next
@@ -518,8 +586,12 @@ def validate_code(code: str, config: dict | None = None) -> str | None:
                 "the training loop are harness-owned — implement only the optimizer "
                 "functions, and keep them `pub fn` with their exact signatures."
             )
-    elif "fn solve_challenge(" not in code:
-        return "`fn solve_challenge(` not found — the function signature must not change."
+    elif not solve_challenge_reachable(code, files):
+        return (
+            "`solve_challenge` is not reachable from the entry file — define "
+            "`pub fn solve_challenge(` here with its exact signature, or define "
+            "it in a submodule and re-export it (`pub use solver::solve_challenge;`)."
+        )
     if is_stub_code(code):
         return (
             "Code still contains `unimplemented!()` or `todo!()` — "
@@ -649,10 +721,16 @@ def reshape_mainnet_for_swarm(
         for fn in _HARNESS_OWNED_FNS:
             code, _removed = _strip_top_level_fn(code, fn)
 
-    code = ensure_challenge_import(code, challenge)
+    # A declarations-only entry is left byte-identical to mainnet: it names no
+    # challenge types, so injecting the anchor would only add an unused import.
+    if not _is_declarations_only_entry(code):
+        code = ensure_challenge_import(code, challenge)
     out[entry] = code
 
-    err = validate_code(code, {"challenge": challenge})
+    # Validate against the WHOLE bundle: mainnet's larger algorithms keep
+    # `solve_challenge` in a submodule and re-export it from mod.rs, which is
+    # invisible to an entry-file-only check.
+    err = validate_code(code, {"challenge": challenge}, files=out)
     if err:
         return None, err
     return out, None

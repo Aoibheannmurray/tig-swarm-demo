@@ -39,7 +39,13 @@ from .config_io import (
     write_swarm_admin,
     write_swarm_cache,
 )
-from .http import _MAINNET_API, _mainnet_get, post_json
+from .http import (
+    _MAINNET_API,
+    _mainnet_get,
+    classify_http_error,
+    looks_like_platform_error,
+    post_json,
+)
 from .prompting import prompt, prompt_choice, prompt_int
 from .railway import (
     _pick_workspace,
@@ -177,6 +183,50 @@ def _reshaped_mainnet_algo(ch: str) -> tuple[dict | None, str]:
     )
 
 
+class AdminPostError(Exception):
+    """An admin POST that exhausted its retries. `detail` is the operator-facing
+    reason; `transient` says whether we gave up on a retryable condition (the
+    platform never came back) rather than a hard rejection."""
+
+    def __init__(self, detail: str, *, transient: bool):
+        super().__init__(detail)
+        self.detail = detail
+        self.transient = transient
+
+
+def _post_admin(
+    url: str, payload: dict, *, timeout: int = 10, attempts: int = 5,
+) -> dict:
+    """POST to an admin endpoint, retrying through the deploy's rollout window.
+
+    Every admin POST here is idempotent (seed deposits upsert by
+    challenge+strategy_tag; listings are reads), so retrying is always safe.
+    What we're riding out is Railway's edge answering `404 Application not
+    found` while the service has no routable container — which happens AFTER
+    `_wait_for_server` and `push_config_to_server` have both confirmed the
+    server is up, because a rollout can replace the container underneath us.
+    Backing off ~2s, 4s, 8s, 16s covers a normal rollout.
+
+    `post_json` and `time` are looked up as module globals so the self-running
+    tests can stub them."""
+    delay = 2.0
+    last: AdminPostError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return post_json(url, payload, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            retryable, detail = classify_http_error(e)
+            last = AdminPostError(f"HTTP {e.code}: {detail}", transient=retryable)
+            if not retryable:
+                raise last from e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = AdminPostError(str(e), transient=True)
+        if attempt < attempts:
+            time.sleep(delay)
+            delay = min(delay * 2, 16.0)
+    raise last or AdminPostError("no attempts made", transient=True)
+
+
 def seed_pool_from_mainnet(
     server_url: str, admin_key: str, challenges: set[str],
 ) -> list[str]:
@@ -215,17 +265,13 @@ def seed_pool_from_mainnet(
         }
         label = f"{ch}/mainnet"
         try:
-            body = post_json(
+            body = _post_admin(
                 f"{server_url.rstrip('/')}/api/admin/seed_pool", payload, timeout=10,
             )
             status = body.get("action") or ("added" if body.get("seeded") else "already present")
             print(f"  {label}: seed {status}")
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")[:200]
-            print(f"  {label}: server rejected seed (HTTP {e.code}: {detail}).")
-            failed.append(label)
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            print(f"  {label}: could not reach {server_url} ({e}).")
+        except AdminPostError as e:
+            print(f"  {label}: seed FAILED ({e.detail}).")
             failed.append(label)
     return failed
 
@@ -276,7 +322,7 @@ def seed_inactive_pool_from_mainnet(
             "source_label": "tig-foundation",
         }
         try:
-            body = post_json(
+            body = _post_admin(
                 f"{server_url.rstrip('/')}/api/admin/seed_inactive",
                 payload, timeout=10,
             )
@@ -293,11 +339,8 @@ def seed_inactive_pool_from_mainnet(
                     f"(inactive_id={body.get('inactive_id')}, "
                     f"files={len(code_files)}{extra}, source={body.get('source')})"
                 )
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")[:200]
-            print(f"  {ch}: server rejected seed (HTTP {e.code}: {detail}); skipping.")
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            print(f"  {ch}: could not reach {server_url} ({e}); skipping seed.")
+        except AdminPostError as e:
+            print(f"  {ch}: inactive seed FAILED ({e.detail}); skipping.")
 
 
 def encode_challenges_blob(challenges_cfg: dict) -> str:
@@ -490,79 +533,98 @@ def seed_pool_from_authored(
         }
         label = f"{s['challenge']}/{s['strategy_tag']}"
         try:
-            body = post_json(
+            body = _post_admin(
                 f"{server_url.rstrip('/')}/api/admin/seed_pool",
                 payload, timeout=10,
             )
             # Newer servers report the upsert outcome; older ones only `seeded`.
             status = body.get("action") or ("added" if body.get("seeded") else "already present")
             print(f"  {label}: seed {status}")
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")[:200]
-            print(f"  {label}: server rejected seed (HTTP {e.code}: {detail}).")
-            failed.append(label)
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            print(f"  {label}: could not reach {server_url} ({e}).")
+        except AdminPostError as e:
+            print(f"  {label}: seed FAILED ({e.detail}).")
             failed.append(label)
     return failed
 
 
 def verify_seed_pool(
     server_url: str, admin_key: str, seeds: list[dict], *, deadline_s: int = 90,
-) -> list[str]:
+) -> tuple[list[str], bool]:
     """Verify every authored seed is actually IN the server's seed pool,
     re-depositing missing ones until the deadline. Same belt-and-suspenders
     rationale as `push_config_to_server`: a POST during the deploy's
     health-rollout window can land on a doomed container and vanish, leaving
     the pool empty with create's output looking successful.
 
-    Reads back via ``POST /api/admin/seeds`` (metadata listing). Returns the
-    labels still missing at the deadline — empty list means verified. A
-    server predating the listing endpoint (HTTP 404) can't be verified;
-    that's reported and treated as unverified-but-not-fatal ([] returned)
-    so resumed creates against old images don't hard-fail."""
+    Reads back via ``POST /api/admin/seeds`` (metadata listing). Returns
+    ``(missing_labels, verified)``:
+
+    - ``([], True)``  — read back clean; the pool really is populated.
+    - ``(labels, True)`` — we could read the pool and those seeds aren't in it.
+    - ``([], False)`` — we could not read the pool at all (a server genuinely
+      predating ``/api/admin/seeds``). NOT a success: callers must say so
+      rather than printing a verified message.
+
+    The `verified` flag exists because the old `list[str]` return conflated
+    "nothing missing" with "couldn't check", so an unverifiable run printed
+    `all N seeds present` over an empty pool. Distinguishing a real app 404
+    from the platform edge's transient 404 (see `looks_like_platform_error`)
+    is the other half of that fix — the edge kind is retried, not surrendered
+    to."""
     if not seeds:
-        return []
+        return [], True
     wanted: dict[str, set[str]] = {}
     for s in seeds:
         wanted.setdefault(s["challenge"], set()).add(s["strategy_tag"])
-    by_label = {f"{s['challenge']}/{s['strategy_tag']}": s for s in seeds}
+    # Only seeds we hold the code for can be re-deposited. Callers may also
+    # pass code-less markers (e.g. {challenge, strategy_tag: "mainnet"}) purely
+    # to have a deposit made elsewhere read back — those are verified, and
+    # reported if absent, but never re-sent from here.
+    by_label = {
+        f"{s['challenge']}/{s['strategy_tag']}": s
+        for s in seeds if s.get("algorithm_code")
+    }
 
     deadline = time.time() + deadline_s
     missing: list[str] = []
     while True:
         missing = []
+        read_failed = False
         for challenge, tags in wanted.items():
             try:
-                body = post_json(
+                body = _post_admin(
                     f"{server_url.rstrip('/')}/api/admin/seeds",
                     {"admin_key": admin_key, "challenge": challenge},
                     timeout=10,
                 )
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
+            except AdminPostError as e:
+                missing.extend(f"{challenge}/{t}" for t in sorted(tags))
+                read_failed = True
+                if e.transient:
+                    continue
+                # A hard rejection won't fix itself: an old server image
+                # (404 from our app) or a bad admin key (401). Stop rather
+                # than hammering the same wall until the deadline.
+                if "HTTP 404" in e.detail:
                     print(
                         "  note: this server predates /api/admin/seeds — "
                         "cannot verify the seed pool; check it in the Admin "
                         "Console after redeploying."
                     )
-                    return []
-                missing.extend(f"{challenge}/{t}" for t in sorted(tags))
-                continue
-            except (urllib.error.URLError, TimeoutError, OSError):
-                missing.extend(f"{challenge}/{t}" for t in sorted(tags))
-                continue
+                    return [], False
+                print(f"  seed pool read rejected ({e.detail}) — cannot verify.")
+                return missing, False
             present = {
                 s["strategy_tag"] for s in body.get("seeds", [])
                 if s.get("source") == "authored"
             }
             missing.extend(f"{challenge}/{t}" for t in sorted(tags - present))
-        if not missing or time.time() >= deadline:
-            return missing
+        redepositable = [by_label[m] for m in missing if m in by_label]
+        if not missing or time.time() >= deadline or not redepositable:
+            # `verified` claims only what we actually observed: a read we never
+            # got back can't testify that the pool is fine OR that it's empty.
+            return missing, not read_failed
         print(f"  seed pool incomplete ({len(missing)} missing) — re-depositing…")
-        seed_pool_from_authored(
-            server_url, admin_key, [by_label[m] for m in missing],
-        )
+        seed_pool_from_authored(server_url, admin_key, redepositable)
         time.sleep(3)
 
 
@@ -859,17 +921,39 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
             emit("\nSeeding inactive trajectory pool from TIG mainnet…")
             seed_inactive_pool_from_mainnet(server_url, admin_key, seedable)
 
+        # Mainnet deposits are verified alongside the authored ones: they land
+        # in the same seed_pool table under strategy_tag "mainnet", and losing
+        # them to a rollout is just as silent (fresh trajectories quietly start
+        # from the stub instead of a mainnet-grade algorithm).
+        mainnet_deposited: list[str] = []
         if seed_pool_mainnet:
             emit("\nSeeding the initial (seed) pool from TIG mainnet…")
-            seed_pool_from_mainnet(server_url, admin_key, seedable)
+            mainnet_failed = seed_pool_from_mainnet(server_url, admin_key, seedable)
+            mainnet_deposited = [
+                ch for ch in sorted(seedable)
+                if f"{ch}/mainnet" not in set(mainnet_failed)
+            ]
 
         authored_seeds = read_authored_seeds()
+        # A mainnet seed we attempted is a pool row we expect to read back.
+        to_verify = authored_seeds + [
+            {"challenge": ch, "strategy_tag": "mainnet"} for ch in mainnet_deposited
+        ]
         if authored_seeds:
             emit("")
             seed_pool_from_authored(server_url, admin_key, authored_seeds)
+        if to_verify:
             emit("  verifying the seed pool on the server…")
-            still_missing = verify_seed_pool(server_url, admin_key, authored_seeds)
-            if still_missing:
+            still_missing, verified = verify_seed_pool(server_url, admin_key, to_verify)
+            if not verified:
+                # Unverifiable is NOT success — never print a green line here.
+                seeds_ok = False
+                emit(
+                    "  WARNING: could not read the seed pool back — the deposits "
+                    "above are UNCONFIRMED. Check the Admin Console, or re-run "
+                    "`python setup.py create` (idempotent) after redeploying."
+                )
+            elif still_missing:
                 seeds_ok = False
                 emit(
                     "  ERROR: seed pool verification FAILED — missing: "
@@ -881,7 +965,8 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
                     "(idempotent), or deposit via the Admin Console."
                 )
             else:
-                emit(f"  seed pool verified: all {len(authored_seeds)} authored seed(s) present.")
+                emit(f"  seed pool verified: all {len(to_verify)} seed(s) present "
+                     f"on the server.")
     else:
         # Config never verified, so seeding was skipped — the pool is EMPTY,
         # which historically read as "agents mysteriously start from the stub".

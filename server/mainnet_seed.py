@@ -211,6 +211,33 @@ def _ensure_challenge_import(code: str, challenge: str) -> str:
     return anchor + "\n" + code
 
 
+def _solve_challenge_reachable(entry_code: str, files: dict[str, str]) -> bool:
+    """True if `solve_challenge` resolves as `<algorithm>::solve_challenge` —
+    defined in the entry file, or defined in a submodule and re-exported from
+    it (`pub use solver::{solve_challenge, help};`, mainnet's shape for large
+    algorithms). Mirrors `scripts/challenge_files.solve_challenge_reachable`;
+    duplicated because server/ ships without scripts/ (see CLAUDE.md)."""
+    if "fn solve_challenge(" in entry_code:
+        return True
+    definers = [
+        rel.rsplit("/", 1)[-1][:-3] for rel, content in files.items()
+        if rel.endswith(".rs") and "fn solve_challenge(" in content
+    ]
+    if not definers:
+        return False
+    for line in entry_code.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("pub use "):
+            continue
+        if "solve_challenge" in stripped:
+            return True
+        if stripped.rstrip(";").endswith("::*"):
+            path = stripped[len("pub use "):].rstrip(";")[:-3]
+            if path.rsplit("::", 1)[-1].strip() in definers:
+                return True
+    return False
+
+
 def reshape_for_swarm(challenge: str, files: dict[str, str]) -> tuple[dict | None, str]:
     """Reshape a fetched mainnet bundle into the swarm layout. Returns
     (files, "") or (None, reason). Optimizer-hook challenges get their
@@ -229,9 +256,13 @@ def reshape_for_swarm(challenge: str, files: dict[str, str]) -> tuple[dict | Non
         if "fn solve_challenge(" in code:
             return None, "solve_challenge is harness-owned but could not be stripped"
     else:
-        if "fn solve_challenge(" not in code:
-            return None, "entry file has no solve_challenge"
-    code = _ensure_challenge_import(code, challenge)
+        if not _solve_challenge_reachable(code, out):
+            return None, ("solve_challenge is not reachable from mod.rs "
+                          "(not defined there and not re-exported)")
+    # A declarations-only entry names no challenge types — injecting the
+    # anchor there would only add an import rustc warns is unused.
+    if "fn " in code or "pub mod " not in code:
+        code = _ensure_challenge_import(code, challenge)
     out["mod.rs"] = code
     return out, ""
 

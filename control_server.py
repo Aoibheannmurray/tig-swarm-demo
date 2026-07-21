@@ -1344,11 +1344,22 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             )
         try:
             failed = setup_mod.seed_pool_from_authored(server_url, key, seeds) if seeds else []
-            missing = setup_mod.verify_seed_pool(server_url, key, seeds) if seeds else []
             mainnet_failed = []
             if want_mainnet:
                 mainnet_failed = setup_mod.seed_pool_from_mainnet(
                     server_url, key, only or set())
+            # Verify last, so mainnet deposits are covered too. `verified` is
+            # False when the pool could not be read back at all — the UI must
+            # not render that as a clean reseed.
+            to_verify = list(seeds) + [
+                {"challenge": ch, "strategy_tag": "mainnet"}
+                for ch in sorted(only or set())
+                if f"{ch}/mainnet" not in set(mainnet_failed)
+            ]
+            missing, verified = (
+                setup_mod.verify_seed_pool(server_url, key, to_verify)
+                if to_verify else ([], True)
+            )
         except Exception as exc:
             return JSONResponse({"error": f"reseed failed: {exc}"}, status_code=502)
         return {
@@ -1356,6 +1367,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "total": len(seeds),
             "failed": failed,
             "missing": missing,
+            "verified": verified,
             "mainnet": want_mainnet,
             "mainnet_failed": mainnet_failed,
         }

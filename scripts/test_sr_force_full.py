@@ -45,7 +45,7 @@ def _run(force_full):
     run_loop._generate_code_search_replace = _fake_sr
 
     run_loop._call_llm_logged = lambda *a, **k: ("FULL_CODE", {"input_tokens": 1, "output_tokens": 1})
-    run_loop.validate_code = lambda code, cfg: None
+    run_loop.validate_code = lambda code, cfg, files=None: None
     run_loop.build_code_system_prompt = lambda *a, **k: "sys"
     run_loop.build_code_user_prompt = lambda *a, **k: "user"
 
