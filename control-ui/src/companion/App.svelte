@@ -117,7 +117,9 @@
           <span class="muted">as</span> <b>{fleetConfig.username}</b>
         </span>
         <span class="spacer"></span>
-        <span class="ch-arrow">→</span>
+        <!-- Named, not just an arrow: the row has to say where it goes, or
+             "manage my fleet" has no obvious home on this page. -->
+        <span class="fleetlink-go">Start, monitor &amp; edit fleet →</span>
       </button>
     {/if}
 
@@ -188,7 +190,7 @@
     </div>
     {/if}
   {:else if view === "contributor"}
-    <Contributor />
+    <Contributor onLaunched={async () => { await refresh(); view = "fleet"; }} />
   {:else if view === "host"}
     <Host />
   {:else if view === "editor"}
@@ -245,6 +247,11 @@
   .fleetlink:hover { border-color: var(--color-accent); transform: translateY(-1px); background: var(--bg-card); }
   .fleetlink .spacer { flex: 1; }
   .fleetlink-txt b { font-weight: 600; }
+  .fleetlink-go { color: var(--color-accent); font-weight: 600; white-space: nowrap; }
+  @media (max-width: 560px) {
+    .fleetlink { flex-wrap: wrap; }
+    .fleetlink .spacer { display: none; }
+  }
 
   .fleetcard { border-color: var(--border-default); }
   .fleet-head h2 { margin: 0 0 2px; }
