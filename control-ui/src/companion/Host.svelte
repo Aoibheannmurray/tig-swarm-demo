@@ -544,7 +544,7 @@
     {#if seed?.configured}
       <div class="seedpool">
         <div class="row" style="align-items:baseline">
-          <label style="flex:1">Seed pool</label>
+          <h3 class="seedhead">Seed pool</h3>
           <label class="check" style="margin:0 12px 0 0"><input type="checkbox" bind:checked={reseedMainnet} /> from mainnet too</label>
           <button onclick={doReseed} disabled={reseeding}>
             {reseeding ? "Re-seeding…" : "Re-seed pool"}
@@ -612,6 +612,13 @@
   .creds li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }
   .creds li span { color: var(--ink-dim); }
   .seedpool { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+  /* Heads the seed-pool block; it labels no control, so a <label> here was
+     wrong for a screen reader (svelte a11y_label_has_associated_control) and
+     misleading for anyone tabbing the form. `font: inherit` keeps the h3
+     rendering byte-identical to the label it replaces — semantics only.
+     `flex: 1` was an inline style on the label; .row > * already sets it, but
+     it stays explicit so the rule survives moving out of .row. */
+  .seedhead { flex: 1; margin: 0; font: inherit; }
   .creds li b.bad { color: #c0392b; }
   .credval { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .credval code { overflow-wrap: anywhere; }
