@@ -140,6 +140,23 @@ from c3_compute import run_benchmark_c3
 _ITERATION_BACKOFF_SECS = 5
 
 
+def _validate_entry(entry_code: str, config: dict, files) -> str | None:
+    """`validate_code` with the algorithm's full file bundle in view.
+
+    A multi-file algorithm may define `solve_challenge` in a submodule and
+    re-export it from the entry (mainnet's shape for large algorithms). Judged
+    on the entry file alone that reads as "solve_challenge missing", which
+    would reject every edit to an otherwise valid algorithm. The on-disk
+    bundle supplies the sibling modules; `entry_code` is the candidate entry,
+    which may not be written yet."""
+    try:
+        bundle = dict(files.read_files())
+    except Exception:
+        bundle = {}
+    bundle[files.entry_name] = entry_code
+    return validate_code(entry_code, config, files=bundle)
+
+
 def _normalize_role(value: object) -> str:
     """Map a config/state `role` value to 'exploiter' or 'explorer' (default).
 
@@ -723,7 +740,7 @@ def _generate_code_search_replace(
         file_map.get(files.entry_name, ""), config["challenge"]
     ))
     file_map[files.entry_name] = entry_code
-    violation = validate_code(entry_code, config)
+    violation = validate_code(entry_code, config, files=file_map)
     if violation:
         print(f"  [SR] validation failed after edits: {violation} — skipping")
         return None, None, input_tokens, output_tokens
@@ -798,7 +815,7 @@ def _generate_code(
             print("  [LLM] Empty code response — skipping iteration")
             break
 
-        violation = validate_code(parsed, config)
+        violation = _validate_entry(parsed, config, files)
         if violation:
             print(f"  [LLM] Validation failed: {violation}")
             continue
@@ -882,7 +899,7 @@ def _try_compile_fix(
         print("  Empty fix response — giving up")
         return False, usage["input_tokens"], usage["output_tokens"]
 
-    violation = validate_code(fixed, config)
+    violation = _validate_entry(fixed, config, files)
     if violation:
         print(f"  Fix failed validation: {violation}")
         return False, usage["input_tokens"], usage["output_tokens"]
@@ -1197,7 +1214,7 @@ def _maybe_tune_hyperparameters(
     variant_map = parsed["algorithm_files"]
     files.write_files(variant_map)
     entry_code = variant_map.get(files.entry_name, "")
-    if validate_code(entry_code, config):
+    if validate_code(entry_code, config, files=variant_map):
         print("  [HPO] variant failed validation — restoring, skipping tune")
         files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
@@ -1322,7 +1339,7 @@ def _fix_runtime_errors(
             print("  Empty fix response — giving up")
             return restore_and_fail()
 
-        violation = validate_code(fixed, config)
+        violation = _validate_entry(fixed, config, files)
         if violation:
             print(f"  Fix failed validation: {violation}")
             return restore_and_fail()
@@ -2339,7 +2356,7 @@ def main() -> int:
             # likewise the serde_json / std::collections imports it strands.
             code = ensure_common_imports(
                 ensure_challenge_import(code, config["challenge"]))
-            violation = validate_code(code, config)
+            violation = _validate_entry(code, config, files)
             if violation:
                 print(f"  [AGENTIC] Validation failed: {violation} — restoring best")
                 if best_code:
