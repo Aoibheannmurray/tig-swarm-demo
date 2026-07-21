@@ -430,12 +430,22 @@ def _ensure_docker_daemon() -> None:
             )
             sys.exit(1)
     elif sys.platform.startswith("linux"):
-        # Best-effort: Docker Desktop on Linux registers a user-level service.
-        # System dockerd usually needs sudo, which we don't have here.
-        subprocess.run(
+        # Two shapes of Docker on Linux, started two different ways:
+        #   - Docker Engine (apt / get.docker.com) is a SYSTEM unit, so it needs
+        #     root. Plain systemctl works when we already are root; `sudo -n`
+        #     covers passwordless sudo. Never an interactive sudo — there's no
+        #     TTY here to answer the prompt, so it would just hang.
+        #   - Docker Desktop for Linux registers a USER unit instead.
+        # Try each and stop at the first that brings the daemon up; all are
+        # no-ops when the corresponding install isn't present.
+        for cmd in (
+            ["systemctl", "start", "docker"],
+            ["sudo", "-n", "systemctl", "start", "docker"],
             ["systemctl", "--user", "start", "docker-desktop"],
-            capture_output=True,
-        )
+        ):
+            subprocess.run(cmd, capture_output=True)
+            if _daemon_running():
+                break
     else:
         print(
             f"error: don't know how to auto-start Docker on {sys.platform} — start it manually.",

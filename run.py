@@ -463,12 +463,23 @@ def main() -> int:
     # instead of mid-benchmark. Same check the --ui companion performs.
     uses_local = any((a.get("compute") or "local") == "local" for a in agents)
     if uses_local and shutil.which("docker") is None:
+        # Name the right product for the platform: Docker Desktop is a GUI app
+        # for Mac/Windows, while Linux wants Docker Engine — pointing a headless
+        # Linux box at the Desktop download is a dead end. (control_server.py has
+        # the same hint for the --ui path; it can't be shared, since this CLI is
+        # stdlib-only and that module pulls in FastAPI.)
+        if sys.platform.startswith("linux"):
+            how = ("Install Docker Engine with:\n"
+                   "    curl -fsSL https://get.docker.com | sudo sh\n"
+                   "    sudo systemctl enable --now docker\n"
+                   "(or run `python run.py --ui` and install it from the wizard)")
+        else:
+            how = ("Install Docker Desktop "
+                   "(https://www.docker.com/products/docker-desktop/) and start it")
         print(
             "This fleet has agents on local compute, but Docker isn't "
-            "installed.\nInstall Docker Desktop "
-            "(https://www.docker.com/products/docker-desktop/) and start it,\n"
-            "or switch those agents to C3 cloud compute (no local Docker "
-            "needed).",
+            "installed.\n" + how + ",\nor switch those agents to C3 cloud "
+            "compute (no local Docker needed).",
             file=sys.stderr,
         )
         return 1

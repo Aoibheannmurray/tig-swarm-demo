@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import Stepper from "../components/Stepper.svelte";
   import FleetMonitor from "../components/FleetMonitor.svelte";
   import { localApi } from "../lib/api";
@@ -78,6 +78,43 @@
     try { preflight = await localApi.preflight(); } catch { /* keep last */ }
   }
   const dockerInstalled = $derived(!!preflight && preflight.docker.installed);
+  // Whether the companion can install Docker for them here (Linux + root or
+  // passwordless sudo). Everywhere else we show `manual` instead of a button
+  // that can't work. Older companions don't send this — treat as unsupported.
+  const dockerInstallSupport = $derived(preflight?.docker?.install_support ?? null);
+
+  // ── Install Docker Engine from the UI ──
+  // POST runs Docker's convenience script on the companion; we poll until it
+  // exits, then re-read preflight (now docker.installed).
+  let dockerInstall: any = $state(null);
+  let dockerPoll: ReturnType<typeof setInterval> | null = null;
+  function stopDockerPoll() {
+    if (dockerPoll) { clearInterval(dockerPoll); dockerPoll = null; }
+  }
+  async function startDockerInstall() {
+    try {
+      dockerInstall = await localApi.dockerInstallStart();
+    } catch (e: any) {
+      dockerInstall = { state: "error", error: e.message };
+      return;
+    }
+    stopDockerPoll();
+    dockerPoll = setInterval(async () => {
+      try {
+        dockerInstall = await localApi.dockerInstallStatus();
+        if (dockerInstall.state === "done") {
+          stopDockerPoll();
+          await recheckPreflight();
+          // Keep the panel up when a fresh login is still needed — clearing it
+          // would imply local compute is ready when the socket is still denied.
+          if (dockerInstalled && !dockerInstall.needs_relogin) dockerInstall = null;
+        } else if (dockerInstall.state === "error") {
+          stopDockerPoll();
+        }
+      } catch { /* companion hiccup — keep polling */ }
+    }, 2000);
+  }
+  onDestroy(stopDockerPoll);
 
   // ── API keys (stored locally in secrets.local.json — no `export` needed) ──
   async function refreshSecrets() {
@@ -374,10 +411,45 @@
       {#if preflight && !dockerInstalled}
         <div class="banner warn">
           Local compute needs Docker, which isn't installed on this machine.
-          Install Docker Desktop
-          (<span class="mono">https://www.docker.com/products/docker-desktop/</span>)
-          and start it{#if supportsC3}, or switch to <b>C3 cloud</b> above (no Docker
-            needed){/if}.
+          {#if dockerInstallSupport?.supported}
+            <b>Install it here</b> — it takes a minute{#if supportsC3}, or switch to
+              <b>C3 cloud</b> above (no Docker needed){/if}.
+          {:else}
+            {#if supportsC3}Switch to <b>C3 cloud</b> above (no Docker needed), or
+              install it yourself:{:else}Install it to continue:{/if}
+            <pre class="mono" style="white-space:pre-wrap;margin:8px 0 0">{dockerInstallSupport?.manual ??
+              "Install Docker (https://www.docker.com/products/docker-desktop/) and start it."}</pre>
+            {#if dockerInstallSupport?.reason}
+              <div class="hint">{dockerInstallSupport.reason}</div>
+            {/if}
+          {/if}
+        </div>
+        {#if dockerInstallSupport?.supported}
+          {#if !dockerInstall || dockerInstall.state === "idle"}
+            <button class="primary" onclick={startDockerInstall}>Install Docker</button>
+          {:else if dockerInstall.state === "pending"}
+            <p class="lede">Installing Docker Engine… this usually takes a minute.</p>
+            {#if dockerInstall.output}
+              <pre class="mono muted" style="white-space:pre-wrap">{dockerInstall.output}</pre>
+            {/if}
+          {:else if dockerInstall.state === "error"}
+            <div class="banner err" style="white-space:pre-wrap">{dockerInstall.error || "Install failed."}</div>
+            {#if dockerInstall.output}
+              <pre class="mono muted" style="white-space:pre-wrap">{dockerInstall.output}</pre>
+            {/if}
+            <button class="primary" onclick={startDockerInstall}>Try again</button>
+          {:else if dockerInstall.state === "done"}
+            <p class="lede">Installed — rechecking…</p>
+          {/if}
+        {/if}
+      {:else if dockerInstall?.needs_relogin}
+        <!-- Engine is in, but this user's `docker` group membership only takes
+             effect on a new login — so the fleet still can't reach the socket. -->
+        <div class="banner warn">
+          Docker is installed, but your user was just added to the
+          <span class="mono">docker</span> group — that only takes effect after a
+          fresh login. Log out and back in (or reboot), restart this companion,
+          then hit Recheck.
         </div>
       {:else if preflight && !preflight.docker.running}
         <div class="banner ok">Docker is installed — it'll be started automatically at launch.</div>
