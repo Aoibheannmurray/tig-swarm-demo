@@ -57,8 +57,12 @@
     reseeding = true; seedMsg = ""; error = "";
     try {
       const r = await localApi.reseed(reseedMainnet);
-      let msg = `Re-seeded ${r.deposited}/${r.total} authored seed(s)` +
-        (r.missing?.length ? ` — still missing: ${r.missing.join(", ")}` : " — pool verified.");
+      // `verified: false` means the pool could not be read back — an empty
+      // `missing` list there proves nothing, so don't claim it's verified.
+      let msg = `Re-seeded ${r.deposited}/${r.total} authored seed(s)`;
+      if (r.missing?.length) msg += ` — still missing: ${r.missing.join(", ")}`;
+      else if (r.verified === false) msg += " — UNCONFIRMED (could not read the pool back).";
+      else msg += " — pool verified.";
       if (r.mainnet) {
         msg += r.mainnet_failed?.length
           ? ` Mainnet: failed for ${r.mainnet_failed.join(", ")}.`
