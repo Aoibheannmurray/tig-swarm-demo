@@ -47,6 +47,9 @@ export const localApi = {
     fetch(`${LOCAL}/secrets`, post({ name, value })).then(jsonOrThrow),
 
   railwayStatus: () => fetch(`${LOCAL}/railway/status`).then(jsonOrThrow),
+  railwayNameCheck: (name: string, workspace?: string) =>
+    fetch(`${LOCAL}/railway/name-check?name=${encodeURIComponent(name)}` +
+      (workspace ? `&workspace=${encodeURIComponent(workspace)}` : "")).then(jsonOrThrow),
   railwayLoginStart: () => fetch(`${LOCAL}/railway/login`, { method: "POST" }).then(jsonOrThrow),
   railwayLoginStatus: () => fetch(`${LOCAL}/railway/login`).then(jsonOrThrow),
   railwayInstallStart: () => fetch(`${LOCAL}/railway/install`, { method: "POST" }).then(jsonOrThrow),
