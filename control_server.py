@@ -347,7 +347,7 @@ class DeployController:
                 print(f"\n{'='*48}\nSWARM DEPLOYED — {url}\n{'='*48}\n"
                       f"  The browser UI now has the server URL + credentials.\n"
                       f"  This --ui process keeps running to serve that UI; leave\n"
-                      f"  it up (Ctrl-C to stop). It is done, not hung.\n",
+                      f"  it up (Ctrl-C to stop).\n",
                       flush=True)
             except (Exception, SystemExit) as exc:
                 # SystemExit too: setup's CLI-oriented helpers may still exit
