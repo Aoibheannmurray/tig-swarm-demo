@@ -12,16 +12,34 @@ This project was built largely with Claude Code and is released as-is: no
 support is provided and things may break — use at your own risk. Issues are
 tracked but not triaged on any schedule; contributions are welcome via PR.
 
-## Host
+## Choose your role
 
-**Browser-only (easiest):** deploy the coordination server to Railway with one
-click — no terminal, no CLI. The server self-configures on first boot
-(generates its admin key + swarm password, seeds starting algorithms from the
-image), then you manage everything — challenge, contributors, join links — from
-the hosted Admin Console. See
-[deploy/DEPLOY_ON_RAILWAY.md](./deploy/DEPLOY_ON_RAILWAY.md).
+- **Hosting a new swarm?** Follow [For hosts: create a swarm](#for-hosts-create-a-swarm).
+- **Joining an existing swarm?** Follow [For contributors: join a swarm](#for-contributors-join-a-swarm).
 
-**CLI:** requirements: Python 3, Railway CLI, Railway account.
+## For hosts: create a swarm
+
+Hosts deploy and manage the shared coordination server and invite contributors.
+
+Requirements: Python 3, Git, and a Railway account. The setup UI can install
+the Railway CLI if it is not already available.
+
+Clone the repository, then start the setup UI:
+
+```bash
+git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git
+cd tig-swarm-demo
+python3 run.py --ui
+```
+
+Choose **Host → Create & manage a swarm**. The companion UI guides Railway
+login and provisioning, challenge selection, seed setup, and contributor
+invites. The UI runs locally; keep its terminal open while using it.
+
+### Optional: host-admin terminal commands
+
+The setup UI is the recommended path. These equivalent commands are available
+for hosts who prefer to manage the swarm directly from the cloned repository:
 
 ```bash
 railway login
@@ -38,104 +56,90 @@ python3 setup.py revoke <username>     # block future registers, stop their runn
 python3 setup.py list                  # contributors: agents, activity, revoked state
 ```
 
-`setup.py` is host-only. Contributors run `python3 run.py`.
+`setup.py` is host-only. Contributors use the same local UI or run
+`python3 run.py` for terminal setup.
 
-## Contributor
+## For contributors: join a swarm
+
+Contributors run one or more agents that improve challenge solvers. You need a
+join link from the host before starting.
 
 Requirements:
 
 - Python 3
 - Git (each agent runs in its own git worktree)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/), running — **only if you benchmark locally** (`"compute": "local"`). Not needed when all agents benchmark on C3, which runs every benchmark remotely. (Windows local Docker also needs WSL 2.)
+- **Compute — choose one:**
+  - **Docker installed and running** for local benchmarking (`"compute": "local"`): use [Docker Desktop](https://docs.docker.com/desktop/) on macOS or Windows (Windows also requires WSL 2), or [Docker Engine](https://docs.docker.com/engine/install/) or Docker Desktop on Linux.
+  - A [C3 account](https://cthree.cloud/) for cloud-based compute. C3 runs benchmarks remotely, so Docker is not required.
 - Either an API key for your chosen provider, or a logged-in `claude` / `codex` CLI
 
-
+> **Local compute resources:** The first local benchmark automatically builds
+> the required Docker image. Expect a several-gigabyte download and allow at
+> least 10 GB of free disk space for CPU challenges or 25 GB for GPU challenges
+> (the CUDA image is substantially larger), including build layers and caches.
+> 8 GB of system RAM is a practical minimum; 16 GB is recommended, especially
+> when running multiple agents. GPU challenges also require a supported NVIDIA
+> GPU and the NVIDIA Container Toolkit.
 
 ### Join with a link (easiest)
 
 If your host sent you a **join link** (`https://<swarm>/join#u=…&p=…`), open it
-in a browser — the join page hands you a single command with the link already
-baked in. It fetches the swarm code (no manual clone) and opens the local
-**setup app** in your browser, where you pick your provider/models, paste your
-API keys (LLM + [C3](https://cthree.cloud/dashboard/settings); stored locally in
-a gitignored `secrets.local.json`, never uploaded), and click **Launch fleet**.
+in a browser and run the command it provides. The setup app will open, where
+you can choose your models and compute option, add any required API keys, and
+launch your fleet. You do not need to clone the repository manually.
 
 ```bash
 # macOS / Linux (needs Python 3 + git)
-# NOTE: pinned to the staging branch until it merges to main —
-# then use .../main/deploy/get-swarm.py and drop --branch.
-curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/staging/deploy/get-swarm.py \
-  | python3 - join "<your-join-link>" --ui --branch staging
+curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py \
+  | python3 - join "<your-join-link>" --ui
 ```
 
 ```powershell
 # Windows (PowerShell or cmd; try `py` if `python` isn't recognized)
-curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/staging/deploy/get-swarm.py | python - join "<your-join-link>" --ui --branch staging
+curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py | python - join "<your-join-link>" --ui
 ```
 
-(Advanced: dropping `--ui` runs headless instead, fetching a fleet config
-stored server-side via the `/api/contributor/config` API — there's no UI for
-authoring that anymore, so most people want the setup-app flow above.)
+### Setup UI from an existing clone
 
-### Local Web Setup
+If you have already cloned the repository manually, run:
 
 ```bash
 python3 run.py --ui
 ```
 
-Opens the local web companion. It walks you through fleet setup, then lets you launch the fleet and edit it later — add agents, change settings or providers.
+This opens the local web companion. It walks you through fleet setup, then lets
+you launch the fleet and edit it later—adding agents or changing settings and
+providers.
 
-### Terminal setup
+### Optional: terminal-only setup
 
-`python3 run.py` runs setup through a wizard on the terminal. It walks you through setup the first time, then just launches on subsequent runs (a couple of optional update prompts you can skip with Enter).
+The setup UI is the recommended path. From an existing clone, `python3 run.py`
+runs the setup wizard entirely in the terminal. On subsequent runs it launches
+the saved fleet, with optional update prompts that you can skip with Enter.
 
-Export your keys before launching — your provider key (skip if you use a `claude` / `codex` CLI login) and `C3_API_KEY` for C3 compute:
+Export your keys before launching — your provider key (skip if you use a
+`claude` / `codex` CLI login), plus `C3_API_KEY` only if using C3 compute:
 
 ```bash
 # macOS / Linux
 export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
-export C3_API_KEY=c3_...            # from `c3 apikey create tig-swarm`
+export C3_API_KEY=c3_...            # C3 compute only
 ```
 
 ```powershell
 # Windows PowerShell  (cmd.exe: use  set ANTHROPIC_API_KEY=sk-...  with no quotes)
 $env:ANTHROPIC_API_KEY="sk-..."     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
-$env:C3_API_KEY="c3_..."            # from `c3 apikey create tig-swarm`
+$env:C3_API_KEY="c3_..."            # C3 compute only
 ```
 
 `Ctrl-C` terminates the whole fleet. Each agent runs in its own git worktree under `worktrees/<name>/`; identities persist across restarts.
 
-### Hand-editing
+### Updating fleet configuration manually
 
-To skip the wizard:
-
-```bash
-cp fleet.config.example.json fleet.config.json
-$EDITOR fleet.config.json
-```
-
-Per-agent fields:
-
-
-| field              | meaning                                                                                                                                                                                                                    |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`             | Agent name                                                                                                                                                                                                                 |
-| `provider`         | LLM provider eg: claude-code — see [Providers](#providers).                                                                                                                                                                |
-| `model`            | Model ID. Run `python scripts/list_models.py <provider>` to see what's available; per-provider defaults live in `DEFAULT_MODELS` (`scripts/llm_backends.py`).                                                              |
-| `api_key_env`      | Variable holding the API key, eg: `OPENROUTER_API_KEY`. Omit for CLI-auth providers.                                                                                                                                       |
-| `api_base`         | Optional override of the provider's base URL, e.g. `https://openrouter.ai/api/v1`.                                                                                                                                         |
-| `detailed_prompts` | Optional `true` to send a stricter, rule-based Rust prompt. Helps smaller/cheaper models whose code often fails to compile.                                                                                                |
-| `role`             | `explorer` writes novel/ambitious algorithms; `exploiter` makes small focused localized edits. **Hot-editable** — change it in `fleet.config.json` while the fleet runs and it takes effect on the agent's next iteration. |
-| `seeded_start`     | Optional `true`/`false` override of where the agent starts a fresh trajectory. `true`: start from working code (server seed pool → best active peer → stub as fallback); `false`: always start from the bare stub. Omit for the default policy: frontier explorers bootstrap from the stub on CPU challenges, everyone else (and all GPU challenges) gets working code. **Hot-editable** like `role`; applies at the next fresh trajectory (registration or stagnation reset), not mid-trajectory. |
-
-
-
-
-Then run the fleet (make sure you've exported your API keys first):
-
-```bash
-python3 scripts/run_fleet.py
-```
+After setup, you can change agents, providers, models, compute options, and
+other settings by editing your local `fleet.config.json`. Use
+[`fleet.config.example.json`](./fleet.config.example.json) as a reference. The
+setup UI can also make these changes for you.
 
 ### Tacit knowledge
 
@@ -145,7 +149,7 @@ Agents can also optionally **write back to it**: when one has been failing for a
 
 To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python3 setup.py tacit` directly. More detail can be found in [ARCHITECTURE.md](./docs/ARCHITECTURE.md#tacit-knowledge).
 
-### Manual / power-user flow
+### Optional: manual power-user commands
 
 The underlying commands `run.py` orchestrates also work directly:
 
@@ -158,18 +162,8 @@ python3 scripts/run_fleet.py --only claude-1    # run a subset (repeatable)
 python3 scripts/run_fleet.py --clean            # remove every worktree + branch
 ```
 
-
-
-## Benchmark image (local compute only)
-
-Only needed if an agent has `"compute": "local"` — the C3 default needs no
-local images. Build once before the first launch:
-
-```bash
-docker build -f Dockerfile.cpu -t tig-swarm-cpu .
-docker build -f Dockerfile.gpu -t tig-swarm-gpu .       # GPU challenges only
-```
-
+To inspect recorded Claude Code agentic sessions and tool activity, see
+[Inspecting agentic sessions](./docs/AGENTIC_SESSIONS.md).
 
 
 ## Providers
@@ -203,33 +197,6 @@ Each iteration prints a `[BENCH]` line: the aggregate `Score`, `Feasible`, and a
 
 The aggregate is a **shifted geometric mean** across tracks, and a failed or infeasible track is assigned a large fixed penalty. Because of that penalty, **a single bad track can drag the whole aggregate negative** even when the other tracks scored well. 
 
-## Inspecting agentic prompts
-
-In agentic mode (`claude-code-agentic` / `codex-agentic`) each iteration runs
-`claude -p` inside `worktrees/<agent>/`, and Claude Code logs the full session.
-To see exactly what an agent was told and did:
-
-```bash
-python3 scripts/show_agent_session.py <agent> --list   # list that agent's sessions, newest first
-python3 scripts/show_agent_session.py <agent>          # render the newest one
-python3 scripts/show_agent_session.py <agent> --index 3  # an older run
-python3 scripts/show_agent_session.py <agent> --full   # don't truncate long blocks
-```
-
-A session is a full agentic trace, not just input→output text. You see, in order:
-
-- **SYSTEM** — the swarm's stable rules (`worktrees/<agent>/CLAUDE.md`). These
-  aren't in the raw session log — the harness folds them into the system prompt —
-  so the script prints the on-disk copy for you. (Claude Code's own base system
-  prompt isn't recoverable from a log; capture it with `claude --debug` on a live run.)
-- **USER** — the per-iteration prompt the swarm piped in (score, role, niche,
-  inspiration, task).
-- **thinking** — Claude's private reasoning before it acts (scratchpad
-  chain-of-thought, not shown to end users normally; surfaced here).
-- **ASSISTANT** — the text replies.
-- **⚙ TOOL CALL / └─ TOOL RESULT** — each `Read`/`Edit`/`Bash` the agent made and
-  what came back.
-
 ## Local files
 
 Swarm state lives on the server. Local files only tell this clone how to connect and run:
@@ -245,91 +212,10 @@ Swarm state lives on the server. Local files only tell this clone how to connect
 
 ## Remote benchmarking with C3
 
-This swarm benchmarks on [C3](https://cthree.cloud) cloud hardware by default — the
-`run.py` wizard and `fleet.config.example.json` both set `"compute": "c3"`, so
-you don't need local compute. To benchmark locally in Docker instead, set
-`"compute": "local"` on an agent in `fleet.config.json`, then launch as usual
-with `python3 run.py`. 
+[C3](https://cthree.cloud) runs benchmarks remotely, so Docker and local
+benchmark hardware are not required. Create a C3 account, obtain an API key
+from the [C3 dashboard](https://cthree.cloud/dashboard/settings), and enter it
+in the setup UI or export it as `C3_API_KEY`.
 
-First install the `c3` CLI:
-
-```bash
-curl -fsSL https://cthree.cloud/install.sh | sh
-```
-
-Then authenticate, via either:
-
-- `c3 login` (uses your existing session), or
-- `c3 apikey create tig-swarm` then export `C3_API_KEY=...`
-
-**Windows: installing the** `c3` **CLI** (the install script above is macOS/Linux only)
-
-The equivalent of `curl -fsSL https://cthree.cloud/install.sh | sh`, in PowerShell:
-
-```powershell
-# 1. Create an install folder
-$dir = "$env:LOCALAPPDATA\Programs\c3"
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-
-# 2. Download the Windows binary as c3.exe
-curl.exe -fsSL "https://cthree.cloud/releases/latest/c3-windows-amd64.exe" -o "$dir\c3.exe"
-
-# 3. Add the folder to your User PATH (permanent) if not already there
-$userPath = [System.Environment]::GetEnvironmentVariable("Path","User")
-if (($userPath -split ';') -notcontains $dir) {
-  [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User")
-}
-
-# 4. Make it available in the CURRENT window too (no restart needed)
-$env:Path = "$env:Path;$dir"
-
-# 5. Verify
-c3 --version
-```
-
-- **PATH:** step 3 adds it permanently for your user account; step 4 makes it work in the window you're in right now. Other already-open terminals won't see `c3` until you open a new window.
-- **Command name:** it's `c3` (the binary is `c3.exe`) — no `.sh` and no `sh` required on Windows.
-- **Arch:** this uses the `amd64` build (correct for most machines, `PROCESSOR_ARCHITECTURE = AMD64`). On an ARM Windows PC, swap the URL to `c3-windows-arm64.exe`.
-- **Updating later:** re-run steps 1–2 to overwrite `c3.exe` with the latest release.
-
-### Optional C3 fields in `fleet.config.json`
-
-| key           | purpose                                                                                                                                                                             |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `compute`     | `"c3"` for C3 cloud hardware (the wizard & example default), `"local"` for local Docker. Omit the field and it falls back to `"local"`.                                             |
-| `c3_hardware` | C3 hardware selector. Use `"auto"` to run CPU challenges on `cpu-d3-4vcpu-16gb` and GPU challenges on `l40`; pin an exact profile only when needed.                                 |
-| `c3_time`     | Per-job walltime (default: `02:00:00`).                                                                                                                                             |
-| `c3_provider` | Optional C3 backend passed as `c3 deploy -p ...`.                                                                                                                                   |
-| `c3_api_key`  | Optional per-agent C3 API key (raw value). Omit to inherit the top-level fleet `c3_api_key`, then `C3_API_KEY`, then the `c3 login` session. Lets agents bill C3 to different keys. |
-| `env_image`   | Docker Hub image for the job. Defaults: `rust:1-bookworm` (CPU) or `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` (GPU). Use `env_cpu` / `env_gpu` to set each separately.            |
-
-### How your fleet's jobs run on C3
-
-Your whole fleet shares **one C3 subscription** (one C3 key), so all your agents
-share **one pool of C3 machines**. You don't configure how many — at launch the
-fleet reads your subscription's concurrent-job limit straight from C3 (Free 3 /
-Pro 10 / Team 50 today) and uses that as the pool size. Upgrade your C3 plan and
-the fleet automatically uses more machines; no config change needed.
-
-Here's what happens each time an agent benchmarks on C3:
-
-1. **Split.** The benchmark's work (its *nonces*) is divided into as many
-   **balanced** pieces as your pool has slots — sizes differ by at most one, so
-   no machine sits idle. For example, 22 nonces on a 3-slot plan → **8, 7, 7**;
-   on a 4-slot plan → **6, 6, 5, 5**. (If there's less work than slots, you just
-   use fewer machines.)
-2. **Queue.** Each piece is a job that needs a C3 machine slot. Slots are handed
-   out **first-come, first-served** across your whole fleet: when the pool is
-   full, new jobs wait in line, and each freed slot goes to the longest-waiting
-   job. This is what keeps your fleet from ever exceeding the concurrent-job
-   limit your plan allows (and thus from over-spending your C3 budget).
-3. **Merge.** When every piece of a benchmark finishes, the results are stitched
-   back together and scored once — so the score is exactly what a single-machine
-   run would give, just produced faster by running the pieces in parallel.
-
-Practically: with **one** agent benchmarking, its pieces fill the whole pool and
-the benchmark finishes as fast as your plan allows. With **several** agents, jobs
-run in the order they were submitted as slots free up, so agents take turns — a
-burst from one agent (say, a hyperparameter search) can make the others wait
-their turn in line. Either way you never over-subscribe your plan, and there's
-nothing to tune: it scales with your C3 subscription.
+See [C3 cloud compute](./docs/C3.md) for CLI installation, manual configuration,
+hardware options, and details of how remote benchmark jobs run.
