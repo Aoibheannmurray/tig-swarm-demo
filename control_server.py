@@ -215,6 +215,14 @@ class FleetController:
         self.error: str | None = None
 
     def is_running(self) -> bool:
+        # Terminal states win over thread liveness. `stop()` returns a status
+        # snapshot synchronously, and run_fleet emits its "stopped" event from
+        # INSIDE the worker thread — in both cases the thread is still alive, so
+        # a pure is_alive() check reported running=True after a stop. The UI took
+        # that at face value and kept showing "Stop fleet" until a second press
+        # produced a snapshot from outside the thread.
+        if self.state in ("stopped", "error"):
+            return False
         return self._thread is not None and self._thread.is_alive()
 
     def status(self) -> dict:
@@ -246,8 +254,14 @@ class FleetController:
                         "fleet": self.status()})
 
     def start(self, only: list[str] | None = None) -> dict:
-        if self.is_running():
-            raise RuntimeError("fleet is already running")
+        # Thread liveness, not is_running(): that now reports False as soon as
+        # the state goes terminal, which is deliberately earlier than the worker
+        # actually winds down. Starting against a still-live thread would orphan
+        # it and run two fleets at once.
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError(
+                "the previous fleet is still shutting down — try again in a moment"
+            )
         if not FLEET_CONFIG_PATH.exists():
             raise RuntimeError("fleet.config.json not found — configure the fleet first")
 
@@ -1402,7 +1416,9 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         """Generate a contributor invite from the base swarm password.
 
         Same derivation as setup.py run_invite: sha256(username:base). Uses the
-        base password from swarm.admin.json unless one is supplied."""
+        base password from swarm.admin.json unless one is supplied. Backs the
+        "Also run agents yourself" button on the host's done-screen, so a host
+        can join their own swarm without a round-trip through a join link."""
         admin = setup_mod.read_swarm_admin()
         base = payload.get("swarm_password") or admin.get("swarm_password")
         server_url = payload.get("server_url") or admin.get("server_url")
@@ -1411,7 +1427,17 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return JSONResponse({"error": "no base swarm_password available"}, status_code=400)
         if not username:
             return JSONResponse({"error": "username is required"}, status_code=400)
-        derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
+        if username in (admin.get("revoked_contributors") or []):
+            # Re-deriving the same hash won't help: the server revokes by
+            # username, not by hash. Same guard as hostadmin.run_invite.
+            return JSONResponse(
+                {"error": f"{username!r} is on the revoked list — pick a different name"},
+                status_code=400,
+            )
+        derived = setup_mod.derive_password(username, base)
+        # Without this the invite is invisible to `setup.py list`, which
+        # cross-checks issued names against the server's joined ones.
+        setup_mod.record_issued(admin, username)
         return {"server_url": server_url, "username": username,
                 "swarm_password": derived,
                 # One-link form of the same credentials (fragment-encoded so

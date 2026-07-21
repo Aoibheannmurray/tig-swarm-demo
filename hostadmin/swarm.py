@@ -1400,26 +1400,42 @@ def run_create_runner(args: argparse.Namespace | None = None) -> int:
 def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:
     """After `setup.py create`, leave the host with a working fleet.config.json
     so they can immediately participate via `python scripts/run_fleet.py`.
-    Skipped if a fleet.config.json already exists — never clobbers user edits."""
+    Skipped if a fleet.config.json already exists — never clobbers user edits.
+
+    `swarm_password` is the swarm's BASE password, which never authenticates on
+    its own: the server compares against sha256("<username>:<base>"). So the
+    host is self-invited here exactly as `setup.py invite` would do it —
+    deriving their own password and recording the name in issued_contributors.
+    (Writing the base password with no username, as this used to, produced a
+    config that run_fleet.py rejects outright for the missing username, and
+    that the server would reject anyway.)
+    """
+    from .contributors import derive_password, record_issued
+
     path = ROOT / "fleet.config.json"
     if path.exists():
         print(f"  fleet.config.json already present — leaving as-is")
         return
+    username = os.environ.get("USER") or os.environ.get("USERNAME") or "host"
     starter = {
         "server_url": server_url,
-        "swarm_password": swarm_password,
+        "username": username,
+        "swarm_password": derive_password(username, swarm_password),
         "agents": [
             {
-                "name": os.environ.get("USER") or os.environ.get("USERNAME") or "agent-1",
+                "name": f"{username}-1",
                 "provider": "anthropic",
                 "model": "claude-opus-4-7",
                 "api_key_env": "ANTHROPIC_API_KEY",
-                "compute": "local",
+                # C3 needs no local Docker/Rust — see build_fleet_config.
+                "compute": "c3",
+                "hardware": "auto",
             }
         ],
     }
     path.write_text(json.dumps(starter, indent=2) + "\n")
-    print(f"  scaffolded {path.relative_to(ROOT)} (one agent — edit before launching)")
+    record_issued(read_swarm_admin(), username)
+    print(f"  scaffolded {path.relative_to(ROOT)} as {username!r} (one agent — edit before launching)")
 
 
 # ── Switch / sync subcommands ─────────────────────────────────────────

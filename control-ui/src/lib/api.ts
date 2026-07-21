@@ -57,6 +57,11 @@ export const localApi = {
   dockerInstallStart: () => fetch(`${LOCAL}/docker/install`, { method: "POST" }).then(jsonOrThrow),
   dockerInstallStatus: () => fetch(`${LOCAL}/docker/install`).then(jsonOrThrow),
   swarmAdmin: () => fetch(`${LOCAL}/swarm/admin`).then(jsonOrThrow),
+  // Derive a contributor's credentials from the host's base password, and
+  // record the name in issued_contributors. Lets a host join their own swarm
+  // without the Admin Console → join link → browser detour.
+  invite: (username: string) =>
+    fetch(`${LOCAL}/invite`, post({ username })).then(jsonOrThrow),
   swarmCreate: (params: any) =>
     fetch(`${LOCAL}/swarm/create`, post(params)).then(jsonOrThrow),
   // Authoritative deploy state, independent of the WebSocket. Polled as a

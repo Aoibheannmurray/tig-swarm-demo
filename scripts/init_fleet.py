@@ -631,7 +631,11 @@ def build_fleet_config(params: dict) -> dict:
             else _generate_agent_names(count)
         )
 
-    compute = params.get("compute") or "local"
+    # C3 by default: it needs no local Docker or Rust toolchain, which is the
+    # smoothest path for a new contributor (the setup UI defaults the same way).
+    # Only affects configs created here — a fleet.config.json with no `compute`
+    # field still falls back to local at runtime, so existing fleets don't move.
+    compute = params.get("compute") or "c3"
     if not supports_c3:
         compute = "local"
     if compute not in ("local", "c3"):

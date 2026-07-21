@@ -4,10 +4,43 @@
   import { localApi } from "../lib/api";
   import { ensureStream, deployLog, deployStatus } from "../lib/stream";
 
+  // Handing the host's own freshly-derived credentials to the contributor
+  // wizard. A host who wants to run agents on their own swarm previously had to
+  // detour through the Admin Console to invite themselves, copy a join link,
+  // and open it — all to get back to this same app.
+  let { onJoinAsContributor = (_creds: any) => {} }:
+    { onJoinAsContributor?: (creds: any) => void } = $props();
+
   let error = $state("");
   let railway: any = $state(null);
   let challenges: any = $state({ cpu: [], gpu: [] });
   let admin: any = $state(null);
+
+  // ── Join my own swarm ──
+  let selfJoinOpen = $state(false);
+  let selfJoinName = $state("");
+  let selfJoinBusy = $state(false);
+  let selfJoinErr = $state("");
+
+  async function selfJoin() {
+    const name = selfJoinName.trim();
+    if (!name) { selfJoinErr = "Pick a username."; return; }
+    selfJoinBusy = true; selfJoinErr = "";
+    try {
+      // Derives sha256(username:base) server-side and records the name in
+      // issued_contributors, exactly as `setup.py invite` would.
+      const inv = await localApi.invite(name);
+      onJoinAsContributor({
+        server_url: inv.server_url,
+        username: inv.username,
+        swarm_password: inv.swarm_password,
+      });
+    } catch (e: any) {
+      selfJoinErr = e.message;
+    } finally {
+      selfJoinBusy = false;
+    }
+  }
 
   // ── Create form ──
   let swarmType = $state("cpu");
@@ -511,12 +544,37 @@
       <p class="lede" style="margin-top:14px">
         <b>Next:</b> open the Admin Console to create a <b>join link</b> for each
         contributor — they configure agents in the browser, then run one command
-        (<span class="mono">python run.py --join "&lt;link&gt;"</span>) or a no-clone
-        path from the README.
+        from the join page. To run agents yourself as well, you don't need a
+        link: you're already in the app that configures them.
       </p>
+
+      {#if selfJoinOpen}
+        <div class="field" style="margin-top:14px">
+          <label for="sjn">Your contributor username</label>
+          <input id="sjn" type="text" bind:value={selfJoinName}
+                 placeholder="e.g. your name"
+                 onkeydown={(e) => e.key === "Enter" && selfJoin()} />
+          <div class="hint">
+            Names your agents on the leaderboard. You get the same per-user
+            password an invite would derive — the base password above never
+            authenticates on its own.
+          </div>
+        </div>
+        {#if selfJoinErr}<div class="banner err">{selfJoinErr}</div>{/if}
+      {/if}
+
       <div class="actions">
         <div class="spacer"></div>
-        <a class="btn primary" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
+        <a class="btn" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
+        {#if selfJoinOpen}
+          <button class="primary" disabled={selfJoinBusy} onclick={selfJoin}>
+            {selfJoinBusy ? "Setting up…" : "Continue →"}
+          </button>
+        {:else}
+          <button class="primary" onclick={() => (selfJoinOpen = true)}>
+            Also run agents yourself →
+          </button>
+        {/if}
       </div>
     {/if}
   </div>
@@ -573,9 +631,35 @@
       </div>
     {/if}
 
+    <!-- Same self-invite as the done-screen. A host who provisioned in an
+         earlier session lands here, not there, so the route has to exist in
+         both places or it's only findable in the minute after deploying. -->
+    {#if selfJoinOpen}
+      <div class="field" style="margin-top:16px">
+        <label for="sjn2">Your contributor username</label>
+        <input id="sjn2" type="text" bind:value={selfJoinName}
+               placeholder="e.g. your name"
+               onkeydown={(e) => e.key === "Enter" && selfJoin()} />
+        <div class="hint">
+          Names your agents on the leaderboard. You get the same per-user
+          password an invite would derive.
+        </div>
+      </div>
+      {#if selfJoinErr}<div class="banner err">{selfJoinErr}</div>{/if}
+    {/if}
+
     <div class="actions">
       <div class="spacer"></div>
       <a class="btn" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
+      {#if selfJoinOpen}
+        <button class="primary" disabled={selfJoinBusy} onclick={selfJoin}>
+          {selfJoinBusy ? "Setting up…" : "Continue →"}
+        </button>
+      {:else}
+        <button class="primary" onclick={() => (selfJoinOpen = true)}>
+          Also run agents yourself →
+        </button>
+      {/if}
     </div>
   </div>
 {/if}

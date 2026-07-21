@@ -11,6 +11,7 @@
   // docs/server-first-onboarding-plan.md §5.
   import { onMount } from "svelte";
   import Masthead from "../components/Masthead.svelte";
+  import CopyCommand from "../components/CopyCommand.svelte";
   import { hostedApi, buildJoinLink } from "../lib/api";
 
   // Public repo contributors clone to run a local fleet. Hosts running a
@@ -24,7 +25,6 @@
   let me: any = $state(null);
   let username = $state("");
   let password = $state("");
-  let copied = $state("");
 
   onMount(async () => {
     const frag = new URLSearchParams(location.hash.slice(1));
@@ -79,40 +79,42 @@
   const BOOTSTRAP_REF: string = "staging";
   const joinLink = () => buildJoinLink(serverUrl(), username, password);
 
-  // ── Per-OS one-liner ──
-  // The primary flow: one command fetches the swarm code and opens the local
-  // setup app (run.py --join <link> --ui), where the contributor picks
-  // provider/model, pastes their API keys (stored on THEIR machine, never
-  // sent to this server), and clicks Launch fleet. Windows ships curl.exe and
-  // uses `python`; the --branch flag (handled by get-swarm.py) replaces
-  // env-var syntax so one command shape works in every shell.
-  let osTab: "unix" | "windows" = $state(
-    /win/i.test(navigator.platform || navigator.userAgent || "") ? "windows" : "unix",
-  );
+  // ── Per-OS commands ──
+  // macOS and Linux are split so each can name its own way to open a terminal;
+  // the command text only differs between unix-likes and Windows.
+  type Os = "mac" | "linux" | "windows";
+  function detectOs(): Os {
+    const s = navigator.platform || navigator.userAgent || "";
+    if (/win/i.test(s)) return "windows";
+    if (/mac|iphone|ipad/i.test(s)) return "mac";
+    return "linux";
+  }
+  let osTab: Os = $state(detectOs());
+  const isWin = $derived(osTab === "windows");
+
   const branchFlag = BOOTSTRAP_REF === "main" ? "" : ` --branch ${BOOTSTRAP_REF}`;
-  const bootstrapCmd = () => {
-    const curl = osTab === "windows" ? "curl.exe" : "curl";
-    const py = osTab === "windows" ? "python" : "python3";
-    return (
-      `${curl} -fsSL ${RAW_BASE}/${BOOTSTRAP_REF}/deploy/get-swarm.py | ` +
-      `${py} - join "${joinLink()}" --ui${branchFlag}`
-    );
-  };
-  // The secondary path, behind a disclosure: contributors who'd rather have a
-  // normal checkout in a directory they chose than the managed one get-swarm.py
-  // keeps under their data dir. Same two commands, just run by hand.
+  // `py` (the Python launcher) rather than `python` on Windows: a machine with
+  // no python.org install resolves `python` to the Microsoft Store alias stub,
+  // which in a non-interactive pipe opens the Store and exits silently — see
+  // the note on the one-liner below. `py` only exists with a real install.
+  const pyBin = $derived(isWin ? "py" : "python3");
+  const bootstrapCmd = () =>
+    `${isWin ? "curl.exe" : "curl"} -fsSL ${RAW_BASE}/${BOOTSTRAP_REF}/deploy/get-swarm.py | ` +
+    `${pyBin} - join "${joinLink()}" --ui${branchFlag}`;
   const cloneCmd = () =>
     BOOTSTRAP_REF === "main"
       ? `git clone ${REPO_URL}.git && cd tig-swarm-demo`
       : `git clone -b ${BOOTSTRAP_REF} ${REPO_URL}.git && cd tig-swarm-demo`;
-  const runJoinCmd = () =>
-    `${osTab === "windows" ? "python" : "python3"} run.py --join "${joinLink()}" --ui`;
+  const runJoinCmd = () => `${pyBin} run.py --join "${joinLink()}" --ui`;
 
-  async function copy(text: string, tag: string) {
-    await navigator.clipboard.writeText(text);
-    copied = tag;
-    setTimeout(() => (copied = ""), 1500);
-  }
+  // How to get to a terminal in the first place — the step the page used to
+  // skip entirely. A web page can't open one (no browser API exists), so this
+  // is the honest substitute.
+  const TERMINAL_HOWTO: Record<Os, string> = {
+    mac: 'Press ⌘ + Space, type "Terminal", press Enter.',
+    linux: "Press Ctrl + Alt + T (or open Terminal from your applications).",
+    windows: 'Press Win + X and choose "Terminal" (or "Windows PowerShell").',
+  };
 
   function forget() {
     localStorage.removeItem(CREDS_KEY);
@@ -164,84 +166,119 @@
     <div class="card" style="max-width:640px;margin:16px auto 0">
       <h2>Run agents on your machine</h2>
 
-      <nav class="tabs" style="margin:2px 0 10px">
-        <button class:active={osTab === "unix"} onclick={() => (osTab = "unix")}>macOS / Linux</button>
+      <nav class="tabs" style="margin:2px 0 16px">
+        <button class:active={osTab === "mac"} onclick={() => (osTab = "mac")}>macOS</button>
+        <button class:active={osTab === "linux"} onclick={() => (osTab = "linux")}>Linux</button>
         <button class:active={osTab === "windows"} onclick={() => (osTab = "windows")}>Windows</button>
       </nav>
 
-      <div class="field">
-        <div id="boot" class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{bootstrapCmd()}</div>
-        <button class="primary" onclick={() => copy(bootstrapCmd(), "boot")}>
-          {copied === "boot" ? "Copied ✓" : "Copy command"}
-        </button>
-      </div>
+      <ol class="steps">
+        <li>
+          <h3>Open your terminal</h3>
+          <p class="lede">{TERMINAL_HOWTO[osTab]}</p>
+        </li>
+        {#if isWin}
+          <!-- Windows leads with clone + run. The piped one-liner has a
+               reported failure on Windows that we could not reproduce or
+               root-cause (see the disclosure below), and this path is
+               known-good — so it is the instruction, not the fallback. -->
+          <li>
+            <h3>Paste this and press Enter</h3>
+            <p class="lede">Downloads the swarm code into a folder here.</p>
+            <CopyCommand text={cloneCmd()} variant="ghost" />
+          </li>
+          <li>
+            <h3>Then paste this</h3>
+            <p class="lede">Saves your credentials and opens the setup page.</p>
+            <CopyCommand text={runJoinCmd()} />
+          </li>
+        {:else}
+          <li>
+            <h3>Paste this and press Enter</h3>
+            <CopyCommand text={bootstrapCmd()} label="Copy command" />
+          </li>
+        {/if}
+      </ol>
 
       <!-- Only what you need before the setup app takes over: what you must
            already have, and what happens when it runs. Everything else lives
            in the README. -->
-      <p class="lede" style="margin-top:14px">
+      <p class="lede" style="margin-top:16px">
         Needs <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3</a>
         and <a href="https://git-scm.com/downloads" target="_blank" rel="noopener">Git</a>.
         A setup page opens at <span class="mono">127.0.0.1:8787</span> — add your
         API key there and launch.
-        {#if osTab === "windows"}
-          If <span class="mono">python</span> isn't recognized, try <span class="mono">py</span>.
+        {#if isWin}
+          If <span class="mono">py</span> isn't recognized, try
+          <span class="mono">python</span>. When installing Python, tick
+          <b>"Add python.exe to PATH"</b>.
         {/if}
       </p>
 
-      <details class="alt">
-        <summary>Clone the repo instead</summary>
-        <ol class="steps">
-          <li>
-            <div class="cmd mono" style="word-break:break-all">{cloneCmd()}</div>
-            <button class="ghost" onclick={() => copy(cloneCmd(), "clone")}>
-              {copied === "clone" ? "Copied ✓" : "Copy"}
-            </button>
-          </li>
-          <li>
-            <div class="cmd mono" style="white-space:pre-wrap;word-break:break-all">{runJoinCmd()}</div>
-            <button class="ghost" onclick={() => copy(runJoinCmd(), "run")}>
-              {copied === "run" ? "Copied ✓" : "Copy"}
-            </button>
-          </li>
-        </ol>
-      </details>
+      {#if isWin}
+        <details class="alt">
+          <summary>One-line install (experimental on Windows)</summary>
+          <p class="lede" style="margin:10px 0 8px">
+            Skips the clone and keeps the code in your app-data folder. This has
+            been reported to fail silently on Windows — most likely because
+            <span class="mono">python</span> resolves to the Microsoft Store
+            alias, which exits without output when run in a pipe. Use the steps
+            above if it prints nothing.
+          </p>
+          <CopyCommand text={bootstrapCmd()} variant="ghost" />
+        </details>
+      {:else}
+        <details class="alt">
+          <summary>Clone the repo instead</summary>
+          <p class="lede" style="margin:10px 0 8px">
+            Puts the code in a folder you choose, rather than the managed
+            checkout the one-liner keeps under your data directory.
+          </p>
+          <ol class="steps compact">
+            <li><CopyCommand text={cloneCmd()} variant="ghost" /></li>
+            <li><CopyCommand text={runJoinCmd()} variant="ghost" /></li>
+          </ol>
+        </details>
+      {/if}
 
+      <!-- The host's own case: they created the swarm from the companion app,
+           which is already running on :8787, and now want to contribute too.
+           Previously this page only spoke to people starting from nothing. -->
       <details class="alt">
-        <summary>Set up by hand</summary>
+        <summary>Already have the setup app open?</summary>
         <p class="lede" style="margin:10px 0 8px">
-          Put these in <span class="mono">fleet.config.json</span>, then run
-          <span class="mono">python3 run.py</span>.
+          If <span class="mono">127.0.0.1:8787</span> is already running — you
+          host this swarm, or you've joined one before — skip the commands. Open
+          it, choose <b>Join a swarm</b>, and paste these into the connect step.
         </p>
-        <textarea id="mb" readonly rows="3" aria-label="Credentials for fleet.config.json">{configBlock()}</textarea>
-        <button class="ghost" onclick={() => copy(configBlock(), "manual")}>
-          {copied === "manual" ? "Copied ✓" : "Copy"}
-        </button>
+        <CopyCommand text={configBlock()} variant="ghost" multiline />
+        <p class="lede" style="margin-top:10px">
+          Hosts can also do this without a join link: on the fleet page after
+          provisioning, use <b>Also run agents yourself</b>.
+        </p>
       </details>
     </div>
   {/if}
 </div>
 
 <style>
+  /* `.tabs`, `.alt` and the command-box styling now live in app.css /
+     CopyCommand.svelte — three surfaces render them. */
   .steps {
     margin: 10px 0 0;
-    padding-left: 20px;
+    padding-left: 22px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 20px;
   }
-  /* Alternative routes: present, but visually subordinate to the one command
-     above them. */
-  .alt { margin-top: 10px; }
-  .alt summary { cursor: pointer; font-size: 13.5px; color: var(--ink-dim); }
-  .alt summary:hover { color: var(--color-accent); }
-  .alt[open] summary { margin-bottom: 4px; }
-  .cmd {
-    background: var(--bg-sunken, rgba(127, 127, 127, 0.12));
-    border-radius: 6px;
-    padding: 8px 10px;
-    margin-bottom: 6px;
-    overflow-x: auto;
-    font-size: 0.92em;
+  .steps h3 {
+    font-family: var(--ui);
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 4px;
   }
+  /* The numbered step for each command reads as the instruction; inside a
+     disclosure the commands are just a sequence, so drop the headings' spacing. */
+  .steps.compact { gap: 10px; margin-top: 4px; }
+  .steps .lede { margin: 0 0 8px; }
 </style>

@@ -10,6 +10,10 @@
 
   type View = "landing" | "contributor" | "host" | "fleet" | "editor";
   let view: View = $state("landing");
+  // Credentials passed from Host → Contributor when a host self-invites, so the
+  // wizard opens already connected instead of asking them to paste their own
+  // password back in.
+  let contributorPrefill: any = $state(null);
   let env: any = $state(null);
   let fleetConfig: any = $state(null);
   let starting = $state(false);
@@ -177,7 +181,11 @@
       </div>
 
       <div class="actions">
-        {#if running}
+        {#if $fleetStatus.state === "stopping"}
+          <!-- Agents don't die instantly. Without this the gap between the
+               press and the state flip looked like the click was ignored. -->
+          <button class="danger" disabled>Stopping…</button>
+        {:else if running}
           <button class="danger" disabled={stopping} onclick={stopFleet}>{stopping ? "Stopping…" : "■ Stop fleet"}</button>
         {:else}
           <button class="primary" disabled={starting} onclick={startFleet}>{starting ? "Starting…" : "▶ Start fleet"}</button>
@@ -192,11 +200,15 @@
     <FleetMonitor embedded />
     {/if}
   {:else if view === "contributor"}
-    <Contributor onLaunched={async () => { await refresh(); view = "fleet"; }} />
+    <Contributor
+      prefill={contributorPrefill}
+      onLaunched={async () => { await refresh(); view = "fleet"; }} />
   {:else if view === "host"}
-    <Host />
+    <Host onJoinAsContributor={(creds) => { contributorPrefill = creds; view = "contributor"; }} />
   {:else if view === "editor"}
-    <ConfigEditor />
+    <ConfigEditor
+      onBack={() => (view = "fleet")}
+      onStarted={async () => { await refresh(); view = "fleet"; }} />
   {/if}
 </div>
 
