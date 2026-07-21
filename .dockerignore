@@ -7,3 +7,7 @@ datasets/
 .railway/
 **/__pycache__
 dashboard/dist/
+# Development-only symlink to dashboard/dist. The container receives the
+# dashboard from its dedicated build stage, so copying this path would make
+# /app/static a symlink (or a regular file on Windows) instead of a directory.
+server/static
