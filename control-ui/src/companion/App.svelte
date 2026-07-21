@@ -8,7 +8,7 @@
   import { localApi } from "../lib/api";
   import { ensureStream, fleetStatus } from "../lib/stream";
 
-  type View = "landing" | "contributor" | "host" | "monitor" | "editor";
+  type View = "landing" | "contributor" | "host" | "fleet" | "monitor" | "editor";
   let view: View = $state("landing");
   let env: any = $state(null);
   let fleetConfig: any = $state(null);
@@ -81,29 +81,6 @@
   {#if error}<div class="banner err">{error}</div>{/if}
 
   {#if view === "landing"}
-    <!-- Returning-visit shortcut. The role choice leads the page (it's what a
-         first-time visitor needs), but someone who already has a fleet came
-         back to start or watch it — this jumps them there without scrolling
-         past a decision they've already made. -->
-    {#if fleetConfig}
-      <a class="resume" href="#fleet">
-        <span class="pill {running ? 'ok' : 'info'}">{running ? "running" : "ready"}</span>
-        <span>Your fleet — <b>{agentEntries.length}</b>
-          {agentEntries.length === 1 ? "agent" : "agents"} as <b>{fleetConfig.username}</b></span>
-        <span class="spacer"></span>
-        <span class="resume-go">Go to fleet ↓</span>
-      </a>
-    {/if}
-
-    <div class="card intro">
-      <h2>Run the swarm without the command line</h2>
-      <p class="lede">
-        A local companion for standing up and joining a Prometheus swarm. The
-        classic CLI (<code>python setup.py</code>, <code>python run.py</code>)
-        still works if you prefer it.
-      </p>
-    </div>
-
     <h3 class="secheading">Which are you?</h3>
     <div class="choices">
       <button class="choice" onclick={() => (view = "contributor")}>
@@ -112,13 +89,8 @@
           <span class="spacer"></span>
           <span class="ch-arrow">→</span>
         </span>
-        <span class="ch-title">{fleetConfig ? "Join another swarm" : "Join a swarm"}</span>
-        <span class="ch-desc">
-          Someone shared a join link with you. Point agents on this machine at
-          their swarm — pick your provider, models and how many agents, then
-          launch.
-        </span>
-        <span class="ch-needs">You'll need a <b>join link</b> and an <b>API key</b> (or a signed-in Claude/Codex CLI)</span>
+        <span class="ch-title">Join a swarm</span>
+        <span class="ch-desc">Someone sent you a join link.</span>
       </button>
       <button class="choice" onclick={() => (view = "host")}>
         <span class="ch-head">
@@ -127,61 +99,26 @@
           <span class="ch-arrow">→</span>
         </span>
         <span class="ch-title">Create a swarm</span>
-        <span class="ch-desc">
-          Stand up the coordination server everyone else joins — pick the
-          challenge, seed the algorithm pool, and invite contributors.
-        </span>
-        <span class="ch-needs">You'll need a <b>Railway account</b></span>
+        <span class="ch-desc">You're setting one up for others to join.</span>
       </button>
     </div>
-    <p class="helper muted">
-      Not sure? If someone sent you a link, you're a contributor. You can be
-      both — hosts usually run a fleet of their own too.
-    </p>
 
-    <!-- Your fleet / joined swarm -->
+    <!-- Entry point only. Everything you DO to a fleet — start, stop, monitor,
+         reconfigure — lives on the fleet page, so the landing stays a choice
+         rather than a choice plus a control panel. -->
     {#if fleetConfig}
-      <h3 class="secheading" id="fleet">Your fleet</h3>
-      <div class="card fleetcard">
-        <div class="fleet-head">
-          <div>
-            <div class="swarm-meta">
-              <span class="muted">joined as</span> <b>{fleetConfig.username}</b>
-              <span class="muted">·</span>
-              <a href={fleetConfig.server_url} target="_blank" rel="noreferrer">{fleetConfig.server_url}</a>
-            </div>
-          </div>
-          <div class="spacer"></div>
-          <span class="pill {running ? 'ok' : $fleetStatus.state === 'stopped' ? 'info' : 'warn'}">
-            {running ? "attached · running" : $fleetStatus.state === "stopped" ? "stopped" : "not running"}
-          </span>
-        </div>
-
-        <div class="agentgrid">
-          {#each agentEntries as a}
-            {@const st = liveState(a.name)}
-            <div class="agentcard">
-              <b>{a.name}</b>
-              <span class="pill {st === 'running' ? 'ok' : st === 'exited' ? 'info' : 'warn'}">{st ?? "idle"}</span>
-              <div class="agent-sub muted mono">
-                {a.provider}{a.model ? ` · ${a.model}` : ""} · {a.compute === "c3" ? `c3/${a.hardware ?? "auto"}` : "local"}
-              </div>
-            </div>
-          {/each}
-        </div>
-
-        <div class="actions">
-          {#if running}
-            <button class="primary" onclick={() => (view = "monitor")}>Open monitor →</button>
-            <button class="danger" disabled={stopping} onclick={stopFleet}>{stopping ? "Stopping…" : "■ Stop fleet"}</button>
-          {:else}
-            <button class="primary" disabled={starting} onclick={startFleet}>{starting ? "Starting…" : "▶ Start fleet"}</button>
-            <button onclick={() => (view = "monitor")}>View last run</button>
-          {/if}
-          <div class="spacer"></div>
-          <button class="ghost" onclick={() => (view = "editor")}>Reconfigure</button>
-        </div>
-      </div>
+      <h3 class="secheading">Your fleet</h3>
+      <button class="card fleetlink" onclick={() => (view = "fleet")}>
+        <span class="pill {running ? 'ok' : $fleetStatus.state === 'stopped' ? 'info' : 'warn'}">
+          {running ? "running" : $fleetStatus.state === "stopped" ? "stopped" : "not running"}
+        </span>
+        <span class="fleetlink-txt">
+          <b>{agentEntries.length}</b> {agentEntries.length === 1 ? "agent" : "agents"}
+          <span class="muted">as</span> <b>{fleetConfig.username}</b>
+        </span>
+        <span class="spacer"></span>
+        <span class="ch-arrow">→</span>
+      </button>
     {/if}
 
     {#if env}
@@ -191,6 +128,64 @@
       </div>
     {:else}
       <div class="banner err">Can't reach the local companion. Start it with <code>python control_server.py</code>.</div>
+    {/if}
+  {:else if view === "fleet"}
+    {#if !fleetConfig}
+      <!-- Reachable if the config went away underneath us (removed on disk, a
+           failed reconfigure). Without this the view matches but renders
+           nothing, leaving a blank page with no way back but the masthead. -->
+      <div class="card">
+        <h2>No fleet configured</h2>
+        <p class="lede">
+          There's no <code>fleet.config.json</code> for this checkout yet. Join
+          a swarm to create one.
+        </p>
+        <div class="actions">
+          <button class="primary" onclick={() => (view = "contributor")}>Join a swarm →</button>
+        </div>
+      </div>
+    {:else}
+    <div class="card fleetcard">
+      <div class="fleet-head">
+        <div>
+          <h2>Your fleet</h2>
+          <div class="swarm-meta">
+            <span class="muted">joined as</span> <b>{fleetConfig.username}</b>
+            <span class="muted">·</span>
+            <a href={fleetConfig.server_url} target="_blank" rel="noreferrer">{fleetConfig.server_url}</a>
+          </div>
+        </div>
+        <div class="spacer"></div>
+        <span class="pill {running ? 'ok' : $fleetStatus.state === 'stopped' ? 'info' : 'warn'}">
+          {running ? "attached · running" : $fleetStatus.state === "stopped" ? "stopped" : "not running"}
+        </span>
+      </div>
+
+      <div class="agentgrid">
+        {#each agentEntries as a}
+          {@const st = liveState(a.name)}
+          <div class="agentcard">
+            <b>{a.name}</b>
+            <span class="pill {st === 'running' ? 'ok' : st === 'exited' ? 'info' : 'warn'}">{st ?? "idle"}</span>
+            <div class="agent-sub muted mono">
+              {a.provider}{a.model ? ` · ${a.model}` : ""} · {a.compute === "c3" ? `c3/${a.hardware ?? "auto"}` : "local"}
+            </div>
+          </div>
+        {/each}
+      </div>
+
+      <div class="actions">
+        {#if running}
+          <button class="primary" onclick={() => (view = "monitor")}>Open monitor →</button>
+          <button class="danger" disabled={stopping} onclick={stopFleet}>{stopping ? "Stopping…" : "■ Stop fleet"}</button>
+        {:else}
+          <button class="primary" disabled={starting} onclick={startFleet}>{starting ? "Starting…" : "▶ Start fleet"}</button>
+          <button onclick={() => (view = "monitor")}>View last run</button>
+        {/if}
+        <div class="spacer"></div>
+        <button class="ghost" onclick={() => (view = "editor")}>Reconfigure</button>
+      </div>
+    </div>
     {/if}
   {:else if view === "contributor"}
     <Contributor />
@@ -204,8 +199,6 @@
 </div>
 
 <style>
-  .intro { background: transparent; border: none; box-shadow: none; padding: 8px 0 4px; }
-
   /* Section label — gives the page a visible spine (choose a role → your
      fleet) instead of a flat stack of cards. */
   .secheading {
@@ -214,43 +207,47 @@
     margin: 26px 0 12px;
   }
 
-  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   @media (max-width: 720px) { .choices { grid-template-columns: 1fr; } }
   .choice {
-    text-align: left; display: flex; flex-direction: column; gap: 8px; padding: 22px;
+    text-align: left; display: flex; flex-direction: column; gap: 10px;
+    /* Deliberately large: this is the only decision on the page, and the tile
+       is the target. min-height keeps the pair even when one line of copy
+       wraps and the other doesn't. */
+    padding: 30px 28px 32px; min-height: 210px;
     background: var(--bg-card); border: 1px solid var(--border-subtle);
     border-radius: var(--radius); box-shadow: var(--shadow); cursor: pointer;
-    transition: border-color 0.15s, transform 0.08s;
+    transition: border-color 0.15s, transform 0.08s, box-shadow 0.15s;
   }
-  .choice:hover { border-color: var(--color-accent); transform: translateY(-1px); }
+  .choice:hover {
+    border-color: var(--color-accent); transform: translateY(-2px);
+    box-shadow: 0 2px 4px rgba(26, 26, 26, 0.06), 0 10px 28px rgba(26, 26, 26, 0.07);
+  }
   .ch-head { display: flex; align-items: center; gap: 8px; }
   .ch-head .spacer { flex: 1; }
-  .ch-arrow { color: var(--ink-faint); font-size: 17px; transition: color 0.15s, transform 0.15s; }
+  .ch-arrow { color: var(--ink-faint); font-size: 19px; transition: color 0.15s, transform 0.15s; }
   .choice:hover .ch-arrow { color: var(--color-accent); transform: translateX(3px); }
-  .ch-title { font-family: var(--display); font-style: italic; font-size: 22px; font-weight: 600; }
-  .ch-desc { font-size: 13.5px; color: var(--ink-mid); }
-  /* The prerequisite line: the thing that actually tells someone whether they
-     can start down this path right now. */
-  .ch-needs {
-    margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border-subtle);
-    font-size: 12.5px; color: var(--ink-dim);
+  /* The title carries the tile — sized to be readable at a glance from across
+     the viewport, with the one-line description as support. */
+  .ch-title {
+    font-family: var(--display); font-style: italic; font-size: 34px;
+    font-weight: 600; line-height: 1.1; margin-top: auto;
   }
-  .helper { font-size: 13px; margin-top: 12px; }
+  .ch-desc { font-size: 15px; color: var(--ink-mid); }
   .statusline { display: flex; gap: 10px; align-items: center; margin-top: 22px; font-size: 13px; flex-wrap: wrap; }
 
-  /* Returning-visit strip above the fold. */
-  .resume {
-    display: flex; align-items: center; gap: 10px; width: 100%;
-    padding: 11px 14px; margin-bottom: 18px;
-    background: var(--bg-card); border: 1px solid var(--border-subtle);
-    border-radius: var(--radius); font-size: 13.5px; color: var(--ink);
-    text-decoration: none; transition: border-color 0.15s;
+  /* Landing entry point to the fleet page — status at a glance, no controls. */
+  .fleetlink {
+    display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+    padding: 16px 20px; font-family: var(--ui); font-size: 14px; font-weight: 400;
+    cursor: pointer; transition: border-color 0.15s, transform 0.08s;
   }
-  .resume:hover { border-color: var(--color-accent); }
-  .resume .spacer { flex: 1; }
-  .resume-go { color: var(--color-accent); font-weight: 600; white-space: nowrap; }
+  .fleetlink:hover { border-color: var(--color-accent); transform: translateY(-1px); background: var(--bg-card); }
+  .fleetlink .spacer { flex: 1; }
+  .fleetlink-txt b { font-weight: 600; }
 
   .fleetcard { border-color: var(--border-default); }
+  .fleet-head h2 { margin: 0 0 2px; }
   .fleet-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 16px; }
   .swarm-meta { font-size: 13px; }
   .agentgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-bottom: 4px; }
