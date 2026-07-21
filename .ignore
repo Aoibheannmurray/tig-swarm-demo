@@ -12,3 +12,14 @@ docs/
 tig-monorepo/
 target/
 datasets/
+# Local state and generated agent output are not image inputs. Most are also
+# covered by .gitignore, but listing them here keeps Railway snapshots small
+# even if uploader ignore precedence changes.
+worktrees/
+local/
+reports/
+prompts_log/
+feedback/
+*.db
+*.db-journal
+swarm.admin*.json

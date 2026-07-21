@@ -2,7 +2,7 @@
 FROM node:20-slim AS dashboard
 WORKDIR /dashboard
 COPY dashboard/package.json dashboard/package-lock.json ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 COPY dashboard/ .
 RUN npm run build
 
@@ -10,7 +10,7 @@ RUN npm run build
 FROM node:20-slim AS controlui
 WORKDIR /control-ui
 COPY control-ui/package.json control-ui/package-lock.json ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 COPY control-ui/ .
 RUN npm run build:fast
 
@@ -19,7 +19,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 COPY server/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 COPY server/ .
 COPY --from=dashboard /dashboard/dist ./static/
 # Admin Console served at /admin/, contributor join page at /join/. Copy only
