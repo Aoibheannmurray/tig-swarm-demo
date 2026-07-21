@@ -414,6 +414,36 @@ async def verify_swarm_password(
     return x_username
 
 
+async def optional_swarm_password(
+    x_username: str | None = Header(default=None, alias="X-Username"),
+    x_swarm_password: str | None = Header(default=None, alias="X-Swarm-Password"),
+) -> bool:
+    """Like verify_swarm_password, but for endpoints that must stay publicly
+    reachable (the dashboard) while gating specific code-bearing fields to
+    contributors who present valid swarm credentials. Returns whether the
+    caller is credentialed instead of raising on failure/absence — but still
+    throttles wrong-password attempts (shares the same `swarm:{ip}` bucket
+    as verify_swarm_password) so this can't be used as an unthrottled side
+    channel to brute-force the swarm password.
+    """
+    if not x_username or not x_swarm_password:
+        return False
+    config = await get_config_cached()
+    base = config.get("swarm_password")
+    if not base:
+        return False
+    expected = _derive_user_password(x_username, base)
+    ip = _client_ip.get()
+    if not secrets.compare_digest(x_swarm_password.encode(), expected.encode()):
+        if _note_auth_failure(f"swarm:{ip}") > _AUTH_FAIL_LIMIT:
+            raise HTTPException(status_code=429, detail="Too many attempts; slow down")
+        return False
+    _clear_auth_failure(f"swarm:{ip}")
+    if x_username in _revoked_usernames(config):
+        return False
+    return True
+
+
 async def _agent_id_for_token(token: str) -> str | None:
     async with db.connect() as conn:
         cursor = await conn.execute(
@@ -1201,6 +1231,7 @@ async def get_state(
     role: str | None = None,
     seeded_start: str | None = None,
     token_agent_id: str | None = Depends(optional_agent_token),
+    credentialed: bool = Depends(optional_swarm_password),
 ):
     """Return current swarm state for the given challenge.
 
@@ -1222,7 +1253,12 @@ async def get_state(
     are omitted.
 
     When `agent_id` is omitted, returns a global dashboard view (filtered
-    by the requested or active challenge).
+    by the requested or active challenge). That view is public and
+    side-effect-free, but the code-bearing fields (`best_algorithm_code`,
+    `best_algorithm_files`, `best_kernel_code`) are only populated when the
+    caller presents valid X-Username/X-Swarm-Password headers — anonymous
+    callers get every other field with those three set to null, so the
+    leaderboard/chart/stats views keep working unauthenticated.
 
     `challenge` defaults to the swarm's `active_challenge` when omitted.
     """
@@ -1231,7 +1267,7 @@ async def get_state(
     challenge = await resolve_challenge(challenge)
     if agent_id is not None:
         return await _agent_state(agent_id, challenge, role, seeded_start)
-    return await _dashboard_state(challenge)
+    return await _dashboard_state(challenge, credentialed)
 
 
 async def _ensure_current_program_id(
@@ -1595,10 +1631,15 @@ async def _agent_state(
         return resp
 
 
-async def _dashboard_state(challenge: str) -> dict:
+async def _dashboard_state(challenge: str, credentialed: bool = False) -> dict:
     """Public dashboard view of /api/state (no agent_id): read-only swarm
     stats, recent experiments/hypotheses, and the global-best code. No
-    side effects."""
+    side effects.
+
+    `credentialed` gates the code-bearing fields (best_algorithm_code,
+    best_algorithm_files, best_kernel_code) to callers who presented a
+    valid swarm password — see optional_swarm_password. Everything else
+    (scores, leaderboard, counters, recent activity) stays public."""
     direction = await get_direction(challenge)
     challenge_cfg = await get_challenge_config_cached(challenge)
 
@@ -1639,14 +1680,21 @@ async def _dashboard_state(challenge: str) -> dict:
     global_best_score = global_best["score"] if global_best else None
 
     _initial_algo = (None, None) if served else await load_initial_algorithm(challenge)
+    best_algorithm_code = served["algorithm_code"] if served else _initial_algo[0]
+    best_algorithm_files = _row_files(served) if served else None
+    best_kernel_code = (served.get("kernel_code") if served else _initial_algo[1]) or None
+    if not credentialed:
+        best_algorithm_code = None
+        best_algorithm_files = None
+        best_kernel_code = None
     return {
         "challenge": challenge,
         "baseline_score": baseline,
         "best_score": global_best_score,
         "improvement_pct": overall_imp,
-        "best_algorithm_code": served["algorithm_code"] if served else _initial_algo[0],
-        "best_algorithm_files": _row_files(served) if served else None,
-        "best_kernel_code": (served.get("kernel_code") if served else _initial_algo[1]) or None,
+        "best_algorithm_code": best_algorithm_code,
+        "best_algorithm_files": best_algorithm_files,
+        "best_kernel_code": best_kernel_code,
         "best_experiment_id": served["id"] if served else None,
         "best_solution_data": json.loads(served["solution_data"]) if served and served["solution_data"] else None,
         "best_track_scores": (
@@ -2658,7 +2706,16 @@ async def get_agent_experiments(
     agent_id: str,
     challenge: str | None = None,
     include_code: bool = False,
+    credentialed: bool = Depends(optional_swarm_password),
 ):
+    # include_code=true returns algorithm_code/kernel_code, so it's gated to
+    # callers with valid swarm credentials; the base (no-code) response stays
+    # public — see optional_swarm_password.
+    if include_code and not credentialed:
+        raise HTTPException(
+            status_code=403,
+            detail="X-Username/X-Swarm-Password required for include_code",
+        )
     # Per-agent full attempt history for the personal progress chart, scoped
     # to the requested challenge (defaults to active). Returns every experiment
     # (improvement or not, feasible or not) so the dashboard can render a
@@ -2790,12 +2847,20 @@ async def get_trajectory_experiments(
     challenge: str | None = None,
     trajectory_id: str | None = None,
     include_code: bool = False,
+    credentialed: bool = Depends(optional_swarm_password),
 ):
     """All experiments grouped by trajectory.
 
     Optionally filter to a single trajectory via ?trajectory_id=...
-    Pass include_code=true to return algorithm_code per experiment.
+    Pass include_code=true to return algorithm_code per experiment — gated
+    to callers with valid X-Username/X-Swarm-Password (see
+    optional_swarm_password); the base response stays public.
     """
+    if include_code and not credentialed:
+        raise HTTPException(
+            status_code=403,
+            detail="X-Username/X-Swarm-Password required for include_code",
+        )
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         traj_filter = ""

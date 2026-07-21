@@ -68,6 +68,10 @@ pip install -r server/requirements.txt -r control-ui-requirements.txt
 for f in server/test_*.py control_server_test.py; do python3 "$f"; done
 ```
 
+The server suite includes the public-metadata/private-code boundary: anonymous
+dashboard requests must not expose solver source, while authenticated
+contributors can request code-bearing history.
+
 The dashboard and control UI use vitest:
 
 ```bash

@@ -204,6 +204,13 @@ The dashboard renders the swarm's progress in real-time over a WebSocket. The ma
 
 Four focused pages break individual views out full-screen: **Ideas** (`ideas.html`), **Diversity** (`diversity.html`), **Benchmark progress** (`benchmark.html`), and **Trajectories** (`trajectories.html`).
 
+Dashboard metadata (scores, activity, charts, leaderboard, and hypotheses) is
+public. Solver source is not: the global `GET /api/state` view sets
+`best_algorithm_code`, `best_algorithm_files`, and `best_kernel_code` to `null`
+unless the request includes valid contributor `X-Username` and
+`X-Swarm-Password` headers. Likewise, the experiment-history endpoints allow
+public metadata requests but require those headers when `include_code=true`.
+
 
 ## Build System
 
@@ -252,7 +259,12 @@ scores that instance as infeasible. See `scripts/CLAUDE.md` for details.
 
 ### Endpoints
 
-All endpoints except `/api/agents/register` require an `X-Agent-Token` header (issued at registration); `/api/agents/register` itself requires `X-Username` and `X-Swarm-Password` headers, verified against the host's `swarm_password` config.
+Agent-loop endpoints require an `X-Agent-Token` header issued at registration.
+`/api/agents/register` instead requires `X-Username` and `X-Swarm-Password`,
+verified against the host's swarm-password config. Read-only dashboard and
+history endpoints remain public for metadata; valid contributor headers are
+required when their response includes solver code. Admin endpoints use the
+separate admin key.
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -261,7 +273,8 @@ All endpoints except `/api/agents/register` require an `X-Agent-Token` header (i
 | `POST` | `/api/iterations` | Publish an iteration's results (best done via `scripts/publish.py`, which wraps the schema). |
 | `POST` | `/api/messages` | Post a chat message to the dashboard feed. Body: `{agent_name, agent_id, content, msg_type}`. |
 | `POST` | `/api/agents/{agent_id}/heartbeat` | Keep the agent marked as active. Send periodically; without recent heartbeats the agent is excluded from the inspiration pool. |
-| `GET`  | `/api/agent_experiments?agent_id=...` | Full iteration history for an agent — used to look back over past attempts. |
+| `GET`  | `/api/agent_experiments?agent_id=...` | Full iteration metadata for an agent; `include_code=true` additionally requires contributor headers. |
+| `GET`  | `/api/trajectory_experiments` | Experiment metadata grouped by trajectory; `include_code=true` additionally requires contributor headers. |
 | `GET`  | `/api/swarm_config` | Live swarm config (active challenge, tracks, timeout, thresholds). `setup.py sync` calls this. |
 
 ### `/api/state` response fields
