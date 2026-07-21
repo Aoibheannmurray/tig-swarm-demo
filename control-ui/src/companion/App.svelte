@@ -8,7 +8,7 @@
   import { localApi } from "../lib/api";
   import { ensureStream, fleetStatus } from "../lib/stream";
 
-  type View = "landing" | "contributor" | "host" | "fleet" | "monitor" | "editor";
+  type View = "landing" | "contributor" | "host" | "fleet" | "editor";
   let view: View = $state("landing");
   let env: any = $state(null);
   let fleetConfig: any = $state(null);
@@ -46,7 +46,7 @@
     try {
       ensureStream();
       await localApi.fleetStart();
-      view = "monitor";
+      view = "fleet";
     } catch (e: any) {
       error = e.message;
     } finally {
@@ -178,16 +178,18 @@
 
       <div class="actions">
         {#if running}
-          <button class="primary" onclick={() => (view = "monitor")}>Open monitor →</button>
           <button class="danger" disabled={stopping} onclick={stopFleet}>{stopping ? "Stopping…" : "■ Stop fleet"}</button>
         {:else}
           <button class="primary" disabled={starting} onclick={startFleet}>{starting ? "Starting…" : "▶ Start fleet"}</button>
-          <button onclick={() => (view = "monitor")}>View last run</button>
         {/if}
         <div class="spacer"></div>
-        <button class="ghost" onclick={() => (view = "editor")}>Reconfigure</button>
+        <button class="reconfig" onclick={() => (view = "editor")}>⚙ Reconfigure fleet</button>
       </div>
     </div>
+
+    <!-- Same page: starting a fleet and watching it are one activity, so the
+         log sits under the controls instead of behind a navigation step. -->
+    <FleetMonitor embedded />
     {/if}
   {:else if view === "contributor"}
     <Contributor onLaunched={async () => { await refresh(); view = "fleet"; }} />
@@ -195,8 +197,6 @@
     <Host />
   {:else if view === "editor"}
     <ConfigEditor />
-  {:else if view === "monitor"}
-    <FleetMonitor />
   {/if}
 </div>
 
@@ -252,6 +252,11 @@
     .fleetlink { flex-wrap: wrap; }
     .fleetlink .spacer { display: none; }
   }
+
+  /* Reconfigure was a .ghost (transparent, dimmed) — the least visible thing
+     on the page, despite being the only route to changing the fleet. */
+  .reconfig { border-color: var(--border-strong); color: var(--ink); }
+  .reconfig:hover { border-color: var(--color-accent); color: var(--color-accent); }
 
   .fleetcard { border-color: var(--border-default); }
   .fleet-head h2 { margin: 0 0 2px; }
