@@ -1,9 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import Stepper from "../components/Stepper.svelte";
-  import FleetMonitor from "../components/FleetMonitor.svelte";
   import { localApi } from "../lib/api";
   import { ensureStream } from "../lib/stream";
+
+  // Called once the fleet is running. The parent sends the user to the fleet
+  // page, so setup ends where fleets are managed from then on — rather than at
+  // a monitor embedded in the wizard, which looked like a different feature
+  // from the identical one on the fleet page.
+  let { onLaunched = () => {} }: { onLaunched?: () => void } = $props();
 
   const STEPS = ["Connect", "Provider", "Agents", "Tacit", "Launch"];
   let step = $state(0);
@@ -204,6 +209,7 @@
       ensureStream();
       await localApi.fleetStart();
       started = true;
+      onLaunched();
     } catch (e: any) {
       error = e.message;
     } finally {
@@ -340,11 +346,14 @@
         </select>
       </div>
     </div>
-    <div class="hint">
-      Both are hot-editable later in <code>fleet.config.json</code>
-      (<code>role</code> / <code>seeded_start</code>) — changes apply on the
-      agent's next iteration. “Starting point” takes effect when a fresh
-      trajectory begins, not mid-run.
+    <!-- Given room of its own: it answers "am I locked into this?", which is
+         the question that stalls people on this step. Cramped under the two
+         selects it read as fine print. -->
+    <div class="note">
+      <p>Both can be changed later, while the swarm is running — from
+        <b>Reconfigure</b> on your fleet page.</p>
+      <p>Changes apply on the agent's next iteration. A new starting point
+        takes effect when a fresh trajectory begins.</p>
     </div>
 
     <!-- Readiness: guide the user to the prerequisites for the chosen backend
@@ -501,13 +510,24 @@
       {/if}
     {/if}
   </div>
-
-  {#if started}
-    <FleetMonitor />
-  {/if}
 {/if}
 
 <style>
+  /* Explanatory aside — roomier than .hint, which is sized for a one-line
+     caption hanging off a single field. */
+  .note {
+    margin-top: 20px;
+    padding: 16px 18px;
+    background: var(--bg-sunken);
+    border-radius: 6px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--ink-mid);
+  }
+  .note p { margin: 0; }
+  .note p + p { margin-top: 10px; }
+  .note b { color: var(--ink); font-weight: 600; }
+
   .summary { list-style: none; margin-bottom: 8px; }
   .summary li { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }
   .summary li span { color: var(--ink-dim); }

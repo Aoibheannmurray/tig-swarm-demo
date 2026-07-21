@@ -8,6 +8,12 @@
   // page load): it fetches the current fleet status from the companion and
   // (re)connects the event stream, which replays recent log history. So a
   // reload lands you right back on a live view with a working Stop button.
+  // `embedded`: rendered underneath the fleet card, which already carries the
+  // identity, the agent grid and the start/stop controls. Showing them again
+  // here would mean two agent grids and two Stop buttons on one page, so in
+  // this mode the monitor is the live log and nothing else.
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   let stopping = $state(false);
   let error = $state("");
 
@@ -37,19 +43,21 @@
 
 <div class="card">
   <div class="monitor-head">
-    <h2>Fleet monitor</h2>
+    <h2>{embedded ? "Live log" : "Fleet monitor"}</h2>
     <div class="spacer"></div>
     <span class="pill {$fleetStatus.state === 'running' ? 'ok' : $fleetStatus.state === 'error' ? 'err' : 'info'}">
       {$fleetStatus.state}
     </span>
-    {#if running}
+    {#if running && !embedded}
       <button class="danger" disabled={stopping} onclick={stop}>{stopping ? "Stopping…" : "■ Stop fleet"}</button>
     {/if}
   </div>
 
   {#if error}<div class="banner err">{error}</div>{/if}
 
-  {#if agents.length}
+  {#if embedded}
+    <!-- agent grid intentionally omitted; the fleet card above shows it -->
+  {:else if agents.length}
     <div class="agentgrid">
       {#each agents as [name, a]}
         <div class="agentcard">
