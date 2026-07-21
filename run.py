@@ -47,11 +47,12 @@ def _ensure_ui_deps() -> None:
     first run.
 
     Two-stage install so it 'just works' regardless of how Python was obtained:
-      1. Install into the current interpreter — works in a venv/conda and in
-         python.org installs.
-      2. If that fails (Homebrew / modern-Linux system Python marks itself
-         'externally managed' per PEP 668 and refuses), create a project-local
-         .venv, install there, and re-exec into it. Never touches system site.
+      1. Install into the current interpreter — but ONLY when that's a private
+         environment (venv/conda) or a python.org install. A distro/Homebrew
+         Python marks itself 'externally managed' per PEP 668 and refuses, so
+         we skip straight to stage 2 rather than spew its error at the user.
+      2. Create a project-local .venv, install there, and re-exec into it.
+         Never touches system site.
     """
     try:
         import fastapi  # noqa: F401
@@ -62,43 +63,157 @@ def _ensure_ui_deps() -> None:
 
     import os
     import importlib
+    import shutil
     import subprocess
+    import sysconfig
 
     req = str(ROOT / "control-ui-requirements.txt")
     print("First run: installing the web companion's dependencies…")
 
+    def _has_pip(py) -> bool:
+        """A venv built without ensurepip has bin/python but no pip — existence
+        of the interpreter is not proof the environment is usable."""
+        try:
+            return subprocess.run(
+                [str(py), "-m", "pip", "--version"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode == 0
+        except OSError:
+            return False
+
+    def _externally_managed() -> bool:
+        # PEP 668: the marker sits next to the stdlib. In a venv, pip is allowed
+        # regardless — the venv's own prefix has no marker.
+        if sys.prefix != sys.base_prefix:
+            return False
+        stdlib = sysconfig.get_path("stdlib")
+        return bool(stdlib) and os.path.exists(os.path.join(stdlib, "EXTERNALLY-MANAGED"))
+
     try:
-        # Stage 1 — current interpreter.
-        if subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-r", req]
-        ).returncode == 0:
-            importlib.invalidate_caches()
-            try:
-                import fastapi  # noqa: F401
-                import uvicorn  # noqa: F401
-                return
-            except ModuleNotFoundError:
-                pass  # installed somewhere not on this process's path — use a venv
+        # Stage 1 — current interpreter, when it's ours to install into.
+        if not _externally_managed() and _has_pip(sys.executable):
+            if subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", "-r", req]
+            ).returncode == 0:
+                importlib.invalidate_caches()
+                try:
+                    import fastapi  # noqa: F401
+                    import uvicorn  # noqa: F401
+                    return
+                except ModuleNotFoundError:
+                    pass  # installed somewhere not on this process's path — use a venv
 
         # Stage 2 — self-contained .venv + re-exec.
         venv_dir = ROOT / ".venv"
         bindir = "Scripts" if os.name == "nt" else "bin"
         vpy = venv_dir / bindir / ("python.exe" if os.name == "nt" else "python")
+        if vpy.exists() and not _has_pip(vpy):
+            # Half-built .venv from an earlier run that died in ensurepip. Left
+            # in place it poisons every retry, so clear it and start over.
+            print("Discarding an incomplete .venv from a previous run…")
+            shutil.rmtree(venv_dir, ignore_errors=True)
         if not vpy.exists():
+            if not _venv_capable() and not _offer_venv_package():
+                _exit_needs_venv_package()
             print("Creating a local Python environment (.venv)…")
-            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+            proc = subprocess.run([sys.executable, "-m", "venv", str(venv_dir)])
+            if proc.returncode != 0 or not _has_pip(vpy):
+                # venv can fail *after* creating bin/python — never leave the
+                # husk behind, it's what poisons the next run.
+                shutil.rmtree(venv_dir, ignore_errors=True)
+                _exit_needs_venv_package()
         subprocess.run([str(vpy), "-m", "pip", "install", "-q", "-r", req], check=True)
         print("Relaunching inside the local environment…")
+        # execv discards buffered stdout, which is block-buffered whenever
+        # output is piped — without this the whole bootstrap runs silently.
+        sys.stdout.flush()
         # Preserve the user's flags (--port/--host/--no-browser). main() has
         # already stripped --ui from sys.argv, so re-add it.
         os.execv(str(vpy), [str(vpy), str(ROOT / "run.py"), "--ui", *sys.argv[1:]])
     except (subprocess.CalledProcessError, OSError) as exc:
         sys.exit(
             f"Couldn't auto-install the companion's dependencies ({exc}).\n"
-            f"Install them manually and retry:\n"
-            f"    pip3 install -r control-ui-requirements.txt\n"
-            f"    python3 run.py --ui"
+            f"Create an environment by hand and retry:\n"
+            f"    python3 -m venv .venv\n"
+            f"    .venv/bin/python -m pip install -r control-ui-requirements.txt\n"
+            f"    .venv/bin/python run.py --ui"
         )
+
+
+def _venv_package() -> str:
+    """The apt package carrying ensurepip for THIS interpreter. Version-specific
+    (python3.14-venv), since the unversioned metapackage tracks the distro's
+    default python — which isn't necessarily the one running us."""
+    return f"python{sys.version_info.major}.{sys.version_info.minor}-venv"
+
+
+def _venv_capable() -> bool:
+    """Can this interpreter actually build a venv? Asked in a subprocess so the
+    answer stays true right after an apt install (no import-cache staleness)."""
+    import subprocess
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", "import ensurepip"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0
+    except OSError:
+        return False
+
+
+def _offer_venv_package() -> bool:
+    """Offer to apt-install the missing python3.X-venv, then report whether the
+    interpreter can build a venv now.
+
+    We ASK rather than just doing it: this is a system-wide package change, and
+    sudo may block on a password prompt. Only ever offered on a TTY — a piped or
+    CI run gets the printed instructions instead, because silently mutating
+    system packages in an unattended context is not ours to decide.
+    """
+    import os
+    import shutil as _shutil
+    import subprocess
+
+    if os.name != "posix" or not _shutil.which("apt-get"):
+        return False  # not a Debian-ish box — no idea what to install
+    if not sys.stdin.isatty():
+        return False
+    sudo = [] if os.geteuid() == 0 else (["sudo"] if _shutil.which("sudo") else None)
+    if sudo is None:
+        return False
+
+    pkg = _venv_package()
+    cmd = [*sudo, "apt-get", "install", "-y", pkg]
+    print(
+        f"\nPython here can't create virtual environments — Debian/Ubuntu split\n"
+        f"the 'ensurepip' module into a separate package that isn't installed yet.\n"
+        f"\n    {' '.join(cmd)}\n"
+    )
+    try:
+        if input("Run that now? [Y/n] ").strip().lower() not in ("", "y", "yes"):
+            return False
+    except EOFError:
+        return False
+
+    if subprocess.run(cmd).returncode != 0:
+        # Commonly just a stale package index on a fresh box — the reason
+        # `apt update && apt install` is the folk remedy. Try it once.
+        print("Refreshing the package index and retrying…")
+        subprocess.run([*sudo, "apt-get", "update"])
+        subprocess.run(cmd)
+    return _venv_capable()
+
+
+def _exit_needs_venv_package() -> None:
+    """Last resort when we couldn't install it ourselves (not Debian, no sudo,
+    unattended run, or the user declined) — name the exact package rather than
+    failing cryptically."""
+    sys.exit(
+        "\nPython here can't create virtual environments — Debian/Ubuntu split\n"
+        "the 'ensurepip' module into a separate package that isn't installed yet.\n"
+        f"\nInstall it, then retry:\n"
+        f"\n    sudo apt install {_venv_package()}\n"
+        f"    python3 run.py --ui"
+    )
 
 
 def _launch_ui() -> int:
