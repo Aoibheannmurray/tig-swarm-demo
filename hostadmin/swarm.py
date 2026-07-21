@@ -53,6 +53,7 @@ from .railway import (
     _railway_check_auth,
     _railway_check_installed,
     _railway_domain,
+    _railway_get_variables,
     _railway_provision,
     _railway_set_variables,
     _railway_up,
@@ -708,6 +709,55 @@ def write_challenge_md(challenge: str) -> None:
 # ── Modes ────────────────────────────────────────────────────────────
 
 
+def _resolve_swarm_credentials(
+    swarm_name: str, *, resumed: bool, emit=print,
+) -> tuple[str, str]:
+    """The `(admin_key, swarm_password)` a create run should deploy with.
+
+    A FRESH swarm gets new random secrets. An ADOPTED one must keep the ones
+    it is already running with — rotating them leaves the data volume intact
+    but locks out the host and every contributor (see the call site).
+
+    Recovery order for an adopted swarm:
+
+    1. Railway's own service variables — what the running server actually
+       booted with. Authoritative, and survives a lost `swarm.admin.json` or a
+       re-provision from a different machine.
+    2. The local `swarm.admin.json`, if it names this same swarm.
+    3. Give up and generate — but say so loudly. A create that fails outright
+       would leave the host with no way forward; a rotation they've been
+       WARNED about is recoverable with `setup.py invite`.
+    """
+    if not resumed:
+        return secrets.token_urlsafe(16), secrets.token_urlsafe(16)
+
+    live = _railway_get_variables(swarm_name)
+    key, password = live.get("ADMIN_KEY"), live.get("SWARM_PASSWORD")
+    if key and password:
+        emit("  reusing this swarm's existing credentials (read from Railway) — "
+             "contributor passwords and invites stay valid")
+        return key, password
+
+    admin = read_swarm_admin()
+    if admin.get("swarm_name") == swarm_name:
+        key = key or admin.get("admin_key")
+        password = password or admin.get("swarm_password")
+        if key and password:
+            emit("  reusing this swarm's existing credentials (from "
+                 "swarm.admin.json) — contributor passwords stay valid")
+            return key, password
+
+    emit(
+        "  WARNING: adopting an existing swarm, but its credentials could not "
+        "be recovered\n"
+        "  from Railway or swarm.admin.json — issuing NEW ones. Every invite "
+        "already\n"
+        "  issued will stop working; re-invite contributors with "
+        "`python setup.py invite <username>`."
+    )
+    return key or secrets.token_urlsafe(16), password or secrets.token_urlsafe(16)
+
+
 def create_swarm(params: dict, progress_cb=None) -> dict:
     """Non-interactive core of `run_create`: provision + configure a swarm.
 
@@ -765,9 +815,6 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
 
     initial_algorithms = read_initial_algorithms()
 
-    admin_key = secrets.token_urlsafe(16)
-    swarm_password = secrets.token_urlsafe(16)
-
     railway_dir = ROOT / ".railway"
     if railway_dir.exists():
         emit(f"Removing existing {railway_dir.relative_to(ROOT)} from a prior run.")
@@ -777,6 +824,17 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
     project, service, resumed = _railway_provision(swarm_name, workspace)
     if resumed:
         emit("  (resuming a prior half-finished run — adopting existing resources)")
+
+    # Credentials are decided AFTER provisioning, because an adopted swarm must
+    # keep the ones it already has. Generating them earlier (as this used to)
+    # rotated ADMIN_KEY/SWARM_PASSWORD on every re-provision of an existing
+    # name: the server re-asserts env vars into its DB on every boot
+    # (server/db.py), and each contributor's password is derived from the base
+    # (sha256(username:base)), so a rotation silently invalidated every invite
+    # ever issued. The data volume survives — only access to it was lost.
+    admin_key, swarm_password = _resolve_swarm_credentials(
+        swarm_name, resumed=resumed, emit=emit,
+    )
 
     # USER is absent on Windows (USERNAME is the equivalent there).
     owner_name = os.environ.get("USER") or os.environ.get("USERNAME") or "owner"

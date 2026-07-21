@@ -197,8 +197,34 @@
     } catch { /* clipboard blocked (non-secure context) — leave the value visible */ }
   }
 
+  // ── Adopt confirmation ──
+  // Provisioning onto an existing name ADOPTS that swarm (data volume and
+  // credentials are preserved) — but it redeploys a live server, so it must
+  // never happen by accident. Set while the host confirms; cleared either way.
+  let adoptPrompt: any = $state(null);
+  let checkingName = $state(false);
+
   async function createSwarm() {
-    error = ""; deploying = true;
+    error = "";
+    // Pre-flight: warn once if the name is taken. `adoptPrompt` being set means
+    // the host already saw the warning and clicked through.
+    if (!adoptPrompt) {
+      checkingName = true;
+      try {
+        const check = await localApi.railwayNameCheck(swarmName, workspace);
+        if (check.exists) {
+          adoptPrompt = check;
+          checkingName = false;
+          return;
+        }
+      } catch {
+        // Name check is advisory — a companion/Railway hiccup must not block
+        // a legitimate create.
+      }
+      checkingName = false;
+    }
+    adoptPrompt = null;
+    deploying = true;
     try {
       ensureStream();
       const payload: any = {
@@ -417,10 +443,35 @@
       <div class="hint">Benchmark instances per track for each challenge (0 disables a track), plus each solver's per-instance time budget in seconds.</div>
     </div>
   {/if}
+  {#if adoptPrompt}
+    <div class="adopt-warn">
+      <h3>⚠ A swarm named “{swarmName}” already exists</h3>
+      <p>Continuing will <strong>adopt</strong> it, not replace it:</p>
+      <ul>
+        <li>data volume, scores and seed pool are <strong>preserved</strong></li>
+        <li>its admin key and swarm password are <strong>kept</strong> — contributors keep working</li>
+        <li>the server is redeployed with the config above</li>
+      </ul>
+      {#if !adoptPrompt.is_yours}
+        <p class="stern">
+          This companion has no <code>swarm.admin.json</code> for that name, so it
+          may belong to someone else in this Railway workspace. Adopting it will
+          redeploy <em>their</em> live server.
+        </p>
+      {/if}
+      <div class="actions">
+        <div class="spacer"></div>
+        <button onclick={() => (adoptPrompt = null)}>Cancel</button>
+        <button class="primary" onclick={createSwarm}>Adopt and redeploy</button>
+      </div>
+    </div>
+  {/if}
   <div class="actions">
     <div class="spacer"></div>
-    <button class="primary" disabled={deploying || !railway?.authed} onclick={createSwarm}>
-      {deploying ? "Provisioning…" : "Provision on Railway"}
+    <button class="primary"
+            disabled={deploying || checkingName || !railway?.authed}
+            onclick={createSwarm}>
+      {deploying ? "Provisioning…" : checkingName ? "Checking name…" : "Provision on Railway"}
     </button>
   </div>
 </div>
@@ -530,6 +581,22 @@
 {/if}
 
 <style>
+  /* Adopt warning — reuses the shared warn tokens so it themes with everything
+     else rather than hard-coding a colour. */
+  .adopt-warn {
+    background: var(--warn-bg);
+    color: var(--warn);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-top: 16px;
+    font-size: 13.5px;
+  }
+  .adopt-warn h3 { margin: 0 0 8px; font-size: 14px; }
+  .adopt-warn p { margin: 6px 0; }
+  .adopt-warn ul { margin: 6px 0 6px 18px; }
+  .adopt-warn li { margin: 3px 0; }
+  .adopt-warn .stern { border-top: 1px solid currentColor; margin-top: 10px; padding-top: 9px; }
+  .adopt-warn .actions { margin-top: 12px; }
   .rowhead { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
   .cmd {
     background: var(--bg-sunken, rgba(127, 127, 127, 0.12));

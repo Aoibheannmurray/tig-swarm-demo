@@ -1073,6 +1073,34 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return {"available": False, "installed": True, "authed": False,
                     "message": str(exc)}
 
+    @app.get("/local-api/railway/name-check")
+    def railway_name_check(name: str, workspace: str | None = None) -> dict:
+        """Does a Railway project by this name already exist?
+
+        Lets the host UI warn BEFORE provisioning. Re-provisioning an existing
+        name is adoption, not replacement — the data volume and (since
+        `_resolve_swarm_credentials`) the credentials are preserved — but it
+        does redeploy a live server, so it should never happen by accident.
+
+        `exists: false` on any lookup failure: this gate must not block a
+        legitimate create just because the Railway API blipped."""
+        try:
+            project = setup_mod._railway_find_project(name, workspace)
+        except (Exception, SystemExit):
+            return {"exists": False, "checked": False}
+        if not project:
+            return {"exists": False, "checked": True}
+        admin = setup_mod.read_swarm_admin()
+        return {
+            "exists": True,
+            "checked": True,
+            # True when this companion holds the swarm's admin file, i.e. the
+            # host is re-provisioning their OWN swarm rather than colliding
+            # with someone else's name in a shared workspace.
+            "is_yours": admin.get("swarm_name") == name,
+            "server_url": admin.get("server_url") if admin.get("swarm_name") == name else None,
+        }
+
     @app.post("/local-api/railway/install")
     async def railway_install_start() -> dict:
         """Install the Railway CLI via the vendor script. Returns immediately;

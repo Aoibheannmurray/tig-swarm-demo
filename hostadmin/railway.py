@@ -323,6 +323,32 @@ def _railway_set_variables(service: str, vars: dict[str, str]) -> None:
     _railway_run(*args, retries=4)
 
 
+def _railway_get_variables(service: str) -> dict[str, str]:
+    """Read a service's environment variables back from Railway.
+
+    This is how an adopted swarm recovers its OWN credentials: Railway holds
+    the authoritative `ADMIN_KEY` / `SWARM_PASSWORD` that the running server
+    boots with, so re-provisioning can reuse them instead of rotating them out
+    from under every contributor. It works even when the host lost
+    `swarm.admin.json` or is re-provisioning from a different machine.
+
+    A read, so retries are safe. Returns {} on any failure — the caller must
+    treat "couldn't read" as "don't assume", never as "no credentials"."""
+    result = _railway_run(
+        "variable", "list", "--service", service, "--json",
+        check=False, retries=4,
+    )
+    if result.returncode != 0:
+        return {}
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
 def _railway_add_volume(service: str, mount_path: str) -> None:
     """Create a persistent volume mounted at `mount_path`.
 
