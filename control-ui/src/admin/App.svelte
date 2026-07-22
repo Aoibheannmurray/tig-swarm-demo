@@ -612,12 +612,8 @@
 </div>
 
 <style>
-  .tabs { display: flex; gap: 6px; margin-bottom: 20px; border-bottom: 1px solid var(--border-subtle); }
-  .tabs button {
-    background: transparent; border: none; border-bottom: 2px solid transparent;
-    border-radius: 0; padding: 10px 14px; color: var(--ink-dim); font-weight: 600;
-  }
-  .tabs button.active { color: var(--ink); border-bottom-color: var(--color-accent); }
+  /* `.tabs` moved to app.css — it's shared with the join page's OS switcher
+     and the C3 install instructions. */
   .rowhead { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
   .knobrow { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
   .invite-item { border: 1px solid var(--border-subtle); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }

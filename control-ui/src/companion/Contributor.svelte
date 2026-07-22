@@ -1,14 +1,25 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import Stepper from "../components/Stepper.svelte";
+  import CopyCommand from "../components/CopyCommand.svelte";
   import { localApi } from "../lib/api";
   import { ensureStream } from "../lib/stream";
 
-  // Called once the fleet is running. The parent sends the user to the fleet
-  // page, so setup ends where fleets are managed from then on — rather than at
-  // a monitor embedded in the wizard, which looked like a different feature
-  // from the identical one on the fleet page.
-  let { onLaunched = () => {} }: { onLaunched?: () => void } = $props();
+  // `onLaunched` is called once the fleet is running. The parent sends the user
+  // to the fleet page, so setup ends where fleets are managed from then on —
+  // rather than at a monitor embedded in the wizard, which looked like a
+  // different feature from the identical one on the fleet page.
+  //
+  // `prefill` carries credentials handed straight over from the Host screen
+  // ("Also run agents yourself"), which self-invites and lands here. It wins
+  // over whatever onMount reads off disk.
+  let {
+    onLaunched = () => {},
+    prefill = null,
+  }: {
+    onLaunched?: () => void;
+    prefill?: { server_url?: string; username?: string; swarm_password?: string } | null;
+  } = $props();
 
   const STEPS = ["Connect", "Provider", "Agents", "Tacit", "Launch"];
   let step = $state(0);
@@ -21,6 +32,10 @@
   let username = $state("");
   let swarmPassword = $state("");
 
+  // Runs on every keystroke/paste into the textarea, and once more from next()
+  // as a safety net. It used to need a "Fill fields from paste" button, which
+  // people didn't understand they had to press — so they hit Continue with
+  // three empty fields and an error.
   function parsePaste() {
     const grab = (k: string) => {
       const m =
@@ -32,6 +47,12 @@
     username = grab("username") || username;
     swarmPassword = grab("swarm_password") || swarmPassword;
   }
+
+  // Arrived with credentials already in hand (a join link ran `run.py --join`,
+  // or the host self-invited). Then Connect is a confirmation, not a form: the
+  // fields and the paste box move behind "Use a different swarm".
+  let connected = $derived(!!serverUrl && !!username && !!swarmPassword);
+  let editConnection = $state(false);
 
   // ── Provider ──
   let providers: any[] = $state([]);
@@ -63,9 +84,44 @@
   let secrets: Record<string, { set: boolean; source: string }> = $state({});
   let keyDraft: Record<string, string> = $state({});
   let keyMsg = $state("");
-  let supportsC3 = $derived(selectedProvider?.supports_c3 ?? false);
-  // Keep `compute` valid for the chosen provider: if it can't do C3, force local.
-  $effect(() => { if (!supportsC3 && compute === "c3") compute = "local"; });
+  // Unknown until /local-api/providers resolves. Treat unknown as "supported":
+  // defaulting to false meant a slow or failed providers fetch silently
+  // downgraded the fleet to local Docker and captioned it "This provider runs
+  // benchmarks locally (Docker)" — which was never true of any provider.
+  let providerKnown = $derived(providers.length > 0 && !!selectedProvider);
+  let supportsC3 = $derived(providerKnown ? !!selectedProvider.supports_c3 : true);
+  // Keep `compute` valid for the chosen provider: if it can't do C3, force
+  // local — but only once we actually know that.
+  $effect(() => {
+    if (providerKnown && !supportsC3 && compute === "c3") compute = "local";
+  });
+
+  // Which C3 install instructions to show. The companion runs on the user's own
+  // machine, so the OS it detects is the one they'll install onto.
+  type Os = "unix" | "windows";
+  let c3Os: Os = $state(
+    /win/i.test(navigator.platform || navigator.userAgent || "") ? "windows" : "unix",
+  );
+  // Transcribed from docs/C3.md — the Windows section (a native binary, no WSL)
+  // previously existed only in that doc, while this page claimed the opposite.
+  const C3_INSTALL_UNIX = "curl -fsSL https://cthree.cloud/install.sh | sh";
+  const C3_INSTALL_WIN = `# Create an install folder.
+$dir = "$env:LOCALAPPDATA\\Programs\\c3"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+# Download the Windows binary.
+curl.exe -fsSL "https://cthree.cloud/releases/latest/c3-windows-amd64.exe" -o "$dir\\c3.exe"
+
+# Add the folder permanently to the current user's PATH.
+$userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+if (($userPath -split ';') -notcontains $dir) {
+  [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User")
+}
+
+# Also make it available in this PowerShell window.
+$env:Path = "$env:Path;$dir"
+
+c3 --version`;
 
   // Capability probe (Docker / C3) so we can guide instead of failing mid-run.
   let preflight: any = $state(null);
@@ -126,7 +182,10 @@
     try { secrets = (await localApi.secretsStatus()).secrets ?? {}; }
     catch { /* companion may predate the endpoint — hide the panel */ }
   }
-  async function saveKey(name: string) {
+  // `silent` is the auto-save-on-Continue path: it rethrows so the caller can
+  // hold the step, rather than leaving the failure in a banner the step change
+  // would scroll past.
+  async function saveKey(name: string, opts: { silent?: boolean } = {}) {
     keyMsg = "";
     const value = (keyDraft[name] ?? "").trim();
     if (!value) return;
@@ -134,7 +193,10 @@
       secrets = (await localApi.secretSet(name, value)).secrets ?? secrets;
       keyDraft[name] = "";
       keyMsg = `Saved ${name}.`;
-    } catch (e: any) { keyMsg = e.message; }
+    } catch (e: any) {
+      if (opts.silent) throw e;
+      keyMsg = e.message;
+    }
   }
   // The env-var names this fleet will need: the chosen provider's key (if any)
   // plus C3 when benchmarking in the cloud.
@@ -165,15 +227,43 @@
         username = fc.config.username ?? "";
         swarmPassword = fc.config.swarm_password ?? "";
       }
+      // Credentials handed over from the Host screen outrank the file: the host
+      // just self-invited, and any config on disk predates that.
+      if (prefill) {
+        serverUrl = prefill.server_url || serverUrl;
+        username = prefill.username || username;
+        swarmPassword = prefill.swarm_password || swarmPassword;
+      }
     } catch (e: any) {
       error = e.message;
     }
   });
 
-  function next() {
+  // Persist any key typed but not explicitly saved. People skipped the "Save
+  // key" button and advanced with the field still holding an unsaved value, so
+  // the fleet only failed at launch — long after the step that could fix it.
+  // Throws on failure so next() can hold the step and surface the reason.
+  async function flushKeyDrafts() {
+    for (const name of Object.keys(keyDraft)) {
+      if ((keyDraft[name] ?? "").trim()) await saveKey(name, { silent: true });
+    }
+  }
+
+  async function next() {
     error = "";
-    if (step === 0 && (!serverUrl || !username || !swarmPassword)) {
-      error = "server_url, username and swarm_password are all required.";
+    if (step === 0) {
+      // Covers a paste that never fired an input event (programmatic fill,
+      // some mobile keyboards) — cheap, and idempotent when it already ran.
+      if (paste.trim()) parsePaste();
+      if (!serverUrl || !username || !swarmPassword) {
+        error = "server_url, username and swarm_password are all required.";
+        return;
+      }
+    }
+    try {
+      await flushKeyDrafts();
+    } catch (e: any) {
+      error = e.message;
       return;
     }
     step = Math.min(step + 1, STEPS.length - 1);
@@ -225,27 +315,46 @@
 
 {#if step === 0}
   <div class="card">
-    <h2>Connect to a swarm</h2>
-    <p class="lede">Paste the lines your host sent you, or type them in.</p>
-    <div class="field">
-      <label for="paste">Paste invite</label>
-      <textarea id="paste" bind:value={paste} placeholder={'"server_url": "https://…",\n"username": "your-name",\n"swarm_password": "…"'}></textarea>
-      <button class="ghost" onclick={parsePaste}>Fill fields from paste</button>
-    </div>
-    <div class="field">
-      <label for="su">Server URL</label>
-      <input id="su" type="text" bind:value={serverUrl} placeholder="https://my-swarm.up.railway.app" />
-    </div>
-    <div class="row">
+    {#if connected && !editConnection}
+      <!-- The common case: a join link already wrote these, or the host just
+           self-invited. Showing a paste box here made people think they had
+           something left to do. -->
+      <h2>Connected</h2>
+      <ul class="summary">
+        <li><span>Username</span><b>{username}</b></li>
+        <li><span>Server</span><b>{serverUrl}</b></li>
+      </ul>
+      <button class="linky" onclick={() => (editConnection = true)}>Use a different swarm</button>
+    {:else}
+      <h2>Connect to a swarm</h2>
+      <p class="lede">Enter the details your host sent you.</p>
       <div class="field">
-        <label for="un">Username</label>
-        <input id="un" type="text" bind:value={username} />
+        <label for="su">Server URL</label>
+        <input id="su" type="text" bind:value={serverUrl} placeholder="https://my-swarm.up.railway.app" />
       </div>
-      <div class="field">
-        <label for="pw">Swarm password</label>
-        <input id="pw" type="password" bind:value={swarmPassword} />
+      <div class="row">
+        <div class="field">
+          <label for="un">Username</label>
+          <input id="un" type="text" bind:value={username} />
+        </div>
+        <div class="field">
+          <label for="pw">Swarm password</label>
+          <input id="pw" type="password" bind:value={swarmPassword} />
+        </div>
       </div>
-    </div>
+      <details class="alt">
+        <summary>Paste an invite instead</summary>
+        <p class="lede" style="margin:10px 0 8px">
+          Drop in the lines your host sent — the fields above fill themselves.
+        </p>
+        <textarea
+          id="paste"
+          bind:value={paste}
+          oninput={parsePaste}
+          placeholder={'"server_url": "https://…",\n"username": "your-name",\n"swarm_password": "…"'}
+        ></textarea>
+      </details>
+    {/if}
     <div class="actions"><div class="spacer"></div><button class="primary" onclick={next}>Continue →</button></div>
   </div>
 {:else if step === 1}
@@ -362,12 +471,38 @@
       {#if preflight && !c3CliInstalled}
         <div class="banner warn">
           <b>Install the c3 CLI</b> — C3 benchmarking needs it even with an API
-          key (the CLI submits the jobs). Run this in a terminal, then Recheck:
-          <div class="mono" style="margin:8px 0;padding:8px 10px;border-radius:6px;background:var(--bg-sunken,rgba(127,127,127,.12))">curl -fsSL https://cthree.cloud/install.sh | sh</div>
-          <div style="display:flex;gap:8px;align-items:center">
+          key (the CLI submits the jobs). Run this in a terminal, then Recheck.
+          <nav class="tabs" style="margin:10px 0 10px">
+            <button class:active={c3Os === "unix"} onclick={() => (c3Os = "unix")}>macOS / Linux</button>
+            <button class:active={c3Os === "windows"} onclick={() => (c3Os = "windows")}>Windows</button>
+          </nav>
+          {#if c3Os === "unix"}
+            <CopyCommand text={C3_INSTALL_UNIX} variant="ghost" />
+            <div class="hint">
+              Then authenticate: <code>c3 login</code>, or
+              <code>c3 apikey create tig-swarm</code> and paste the key below.
+            </div>
+          {:else}
+            <div class="hint" style="margin:0 0 8px">
+              In <b>PowerShell</b> — the shell installer above is macOS/Linux only:
+            </div>
+            <CopyCommand text={C3_INSTALL_WIN} variant="ghost" multiline />
+            <div class="hint">
+              Other open terminals won't see the new <code>PATH</code> until
+              restarted. On an ARM Windows machine use
+              <code>c3-windows-arm64.exe</code> instead. To update later,
+              download again and overwrite <code>c3.exe</code>.
+              <br />
+              Then authenticate: <code>c3 login</code>, or
+              <code>c3 apikey create tig-swarm</code> and paste the key below.
+            </div>
+          {/if}
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
             <button onclick={recheckPreflight}>↻ Recheck</button>
-            <span class="hint" style="margin:0">Windows: no native c3 CLI — use WSL, or
-              {#if dockerInstalled}switch to <b>Local Docker</b> above.{:else}install Docker Desktop and switch to <b>Local Docker</b>.{/if}
+            <span class="hint" style="margin:0">
+              Restart this companion after installing if Recheck still
+              doesn't see it{#if supportsC3 || dockerInstalled}, or switch to
+                <b>Local Docker</b> above{/if}.
             </span>
           </div>
         </div>
@@ -408,8 +543,10 @@
           </div>
           {#if !secrets["C3_API_KEY"]?.set}
             <div class="hint">
-              Create one at
-              <span class="mono">cthree.cloud/dashboard/settings</span>.
+              Create one in
+              <a href="https://cthree.cloud/dashboard/settings" target="_blank" rel="noopener">C3 settings</a>
+              (sign in at
+              <a href="https://cthree.cloud/dashboard/" target="_blank" rel="noopener">cthree.cloud/dashboard</a>).
               Or leave blank and set <code>c3_api_key</code> per agent / use
               <span class="mono">c3 login</span>.
             </div>
@@ -527,6 +664,16 @@
   .note p { margin: 0; }
   .note p + p { margin-top: 10px; }
   .note b { color: var(--ink); font-weight: 600; }
+
+  /* A text button that reads as the secondary escape hatch it is — the connect
+     step's "this isn't the swarm I want" route, which shouldn't compete with
+     Continue. */
+  .linky {
+    background: none; border: none; padding: 0; margin-top: 4px;
+    color: var(--ink-dim); font-size: 13.5px; text-decoration: underline;
+    cursor: pointer;
+  }
+  .linky:hover { color: var(--color-accent); }
 
   .summary { list-style: none; margin-bottom: 8px; }
   .summary li { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }

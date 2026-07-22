@@ -1,11 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { localApi } from "../lib/api";
+  import { ensureStream } from "../lib/stream";
 
   // Direct editor for the actual fleet.config.json — shows the current values
   // and saves them verbatim (preserving fields like api_base / detailed_prompts
   // / hpo knobs the form doesn't surface). This is the "Reconfigure" path from
   // the home fleet card; the step-by-step wizard lives in Contributor.svelte.
+
+  // Saving used to be a dead end: a "Saved" banner and no way onward, so the
+  // only exit was the masthead's Home link. Both routes land on the fleet page,
+  // which is where the monitor and the start/stop controls live.
+  let {
+    onBack = () => {},
+    onStarted = () => {},
+  }: { onBack?: () => void; onStarted?: () => void } = $props();
   let config: any = $state(null);
   let providers: any[] = $state([]);
   let c3hw: any[] = $state([]);
@@ -119,6 +128,21 @@
       saved = true;
     } catch (e: any) {
       error = e.message?.includes("JSON") ? `Invalid JSON: ${e.message}` : e.message;
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function saveAndStart() {
+    await save();
+    if (!saved) return; // save() surfaced the reason in `error`
+    busy = true; error = "";
+    try {
+      ensureStream();
+      await localApi.fleetStart();
+      onStarted();
+    } catch (e: any) {
+      error = e.message;
     } finally {
       busy = false;
     }
@@ -248,8 +272,15 @@
   {/if}
 
   <div class="actions">
+    <button onclick={onBack}>← Back to fleet</button>
     <div class="spacer"></div>
-    <button class="primary" disabled={busy || config === null} onclick={save}>{busy ? "Saving…" : "Save configuration"}</button>
+    <button disabled={busy || config === null} onclick={save}>{busy ? "Saving…" : "Save configuration"}</button>
+    <!-- The usual reason to edit the config is to change how the fleet runs,
+         so save-and-run is the primary action, not a second trip via the
+         fleet page. -->
+    <button class="primary" disabled={busy || config === null} onclick={saveAndStart}>
+      {busy ? "Working…" : "Save & start fleet ▶"}
+    </button>
   </div>
 </div>
 

@@ -57,6 +57,36 @@ def build_join_command(join_link: str) -> str:
     )
 
 
+def derive_password(username: str, base: str) -> str:
+    """A contributor's per-swarm password: sha256("<username>:<base>").
+
+    The server derives the same value to authenticate (server/server.py
+    `_derive_user_password`), so the BASE password never authenticates on its
+    own. Mirrored client-side in control-ui/src/lib/api.ts
+    (`deriveInvitePassword`) so the Admin Console can issue invites offline;
+    keep all four in sync.
+    """
+    import hashlib
+    return hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
+
+
+def record_issued(admin: dict, username: str) -> bool:
+    """Track a name in swarm.admin.json's `issued_contributors` and persist.
+
+    Returns True if it was newly added. `setup.py list` cross-checks this
+    against the server's joined names to show "issued but not yet joined", so
+    every path that mints an invite has to record it — otherwise the invite is
+    invisible to the host who issued it.
+    """
+    issued: list[str] = list(admin.get("issued_contributors") or [])
+    if username in issued:
+        return False
+    issued.append(username)
+    admin["issued_contributors"] = issued
+    write_swarm_admin(admin)
+    return True
+
+
 def build_join_link(server_url: str | None, username: str, derived: str) -> str | None:
     """One-link invite: `<server>/join#u=<username>&p=<derived>`.
 
@@ -86,7 +116,6 @@ def run_invite(username: str | None) -> int:
     If `username` is None, an adjective-noun slug is generated for the
     host; previously-issued names are tracked in swarm.admin.json
     (`issued_contributors`) to avoid collisions across invite calls."""
-    import hashlib
     admin = read_swarm_admin()
     base = (admin.get("swarm_password") or "").strip()
     if not base:
@@ -114,12 +143,9 @@ def run_invite(username: str | None) -> int:
             return 1
     else:
         username = _generate_invite_slug(set(issued) | set(revoked))
-    derived = hashlib.sha256(f"{username}:{base}".encode()).hexdigest()
+    derived = derive_password(username, base)
     server_url = admin.get("server_url") or read_swarm_cache().get("server_url") or "<paste server URL>"
-    if username not in issued:
-        issued.append(username)
-        admin["issued_contributors"] = issued
-        write_swarm_admin(admin)
+    record_issued(admin, username)
     join_link = build_join_link(server_url, username, derived)
     if join_link:
         print()
