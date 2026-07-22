@@ -141,9 +141,69 @@ def _get_json(url: str, headers: dict) -> dict:
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
 
 
-# CLI-auth providers have no HTTP models endpoint to query — they accept
-# whatever model IDs their CLI knows about.
+# CLI-auth providers have no HTTP models endpoint to query. Codex does expose
+# the model catalog it currently sees through `codex debug models`; Claude has
+# no equivalent machine-readable command.
 _CLI_PROVIDERS = ("claude-code", "claude-code-agentic", "codex-agentic")
+
+
+def _parse_codex_model_catalog(raw: str) -> list[str]:
+    """Return visible Codex model slugs in the CLI's preferred order."""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Codex CLI returned invalid model JSON: {exc}") from None
+    entries = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise RuntimeError("Codex CLI model catalog has no `models` list")
+
+    ranked: list[tuple[int, int, str]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or entry.get("visibility", "list") != "list":
+            continue
+        slug = entry.get("slug")
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        priority = entry.get("priority")
+        ranked.append((priority if isinstance(priority, int) else 1_000_000,
+                       index, slug.strip()))
+
+    # Preserve the best-ranked occurrence if a malformed catalog repeats a slug.
+    seen: set[str] = set()
+    models: list[str] = []
+    for _, _, slug in sorted(ranked):
+        if slug not in seen:
+            seen.add(slug)
+            models.append(slug)
+    if not models:
+        raise RuntimeError("Codex CLI model catalog contains no visible models")
+    return models
+
+
+def _list_codex_cli_models() -> list[str]:
+    """Ask the installed Codex CLI for its refreshed, account-aware catalog."""
+    # Reuse the runner's cross-platform CLI resolution, including CODEX_CLI and
+    # Windows npm .cmd shims, so setup and actual fleet execution see one binary.
+    from agentic_backends import CodexAgent, _scrubbed_env, _wrap_for_windows
+
+    codex_bin = CodexAgent().resolve_cli()
+    if codex_bin is None:
+        raise RuntimeError("Codex CLI is not installed or is not on PATH")
+    cmd = _wrap_for_windows([codex_bin, "debug", "models"])
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+            env=_scrubbed_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"could not run `codex debug models`: {exc}") from None
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-800:]
+        raise RuntimeError(
+            f"`codex debug models` exited {result.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+    return _parse_codex_model_catalog(result.stdout)
 
 
 def list_models(
@@ -156,15 +216,18 @@ def list_models(
     providers require `api_key`; OpenRouter's catalog is public so the key
     is optional there.
 
-    Raises ``ValueError`` for the CLI-auth providers (no endpoint exists) and
+    For Codex CLI, asks the installed CLI for its current model catalog.
+    Raises ``ValueError`` for Claude CLI providers (no endpoint exists) and
     ``RuntimeError`` (with the HTTP status / body) on an API error — typically
     a missing or invalid key."""
+    if provider == "codex-agentic":
+        return _list_codex_cli_models()
     if provider in _CLI_PROVIDERS:
         raise ValueError(
             f"{provider} authenticates through its own CLI, not an HTTP API, "
             "so there is no models endpoint to query. It accepts any model ID "
-            "the CLI knows — for the Claude CLI see `claude --help`; for the "
-            "Codex CLI accept the wizard's empty default and it picks its own."
+            "the CLI knows; choose one of the recommended models or enter a "
+            "custom model ID."
         )
 
     if provider == "google":

@@ -66,32 +66,51 @@
 
   // ── Model list ──
   // Two sources, because neither alone is enough: `popular_models` is a short
-  // curated shortlist that works with no API key and is the ONLY list the CLI
-  // providers can offer (they expose no models endpoint), while the live list
-  // is whatever this account can actually call today — so it never goes stale
-  // as providers ship new models. `Custom…` keeps any id typeable regardless.
+  // curated shortlist that works with no API key and is the fallback for CLI
+  // providers, while the live list is whatever this account or installed Codex
+  // CLI can actually call today. `Custom…` keeps any id typeable regardless.
   const CUSTOM = "__custom__";
   let liveModels: string[] = $state([]);
   let modelsError = $state("");
   let modelsLoading = $state(false);
   let customModel = $state(false);
-  let popular = $derived((selectedProvider?.popular_models ?? []) as string[]);
+  let fallbackModels = $derived((selectedProvider?.popular_models ?? []) as string[]);
+  // The Codex CLI catalog is already curated and priority-ordered by Codex. Use
+  // it authoritatively so removed models do not linger in the static fallback.
+  let popular = $derived(
+    provider === "codex-agentic" && liveModels.length ? liveModels : fallbackModels
+  );
+  let effectiveDefault = $derived(
+    provider === "codex-agentic" && liveModels.length
+      ? liveModels[0]
+      : selectedProvider?.default_model
+  );
   // The live list minus anything already shown under "Recommended".
   let otherModels = $derived(liveModels.filter((m) => !popular.includes(m)));
 
   async function loadModels(refresh = false) {
     if (!provider) return;
+    const requestedProvider = provider;
     modelsLoading = true;
     modelsError = "";
     try {
-      const res = await localApi.models(provider, refresh);
-      liveModels = res.models ?? [];
+      const res = await localApi.models(requestedProvider, refresh);
+      if (provider !== requestedProvider) return;
+      const found = (res.models ?? []) as string[];
+      // On first load, follow Codex's current top-priority model rather than a
+      // fallback default that may be weeks old. Preserve an explicit choice.
+      if (provider === "codex-agentic" && found.length &&
+          (model === "" || model === selectedProvider?.default_model || !found.includes(model))) {
+        model = found[0];
+      }
+      liveModels = found;
       modelsError = res.error ?? "";
     } catch (e: any) {
+      if (provider !== requestedProvider) return;
       liveModels = [];
       modelsError = e.message;
     } finally {
-      modelsLoading = false;
+      if (provider === requestedProvider) modelsLoading = false;
     }
   }
 
@@ -125,6 +144,9 @@
   let secrets: Record<string, { set: boolean; source: string }> = $state({});
   let keyDraft: Record<string, string> = $state({});
   let keyMsg = $state("");
+  // Whether keyMsg reports a problem. Without it a rejected key ("HTTP 401:
+  // invalid x-api-key") rendered in the green success banner.
+  let keyMsgBad = $state(false);
   // Unknown until /local-api/providers resolves. Treat unknown as "supported":
   // defaulting to false meant a slow or failed providers fetch silently
   // downgraded the fleet to local Docker and captioned it "This provider runs
@@ -272,6 +294,7 @@ c3 --version`;
   // would scroll past.
   async function saveKey(name: string, opts: { silent?: boolean } = {}) {
     keyMsg = "";
+    keyMsgBad = false;
     const value = (keyDraft[name] ?? "").trim();
     if (!value) return;
     try {
@@ -280,9 +303,28 @@ c3 --version`;
       keyMsg = `Saved ${name}.`;
       // The provider's own key is what the live model list needs — fetch it now
       // that one exists, rather than leaving the dropdown on the shortlist.
-      if (name === selectedProvider?.api_key_env) loadModels(true);
+      if (name === selectedProvider?.api_key_env) {
+        if (opts.silent) {
+          // Auto-save on Continue: don't make the step change wait on someone
+          // else's API.
+          loadModels(true);
+        } else {
+          // Explicit "Set key": report what the key actually bought. A key the
+          // provider rejects shows up HERE, at the step that can fix it,
+          // instead of at launch.
+          keyMsg = `Saved ${name} — loading models…`;
+          await loadModels(true);
+          keyMsgBad = !!modelsError;
+          // modelsError already reads "Could not reach <provider>: …", so it
+          // stands as its own sentence rather than being introduced again.
+          keyMsg = modelsError
+            ? `Saved ${name}. ${modelsError}`
+            : `Saved ${name} — ${liveModels.length} models available.`;
+        }
+      }
     } catch (e: any) {
       if (opts.silent) throw e;
+      keyMsgBad = true;
       keyMsg = e.message;
     }
   }
@@ -422,7 +464,7 @@ c3 --version`;
 
 <Stepper steps={STEPS} current={step} />
 {#if error}<div class="banner err">{error}</div>{/if}
-{#if keyMsg}<div class="banner ok">{keyMsg}</div>{/if}
+{#if keyMsg}<div class={keyMsgBad ? "banner warn" : "banner ok"}>{keyMsg}</div>{/if}
 
 {#if step === 0}
   <div class="card">
@@ -479,6 +521,49 @@ c3 --version`;
       </select>
       {#if selectedProvider}<div class="hint">{selectedProvider.blurb}</div>{/if}
     </div>
+    <!-- The key comes BEFORE the model, because it is what fills the model
+         list: asking someone to pick a model first is asking them to choose
+         from options that don't exist yet. -->
+    {#if selectedProvider?.api_key_env}
+      {@const kn = selectedProvider.api_key_env}
+      <div class="field">
+        <label for="apikey">API key</label>
+        <div class="hint" style="margin:0 0 8px">
+          Needs <code>{kn}</code>.
+          {#if secrets[kn]?.set}
+            <span class="pill ok">set ({secrets[kn].source})</span>
+          {:else}
+            <span class="pill info">not set</span>
+          {/if}
+          Stored locally in <code>secrets.local.json</code>, never uploaded.
+        </div>
+        {#if secrets[kn]?.source === "env"}
+          <div class="hint">
+            Taken from your environment — change it in your shell (a value set
+            here would be ignored).
+          </div>
+        {:else}
+          <div class="row" style="align-items:flex-start">
+            <div class="field" style="margin-bottom:0;flex:1">
+              <input id="apikey" type="password" bind:value={keyDraft[kn]}
+                placeholder={secrets[kn]?.set ? `paste a new ${kn} to replace it` : `paste ${kn}`}
+                onkeydown={(e) => { if (e.key === "Enter") saveKey(kn); }} />
+            </div>
+            <div style="flex:0 0 auto">
+              <button class="primary" disabled={!(keyDraft[kn] ?? "").trim()}
+                onclick={() => saveKey(kn)}>
+                {secrets[kn]?.set ? "Update key" : "Set key"}
+              </button>
+            </div>
+          </div>
+          <div class="hint">
+            Sets the key and loads the models your account can use. Pressing
+            Continue saves it too, if you'd rather skip this.
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <div class="field">
       <label for="model">Model</label>
       {#if customModel}
@@ -498,7 +583,7 @@ c3 --version`;
           {#if popular.length}
             <optgroup label="Recommended">
               {#each popular as m}
-                <option value={m}>{m}{m === selectedProvider?.default_model ? " — default" : ""}</option>
+                <option value={m}>{m}{m === effectiveDefault ? " — default" : ""}</option>
               {/each}
             </optgroup>
           {/if}
@@ -519,32 +604,15 @@ c3 --version`;
           <span>Loading this account's models…</span>
         {:else if modelsError}
           <span>{modelsError}</span>
+        {:else if provider === "codex-agentic" && liveModels.length}
+          <span>{liveModels.length} models available in Codex CLI.</span>
         {:else if otherModels.length}
           <span>{liveModels.length} models available on your account.</span>
         {/if}
-        {#if selectedProvider?.api_key_env}
+        {#if selectedProvider?.api_key_env || provider === "codex-agentic"}
           <button class="linky" onclick={() => loadModels(true)} disabled={modelsLoading}>↻ Refresh list</button>
         {/if}
       </div>
-      {#if selectedProvider?.api_key_env}
-        {@const kn = selectedProvider.api_key_env}
-        <div class="hint">
-          Needs <code>{kn}</code>.
-          {#if secrets[kn]?.set}
-            <span class="pill ok">set ({secrets[kn].source})</span>
-          {:else}
-            <span class="pill info">not set</span> — paste it below (stored
-            locally in <code>secrets.local.json</code>, never uploaded).
-          {/if}
-        </div>
-        {#if !secrets[kn]?.set || secrets[kn]?.source === "file"}
-          <input type="password" style="margin-top:8px" bind:value={keyDraft[kn]}
-            placeholder={`paste ${kn}`} onchange={() => saveKey(kn)} />
-          <div class="hint">
-            Saved when you press Continue — no separate save step.
-          </div>
-        {/if}
-      {/if}
     </div>
 
     <!-- Login-based providers (claude-code*, codex-agentic) have no api_key_env;

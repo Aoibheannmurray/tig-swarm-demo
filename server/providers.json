@@ -113,11 +113,19 @@
   {
     "key": "codex-agentic",
     "label": "Codex CLI",
-    "default_model": "",
+    "default_model": "gpt-5.6-sol",
     "api_key_env": null,
     "name_stub": "codex-agentic",
     "supports_c3": true,
     "blurb": "Agentic Codex CLI \u2014 uses `codex login`. Subscription only.",
-    "popular_models": []
+    "popular_models": [
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark"
+    ]
   }
 ]
