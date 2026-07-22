@@ -27,11 +27,13 @@ import asyncio
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import typing
 import urllib.error
 import urllib.parse
@@ -424,7 +426,9 @@ class RailwayLoginController:
         CLI refuses --browserless when it isn't attached to a terminal
         ("Browserless login requires an interactive terminal"), so plain pipes
         can never work on POSIX. Returns (proc, reader-for-its-output)."""
-        cmd = ["railway", "login", "--browserless"]
+        # _launch_argv, not a bare "railway": an npm-installed CLI is
+        # railway.cmd, which CreateProcess can't run directly.
+        cmd = _launch_argv("railway", "login", "--browserless")
         if pty is None:  # Windows: no pty module; the CLI's TTY probe differs
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -502,37 +506,126 @@ class RailwayLoginController:
         return self.status()
 
 
-# ── Railway CLI install ────────────────────────────────────────────────
+# ── Finding tools this process didn't inherit ──────────────────────────
+#
+# The companion inherits the PATH of whatever shell started it. Anything
+# installed AFTERWARDS — by our own install buttons, or by the user in a second
+# terminal — is invisible to `shutil.which` until the companion restarts, which
+# is exactly how "I installed Railway but the UI still says not installed"
+# happens. The two helpers below close that gap: we re-read the durable PATH
+# (Windows registry) and probe the standard per-tool install dirs ourselves.
 
-# Where the vendor installer (railway.com/install.sh) drops the binary. Its
-# precedence is  --bin-dir > RAILWAY_BIN_DIR > $RAILWAY_HOME/bin > ~/.railway/bin;
-# we never override, so the default ~/.railway/bin is what lands. The installer
-# only patches shell rc files, so a companion already running won't see the new
-# binary — we prepend these dirs to this process's PATH ourselves.
-_RAILWAY_CANDIDATE_BINDIRS = (
-    Path.home() / ".railway" / "bin",
-    Path("/usr/local/bin"),
-    Path.home() / ".local" / "bin",
-)
+# Where each tool's installer actually drops its binary.
+#   railway: vendor installer precedence is --bin-dir > RAILWAY_BIN_DIR >
+#            $RAILWAY_HOME/bin > ~/.railway/bin; we never override, so the
+#            default lands in ~/.railway/bin. npm -g puts railway.cmd in
+#            %APPDATA%\npm on Windows.
+#   c3:      install.sh → ~/.local/bin (or /usr/local/bin); on Windows our own
+#            installer writes %LOCALAPPDATA%\Programs\c3.
+def _candidate_bindirs(tool: str) -> tuple[Path, ...]:
+    home = Path.home()
+    common = [home / ".local" / "bin", Path("/usr/local/bin")]
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        localapp = os.environ.get("LOCALAPPDATA")
+        programfiles = os.environ.get("ProgramFiles")
+        common = []
+        if appdata:
+            common.append(Path(appdata) / "npm")
+        if programfiles:
+            common.append(Path(programfiles) / "nodejs")
+        if localapp:
+            common.append(Path(localapp) / "Programs" / "c3")
+            common.append(Path(localapp) / "Microsoft" / "WindowsApps")
+    per_tool = {
+        "railway": [home / ".railway" / "bin"],
+        "c3": [home / ".c3" / "bin"],
+    }.get(tool, [])
+    return tuple(per_tool + common)
+
+
+def _refresh_windows_path() -> None:
+    """Merge the PERSISTED Windows PATH (user + machine) into this process's.
+
+    Installers write PATH to the registry; already-running processes keep the
+    copy they were born with. Without this, a user who installs Node/Railway/c3
+    in another PowerShell window has to restart the companion before Recheck
+    can ever succeed. No-op off Windows."""
+    if os.name != "nt":
+        return
+    try:
+        import winreg  # Windows-only stdlib
+    except ImportError:  # pragma: no cover - non-Windows
+        return
+    found: list[str] = []
+    for root, subkey in (
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    ):
+        try:
+            with winreg.OpenKey(root, subkey) as key:
+                value, _ = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            continue
+        found.extend(p for p in str(value).split(os.pathsep) if p.strip())
+    if not found:
+        return
+    current = os.environ.get("PATH", "").split(os.pathsep)
+    lowered = {p.rstrip("\\").lower() for p in current if p}
+    # %VAR% references are literal in the registry value — expand them, and drop
+    # anything that still can't resolve rather than poisoning PATH with junk.
+    extra = []
+    for p in found:
+        expanded = os.path.expandvars(p).rstrip("\\")
+        if not expanded or "%" in expanded:
+            continue
+        if expanded.lower() not in lowered:
+            extra.append(expanded)
+            lowered.add(expanded.lower())
+    if extra:
+        os.environ["PATH"] = os.pathsep.join([*current, *extra])
+
+
+def _ensure_on_path(tool: str) -> bool:
+    """Make `tool` findable by this process, and report whether it is.
+
+    Idempotent: refreshes the durable PATH (Windows), then prepends a candidate
+    install dir to os.environ['PATH'] only when it actually holds the binary and
+    isn't already there."""
+    if shutil.which(tool) is not None:
+        return True
+    _refresh_windows_path()
+    if shutil.which(tool) is not None:
+        return True
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    for d in _candidate_bindirs(tool):
+        # On Windows the shim may be .exe or .cmd (npm -g); check both.
+        names = (f"{tool}.exe", f"{tool}.cmd", f"{tool}.bat") if os.name == "nt" else (tool,)
+        if any((d / n).exists() for n in names) and str(d) not in parts:
+            os.environ["PATH"] = os.pathsep.join([str(d), *parts])
+            parts = os.environ["PATH"].split(os.pathsep)
+    return shutil.which(tool) is not None
 
 
 def _ensure_railway_on_path() -> bool:
-    """Make `railway` findable by this process, and report whether it is.
+    """Back-compat alias — several call sites read as "is railway usable?"."""
+    return _ensure_on_path("railway")
 
-    Handles both the post-install case (the installer wrote ~/.railway/bin but
-    that dir isn't on the companion's PATH) and the pre-existing case (railway
-    installed there, companion launched from a shell that never sourced it).
-    Idempotent: prepends a candidate dir to os.environ['PATH'] only when it
-    actually holds a railway binary and isn't already present."""
-    if shutil.which("railway") is not None:
-        return True
-    parts = os.environ.get("PATH", "").split(os.pathsep)
-    for d in _RAILWAY_CANDIDATE_BINDIRS:
-        exe = d / ("railway.exe" if os.name == "nt" else "railway")
-        if exe.exists() and str(d) not in parts:
-            os.environ["PATH"] = os.pathsep.join([str(d), *parts])
-            parts = os.environ["PATH"].split(os.pathsep)
-    return shutil.which("railway") is not None
+
+def _launch_argv(tool: str, *args: str) -> list[str]:
+    """argv for running `tool`, correct for Windows shims.
+
+    npm installs console scripts as `railway.cmd` / `npm.cmd`. CreateProcess —
+    what subprocess.Popen uses — cannot execute a .cmd/.bat directly, so
+    Popen(["railway", ...]) fails on a perfectly good npm install. That is why
+    an npm-installed Railway CLI "didn't register". shutil.which honours
+    PATHEXT and finds the shim; we then run it through the command interpreter."""
+    _ensure_on_path(tool)
+    exe = shutil.which(tool)
+    if exe and os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/c", exe, *args]
+    return [exe or tool, *args]
 
 
 class RailwayInstallController:
@@ -564,11 +657,12 @@ class RailwayInstallController:
         if os.name == "nt":
             self.state = "error"
             self.error = (
-                "Automatic install isn't supported on Windows. Install the "
-                "Railway CLI with one of:\n"
-                "    scoop install railway\n"
-                "    npm i -g @railway/cli\n"
-                "then click Recheck."
+                "Automatic install isn't supported on Windows — install Node, "
+                "then the Railway CLI:\n"
+                "    winget install OpenJS.NodeJS.LTS\n"
+                "    npm.cmd install -g @railway/cli\n"
+                "then click Recheck. (Use npm.cmd — plain `npm` often isn't "
+                "recognized in PowerShell.)"
             )
             return self.status()
         with self._lock:
@@ -796,7 +890,249 @@ class DockerInstallController:
         return self.status()
 
 
+# ── C3 CLI install / update ────────────────────────────────────────────
+
+_C3_INSTALL_SH = "https://cthree.cloud/install.sh"
+_C3_WIN_RELEASE = "https://cthree.cloud/releases/latest/c3-windows-{arch}.exe"
+
+
+def c3_version() -> str | None:
+    """`c3 --version` output, or None when the CLI isn't installed/runnable."""
+    if not _ensure_on_path("c3"):
+        return None
+    try:
+        res = subprocess.run(
+            _launch_argv("c3", "--version"), capture_output=True, timeout=8,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (res.stdout or res.stderr or "").strip()
+    return out.splitlines()[0] if out else None
+
+
+class C3InstallController:
+    """Installs — or updates — the c3 CLI from the UI.
+
+    C3 is a young platform shipping often, so this is deliberately an *update*
+    path too, not just a first install: re-running it overwrites the binary in
+    place. Mirrors the Railway/Docker controllers (POST starts, the UI polls
+    status()), with one difference on Windows.
+
+    Windows has no curl-pipe-sh contract, and shelling out to PowerShell adds an
+    execution-policy failure mode for no gain — the vendor "installer" there is
+    just a file download. So we do it in Python: fetch the release binary, write
+    it into %LOCALAPPDATA%\\Programs\\c3, and persist that dir on the user's PATH
+    via the registry (the same idempotent append the documented PowerShell
+    snippet performs), plus this process's own PATH so Recheck sees it at once.
+
+    One attempt at a time; a new start() supersedes any pending run."""
+
+    def __init__(self) -> None:
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._token = 0
+        self.state = "idle"  # idle | pending | done | error
+        self.output = ""
+        self.error: str | None = None
+        self.version: str | None = None
+
+    def status(self) -> dict:
+        return {"state": self.state, "output": self.output[-4000:],
+                "error": self.error, "version": self.version}
+
+    # ── Windows: download the release binary ourselves ──
+    @staticmethod
+    def _win_arch() -> str:
+        machine = (platform.machine() or "").lower()
+        return "arm64" if machine in ("arm64", "aarch64") else "amd64"
+
+    def _install_windows(self, token: int) -> None:
+        localapp = os.environ.get("LOCALAPPDATA")
+        if not localapp:
+            self._fail(token, "LOCALAPPDATA isn't set, so there's no standard "
+                              "place to install c3.")
+            return
+        target_dir = Path(localapp) / "Programs" / "c3"
+        exe = target_dir / "c3.exe"
+        url = _C3_WIN_RELEASE.format(arch=self._win_arch())
+        self._log(f"Downloading {url}\n  → {exe}\n")
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            # Download to a temp file first: overwriting c3.exe in place would
+            # leave a half-written binary behind if the transfer drops.
+            tmp = exe.with_suffix(".exe.download")
+            with urllib.request.urlopen(url, timeout=120) as resp, tmp.open("wb") as fh:
+                shutil.copyfileobj(resp, fh)
+            os.replace(tmp, exe)
+        except (OSError, urllib.error.URLError) as exc:
+            self._fail(token, f"download failed: {exc}")
+            return
+        self._log("Downloaded. Adding the folder to your PATH…\n")
+        try:
+            self._persist_windows_path(str(target_dir))
+        except OSError as exc:
+            # Non-fatal: the binary is there, and we still put it on THIS
+            # process's PATH — only new terminals miss out.
+            self._log(f"  (couldn't write the persistent PATH entry: {exc})\n")
+        parts = os.environ.get("PATH", "").split(os.pathsep)
+        if str(target_dir) not in parts:
+            os.environ["PATH"] = os.pathsep.join([str(target_dir), *parts])
+        self._finish(token)
+
+    @staticmethod
+    def _persist_windows_path(directory: str) -> None:
+        """Append `directory` to the user's persistent PATH, once."""
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0,
+                            winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                current, kind = winreg.QueryValueEx(key, "Path")
+            except OSError:
+                current, kind = "", winreg.REG_EXPAND_SZ
+            entries = [p for p in str(current).split(os.pathsep) if p.strip()]
+            if any(p.rstrip("\\").lower() == directory.rstrip("\\").lower()
+                   for p in entries):
+                return
+            entries.append(directory)
+            winreg.SetValueEx(key, "Path", 0, kind or winreg.REG_EXPAND_SZ,
+                              os.pathsep.join(entries))
+
+    # ── POSIX: the vendor one-liner ──
+    def _install_posix(self, token: int) -> None:
+        cmd = ["bash", "-c", f"curl -fsSL {_C3_INSTALL_SH} | sh"]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, text=True,
+                encoding="utf-8", errors="replace", cwd=str(ROOT),
+            )
+        except OSError as exc:
+            self._fail(token, f"could not start the installer: {exc}")
+            return
+        self._proc = proc
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                self._log(RailwayLoginController._ANSI_RE.sub("", line))
+        finally:
+            proc.stdout.close()
+        proc.wait()
+        if proc.returncode != 0:
+            self._fail(token, f"installer exited {proc.returncode} — see the log below.")
+            return
+        self._finish(token)
+
+    # ── shared ──
+    def _log(self, text: str) -> None:
+        self.output += text
+
+    def _fail(self, token: int, message: str) -> None:
+        if token != self._token:
+            return  # superseded
+        self.state = "error"
+        self.error = message
+
+    def _finish(self, token: int) -> None:
+        if token != self._token:
+            return
+        version = c3_version()
+        if version is None:
+            self.state = "error"
+            self.error = (
+                "The install finished but `c3` still isn't runnable from this "
+                "process. Open a new terminal and run `c3 --version`; if that "
+                "works, restart this companion."
+            )
+            return
+        self.version = version
+        self._log(f"\n{version}\n")
+        self.state = "done"
+
+    def start(self) -> dict:
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.kill()
+            self._token += 1
+            token = self._token
+            self.state = "pending"
+            self.output = ""
+            self.error = None
+            self.version = None
+
+        def _run() -> None:
+            try:
+                if os.name == "nt":
+                    self._install_windows(token)
+                else:
+                    self._install_posix(token)
+            except Exception as exc:  # never leave the UI stuck on "pending"
+                self._fail(token, f"unexpected error: {exc}")
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+        return self.status()
+
+
 # ── App factory ────────────────────────────────────────────────────────
+
+
+# ── Live model catalogs ────────────────────────────────────────────────
+
+# provider key -> (fetched_at, models). The wizard re-enters the provider step
+# freely (Back/Continue), and each miss is a network round trip to someone
+# else's API, so hold the answer briefly. Short enough that a key added in
+# another tab shows up without a restart.
+_MODELS_CACHE: dict[str, tuple[float, list[str]]] = {}
+_MODELS_TTL = 600.0
+
+
+def _live_models(provider: str, *, refresh: bool = False) -> dict:
+    """`{"models": [...], "error": str | None}` for one provider key.
+
+    Wraps llm_backends.list_models (the same call `scripts/list_models.py`
+    exposes on the CLI) with the two things the UI needs: the API key resolved
+    from the local secret store, and failure expressed as data rather than an
+    exception — the dropdown always has its curated shortlist to fall back on."""
+    spec = next((p for p in init_fleet.PROVIDERS if p[0] == provider), None)
+    if spec is None:
+        return {"models": [], "error": f"unknown provider: {provider}"}
+    api_key_env = spec[3]
+    if api_key_env is None:
+        return {"models": [], "error": (
+            f"{spec[1]} uses its own login rather than an API key, so there is "
+            "no model list to fetch — it accepts any model the CLI knows."
+        )}
+    now = time.time()
+    if not refresh:
+        hit = _MODELS_CACHE.get(provider)
+        if hit and now - hit[0] < _MODELS_TTL:
+            return {"models": hit[1], "error": None}
+    api_key = secrets_local.resolve(api_key_env)
+    # OpenRouter's catalog is public — listing it needs no key (same exemption
+    # scripts/list_models.py makes).
+    if not api_key and provider != "openrouter":
+        return {"models": [], "error": (
+            f"Add your {api_key_env} to see every model this account can use."
+        )}
+    # OpenRouter / DeepSeek are reached as OpenAI-compatible endpoints — the
+    # same remap build_fleet_config applies when writing the agent config.
+    call_provider, api_base = provider, None
+    if provider == "openrouter":
+        api_base = init_fleet._OPENROUTER_API_BASE
+    elif provider == "deepseek":
+        call_provider, api_base = "openai", init_fleet._DEEPSEEK_API_BASE
+    try:
+        from llm_backends import list_models
+        found = list_models(call_provider, api_key=api_key, api_base=api_base)
+    except ValueError as exc:
+        return {"models": [], "error": str(exc)}
+    except (RuntimeError, OSError) as exc:
+        # Bad key, rate limit, offline — all recoverable from the UI's side.
+        return {"models": [], "error": f"Could not reach {spec[1]}: {exc}"}
+    _MODELS_CACHE[provider] = (now, found)
+    return {"models": found, "error": None}
 
 
 def _cmd_ok(args: list[str], timeout: float = 4.0) -> bool:
@@ -821,8 +1157,11 @@ def preflight_status() -> dict:
                 UI whether we can offer the one-click install here (Linux + root
                 or passwordless sudo) or must fall back to `manual` instructions.
     """
-    docker_installed = shutil.which("docker") is not None
-    c3_installed = shutil.which("c3") is not None
+    # _ensure_on_path, not a bare which(): the user may have installed these in
+    # another terminal after this companion started, and Recheck must be able to
+    # see that without a restart.
+    docker_installed = _ensure_on_path("docker")
+    c3_installed = _ensure_on_path("c3")
     return {
         "docker": {
             "installed": docker_installed,
@@ -831,6 +1170,9 @@ def preflight_status() -> dict:
         },
         "c3": {
             "cli_installed": c3_installed,
+            # Shown next to the Update button — C3 ships often, so "which
+            # version am I on" is the question that follows "is it installed".
+            "version": c3_version() if c3_installed else None,
             "key_in_env": bool(os.environ.get("C3_API_KEY")),
         },
         "git": {"installed": shutil.which("git") is not None},
@@ -880,6 +1222,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     railway_login = RailwayLoginController()
     railway_install = RailwayInstallController()
     docker_install = DockerInstallController()
+    c3_install = C3InstallController()
 
     # DNS-rebinding guard. This companion serves host credentials (e.g.
     # /local-api/swarm/admin returns the admin_key) and can start/stop fleets,
@@ -935,6 +1278,17 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "providers": init_fleet.get_providers(),
             "c3_hardware": init_fleet.get_c3_hardware_choices(),
         }
+
+    @app.get("/local-api/models")
+    def models(provider: str, refresh: bool = False) -> dict:
+        """The models `provider` exposes, fetched live from its API.
+
+        Powers the wizard's model dropdown, so a contributor picks from what
+        their account actually has today instead of typing an id from memory.
+        Never an error response: a missing key, a CLI-only provider, or an API
+        hiccup returns an empty list plus a reason, and the UI falls back to the
+        provider's curated shortlist."""
+        return _live_models(provider, refresh=refresh)
 
     @app.get("/local-api/challenges")
     def challenges() -> dict:
@@ -1009,6 +1363,13 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return JSONResponse({"error": "agent names must be unique"}, status_code=400)
         init_fleet.write_fleet_config(config)
         return {"config": config}
+
+    @app.get("/local-api/tacit/questions")
+    def tacit_questions() -> dict:
+        """The prompts the CLI wizard asks (hostadmin/tacit.py), served so the
+        setup app asks exactly the same ones — the guided form and
+        `python setup.py tacit` must not drift into two different interviews."""
+        return {"questions": setup_mod.TACIT_QUESTIONS}
 
     @app.post("/local-api/tacit")
     async def set_tacit(payload: dict) -> dict:
@@ -1135,6 +1496,17 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     @app.get("/local-api/docker/install")
     async def docker_install_status() -> dict:
         return docker_install.status()
+
+    @app.post("/local-api/c3/install")
+    async def c3_install_start() -> dict:
+        """Install — or update — the c3 CLI. Same endpoint for both: C3 ships
+        often, and re-running overwrites the binary in place. Returns
+        immediately; the UI polls the GET below, then re-reads preflight."""
+        return c3_install.start()
+
+    @app.get("/local-api/c3/install")
+    async def c3_install_status() -> dict:
+        return c3_install.status()
 
     @app.post("/local-api/railway/login")
     async def railway_login_start() -> dict:

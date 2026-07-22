@@ -379,14 +379,14 @@
           <div class="field" style="margin-top:16px">
             <label for="il">Join link — share this one line (it contains their password)</label>
             <textarea id="il" readonly rows="2">{inviteLink}</textarea>
-            <button class="ghost" onclick={() => navigator.clipboard.writeText(inviteLink)}>Copy link</button>
+            <button class="primary" onclick={() => navigator.clipboard.writeText(inviteLink)}>Copy link</button>
           </div>
         {/if}
         {#if inviteBlock}
           <div class="field" style="margin-top:16px">
             <label for="ib">Or the manual config lines</label>
             <textarea id="ib" readonly rows="3">{inviteBlock}</textarea>
-            <button class="ghost" onclick={() => navigator.clipboard.writeText(inviteBlock)}>Copy</button>
+            <button class="primary" onclick={() => navigator.clipboard.writeText(inviteBlock)}>Copy</button>
           </div>
         {/if}
       </div>
@@ -413,7 +413,7 @@
           <div class="field" style="margin-top:16px">
             <label for="blk">{bulkInvites.length} join link(s) — one per line (each contains that user's password)</label>
             <textarea id="blk" readonly rows={Math.min(10, bulkInvites.length + 1)}>{bulkText}</textarea>
-            <button class="ghost" onclick={() => navigator.clipboard.writeText(bulkText)}>Copy all</button>
+            <button class="primary" onclick={() => navigator.clipboard.writeText(bulkText)}>Copy all</button>
           </div>
           <div style="margin-top:8px">
             {#each bulkInvites as b}
@@ -422,12 +422,12 @@
                 <div class="field" style="margin-top:10px">
                   <label for={`bl-${b.username}`}>Join link</label>
                   <textarea id={`bl-${b.username}`} readonly rows="2">{b.link}</textarea>
-                  <button class="ghost" onclick={() => navigator.clipboard.writeText(b.link)}>Copy link</button>
+                  <button class="primary" onclick={() => navigator.clipboard.writeText(b.link)}>Copy link</button>
                 </div>
                 <div class="field">
                   <label for={`bb-${b.username}`}>Manual config lines (server / username / password)</label>
                   <textarea id={`bb-${b.username}`} readonly rows="3">{b.block}</textarea>
-                  <button class="ghost" onclick={() => navigator.clipboard.writeText(b.block)}>Copy</button>
+                  <button class="primary" onclick={() => navigator.clipboard.writeText(b.block)}>Copy</button>
                 </div>
               </details>
             {/each}

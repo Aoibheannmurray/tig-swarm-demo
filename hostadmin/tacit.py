@@ -41,7 +41,7 @@ TACIT_QUESTIONS = [
     {
         "title": "When standard approaches stop working, what do you reach for first?",
         "hint": (
-            "Think of the moves you make AFTER the obvious ones don't work\"."
+            "Think of the moves you make AFTER the obvious ones don't work."
         ),
     },
     {
@@ -56,21 +56,21 @@ TACIT_QUESTIONS = [
         "title": "What rules of thumb have you picked up that aren't in the textbooks?",
         "hint": (
             "Practical know-how — the things you'd tell your new PhD student\n"
-            "on day one to guide them\"."
+            "on day one to guide them."
         ),
     },
     {
         "title": "What pattern-recognition cues do you trust? \"When I see X, I try Y.\"",
         "hint": (
             "Diagnostic intuitions — what input or intermediate signal triggers\n"
-            "which strategy in your head?\"."
+            "which strategy in your head?"
         ),
     },
     {
         "title": "What looks promising on paper but consistently underperforms in practice?",
         "hint": (
             "Tempting dead ends — things that sound good in talks or papers\n"
-            "but lose to simpler approaches when you actually run them\"."
+            "but lose to simpler approaches when you actually run them."
         ),
     },
     {

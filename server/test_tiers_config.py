@@ -18,6 +18,7 @@ def test_classify_tier():
     # Frontier markers.
     assert tiers.classify_tier("anthropic", "claude-opus-4-7") == "frontier"
     assert tiers.classify_tier("anthropic", "claude-sonnet-4-6") == "frontier"  # sonnet-4
+    assert tiers.classify_tier("anthropic", "claude-sonnet-5") == "frontier"  # sonnet-5
     assert tiers.classify_tier("openai", "gpt-5") == "frontier"
     assert tiers.classify_tier("google", "gemini-2.5-pro") == "frontier"
     # Standard markers (checked first — downgrade wins).

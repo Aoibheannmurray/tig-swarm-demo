@@ -1,8 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import LogStream from "../components/LogStream.svelte";
+  import CopyCommand from "../components/CopyCommand.svelte";
   import { localApi } from "../lib/api";
   import { ensureStream, deployLog, deployStatus } from "../lib/stream";
+
+  // The companion runs on the host's own machine, so the OS it detects is the
+  // one they'll install onto. Windows takes a different Railway install route
+  // (npm, not the vendor shell script).
+  const isWin = /win/i.test(navigator.platform || navigator.userAgent || "");
 
   // Handing the host's own freshly-derived credentials to the contributor
   // wizard. A host who wants to run agents on their own swarm previously had to
@@ -351,13 +357,33 @@
   {#if railway && !railway.installed}
     <!-- No CLI: offer to install it (provisioning shells out to `railway`). -->
     {#if !install || install.state === "idle"}
-      <p class="lede">
-        Provisioning runs on the Railway CLI, which isn't installed yet.
-        <b>Install it here</b> — or run
-        <code>bash &lt;(curl -fsSL railway.com/install.sh)</code> in a terminal
-        and hit Recheck.
-      </p>
-      <button class="primary" onclick={startInstall}>Install the Railway CLI</button>
+      {#if isWin}
+        <!-- Windows can't run the vendor shell installer, so there is no
+             button to offer — two commands instead. npm.cmd, not npm: the
+             plain name often isn't resolvable in PowerShell. -->
+        <p class="lede">
+          Provisioning runs on the Railway CLI, which isn't installed yet. On
+          Windows it comes from npm — install Node first:
+        </p>
+        <CopyCommand text="winget install OpenJS.NodeJS.LTS" />
+        <p class="lede" style="margin-top:14px">
+          Open a <b>new</b> PowerShell window (so it picks up npm), check it's
+          there, then install the CLI:
+        </p>
+        <CopyCommand text={"npm.cmd --version\nnpm.cmd install -g @railway/cli"} multiline />
+        <p class="lede" style="margin-top:10px">
+          Then hit <b>Recheck</b> above. If <span class="mono">npm</span> isn't
+          recognized, use <span class="mono">npm.cmd</span> — on Windows the npm
+          shim is a <span class="mono">.cmd</span> file.
+        </p>
+      {:else}
+        <p class="lede">
+          Provisioning runs on the Railway CLI, which isn't installed yet.
+          <b>Install it here</b> — it takes a few seconds — or install it
+          yourself and hit Recheck.
+        </p>
+        <button class="primary" onclick={startInstall}>Install the Railway CLI</button>
+      {/if}
     {:else if install.state === "pending"}
       <p class="lede">Installing the Railway CLI… this takes a few seconds.</p>
       {#if install.output}<pre class="mono muted" style="white-space:pre-wrap">{install.output}</pre>{/if}
@@ -372,7 +398,8 @@
     {#if !login || login.state === "idle"}
       <p class="lede">
         Provisioning needs the Railway CLI, logged in.
-        <b>Log in right here</b> — or run <code>railway login</code> in a
+        <b>Log in right here</b> — or run
+        <code>{isWin ? "railway.cmd login" : "railway login"}</code> in a
         terminal and hit Recheck.
         {#if railway?.message}<br /><span class="muted mono">{railway.message}</span>{/if}
       </p>

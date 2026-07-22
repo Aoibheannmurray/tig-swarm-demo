@@ -36,9 +36,12 @@ STANDARD_MARKERS = (
 # Checked SECOND. Sonnet-class and up. `sonnet-4` matches `claude-sonnet-4-6`
 # but not `claude-3.5-sonnet` (caught by STANDARD_MARKERS first). `gpt-5`
 # matches but `gpt-4o` does not. `gemini-2.5-pro` is frontier; `*-flash` is not.
+# Each Sonnet generation needs its own marker for exactly the `3.5-sonnet`
+# reason — a bare "sonnet" would promote the old ones too.
 FRONTIER_MARKERS = (
     "opus",
     "sonnet-4",
+    "sonnet-5",
     "gpt-5",
     "gemini-2.5-pro",
     "o1",

@@ -71,76 +71,92 @@ _DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the
 # provider list in scripts/run_loop.py. Tuple: (label, default_model,
-# api_key_env or None, short_name_stub, supports_c3, blurb).
-PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
+# api_key_env or None, short_name_stub, supports_c3, blurb, popular_models).
+#
+# Labels and blurbs are UI copy — they render in the setup app's provider
+# dropdown, so they name ONE thing ("Claude API", not "Anthropic (Claude
+# API)") and the OpenAI-compatible/api_base plumbing stays in the docs.
+#
+# `popular_models` is a short, hand-kept shortlist (default first) shown as the
+# "Recommended" group in the setup app's model dropdown. It is NOT the full
+# catalog: the UI fetches that live from the provider (llm_backends.list_models
+# via /local-api/models). The shortlist is what we can offer before a key is
+# saved, when the fetch fails, and for the CLI providers — which authenticate
+# through their own CLI and expose no models endpoint at all.
+PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str, list[str]]] = [
     ("anthropic",
-     "Anthropic (Claude API)",
-     "claude-opus-4-7",
+     "Claude API",
+     "claude-opus-4-8",
      "ANTHROPIC_API_KEY",
      "claude",
      True,
-     "Claude via Anthropic's API. Needs ANTHROPIC_API_KEY."),
+     "Claude, called directly over Anthropic's API.",
+     ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]),
     ("openai",
-     "OpenAI (GPT API)",
+     "OpenAI API",
      "gpt-5",
      "OPENAI_API_KEY",
      "gpt",
      True,
-     "GPT via OpenAI's API. Needs OPENAI_API_KEY."),
+     "GPT, called directly over OpenAI's API.",
+     ["gpt-5", "gpt-5-mini", "o3"]),
     ("google",
-     "Google (Gemini API)",
+     "Gemini API",
      "gemini-2.5-pro",
      "GOOGLE_API_KEY",
      "gemini",
      True,
-     "Gemini via Google's API. Needs GOOGLE_API_KEY."),
+     "Gemini, called directly over Google's API.",
+     ["gemini-2.5-pro", "gemini-2.5-flash"]),
     ("venice",
-     "Venice.ai (OpenAI-compatible)",
+     "Venice.ai",
      "zai-org-glm-5",
      "VENICE_API_KEY",
      "venice",
      True,
-     "Venice.ai — OpenAI-compatible. Needs VENICE_API_KEY."),
+     "Private, uncensored inference over an OpenAI-compatible API.",
+     ["zai-org-glm-5", "qwen3-235b", "deepseek-r1-671b"]),
     ("openrouter",
-     "OpenRouter (multi-model proxy, OpenAI-compatible)",
+     "OpenRouter",
      "qwen/qwen3-coder",
      "OPENROUTER_API_KEY",
      "openrouter",
      True,
-     "OpenRouter — gateway to many providers under one key. Written to the "
-     "config as an OpenAI-compatible endpoint (provider `openai` + api_base). "
-     "Use publisher/model strings like `qwen/qwen3-coder` "
-     "or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."),
+     "One key, many providers. Models are `publisher/model` strings.",
+     ["qwen/qwen3-coder", "anthropic/claude-opus-4.8",
+      "deepseek/deepseek-chat", "moonshotai/kimi-k2"]),
     ("deepseek",
-     "DeepSeek (OpenAI-compatible)",
+     "DeepSeek",
      "deepseek-v4-pro",
      "DEEPSEEK_API_KEY",
      "deepseek",
      True,
-     "DeepSeek — OpenAI-compatible. Written to the config as provider `openai` "
-     "+ api_base. Use model ids like `deepseek-v4-pro`, `deepseek-chat` or "
-     "`deepseek-reasoner`. Needs DEEPSEEK_API_KEY."),
+     "DeepSeek's own API — strong models at a low price.",
+     ["deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"]),
     ("claude-code",
-     "Claude CLI — single-shot mode",
-     "claude-opus-4-7",
+     "Claude CLI",
+     "claude-opus-4-8",
      None,
      "claude-cli",
      True,
-     "Uses the `claude` CLI's own login. No API key needed."),
+     "Uses the `claude` CLI's own login. No API key needed.",
+     ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]),
     ("claude-code-agentic",
-     "Claude CLI — agentic (tooled, sandboxed)",
-     "claude-opus-4-7",
+     "Claude CLI (agentic)",
+     "claude-opus-4-8",
      None,
      "claude-agentic",
      True,
-     "Agentic Claude CLI — more capable, 5-20x more tokens. Subscription only."),
+     "Tooled, sandboxed Claude CLI — more capable, 5-20x more tokens.",
+     ["claude-opus-4-8", "claude-sonnet-5"]),
     ("codex-agentic",
-     "Codex CLI — agentic",
+     "Codex CLI",
      "",
      None,
      "codex-agentic",
      True,
-     "Agentic Codex CLI — uses `codex login`. Subscription only."),
+     "Agentic Codex CLI — uses `codex login`. Subscription only.",
+     []),
 ]
 
 
@@ -568,6 +584,9 @@ def get_providers() -> list[dict]:
             "name_stub": p[4],
             "supports_c3": p[5],
             "blurb": p[6],
+            # Shortlist for the UI's "Recommended" group. The full catalog is
+            # fetched live per provider (see /local-api/models).
+            "popular_models": list(p[7]),
         }
         for p in PROVIDERS
     ]

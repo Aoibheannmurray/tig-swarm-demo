@@ -28,12 +28,21 @@ export const localApi = {
   preflight: () => fetch(`${LOCAL}/preflight`).then(jsonOrThrow),
   providers: () => fetch(`${LOCAL}/providers`).then(jsonOrThrow),
   challenges: () => fetch(`${LOCAL}/challenges`).then(jsonOrThrow),
+  // Live model catalog for one provider. Never throws for "no key" / CLI
+  // provider — those come back as {models: [], error} so the caller can fall
+  // back to the provider's curated shortlist.
+  models: (provider: string, refresh = false) =>
+    fetch(`${LOCAL}/models?provider=${encodeURIComponent(provider)}` +
+      (refresh ? "&refresh=true" : "")).then(jsonOrThrow),
 
   getFleetConfig: () => fetch(`${LOCAL}/fleet/config`).then(jsonOrThrow),
   setFleetConfig: (params: any) =>
     fetch(`${LOCAL}/fleet/config`, post(params)).then(jsonOrThrow),
   saveFleetConfig: (config: any) =>
     fetch(`${LOCAL}/fleet/config/save`, post({ config })).then(jsonOrThrow),
+  // The same prompts `python setup.py tacit` asks — served, not duplicated in
+  // the UI, so the two interviews can't drift apart.
+  tacitQuestions: () => fetch(`${LOCAL}/tacit/questions`).then(jsonOrThrow),
   setTacit: (payload: any) =>
     fetch(`${LOCAL}/tacit`, post(payload)).then(jsonOrThrow),
 
@@ -56,6 +65,10 @@ export const localApi = {
   railwayInstallStatus: () => fetch(`${LOCAL}/railway/install`).then(jsonOrThrow),
   dockerInstallStart: () => fetch(`${LOCAL}/docker/install`, { method: "POST" }).then(jsonOrThrow),
   dockerInstallStatus: () => fetch(`${LOCAL}/docker/install`).then(jsonOrThrow),
+  // Install AND update share one endpoint: re-running overwrites the binary,
+  // which is what "update c3" means.
+  c3InstallStart: () => fetch(`${LOCAL}/c3/install`, { method: "POST" }).then(jsonOrThrow),
+  c3InstallStatus: () => fetch(`${LOCAL}/c3/install`).then(jsonOrThrow),
   swarmAdmin: () => fetch(`${LOCAL}/swarm/admin`).then(jsonOrThrow),
   // Derive a contributor's credentials from the host's base password, and
   // record the name in issued_contributors. Lets a host join their own swarm

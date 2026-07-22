@@ -5,6 +5,7 @@ Moved verbatim from the root setup.py ("Railway CLI helpers" section)."""
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess as sp
 import time
@@ -28,7 +29,22 @@ _RAILWAY_INSTALL_HINT = (
     "    npm i -g @railway/cli             # if you have node\n"
     "    brew install railway              # macOS\n"
     "    cargo install railwayapp --locked # rust\n"
+    "  On Windows (PowerShell): winget install OpenJS.NodeJS.LTS, then\n"
+    "    npm.cmd install -g @railway/cli   # npm.cmd — plain `npm` often isn't found\n"
 )
+
+
+def _railway_argv(*args: str) -> list[str]:
+    """argv for invoking the Railway CLI, correct for Windows shims.
+
+    npm installs the CLI as `railway.cmd`. CreateProcess — what subprocess uses
+    on Windows — cannot execute a .cmd/.bat directly, so `["railway", ...]`
+    fails against a perfectly good npm install. shutil.which honours PATHEXT and
+    finds the shim; we then run it through the command interpreter."""
+    exe = shutil.which("railway")
+    if exe and os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/c", exe, *args]
+    return [exe or "railway", *args]
 
 
 # Substrings that mark a *transient* Railway failure — the GraphQL API
@@ -71,7 +87,7 @@ def _railway_run(
     for attempt in range(retries + 1):
         try:
             result = sp.run(
-                ["railway", *args],
+                _railway_argv(*args),
                 capture_output=True,
                 text=True,
                 cwd=str(ROOT),
@@ -389,7 +405,7 @@ def _railway_up(service: str) -> None:
     _ensure_upload_snapshot_targets()
     # Inherit stdout/stderr so the user sees build logs as they stream.
     result = sp.run(
-        ["railway", "up", "--service", service, "--ci"],
+        _railway_argv("up", "--service", service, "--ci"),
         cwd=str(ROOT),
     )
     if result.returncode != 0:
