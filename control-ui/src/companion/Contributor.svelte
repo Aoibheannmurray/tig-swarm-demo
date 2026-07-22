@@ -677,10 +677,11 @@ c3 --version`;
         </select>
       </div>
     </div>
-    <!-- Given room of its own: it answers "am I locked into this?", which is
-         the question that stalls people on this step. Cramped under the two
-         selects it read as fine print. -->
-    <div class="note">
+    <!-- Answers "am I locked into this?", the question that stalls people on
+         this step. `bare`: it belongs to the two selects above it, so it sits
+         close to them and shares their background rather than reading as a
+         separate panel. -->
+    <div class="note bare">
       <p>Both can be changed later, while the swarm is running — from
         <b>Reconfigure</b> on your fleet page.</p>
       <p>Changes apply on the agent's next iteration. A new starting point
@@ -953,6 +954,14 @@ c3 --version`;
   .note p { margin: 0; }
   .note p + p { margin-top: 10px; }
   .note b { color: var(--ink); font-weight: 600; }
+  /* Caption form: text that explains the fields directly above it, not a panel
+     of its own. The tinted box and the 20px gap made it look like a separate
+     section instead of a footnote to the two selects. */
+  .note.bare {
+    margin-top: 0;
+    padding: 0;
+    background: none;
+  }
 
   /* A text button that reads as the secondary escape hatch it is — the connect
      step's "this isn't the swarm I want" route, which shouldn't compete with
