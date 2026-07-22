@@ -681,6 +681,37 @@ _TRAJECTORY_BESTS_COLS = (
 )
 
 
+def score_epoch_key(challenge: str) -> str:
+    """`config` key holding the cutoff for one challenge's leaderboard.
+
+    Set by the admin "Reset leaderboard" action to the moment of the reset.
+    Scores published before it stop counting as the global best, WITHOUT
+    deleting the experiments themselves — the swarm's research history, the
+    inspiration matrix and every trajectory chart still read those rows."""
+    return f"score_epoch:{challenge}"
+
+
+async def set_score_epoch(
+    conn: aiosqlite.Connection, challenge: str, timestamp: str
+) -> None:
+    """Start a new scoring era for `challenge` as of `timestamp`."""
+    await conn.execute(
+        "INSERT INTO config (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (score_epoch_key(challenge), timestamp),
+    )
+
+
+async def get_score_epoch(
+    conn: aiosqlite.Connection, challenge: str
+) -> str | None:
+    cursor = await conn.execute(
+        "SELECT value FROM config WHERE key = ?", (score_epoch_key(challenge),),
+    )
+    row = await cursor.fetchone()
+    return row["value"] if row else None
+
+
 async def get_global_best(
     conn: aiosqlite.Connection, challenge: str, *, direction: str
 ) -> dict | None:
@@ -691,6 +722,14 @@ async def get_global_best(
     # which would otherwise hide historical peaks once their trajectory
     # ended. Returned shape mirrors the prior trajectory_bests-based result so
     # callers don't need to change.
+    #
+    # The score epoch (set by POST /api/admin/reset_challenge) excludes rows
+    # published before the last leaderboard reset. Without it a "reset" cleared
+    # only the chart: this query still found the old peak in `experiments`, so
+    # after a change that makes scores incomparable — new instance counts, a new
+    # timeout — no legitimately lower score could ever become the new best.
+    # Comparing ISO-8601 strings is a plain lexicographic compare, and the
+    # COALESCE default of '' keeps every row when no epoch is set.
     order = _direction_order(direction)
     cursor = await conn.execute(
         "SELECT id as experiment_id, id, agent_id, challenge, "
@@ -698,8 +737,10 @@ async def get_global_best(
         "solution_data, track_scores, created_at as updated_at, "
         "trajectory_id "
         "FROM experiments WHERE feasible = 1 AND challenge = ? "
+        "  AND created_at > COALESCE("
+        "        (SELECT value FROM config WHERE key = ?), '') "
         f"ORDER BY score {order} LIMIT 1",
-        (challenge,),
+        (challenge, score_epoch_key(challenge)),
     )
     row = await cursor.fetchone()
     return dict(row) if row else None

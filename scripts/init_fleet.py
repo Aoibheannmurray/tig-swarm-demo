@@ -77,6 +77,12 @@ _DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 # dropdown, so they name ONE thing ("Claude API", not "Anthropic (Claude
 # API)") and the OpenAI-compatible/api_base plumbing stays in the docs.
 #
+# The Claude CLI rows lead with `opus` / `sonnet` / `haiku`: `claude --model`
+# documents these as "an alias for the latest model", so they follow each new
+# release without anyone editing this table — the closest thing to a live
+# catalog that CLI offers (it has no `models list` command, unlike Codex's
+# `codex debug models`). The dated ids stay below them for pinning a version.
+#
 # `popular_models` is a short, hand-kept shortlist (default first) shown as the
 # "Recommended" group in the setup app's model dropdown. It is NOT the full
 # catalog: the UI fetches that live from the provider (llm_backends.list_models
@@ -140,7 +146,8 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str, list[str]]] = [
      "claude-cli",
      True,
      "Uses the `claude` CLI's own login. No API key needed.",
-     ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]),
+     ["opus", "sonnet", "haiku",
+      "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]),
     ("claude-code-agentic",
      "Claude CLI (agentic)",
      "claude-opus-4-8",
@@ -148,9 +155,10 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str, list[str]]] = [
      "claude-agentic",
      True,
      "Tooled, sandboxed Claude CLI — more capable, 5-20x more tokens.",
-     ["claude-opus-4-8", "claude-sonnet-5"]),
+     ["opus", "sonnet",
+      "claude-opus-4-8", "claude-sonnet-5"]),
     ("codex-agentic",
-     "Codex CLI",
+     "Codex CLI (agentic)",
      "gpt-5.6-sol",
      None,
      "codex-agentic",

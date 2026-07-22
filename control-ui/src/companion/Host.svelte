@@ -19,6 +19,7 @@
 
   let error = $state("");
   let railway: any = $state(null);
+  let preflight: any = $state(null);
   let challenges: any = $state({ cpu: [], gpu: [] });
   let admin: any = $state(null);
 
@@ -149,7 +150,15 @@
     railway = await localApi.railwayStatus();
     const ws: string[] = railway?.workspaces ?? [];
     if (ws.length && !ws.includes(workspace)) workspace = ws[0];
+    // Windows installs the Railway CLI from npm, so whether Node is already
+    // there decides how many steps we show — and whether we can run the
+    // install ourselves. Re-probed on every Recheck: someone may have just
+    // installed Node in another terminal.
+    try { preflight = await localApi.preflight(); } catch { /* keep last */ }
   }
+  // Unknown until preflight resolves. Treat unknown as "present" so a slow
+  // probe never flashes an install step at someone who doesn't need it.
+  let hasNpm = $derived(preflight ? !!preflight.clis?.npm : true);
 
   async function recheckRailway() {
     error = "";
@@ -357,25 +366,37 @@
   {#if railway && !railway.installed}
     <!-- No CLI: offer to install it (provisioning shells out to `railway`). -->
     {#if !install || install.state === "idle"}
-      {#if isWin}
-        <!-- Windows can't run the vendor shell installer, so there is no
-             button to offer — two commands instead. npm.cmd, not npm: the
-             plain name often isn't resolvable in PowerShell. -->
+      {#if isWin && !hasNpm}
+        <!-- Node is the one thing we can't install for them: winget needs a
+             fresh shell before npm appears on PATH. Shown ONLY when npm is
+             actually missing — telling someone who has Node to install Node
+             is how people conclude the page isn't listening. -->
         <p class="lede">
-          Provisioning runs on the Railway CLI, which isn't installed yet. On
-          Windows it comes from npm — install Node first:
+          Provisioning runs on the Railway CLI, which comes from npm on Windows
+          — and Node isn't installed yet. In PowerShell:
         </p>
         <CopyCommand text="winget install OpenJS.NodeJS.LTS" />
         <p class="lede" style="margin-top:14px">
-          Open a <b>new</b> PowerShell window (so it picks up npm), check it's
-          there, then install the CLI:
+          Then open a <b>new</b> PowerShell window (so it picks up npm), check
+          it's there, and hit <b>Recheck</b> above — this page will offer to
+          install the CLI for you.
         </p>
-        <CopyCommand text={"npm.cmd --version\nnpm.cmd install -g @railway/cli"} multiline />
+        <CopyCommand text="npm.cmd --version" />
         <p class="lede" style="margin-top:10px">
-          Then hit <b>Recheck</b> above. If <span class="mono">npm</span> isn't
-          recognized, use <span class="mono">npm.cmd</span> — on Windows the npm
-          shim is a <span class="mono">.cmd</span> file.
+          Use <span class="mono">npm.cmd</span> if plain <span class="mono">npm</span>
+          isn't recognized — on Windows the npm shim is a
+          <span class="mono">.cmd</span> file.
         </p>
+      {:else if isWin}
+        <!-- Node present: same one-click install as everywhere else, run
+             through npm instead of the vendor shell script. -->
+        <p class="lede">
+          Provisioning runs on the Railway CLI, which isn't installed yet.
+          <b>Install it here</b> — it runs
+          <span class="mono">npm install -g @railway/cli</span> — or run that
+          yourself and hit Recheck.
+        </p>
+        <button class="primary" onclick={startInstall}>Install the Railway CLI</button>
       {:else}
         <p class="lede">
           Provisioning runs on the Railway CLI, which isn't installed yet.
@@ -592,13 +613,13 @@
 
       <div class="actions">
         <div class="spacer"></div>
-        <a class="btn" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
+        <a class="btn primary" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
         {#if selfJoinOpen}
           <button class="primary" disabled={selfJoinBusy} onclick={selfJoin}>
             {selfJoinBusy ? "Setting up…" : "Continue →"}
           </button>
         {:else}
-          <button class="primary" onclick={() => (selfJoinOpen = true)}>
+          <button onclick={() => (selfJoinOpen = true)}>
             Also run agents yourself →
           </button>
         {/if}
@@ -677,13 +698,13 @@
 
     <div class="actions">
       <div class="spacer"></div>
-      <a class="btn" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
+      <a class="btn primary" href={adminConsoleUrl()} target="_blank" rel="noreferrer">Open Admin Console →</a>
       {#if selfJoinOpen}
         <button class="primary" disabled={selfJoinBusy} onclick={selfJoin}>
           {selfJoinBusy ? "Setting up…" : "Continue →"}
         </button>
       {:else}
-        <button class="primary" onclick={() => (selfJoinOpen = true)}>
+        <button onclick={() => (selfJoinOpen = true)}>
           Also run agents yourself →
         </button>
       {/if}

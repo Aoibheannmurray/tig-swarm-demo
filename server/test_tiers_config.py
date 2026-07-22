@@ -19,6 +19,14 @@ def test_classify_tier():
     assert tiers.classify_tier("anthropic", "claude-opus-4-7") == "frontier"
     assert tiers.classify_tier("anthropic", "claude-sonnet-4-6") == "frontier"  # sonnet-4
     assert tiers.classify_tier("anthropic", "claude-sonnet-5") == "frontier"  # sonnet-5
+    # Claude CLI aliases (`--model opus|sonnet|haiku`) carry no version, and a
+    # fleet running one must still tier by family.
+    assert tiers.classify_tier("claude-code", "opus") == "frontier"
+    assert tiers.classify_tier("claude-code", "sonnet") == "frontier"
+    assert tiers.classify_tier("claude-code", "haiku") == "standard"
+    # Bare "sonnet" must not promote the old Sonnets, which are downgraded by
+    # their own markers before FRONTIER_MARKERS is consulted.
+    assert tiers.classify_tier("anthropic", "claude-3-sonnet") == "standard"
     assert tiers.classify_tier("openai", "gpt-5") == "frontier"
     assert tiers.classify_tier("google", "gemini-2.5-pro") == "frontier"
     # Standard markers (checked first — downgrade wins).

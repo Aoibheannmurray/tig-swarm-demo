@@ -91,6 +91,15 @@ def main() -> int:
                   for prov in p["providers"] if prov["popular_models"]),
               "each shortlist leads with the provider's default model")
 
+        pf = c.get("/local-api/preflight").json()
+        # node/npm drive the Windows Railway install: the host page shows the
+        # "install Node first" step only when npm is missing, and the install
+        # button shells out to npm when it isn't.
+        check({"claude", "codex", "node", "npm"} <= set(pf["clis"]),
+              "preflight reports node + npm alongside the coding CLIs")
+        check(all(isinstance(v, bool) for v in pf["clis"].values()),
+              "every CLI probe is a plain bool the UI can branch on")
+
         print("model catalog")
         # No key stored in the test env -> a reason, not an exception, so the
         # dropdown can fall back to the shortlist.

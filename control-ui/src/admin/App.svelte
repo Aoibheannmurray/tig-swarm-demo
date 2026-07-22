@@ -175,12 +175,25 @@
   async function pool(action: "clear" | "reset") {
     poolMsg = ""; error = "";
     try {
-      if (action === "clear") await hostedApi.clearInactive(adminKey, poolChallenge);
-      else {
-        if (!confirm(`Reset the ${poolChallenge} leaderboard? This clears its best history.`)) return;
-        await hostedApi.resetChallenge(adminKey, poolChallenge);
+      if (action === "clear") {
+        await hostedApi.clearInactive(adminKey, poolChallenge);
+        poolMsg = `clear on ${poolChallenge} done.`;
+      } else {
+        // Say what actually happens. The old wording ("clears its best
+        // history") described a chart wipe, while the real effect is that
+        // scores stop counting from now on — the thing you reach for after
+        // changing instances.
+        if (!confirm(
+          `Start a new scoring era for ${poolChallenge}?\n\n` +
+          `Scores published before now stop counting, so the next run becomes ` +
+          `the best even if it scores lower. Nothing is deleted — experiments, ` +
+          `hypotheses and trajectories are kept.`
+        )) return;
+        const res = await hostedApi.resetChallenge(adminKey, poolChallenge);
+        poolMsg =
+          `${poolChallenge} leaderboard reset — scores now counted from ` +
+          `${res.score_epoch ?? "now"}. The next feasible publish becomes the best.`;
       }
-      poolMsg = `${action} on ${poolChallenge} done.`;
     } catch (e: any) { error = e.message; }
   }
 
@@ -526,6 +539,13 @@
           <button onclick={() => pool("clear")}>Clear inactive pool</button>
           <button class="danger" onclick={() => pool("reset")}>Reset leaderboard</button>
         </div>
+        <p class="lede" style="margin-top:10px">
+          <b>Reset leaderboard</b> starts a new scoring era: scores published
+          before the reset stop counting, so the next feasible run becomes the
+          best even if it scores lower. Use it after changing something that
+          makes old scores incomparable — instance counts, the solver timeout.
+          Experiments, hypotheses and trajectories are kept.
+        </p>
         {#if poolMsg}<div class="banner ok" style="margin-top:14px">{poolMsg}</div>{/if}
       </div>
 

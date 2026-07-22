@@ -2927,19 +2927,28 @@ async def admin_broadcast(req: AdminBroadcast):
 
 @app.post("/api/admin/reset_challenge")
 async def admin_reset_challenge(req: AdminResetChallenge):
-    """Per-challenge leaderboard reset. Drops `trajectory_bests` + `best_history`
-    for the named challenge so the next feasible publish becomes the new
-    global best. Preserves `experiments`, `hypotheses`, and `trajectories`
-    so the swarm's research history isn't erased.
+    """Per-challenge leaderboard reset — starts a new scoring era.
 
-    Use case: a wire-format change (e.g. the route_data → solution_data
-    rename + trailing-slash fix) leaves all prior best_history rows with
-    NULL solution_data, so the dashboard's gantt / route panels render
-    blank. Resetting the leaderboard lets fresh publishes — which now
-    carry solution_data correctly — repopulate the visualisation.
+    Drops `trajectory_bests` + `best_history` for the challenge, clears each
+    agent's `best_ever_score` on it, and stamps a **score epoch** so scores
+    published before now stop counting as the global best. Preserves
+    `experiments`, `hypotheses`, and `trajectories`, so the swarm's research
+    history, the inspiration matrix and every trajectory chart are intact.
+
+    The epoch is what makes this a real reset. `get_global_best` reads
+    `experiments` (deliberately — a peak from a deactivated trajectory still
+    counts), so deleting the two tables above cleared the CHART while the old
+    peak kept winning the publish gate. After a change that makes scores
+    incomparable — new instance counts, a different timeout — every new run
+    scored lower and was classified "not an improvement", forever. With an
+    epoch, the next feasible publish becomes the new best even if it is lower.
+
+    Reversible: clearing the `score_epoch:<challenge>` config row restores the
+    previous best, because nothing was deleted from `experiments`.
     """
     await verify_admin(req)
     challenge = req.challenge
+    timestamp = now()
     async with db.connect() as conn:
         cur = await conn.execute(
             "DELETE FROM best_history WHERE challenge = ?", (challenge,),
@@ -2949,16 +2958,26 @@ async def admin_reset_challenge(req: AdminResetChallenge):
             "DELETE FROM trajectory_bests WHERE challenge = ?", (challenge,),
         )
         trajectory_bests_deleted = cur.rowcount
+        # best_ever_score is monotonic and drives leaderboard ORDERING, so
+        # leaving it would show pre-reset peaks alongside a reset best.
+        cur = await conn.execute(
+            "UPDATE agent_challenge_state SET best_ever_score = NULL "
+            "WHERE challenge = ?", (challenge,),
+        )
+        agent_bests_cleared = cur.rowcount
+        await db.set_score_epoch(conn, challenge, timestamp)
         await conn.commit()
     await manager.broadcast(ws_events.ResetEvt(
         challenge=challenge,
-        timestamp=now(),
+        timestamp=timestamp,
     ))
     return {
         "reset": True,
         "challenge": challenge,
+        "score_epoch": timestamp,
         "best_history_deleted": best_history_deleted,
         "trajectory_bests_deleted": trajectory_bests_deleted,
+        "agent_bests_cleared": agent_bests_cleared,
     }
 
 

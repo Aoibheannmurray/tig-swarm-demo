@@ -654,15 +654,18 @@ class RailwayInstallController:
                 "error": self.error}
 
     def start(self) -> dict:
-        if os.name == "nt":
+        # Windows has no curl-pipe-bash contract, but it does have npm — which
+        # ships the same CLI. So the button works there too, provided Node is
+        # present; installing Node itself needs winget and a fresh shell, which
+        # we can't do for them, so that stays a manual step (the host page only
+        # shows it when npm is actually missing).
+        if os.name == "nt" and not _ensure_on_path("npm"):
             self.state = "error"
             self.error = (
-                "Automatic install isn't supported on Windows — install Node, "
-                "then the Railway CLI:\n"
+                "Node isn't installed, and the Railway CLI comes from npm on "
+                "Windows. In PowerShell:\n"
                 "    winget install OpenJS.NodeJS.LTS\n"
-                "    npm.cmd install -g @railway/cli\n"
-                "then click Recheck. (Use npm.cmd — plain `npm` often isn't "
-                "recognized in PowerShell.)"
+                "then open a NEW PowerShell window and click Recheck."
             )
             return self.status()
         with self._lock:
@@ -673,10 +676,15 @@ class RailwayInstallController:
             self.error = None
             # `-s --` forwards `-y` to the piped script; without a controlling
             # TTY the installer would otherwise wait on a confirmation prompt.
-            cmd = [
-                "bash", "-c",
-                "curl -fsSL https://railway.com/install.sh | bash -s -- -y",
-            ]
+            cmd = (
+                # npm installs the CLI as railway.cmd; _launch_argv routes the
+                # npm shim itself through the command interpreter for the same
+                # CreateProcess reason.
+                _launch_argv("npm", "install", "-g", "@railway/cli")
+                if os.name == "nt" else
+                ["bash", "-c",
+                 "curl -fsSL https://railway.com/install.sh | bash -s -- -y"]
+            )
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -705,10 +713,13 @@ class RailwayInstallController:
                 self.state = "done"
             else:
                 self.state = "error"
+                manual = (
+                    "npm.cmd install -g @railway/cli"
+                    if os.name == "nt" else "see railway.com/install.sh"
+                )
                 self.error = (
                     "The installer exited without leaving a usable `railway` "
-                    "on PATH. Install it manually (see railway.com/install.sh) "
-                    "and click Recheck."
+                    f"on PATH. Install it manually ({manual}) and click Recheck."
                     if proc.returncode == 0
                     else f"installer exited {proc.returncode} — see the log below."
                 )
@@ -1125,7 +1136,23 @@ def _live_models(provider: str, *, refresh: bool = False) -> dict:
     if spec is None:
         return {"models": [], "error": f"unknown provider: {provider}"}
     api_key_env = spec[3]
-    if api_key_env is None and provider != "codex-agentic":
+    # The Claude CLI has no `models list` command (Codex does). But it drives
+    # the same vendor, so an ANTHROPIC_API_KEY the contributor happens to have
+    # stored lists the right model ids — indicative rather than authoritative,
+    # since the CLI runs on a subscription whose entitlements can differ. Only
+    # a borrowed key, never a required one: with none, the shortlist (aliases
+    # first) stands on its own.
+    borrowed_key_env = (
+        "ANTHROPIC_API_KEY" if api_key_env is None and provider.startswith("claude-code")
+        else None
+    )
+    if api_key_env is None and borrowed_key_env and not secrets_local.resolve(borrowed_key_env):
+        return {"models": [], "error": (
+            f"{spec[1]} uses its own login, so there's no catalog to fetch. "
+            "Pick an alias — opus / sonnet / haiku always resolve to the newest "
+            "model in that family — or a dated id to pin one version."
+        )}
+    if api_key_env is None and not borrowed_key_env and provider != "codex-agentic":
         return {"models": [], "error": (
             f"{spec[1]} uses its own login rather than an API key, so there is "
             "no model list to fetch — it accepts any model the CLI knows."
@@ -1135,7 +1162,7 @@ def _live_models(provider: str, *, refresh: bool = False) -> dict:
         hit = _MODELS_CACHE.get(provider)
         if hit and now - hit[0] < _MODELS_TTL:
             return {"models": hit[1], "error": None}
-    api_key = secrets_local.resolve(api_key_env) if api_key_env else None
+    api_key = secrets_local.resolve(api_key_env or borrowed_key_env or "") or None
     # OpenRouter's catalog is public — listing it needs no key (same exemption
     # scripts/list_models.py makes).
     if not api_key and provider not in ("openrouter", "codex-agentic"):
@@ -1149,6 +1176,9 @@ def _live_models(provider: str, *, refresh: bool = False) -> dict:
         api_base = init_fleet._OPENROUTER_API_BASE
     elif provider == "deepseek":
         call_provider, api_base = "openai", init_fleet._DEEPSEEK_API_BASE
+    elif borrowed_key_env:
+        # Ask Anthropic's HTTP API on the CLI provider's behalf.
+        call_provider = "anthropic"
     try:
         from llm_backends import list_models
         found = list_models(call_provider, api_key=api_key, api_base=api_base)
@@ -1156,6 +1186,13 @@ def _live_models(provider: str, *, refresh: bool = False) -> dict:
         return {"models": [], "error": str(exc)}
     except (RuntimeError, OSError) as exc:
         # Bad key, rate limit, offline — all recoverable from the UI's side.
+        if borrowed_key_env:
+            # Don't blame the CLI for a borrowed key's failure.
+            return {"models": [], "error": (
+                f"Couldn't list models with your {borrowed_key_env}: "
+                f"{_readable_api_error(exc)}. {spec[1]} still accepts any model "
+                "the CLI knows, including the aliases above."
+            )}
         action = (
             "load the model catalog from"
             if provider == "codex-agentic" else "reach"
@@ -1213,6 +1250,14 @@ def preflight_status() -> dict:
         "clis": {
             "claude": shutil.which("claude") is not None,
             "codex": shutil.which("codex") is not None,
+            # Node/npm: the Railway CLI's only install route on Windows. The
+            # host page shows the "install Node first" step only when npm is
+            # actually missing, and can run the install itself when it isn't.
+            # _ensure_on_path, not which(): it knows %APPDATA%\npm and
+            # %ProgramFiles%\nodejs and re-reads the persisted PATH, so a Node
+            # installed in another terminal is seen without a restart.
+            "node": _ensure_on_path("node"),
+            "npm": _ensure_on_path("npm"),
         },
     }
 

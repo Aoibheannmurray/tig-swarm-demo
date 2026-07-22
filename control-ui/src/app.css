@@ -113,6 +113,12 @@ button, .btn {
   color: var(--ink);
   transition: background 0.15s, border-color 0.15s, transform 0.05s;
 }
+/* `.btn` is worn by <a> as well as <button> (Open Admin Console navigates, so
+   it must stay a real link). Without these it inherits the global link colour
+   and underline, which reads as underlined text sitting inside a button —
+   especially loud once the button is the filled primary. */
+a.btn { display: inline-block; text-decoration: none; color: var(--ink); }
+a.btn.primary { color: #fff; }
 button:hover, .btn:hover { background: var(--bg-hover); }
 button:active { transform: translateY(1px); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
