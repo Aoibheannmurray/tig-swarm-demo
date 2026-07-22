@@ -66,32 +66,51 @@
 
   // ── Model list ──
   // Two sources, because neither alone is enough: `popular_models` is a short
-  // curated shortlist that works with no API key and is the ONLY list the CLI
-  // providers can offer (they expose no models endpoint), while the live list
-  // is whatever this account can actually call today — so it never goes stale
-  // as providers ship new models. `Custom…` keeps any id typeable regardless.
+  // curated shortlist that works with no API key and is the fallback for CLI
+  // providers, while the live list is whatever this account or installed Codex
+  // CLI can actually call today. `Custom…` keeps any id typeable regardless.
   const CUSTOM = "__custom__";
   let liveModels: string[] = $state([]);
   let modelsError = $state("");
   let modelsLoading = $state(false);
   let customModel = $state(false);
-  let popular = $derived((selectedProvider?.popular_models ?? []) as string[]);
+  let fallbackModels = $derived((selectedProvider?.popular_models ?? []) as string[]);
+  // The Codex CLI catalog is already curated and priority-ordered by Codex. Use
+  // it authoritatively so removed models do not linger in the static fallback.
+  let popular = $derived(
+    provider === "codex-agentic" && liveModels.length ? liveModels : fallbackModels
+  );
+  let effectiveDefault = $derived(
+    provider === "codex-agentic" && liveModels.length
+      ? liveModels[0]
+      : selectedProvider?.default_model
+  );
   // The live list minus anything already shown under "Recommended".
   let otherModels = $derived(liveModels.filter((m) => !popular.includes(m)));
 
   async function loadModels(refresh = false) {
     if (!provider) return;
+    const requestedProvider = provider;
     modelsLoading = true;
     modelsError = "";
     try {
-      const res = await localApi.models(provider, refresh);
-      liveModels = res.models ?? [];
+      const res = await localApi.models(requestedProvider, refresh);
+      if (provider !== requestedProvider) return;
+      const found = (res.models ?? []) as string[];
+      // On first load, follow Codex's current top-priority model rather than a
+      // fallback default that may be weeks old. Preserve an explicit choice.
+      if (provider === "codex-agentic" && found.length &&
+          (model === "" || model === selectedProvider?.default_model || !found.includes(model))) {
+        model = found[0];
+      }
+      liveModels = found;
       modelsError = res.error ?? "";
     } catch (e: any) {
+      if (provider !== requestedProvider) return;
       liveModels = [];
       modelsError = e.message;
     } finally {
-      modelsLoading = false;
+      if (provider === requestedProvider) modelsLoading = false;
     }
   }
 
@@ -498,7 +517,7 @@ c3 --version`;
           {#if popular.length}
             <optgroup label="Recommended">
               {#each popular as m}
-                <option value={m}>{m}{m === selectedProvider?.default_model ? " — default" : ""}</option>
+                <option value={m}>{m}{m === effectiveDefault ? " — default" : ""}</option>
               {/each}
             </optgroup>
           {/if}
@@ -519,10 +538,12 @@ c3 --version`;
           <span>Loading this account's models…</span>
         {:else if modelsError}
           <span>{modelsError}</span>
+        {:else if provider === "codex-agentic" && liveModels.length}
+          <span>{liveModels.length} models available in Codex CLI.</span>
         {:else if otherModels.length}
           <span>{liveModels.length} models available on your account.</span>
         {/if}
-        {#if selectedProvider?.api_key_env}
+        {#if selectedProvider?.api_key_env || provider === "codex-agentic"}
           <button class="linky" onclick={() => loadModels(true)} disabled={modelsLoading}>↻ Refresh list</button>
         {/if}
       </div>

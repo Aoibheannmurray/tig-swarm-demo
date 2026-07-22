@@ -14,6 +14,7 @@ and manual end-to-end verification.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -25,6 +26,7 @@ sys.path.insert(0, str(ROOT / "server"))
 
 import control_server
 import init_fleet
+import llm_backends
 
 _failures = 0
 
@@ -81,8 +83,8 @@ def main() -> int:
         check(rb.status_code == 400, "invalid fleet config rejected (400)")
 
         # Every provider carries the curated shortlist the model dropdown
-        # falls back to when no key is set (and the ONLY list CLI providers
-        # can offer). Codex takes the CLI's own default, so its list is empty.
+        # falls back to when no key/catalog is available. Codex normally
+        # replaces this at runtime with the installed CLI's live catalog.
         check(all("popular_models" in prov for prov in p["providers"]),
               "every provider exposes popular_models")
         check(all(prov["default_model"] in prov["popular_models"]
@@ -98,9 +100,33 @@ def main() -> int:
         mc = c.get("/local-api/models", params={"provider": "claude-code"}).json()
         check(mc["models"] == [] and "login" in mc["error"],
               "CLI provider explains it has no model endpoint")
+        # Keep this deterministic: exercise the control-plane integration with
+        # a fake refreshed Codex result instead of depending on login/network.
+        original_list_models = llm_backends.list_models
+        try:
+            llm_backends.list_models = lambda provider, **_: (
+                ["gpt-next", "gpt-current"] if provider == "codex-agentic" else []
+            )
+            control_server._MODELS_CACHE.pop("codex-agentic", None)
+            mcd = c.get("/local-api/models", params={"provider": "codex-agentic"}).json()
+        finally:
+            llm_backends.list_models = original_list_models
+            control_server._MODELS_CACHE.pop("codex-agentic", None)
+        check(mcd == {"models": ["gpt-next", "gpt-current"], "error": None},
+              "Codex CLI live catalog is exposed to the dropdown")
         mb = c.get("/local-api/models", params={"provider": "nope"}).json()
         check(mb["models"] == [] and "unknown provider" in mb["error"],
               "unknown provider reported as data")
+
+        catalog = json.dumps({"models": [
+            {"slug": "hidden", "visibility": "hide", "priority": 0},
+            {"slug": "gpt-later", "visibility": "list", "priority": 9},
+            {"slug": "gpt-latest", "visibility": "list", "priority": 1},
+            {"slug": "gpt-latest", "visibility": "list", "priority": 2},
+        ]})
+        check(llm_backends._parse_codex_model_catalog(catalog)
+              == ["gpt-latest", "gpt-later"],
+              "Codex catalog filters hidden models, orders priority, and deduplicates")
 
         print("tacit append")
         tq = c.get("/local-api/tacit/questions").json()["questions"]

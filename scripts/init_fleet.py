@@ -81,8 +81,8 @@ _DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 # "Recommended" group in the setup app's model dropdown. It is NOT the full
 # catalog: the UI fetches that live from the provider (llm_backends.list_models
 # via /local-api/models). The shortlist is what we can offer before a key is
-# saved, when the fetch fails, and for the CLI providers — which authenticate
-# through their own CLI and expose no models endpoint at all.
+# saved or when a catalog fetch fails. Codex's installed CLI exposes a live
+# catalog; Claude CLI providers still rely entirely on this shortlist.
 PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str, list[str]]] = [
     ("anthropic",
      "Claude API",
@@ -151,12 +151,13 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str, list[str]]] = [
      ["claude-opus-4-8", "claude-sonnet-5"]),
     ("codex-agentic",
      "Codex CLI",
-     "",
+     "gpt-5.6-sol",
      None,
      "codex-agentic",
      True,
      "Agentic Codex CLI — uses `codex login`. Subscription only.",
-     []),
+     ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+      "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]),
 ]
 
 

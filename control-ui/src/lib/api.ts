@@ -28,9 +28,9 @@ export const localApi = {
   preflight: () => fetch(`${LOCAL}/preflight`).then(jsonOrThrow),
   providers: () => fetch(`${LOCAL}/providers`).then(jsonOrThrow),
   challenges: () => fetch(`${LOCAL}/challenges`).then(jsonOrThrow),
-  // Live model catalog for one provider. Never throws for "no key" / CLI
-  // provider — those come back as {models: [], error} so the caller can fall
-  // back to the provider's curated shortlist.
+  // Live model catalog for one provider (including the installed Codex CLI).
+  // Never throws for "no key" / unsupported CLI provider — those come back as
+  // {models: [], error} so the caller can use the curated fallback.
   models: (provider: string, refresh = false) =>
     fetch(`${LOCAL}/models?provider=${encodeURIComponent(provider)}` +
       (refresh ? "&refresh=true" : "")).then(jsonOrThrow),

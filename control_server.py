@@ -1099,7 +1099,7 @@ def _live_models(provider: str, *, refresh: bool = False) -> dict:
     if spec is None:
         return {"models": [], "error": f"unknown provider: {provider}"}
     api_key_env = spec[3]
-    if api_key_env is None:
+    if api_key_env is None and provider != "codex-agentic":
         return {"models": [], "error": (
             f"{spec[1]} uses its own login rather than an API key, so there is "
             "no model list to fetch — it accepts any model the CLI knows."
@@ -1109,10 +1109,10 @@ def _live_models(provider: str, *, refresh: bool = False) -> dict:
         hit = _MODELS_CACHE.get(provider)
         if hit and now - hit[0] < _MODELS_TTL:
             return {"models": hit[1], "error": None}
-    api_key = secrets_local.resolve(api_key_env)
+    api_key = secrets_local.resolve(api_key_env) if api_key_env else None
     # OpenRouter's catalog is public — listing it needs no key (same exemption
     # scripts/list_models.py makes).
-    if not api_key and provider != "openrouter":
+    if not api_key and provider not in ("openrouter", "codex-agentic"):
         return {"models": [], "error": (
             f"Add your {api_key_env} to see every model this account can use."
         )}
@@ -1130,7 +1130,11 @@ def _live_models(provider: str, *, refresh: bool = False) -> dict:
         return {"models": [], "error": str(exc)}
     except (RuntimeError, OSError) as exc:
         # Bad key, rate limit, offline — all recoverable from the UI's side.
-        return {"models": [], "error": f"Could not reach {spec[1]}: {exc}"}
+        action = (
+            "load the model catalog from"
+            if provider == "codex-agentic" else "reach"
+        )
+        return {"models": [], "error": f"Could not {action} {spec[1]}: {exc}"}
     _MODELS_CACHE[provider] = (now, found)
     return {"models": found, "error": None}
 
@@ -1281,13 +1285,13 @@ def create_app(allow_remote: bool = False) -> FastAPI:
 
     @app.get("/local-api/models")
     def models(provider: str, refresh: bool = False) -> dict:
-        """The models `provider` exposes, fetched live from its API.
+        """The models `provider` exposes, fetched live from its API or CLI.
 
         Powers the wizard's model dropdown, so a contributor picks from what
         their account actually has today instead of typing an id from memory.
-        Never an error response: a missing key, a CLI-only provider, or an API
-        hiccup returns an empty list plus a reason, and the UI falls back to the
-        provider's curated shortlist."""
+        Never an error response: a missing key, unsupported CLI provider, or a
+        catalog hiccup returns an empty list plus a reason, and the UI falls
+        back to the provider's curated shortlist."""
         return _live_models(provider, refresh=refresh)
 
     @app.get("/local-api/challenges")
