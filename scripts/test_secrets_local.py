@@ -77,6 +77,43 @@ def test_status_reports_source_without_values():
     print("PASS test_status_reports_source_without_values")
 
 
+def test_legacy_alias_keeps_a_renamed_key_working():
+    """GEMINI_API_KEY replaced GOOGLE_API_KEY. Someone who set the old name
+    yesterday must not have their fleet die on the rename — but the canonical
+    name still wins wherever both are present in the same source."""
+    path = _isolate()
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        os.environ.pop(name, None)
+
+    assert secrets_local.resolve("GEMINI_API_KEY") is None
+
+    # Legacy name alone, in the file: found under the canonical name, and
+    # reported as set so the setup UI doesn't ask for a key they already have.
+    secrets_local.store("GOOGLE_API_KEY", "legacy-file")
+    assert secrets_local.resolve("GEMINI_API_KEY") == "legacy-file"
+    assert secrets_local.status()["GEMINI_API_KEY"] == {"set": True, "source": "file"}
+
+    # Both in the file -> canonical wins.
+    secrets_local.store("GEMINI_API_KEY", "new-file")
+    assert secrets_local.resolve("GEMINI_API_KEY") == "new-file"
+
+    # env still beats the file, whichever spelling it uses (the module's
+    # documented precedence, unchanged by aliasing).
+    os.environ["GOOGLE_API_KEY"] = "legacy-env"
+    assert secrets_local.resolve("GEMINI_API_KEY") == "legacy-env"
+    # Both in the env -> canonical wins.
+    os.environ["GEMINI_API_KEY"] = "new-env"
+    assert secrets_local.resolve("GEMINI_API_KEY") == "new-env"
+
+    # Aliasing is scoped: an unrelated key gains no fallbacks.
+    assert secrets_local.resolve("OPENAI_API_KEY") is None
+
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        os.environ.pop(name, None)
+    assert path.exists()
+    print("PASS test_legacy_alias_keeps_a_renamed_key_working")
+
+
 def test_corrupt_file_degrades_gracefully():
     path = _isolate()
     path.write_text("{not json", encoding="utf-8")
@@ -91,5 +128,6 @@ if __name__ == "__main__":
     test_blank_clears_entry()
     test_file_permissions_are_owner_only()
     test_status_reports_source_without_values()
+    test_legacy_alias_keeps_a_renamed_key_working()
     test_corrupt_file_degrades_gracefully()
     print("ALL PASS")

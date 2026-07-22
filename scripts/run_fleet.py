@@ -166,7 +166,7 @@ _HOT_RELOAD_KEYS = ("role", "seeded_start")
 _PROVIDER_TO_DEFAULT_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
-    "google": "GOOGLE_API_KEY",
+    "google": "GEMINI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "venice": "VENICE_API_KEY",
 }

@@ -103,7 +103,7 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str, list[str]]] = [
     ("google",
      "Gemini API",
      "gemini-2.5-pro",
-     "GOOGLE_API_KEY",
+     "GEMINI_API_KEY",
      "gemini",
      True,
      "Gemini, called directly over Google's API.",

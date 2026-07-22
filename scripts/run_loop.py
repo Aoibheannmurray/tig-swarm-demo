@@ -7,7 +7,7 @@ OpenAI, Google) or any OpenAI-compatible endpoint via --api-base.
 
 Usage:
     python setup.py
-    export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
+    export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
     # Windows: set ANTHROPIC_API_KEY=sk-...  (cmd)  /  $env:ANTHROPIC_API_KEY="sk-..."  (PowerShell)
     python scripts/run_loop.py
 
@@ -37,7 +37,7 @@ Picking a model (--model):
 
 Provider/model/compute defaults come from agent.config.json when present.
 API keys are read from the environment: ANTHROPIC_API_KEY, OPENAI_API_KEY,
-GOOGLE_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
+GEMINI_API_KEY (or pass --api-key directly). C3 compute can use C3_API_KEY,
 --c3-api-key, or existing `c3 login` credentials. C3 Docker jobs use public
 Docker Hub images, configured with --env.
 
@@ -1753,7 +1753,7 @@ def resolve_api_key(provider: str, api_key: str | None) -> str:
     env_map = {
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
-        "google": "GOOGLE_API_KEY",
+        "google": "GEMINI_API_KEY",
         "openrouter": "OPENROUTER_API_KEY",
         "venice": "VENICE_API_KEY",
     }
@@ -1764,7 +1764,11 @@ def resolve_api_key(provider: str, api_key: str | None) -> str:
             f"Known: {', '.join(sorted(env_map))} (plus the CLI-auth "
             "providers claude-code, claude-code-agentic, codex-agentic)."
         )
-    key = os.environ.get(env_var, "")
+    # secrets_local, not os.environ: it also reads secrets.local.json (how the
+    # setup UI stores keys) and honours the legacy spelling of a renamed var,
+    # so a standalone run_loop behaves like the same agent under run_fleet.
+    import secrets_local
+    key = secrets_local.resolve(env_var) or ""
     if not key:
         sys.exit(f"No API key. Set ${env_var} or pass --api-key.")
     return key

@@ -122,13 +122,13 @@ Export your keys before launching — your provider key (skip if you use a
 
 ```bash
 # macOS / Linux
-export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GEMINI_API_KEY / etc.
 export C3_API_KEY=c3_...            # C3 compute only
 ```
 
 ```powershell
 # Windows PowerShell  (cmd.exe: use  set ANTHROPIC_API_KEY=sk-...  with no quotes)
-$env:ANTHROPIC_API_KEY="sk-..."     # or OPENAI_API_KEY / GOOGLE_API_KEY / etc.
+$env:ANTHROPIC_API_KEY="sk-..."     # or OPENAI_API_KEY / GEMINI_API_KEY / etc.
 $env:C3_API_KEY="c3_..."            # C3 compute only
 ```
 
@@ -173,7 +173,7 @@ To inspect recorded Claude Code agentic sessions and tool activity, see
 | --------------------- | -------------------------------------------------------------------------------- |
 | `anthropic`           | `ANTHROPIC_API_KEY`                                                              |
 | `openai`              | `OPENAI_API_KEY` (also `"api_base": "<url>"` for any OpenAI-compatible endpoint) |
-| `google`              | `GOOGLE_API_KEY`                                                                 |
+| `google`              | `GEMINI_API_KEY` (`GOOGLE_API_KEY` still accepted)                               |
 | `venice`              | `VENICE_API_KEY` (OpenAI-compatible, base URL baked in)                          |
 | `openrouter`          | `OPENROUTER_API_KEY` (multi-model proxy; model IDs are `publisher/name`)         |
 | `claude-code`         | `claude` CLI login (no API key needed)                                           |
