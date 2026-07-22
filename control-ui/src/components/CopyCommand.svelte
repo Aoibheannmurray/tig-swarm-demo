@@ -49,7 +49,9 @@
     font-size: 0.92em;
     word-break: break-all;
   }
-  /* Multi-line blocks (the Windows PowerShell C3 install) keep their newlines
-     and scroll rather than wrapping mid-token. */
-  .multiline { white-space: pre; word-break: normal; }
+  /* Multi-line blocks (the Windows clone + PowerShell C3 install) keep their
+     newlines, and wrap at spaces rather than scrolling a command out of sight —
+     `word-break: normal` still prevents breaks mid-token, so a long URL scrolls
+     instead of being split across lines where it can't be read back. */
+  .multiline { white-space: pre-wrap; word-break: normal; }
 </style>

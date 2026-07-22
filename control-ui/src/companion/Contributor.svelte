@@ -64,6 +64,47 @@
     if (selectedProvider && model === "") model = selectedProvider.default_model || "";
   });
 
+  // ── Model list ──
+  // Two sources, because neither alone is enough: `popular_models` is a short
+  // curated shortlist that works with no API key and is the ONLY list the CLI
+  // providers can offer (they expose no models endpoint), while the live list
+  // is whatever this account can actually call today — so it never goes stale
+  // as providers ship new models. `Custom…` keeps any id typeable regardless.
+  const CUSTOM = "__custom__";
+  let liveModels: string[] = $state([]);
+  let modelsError = $state("");
+  let modelsLoading = $state(false);
+  let customModel = $state(false);
+  let popular = $derived((selectedProvider?.popular_models ?? []) as string[]);
+  // The live list minus anything already shown under "Recommended".
+  let otherModels = $derived(liveModels.filter((m) => !popular.includes(m)));
+
+  async function loadModels(refresh = false) {
+    if (!provider) return;
+    modelsLoading = true;
+    modelsError = "";
+    try {
+      const res = await localApi.models(provider, refresh);
+      liveModels = res.models ?? [];
+      modelsError = res.error ?? "";
+    } catch (e: any) {
+      liveModels = [];
+      modelsError = e.message;
+    } finally {
+      modelsLoading = false;
+    }
+  }
+
+  // Re-fetch whenever the provider changes; a key saved later re-triggers it
+  // through the Refresh button (and through saveKey, below).
+  $effect(() => {
+    provider; // tracked
+    liveModels = [];
+    modelsError = "";
+    customModel = false;
+    loadModels();
+  });
+
   // ── Agents ──
   let count = $state(1);
   let prefix = $state("");
@@ -104,6 +145,8 @@
   );
   // Transcribed from docs/C3.md — the Windows section (a native binary, no WSL)
   // previously existed only in that doc, while this page claimed the opposite.
+  // These are the manual fallback now: the Install/Update button below does the
+  // same work through the companion.
   const C3_INSTALL_UNIX = "curl -fsSL https://cthree.cloud/install.sh | sh";
   const C3_INSTALL_WIN = `# Create an install folder.
 $dir = "$env:LOCALAPPDATA\\Programs\\c3"
@@ -122,6 +165,15 @@ if (($userPath -split ';') -notcontains $dir) {
 $env:Path = "$env:Path;$dir"
 
 c3 --version`;
+  // Updating an existing install is just "download over the top" — no folder
+  // creation, no PATH edit. Kept separate so the update block isn't 12 lines
+  // of steps the user already did.
+  const C3_UPDATE_WIN = `$dir = "$env:LOCALAPPDATA\\Programs\\c3"
+
+curl.exe -fsSL "https://cthree.cloud/releases/latest/c3-windows-amd64.exe" \`
+  -o "$dir\\c3.exe"
+
+c3 --version`;
 
   // Capability probe (Docker / C3) so we can guide instead of failing mid-run.
   let preflight: any = $state(null);
@@ -135,9 +187,42 @@ c3 --version`;
   // `c3 login` sessions aren't detectable, so CLI-installed counts as ready
   // (the banner still nudges toward a key / login); CLI-missing never does.
   const c3Ready = $derived(c3CliInstalled);
+  const c3Version = $derived(preflight?.c3?.version ?? null);
   async function recheckPreflight() {
     try { preflight = await localApi.preflight(); } catch { /* keep last */ }
   }
+
+  // ── Install / update the c3 CLI from here ──
+  // One endpoint for both: C3 is a young platform shipping new versions
+  // constantly, and re-running the installer overwrites the binary in place.
+  // Same start-then-poll shape as the Docker install below.
+  let c3Install: any = $state(null);
+  let c3Poll: ReturnType<typeof setInterval> | null = null;
+  function stopC3Poll() {
+    if (c3Poll) { clearInterval(c3Poll); c3Poll = null; }
+  }
+  async function startC3Install() {
+    try {
+      c3Install = await localApi.c3InstallStart();
+    } catch (e: any) {
+      c3Install = { state: "error", error: e.message };
+      return;
+    }
+    stopC3Poll();
+    c3Poll = setInterval(async () => {
+      try {
+        c3Install = await localApi.c3InstallStatus();
+        if (c3Install.state === "done") {
+          stopC3Poll();
+          await recheckPreflight();
+          c3Install = null;
+        } else if (c3Install.state === "error") {
+          stopC3Poll();
+        }
+      } catch { /* companion hiccup — keep polling */ }
+    }, 2000);
+  }
+  onDestroy(stopC3Poll);
   const dockerInstalled = $derived(!!preflight && preflight.docker.installed);
   // Whether the companion can install Docker for them here (Linux + root or
   // passwordless sudo). Everywhere else we show `manual` instead of a button
@@ -193,6 +278,9 @@ c3 --version`;
       secrets = (await localApi.secretSet(name, value)).secrets ?? secrets;
       keyDraft[name] = "";
       keyMsg = `Saved ${name}.`;
+      // The provider's own key is what the live model list needs — fetch it now
+      // that one exists, rather than leaving the dropdown on the shortlist.
+      if (name === selectedProvider?.api_key_env) loadModels(true);
     } catch (e: any) {
       if (opts.silent) throw e;
       keyMsg = e.message;
@@ -206,7 +294,20 @@ c3 --version`;
   ]);
 
   // ── Tacit ──
+  // The guided form asks the SAME six prompts as `python setup.py tacit`, and
+  // fetches them from the companion rather than restating them here — two
+  // copies of an interview drift, and the CLI's is the one the prompt builder
+  // was written against. `tacitText` stays as the paste-a-block escape hatch.
   let tacitText = $state("");
+  let tacitQuestions: { title: string; hint?: string }[] = $state([]);
+  let tacitAnswers: string[] = $state([]);
+  // Composed sections, in question order, skipping unanswered prompts — the
+  // same shape setup.py's guided capture produces.
+  let tacitFilled = $derived(
+    tacitQuestions
+      .map((q, i) => ({ title: q.title, body: (tacitAnswers[i] ?? "").trim() }))
+      .filter((a) => a.body),
+  );
 
   // ── Launch ──
   let writtenConfig: any = $state(null);
@@ -217,6 +318,11 @@ c3 --version`;
       const p = await localApi.providers();
       providers = p.providers;
       c3hw = p.c3_hardware;
+      // Best-effort: an older companion has no /tacit/questions, and the step
+      // still works as a free-text paste box without them.
+      localApi.tacitQuestions()
+        .then((t) => { tacitQuestions = t.questions ?? []; })
+        .catch(() => {});
       // Probe capabilities for the readiness panel (non-blocking best-effort).
       localApi.preflight().then((pf) => (preflight = pf)).catch(() => {});
       refreshSecrets();
@@ -283,8 +389,13 @@ c3 --version`;
       };
       const res = await localApi.setFleetConfig(params);
       writtenConfig = res.config;
+      // A pasted block is the explicit override (its disclosure says so);
+      // otherwise send the guided answers, which the server composes into
+      // `### <question>` sections exactly like the CLI wizard does.
       if (tacitText.trim()) {
         await localApi.setTacit({ text: tacitText.trim() });
+      } else if (tacitFilled.length) {
+        await localApi.setTacit({ answers: tacitFilled });
       }
     } catch (e: any) {
       error = e.message;
@@ -370,7 +481,51 @@ c3 --version`;
     </div>
     <div class="field">
       <label for="model">Model</label>
-      <input id="model" type="text" bind:value={model} placeholder={selectedProvider?.default_model || "model id"} />
+      {#if customModel}
+        <input id="model" type="text" bind:value={model}
+          placeholder={selectedProvider?.default_model || "model id"} />
+        <div class="hint">
+          <button class="linky" onclick={() => { customModel = false; model = popular[0] || ""; }}>
+            ← back to the list
+          </button>
+        </div>
+      {:else}
+        <select id="model" value={model}
+          onchange={(e) => {
+            const v = (e.currentTarget as HTMLSelectElement).value;
+            if (v === CUSTOM) { customModel = true; } else { model = v; }
+          }}>
+          {#if popular.length}
+            <optgroup label="Recommended">
+              {#each popular as m}
+                <option value={m}>{m}{m === selectedProvider?.default_model ? " — default" : ""}</option>
+              {/each}
+            </optgroup>
+          {/if}
+          {#if otherModels.length}
+            <optgroup label={`All models on your account (${otherModels.length})`}>
+              {#each otherModels as m}<option value={m}>{m}</option>{/each}
+            </optgroup>
+          {/if}
+          <!-- A model the lists don't know (a preview id, a self-hosted
+               gateway). Never make the dropdown a dead end. -->
+          <optgroup label="Other">
+            <option value={CUSTOM}>Custom…</option>
+          </optgroup>
+        </select>
+      {/if}
+      <div class="hint" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        {#if modelsLoading}
+          <span>Loading this account's models…</span>
+        {:else if modelsError}
+          <span>{modelsError}</span>
+        {:else if otherModels.length}
+          <span>{liveModels.length} models available on your account.</span>
+        {/if}
+        {#if selectedProvider?.api_key_env}
+          <button class="linky" onclick={() => loadModels(true)} disabled={modelsLoading}>↻ Refresh list</button>
+        {/if}
+      </div>
       {#if selectedProvider?.api_key_env}
         {@const kn = selectedProvider.api_key_env}
         <div class="hint">
@@ -383,11 +538,10 @@ c3 --version`;
           {/if}
         </div>
         {#if !secrets[kn]?.set || secrets[kn]?.source === "file"}
-          <div class="row" style="align-items:flex-end;margin-top:8px">
-            <div class="field" style="margin-bottom:0;flex:1">
-              <input type="password" bind:value={keyDraft[kn]} placeholder={`paste ${kn}`} />
-            </div>
-            <button onclick={() => saveKey(kn)}>{secrets[kn]?.set ? "Update" : "Save key"}</button>
+          <input type="password" style="margin-top:8px" bind:value={keyDraft[kn]}
+            placeholder={`paste ${kn}`} onchange={() => saveKey(kn)} />
+          <div class="hint">
+            Saved when you press Continue — no separate save step.
           </div>
         {/if}
       {/if}
@@ -471,39 +625,42 @@ c3 --version`;
       {#if preflight && !c3CliInstalled}
         <div class="banner warn">
           <b>Install the c3 CLI</b> — C3 benchmarking needs it even with an API
-          key (the CLI submits the jobs). Run this in a terminal, then Recheck.
-          <nav class="tabs" style="margin:10px 0 10px">
-            <button class:active={c3Os === "unix"} onclick={() => (c3Os = "unix")}>macOS / Linux</button>
-            <button class:active={c3Os === "windows"} onclick={() => (c3Os = "windows")}>Windows</button>
-          </nav>
-          {#if c3Os === "unix"}
-            <CopyCommand text={C3_INSTALL_UNIX} variant="ghost" />
-            <div class="hint">
-              Then authenticate: <code>c3 login</code>, or
-              <code>c3 apikey create tig-swarm</code> and paste the key below.
-            </div>
-          {:else}
-            <div class="hint" style="margin:0 0 8px">
-              In <b>PowerShell</b> — the shell installer above is macOS/Linux only:
-            </div>
-            <CopyCommand text={C3_INSTALL_WIN} variant="ghost" multiline />
-            <div class="hint">
-              Other open terminals won't see the new <code>PATH</code> until
-              restarted. On an ARM Windows machine use
-              <code>c3-windows-arm64.exe</code> instead. To update later,
-              download again and overwrite <code>c3.exe</code>.
-              <br />
-              Then authenticate: <code>c3 login</code>, or
-              <code>c3 apikey create tig-swarm</code> and paste the key below.
-            </div>
-          {/if}
-          <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          key (the CLI submits the jobs). Install it here, or run it yourself
+          and hit Recheck.
+          <div style="display:flex;gap:8px;align-items:center;margin:10px 0 4px;flex-wrap:wrap">
+            <button class="primary" disabled={c3Install?.state === "pending"} onclick={startC3Install}>
+              {c3Install?.state === "pending" ? "Installing…" : "Install c3"}
+            </button>
             <button onclick={recheckPreflight}>↻ Recheck</button>
-            <span class="hint" style="margin:0">
-              Restart this companion after installing if Recheck still
-              doesn't see it{#if supportsC3 || dockerInstalled}, or switch to
-                <b>Local Docker</b> above{/if}.
-            </span>
+          </div>
+          {#if c3Install?.state === "error"}
+            <div class="banner err" style="white-space:pre-wrap;margin:8px 0 0">{c3Install.error || "Install failed."}</div>
+          {/if}
+          {#if c3Install?.output}
+            <pre class="mono muted" style="white-space:pre-wrap">{c3Install.output}</pre>
+          {/if}
+          <details class="alt" style="margin-top:10px">
+            <summary>Install it yourself instead</summary>
+            <nav class="tabs" style="margin:10px 0">
+              <button class:active={c3Os === "unix"} onclick={() => (c3Os = "unix")}>macOS / Linux</button>
+              <button class:active={c3Os === "windows"} onclick={() => (c3Os = "windows")}>Windows</button>
+            </nav>
+            {#if c3Os === "unix"}
+              <CopyCommand text={C3_INSTALL_UNIX} />
+            {:else}
+              <div class="hint" style="margin:0 0 8px">In <b>PowerShell</b>:</div>
+              <CopyCommand text={C3_INSTALL_WIN} multiline />
+              <div class="hint">
+                Other open terminals won't see the new <code>PATH</code> until
+                restarted. On an ARM Windows machine use
+                <code>c3-windows-arm64.exe</code> instead.
+              </div>
+            {/if}
+          </details>
+          <div class="hint" style="margin-top:10px">
+            Restart this companion after installing if Recheck still
+            doesn't see it{#if supportsC3 || dockerInstalled}, or switch to
+              <b>Local Docker</b> above{/if}.
           </div>
         </div>
       {:else if c3Ready}
@@ -514,6 +671,41 @@ c3 --version`;
               ? "using your saved/entered key."
               : "the c3 CLI is installed (paste a key below, or run c3 login)."}
           No local Docker needed.
+        </div>
+        <!-- Update path. C3 is young and ships often, and an out-of-date CLI
+             fails at deploy time — long after this step — so the button lives
+             where the user already is. -->
+        <div class="note" style="margin-top:12px">
+          <p>
+            <b>Already have c3?</b> Update it — C3 is a young platform releasing
+            new versions constantly, and an old CLI can fail at deploy time.
+            {#if c3Version}<br /><span class="mono muted">{c3Version}</span>{/if}
+          </p>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+            <button disabled={c3Install?.state === "pending"} onclick={startC3Install}>
+              {c3Install?.state === "pending" ? "Updating…" : "↻ Update c3"}
+            </button>
+            <button onclick={recheckPreflight}>Recheck version</button>
+          </div>
+          {#if c3Install?.state === "error"}
+            <div class="banner err" style="white-space:pre-wrap;margin:10px 0 0">{c3Install.error || "Update failed."}</div>
+          {/if}
+          {#if c3Install?.output}
+            <pre class="mono muted" style="white-space:pre-wrap">{c3Install.output}</pre>
+          {/if}
+          <details class="alt" style="margin-top:8px">
+            <summary>Update it yourself instead</summary>
+            <nav class="tabs" style="margin:10px 0">
+              <button class:active={c3Os === "unix"} onclick={() => (c3Os = "unix")}>macOS / Linux</button>
+              <button class:active={c3Os === "windows"} onclick={() => (c3Os = "windows")}>Windows</button>
+            </nav>
+            {#if c3Os === "unix"}
+              <CopyCommand text={C3_INSTALL_UNIX} />
+            {:else}
+              <div class="hint" style="margin:0 0 8px">In <b>PowerShell</b>:</div>
+              <CopyCommand text={C3_UPDATE_WIN} multiline />
+            {/if}
+          </details>
         </div>
       {/if}
       <div class="field">
@@ -534,23 +726,27 @@ c3 --version`;
           </div>
         {/if}
         {#if !secrets["C3_API_KEY"]?.set || secrets["C3_API_KEY"]?.source === "file"}
-          <div class="row" style="align-items:flex-end">
-            <div class="field" style="margin-bottom:0;flex:1">
-              <input id="c3k" type="password" bind:value={keyDraft["C3_API_KEY"]}
-                placeholder={secrets["C3_API_KEY"]?.set ? "paste new C3_API_KEY to replace it" : "paste C3_API_KEY (stored locally)"} />
-            </div>
-            <button onclick={() => saveKey("C3_API_KEY")}>{secrets["C3_API_KEY"]?.set ? "Update" : "Save key"}</button>
-          </div>
           {#if !secrets["C3_API_KEY"]?.set}
-            <div class="hint">
-              Create one in
-              <a href="https://cthree.cloud/dashboard/settings" target="_blank" rel="noopener">C3 settings</a>
-              (sign in at
-              <a href="https://cthree.cloud/dashboard/" target="_blank" rel="noopener">cthree.cloud/dashboard</a>).
-              Or leave blank and set <code>c3_api_key</code> per agent / use
-              <span class="mono">c3 login</span>.
+            <!-- Deliberately full-size, not a .hint: getting a C3 key is the
+                 one genuinely unfamiliar errand on this page, and it was
+                 previously set in the smallest type on the screen. -->
+            <div class="note" style="margin:0 0 10px">
+              <p>
+                <b>Get your key:</b> sign in at
+                <a href="https://cthree.cloud/dashboard/" target="_blank" rel="noopener">cthree.cloud/dashboard</a>,
+                then create one under
+                <a href="https://cthree.cloud/dashboard/settings" target="_blank" rel="noopener">Settings → API keys</a>.
+                Paste it below.
+              </p>
             </div>
           {/if}
+          <input id="c3k" type="password" bind:value={keyDraft["C3_API_KEY"]}
+            onchange={() => saveKey("C3_API_KEY")}
+            placeholder={secrets["C3_API_KEY"]?.set ? "paste new C3_API_KEY to replace it" : "paste C3_API_KEY (stored locally)"} />
+          <div class="hint">
+            Saved when you press Continue — stored locally in
+            <code>secrets.local.json</code>, never uploaded.
+          </div>
         {/if}
       </div>
     {:else if compute === "local"}
@@ -612,10 +808,31 @@ c3 --version`;
       Private hints your agents consult when they stagnate. Never uploaded or
       shared across the swarm. Skip and add later any time.
     </p>
-    <div class="field">
-      <label for="tk">Strategies, heuristics, judgment calls</label>
-      <textarea id="tk" bind:value={tacitText} style="min-height:160px" placeholder="- When standard local search plateaus, try a large-neighbourhood ruin-and-recreate…"></textarea>
-    </div>
+    {#if tacitQuestions.length}
+      <p class="lede">
+        Answer whichever prompts you have something for — leave the rest blank.
+      </p>
+      {#each tacitQuestions as q, i}
+        <div class="field tacit-q">
+          <label for={`tq${i}`}>{q.title}</label>
+          {#if q.hint}<div class="hint" style="margin:0 0 6px">{q.hint}</div>{/if}
+          <textarea id={`tq${i}`} bind:value={tacitAnswers[i]} style="min-height:88px"></textarea>
+        </div>
+      {/each}
+      <details class="alt">
+        <summary>Paste a block instead</summary>
+        <p class="lede" style="margin:10px 0 8px">
+          Already have notes written up? Drop them in — they're used instead of
+          the answers above.
+        </p>
+        <textarea id="tk" bind:value={tacitText} style="min-height:140px" placeholder="- When standard local search plateaus, try a large-neighbourhood ruin-and-recreate…"></textarea>
+      </details>
+    {:else}
+      <div class="field">
+        <label for="tk">Strategies, heuristics, judgment calls</label>
+        <textarea id="tk" bind:value={tacitText} style="min-height:160px" placeholder="- When standard local search plateaus, try a large-neighbourhood ruin-and-recreate…"></textarea>
+      </div>
+    {/if}
     <div class="actions"><button onclick={back}>← Back</button><div class="spacer"></div><button class="primary" onclick={next}>Review →</button></div>
   </div>
 {:else if step === 4}
@@ -627,7 +844,11 @@ c3 --version`;
       <li><span>Provider</span><b>{provider}{model ? ` · ${model}` : ""}</b></li>
       <li><span>Agents</span><b>{count}{prefix ? ` · ${prefix}-*` : ""}</b></li>
       <li><span>Compute</span><b>{compute === "c3" ? `c3 / ${hardware}` : "local"}</b></li>
-      <li><span>Tacit</span><b>{tacitText.trim() ? "added" : "skipped"}</b></li>
+      <li><span>Tacit</span><b>{tacitText.trim()
+        ? "added (pasted block)"
+        : tacitFilled.length
+          ? `added (${tacitFilled.length} answer${tacitFilled.length === 1 ? "" : "s"})`
+          : "skipped"}</b></li>
     </ul>
 
     {#if !writtenConfig}
@@ -674,6 +895,17 @@ c3 --version`;
     cursor: pointer;
   }
   .linky:hover { color: var(--color-accent); }
+
+  /* Tacit prompts are full sentences, not field names — the global label style
+     (12px, uppercase, letter-spaced) turns a question into a shouted banner
+     that's genuinely hard to read. Keep them sentence-case and readable. */
+  .tacit-q label {
+    text-transform: none;
+    letter-spacing: normal;
+    font-size: 14.5px;
+    color: var(--ink);
+    line-height: 1.45;
+  }
 
   .summary { list-style: none; margin-bottom: 8px; }
   .summary li { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }

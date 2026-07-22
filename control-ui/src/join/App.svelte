@@ -101,19 +101,29 @@
   const bootstrapCmd = () =>
     `${isWin ? "curl.exe" : "curl"} -fsSL ${RAW_BASE}/${BOOTSTRAP_REF}/deploy/get-swarm.py | ` +
     `${pyBin} - join "${joinLink()}" --ui${branchFlag}`;
-  const cloneCmd = () =>
+  // Two commands, joined per-OS. `&&` is a syntax error in Windows PowerShell
+  // 5.1 — still the default shell on a stock Windows — so there the two
+  // commands go on their own lines instead (pasting a two-line block runs both).
+  const cloneArgs = () =>
     BOOTSTRAP_REF === "main"
-      ? `git clone ${REPO_URL}.git && cd tig-swarm-demo`
-      : `git clone -b ${BOOTSTRAP_REF} ${REPO_URL}.git && cd tig-swarm-demo`;
+      ? `git clone ${REPO_URL}.git`
+      : `git clone -b ${BOOTSTRAP_REF} ${REPO_URL}.git`;
+  const cloneCmd = () =>
+    isWin
+      ? `${cloneArgs()}\ncd tig-swarm-demo`
+      : `${cloneArgs()} && cd tig-swarm-demo`;
   const runJoinCmd = () => `${pyBin} run.py --join "${joinLink()}" --ui`;
 
   // How to get to a terminal in the first place — the step the page used to
   // skip entirely. A web page can't open one (no browser API exists), so this
-  // is the honest substitute.
+  // is the honest substitute. Windows says "search for it": Win + X is a
+  // keyboard chord people miss, and what the menu is called moves between
+  // Windows versions ("Terminal" on 11, "Windows PowerShell" on 10).
   const TERMINAL_HOWTO: Record<Os, string> = {
     mac: 'Press ⌘ + Space, type "Terminal", press Enter.',
     linux: "Press Ctrl + Alt + T (or open Terminal from your applications).",
-    windows: 'Press Win + X and choose "Terminal" (or "Windows PowerShell").',
+    windows:
+      'Click Start (or press the Windows key), type "PowerShell", and open Windows PowerShell.',
   };
 
   function forget() {
@@ -172,6 +182,26 @@
         <button class:active={osTab === "windows"} onclick={() => (osTab = "windows")}>Windows</button>
       </nav>
 
+      <!-- Prerequisites BEFORE the commands: both of them need Python and Git
+           already installed, so finding this underneath meant reading it after
+           the command had already failed. -->
+      <div class="note">
+        <p>
+          <b>First, install these</b> —
+          <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3</a>
+          and <a href="https://git-scm.com/downloads" target="_blank" rel="noopener">Git</a>.
+          {#if isWin}
+            When installing Python, tick <b>"Add python.exe to PATH"</b>.
+          {/if}
+        </p>
+        {#if isWin}
+          <p>
+            If <span class="mono">py</span> isn't recognized afterwards, try
+            <span class="mono">python</span>.
+          </p>
+        {/if}
+      </div>
+
       <ol class="steps">
         <li>
           <h3>Open your terminal</h3>
@@ -185,7 +215,7 @@
           <li>
             <h3>Paste this and press Enter</h3>
             <p class="lede">Downloads the swarm code into a folder here.</p>
-            <CopyCommand text={cloneCmd()} variant="ghost" />
+            <CopyCommand text={cloneCmd()} multiline />
           </li>
           <li>
             <h3>Then paste this</h3>
@@ -198,22 +228,18 @@
             <CopyCommand text={bootstrapCmd()} label="Copy command" />
           </li>
         {/if}
+        <!-- The step people used to have to infer. Without it the page ends on
+             a command, so someone who checks back here has no idea whether
+             they're finished. -->
+        <li>
+          <h3>Finish in the setup page</h3>
+          <p class="lede">
+            A setup page opens at <span class="mono">127.0.0.1:8787</span>.
+            Choose <b>Join a swarm</b>, follow the steps there — add your API
+            key — and launch your fleet.
+          </p>
+        </li>
       </ol>
-
-      <!-- Only what you need before the setup app takes over: what you must
-           already have, and what happens when it runs. Everything else lives
-           in the README. -->
-      <p class="lede" style="margin-top:16px">
-        Needs <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3</a>
-        and <a href="https://git-scm.com/downloads" target="_blank" rel="noopener">Git</a>.
-        A setup page opens at <span class="mono">127.0.0.1:8787</span> — add your
-        API key there and launch.
-        {#if isWin}
-          If <span class="mono">py</span> isn't recognized, try
-          <span class="mono">python</span>. When installing Python, tick
-          <b>"Add python.exe to PATH"</b>.
-        {/if}
-      </p>
 
       {#if isWin}
         <details class="alt">
@@ -225,7 +251,7 @@
             alias, which exits without output when run in a pipe. Use the steps
             above if it prints nothing.
           </p>
-          <CopyCommand text={bootstrapCmd()} variant="ghost" />
+          <CopyCommand text={bootstrapCmd()} />
         </details>
       {:else}
         <details class="alt">
@@ -235,8 +261,8 @@
             checkout the one-liner keeps under your data directory.
           </p>
           <ol class="steps compact">
-            <li><CopyCommand text={cloneCmd()} variant="ghost" /></li>
-            <li><CopyCommand text={runJoinCmd()} variant="ghost" /></li>
+            <li><CopyCommand text={cloneCmd()} /></li>
+            <li><CopyCommand text={runJoinCmd()} /></li>
           </ol>
         </details>
       {/if}
@@ -251,7 +277,7 @@
           host this swarm, or you've joined one before — skip the commands. Open
           it, choose <b>Join a swarm</b>, and paste these into the connect step.
         </p>
-        <CopyCommand text={configBlock()} variant="ghost" multiline />
+        <CopyCommand text={configBlock()} multiline />
         <p class="lede" style="margin-top:10px">
           Hosts can also do this without a join link: on the fleet page after
           provisioning, use <b>Also run agents yourself</b>.
@@ -281,4 +307,20 @@
      disclosure the commands are just a sequence, so drop the headings' spacing. */
   .steps.compact { gap: 10px; margin-top: 4px; }
   .steps .lede { margin: 0 0 8px; }
+
+  /* Prerequisites block above the steps. Same treatment as the companion's
+     .note — an aside with weight, not fine print, because skipping it is what
+     makes the commands below fail. */
+  .note {
+    margin: 4px 0 18px;
+    padding: 14px 16px;
+    background: var(--bg-sunken);
+    border-radius: 6px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--ink-mid);
+  }
+  .note p { margin: 0; }
+  .note p + p { margin-top: 8px; }
+  .note b { color: var(--ink); font-weight: 600; }
 </style>
