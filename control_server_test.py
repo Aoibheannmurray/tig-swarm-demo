@@ -128,6 +128,20 @@ def main() -> int:
               == ["gpt-latest", "gpt-later"],
               "Codex catalog filters hidden models, orders priority, and deduplicates")
 
+        # A rejected key is reported at the Provider step; the wizard shows the
+        # provider's sentence, not four lines of JSON around it.
+        readable = control_server._readable_api_error
+        check(readable(RuntimeError(
+            'HTTP 401: {"type":"error","error":{"type":"authentication_error",'
+            '"message":"invalid x-api-key"},"request_id":"req_011"}'
+        )) == "HTTP 401: invalid x-api-key",
+              "provider error keeps the status and drops the JSON envelope")
+        check(readable(OSError("[Errno -3] Temporary failure in name resolution"))
+              == "[Errno -3] Temporary failure in name resolution",
+              "non-JSON errors pass through unchanged")
+        check(len(readable(RuntimeError("HTTP 400: " + "y" * 900))) <= 301,
+              "an enormous upstream body is capped")
+
         print("tacit append")
         tq = c.get("/local-api/tacit/questions").json()["questions"]
         # The guided form must ask what `python setup.py tacit` asks — same

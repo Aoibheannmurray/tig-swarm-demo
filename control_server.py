@@ -1088,6 +1088,32 @@ _MODELS_CACHE: dict[str, tuple[float, list[str]]] = {}
 _MODELS_TTL = 600.0
 
 
+def _readable_api_error(exc: Exception) -> str:
+    """The human sentence inside a provider's error, not its raw JSON body.
+
+    list_models raises `HTTP 401: {"type":"error","error":{...,"message":"invalid
+    x-api-key"},"request_id":"..."}`. Shown verbatim in the wizard that is four
+    lines of punctuation around one useful phrase, so dig the message out and
+    keep the status code that tells the user WHICH kind of failure it is."""
+    raw = str(exc)
+    head, _, body = raw.partition(": ")
+    body = body.strip()
+    if body.startswith("{"):
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            for value in (data.get("error"), data.get("detail"), data):
+                if isinstance(value, dict) and isinstance(value.get("message"), str):
+                    return f"{head}: {value['message']}"
+                if isinstance(value, str) and value:
+                    return f"{head}: {value}"
+    # Not a JSON body (network error, plain text) — cap it so one enormous
+    # upstream blob can't push the form off the screen.
+    return raw if len(raw) <= 300 else raw[:300] + "…"
+
+
 def _live_models(provider: str, *, refresh: bool = False) -> dict:
     """`{"models": [...], "error": str | None}` for one provider key.
 
@@ -1134,7 +1160,8 @@ def _live_models(provider: str, *, refresh: bool = False) -> dict:
             "load the model catalog from"
             if provider == "codex-agentic" else "reach"
         )
-        return {"models": [], "error": f"Could not {action} {spec[1]}: {exc}"}
+        return {"models": [], "error":
+                f"Could not {action} {spec[1]}: {_readable_api_error(exc)}"}
     _MODELS_CACHE[provider] = (now, found)
     return {"models": found, "error": None}
 
