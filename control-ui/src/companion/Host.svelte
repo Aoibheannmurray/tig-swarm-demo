@@ -367,10 +367,12 @@
     <!-- No CLI: offer to install it (provisioning shells out to `railway`). -->
     {#if !install || install.state === "idle"}
       {#if isWin && !hasNpm}
-        <!-- Node is the one thing we can't install for them: winget needs a
-             fresh shell before npm appears on PATH. Shown ONLY when npm is
-             actually missing — telling someone who has Node to install Node
-             is how people conclude the page isn't listening. -->
+        <!-- Windows installs the CLI from npm, and we don't drive that from
+             here: the button proved unreliable, so both steps are commands the
+             user runs. The Node step is shown ONLY when npm is actually
+             missing — telling someone who has Node to install Node is how
+             people conclude the page isn't listening. npm.cmd, not npm: the
+             plain name often isn't resolvable in PowerShell. -->
         <p class="lede">
           Provisioning runs on the Railway CLI, which comes from npm on Windows
           — and Node isn't installed yet. In PowerShell:
@@ -378,25 +380,24 @@
         <CopyCommand text="winget install OpenJS.NodeJS.LTS" />
         <p class="lede" style="margin-top:14px">
           Then open a <b>new</b> PowerShell window (so it picks up npm), check
-          it's there, and hit <b>Recheck</b> above — this page will offer to
-          install the CLI for you.
+          it's there, and install the CLI:
         </p>
-        <CopyCommand text="npm.cmd --version" />
+        <CopyCommand text={"npm.cmd --version\nnpm.cmd install -g @railway/cli"} multiline />
         <p class="lede" style="margin-top:10px">
-          Use <span class="mono">npm.cmd</span> if plain <span class="mono">npm</span>
-          isn't recognized — on Windows the npm shim is a
-          <span class="mono">.cmd</span> file.
+          Then hit <b>Recheck</b> above. Use <span class="mono">npm.cmd</span>
+          if plain <span class="mono">npm</span> isn't recognized — on Windows
+          the npm shim is a <span class="mono">.cmd</span> file.
         </p>
       {:else if isWin}
-        <!-- Node present: same one-click install as everywhere else, run
-             through npm instead of the vendor shell script. -->
+        <!-- Node present: one command, then Recheck. -->
         <p class="lede">
-          Provisioning runs on the Railway CLI, which isn't installed yet.
-          <b>Install it here</b> — it runs
-          <span class="mono">npm install -g @railway/cli</span> — or run that
-          yourself and hit Recheck.
+          Provisioning runs on the Railway CLI, which isn't installed yet. On
+          Windows it comes from npm — in PowerShell:
         </p>
-        <button class="primary" onclick={startInstall}>Install the Railway CLI</button>
+        <CopyCommand text="npm.cmd install -g @railway/cli" />
+        <p class="lede" style="margin-top:10px">
+          Then hit <b>Recheck</b> above.
+        </p>
       {:else}
         <p class="lede">
           Provisioning runs on the Railway CLI, which isn't installed yet.

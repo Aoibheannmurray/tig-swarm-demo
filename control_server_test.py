@@ -92,9 +92,8 @@ def main() -> int:
               "each shortlist leads with the provider's default model")
 
         pf = c.get("/local-api/preflight").json()
-        # node/npm drive the Windows Railway install: the host page shows the
-        # "install Node first" step only when npm is missing, and the install
-        # button shells out to npm when it isn't.
+        # node/npm decide what the Windows Railway step looks like: the host
+        # page shows the "install Node first" command only when npm is missing.
         check({"claude", "codex", "node", "npm"} <= set(pf["clis"]),
               "preflight reports node + npm alongside the coding CLIs")
         check(all(isinstance(v, bool) for v in pf["clis"].values()),
@@ -168,22 +167,19 @@ def main() -> int:
         c3s = c.get("/local-api/c3/install").json()
         check(c3s["state"] == "idle" and c3s["error"] is None,
               "c3 install starts idle")
-        check(control_server.C3InstallController._win_arch() in ("amd64", "arm64"),
-              "Windows release arch resolves to a published binary")
-        # The Windows path writes into %LOCALAPPDATA%; without it there is no
-        # standard install dir, and the controller must say so rather than
-        # throwing inside its worker thread.
+        # POSIX only. On Windows the contributor page shows the PowerShell
+        # commands and never calls this — start() must say so rather than
+        # shelling out to a `bash` that isn't there.
         import os as _os2
         ctrl = control_server.C3InstallController()
-        ctrl._token = 1
-        saved = _os2.environ.pop("LOCALAPPDATA", None)
+        saved_name = _os2.name
         try:
-            ctrl._install_windows(1)
+            _os2.name = "nt"
+            st = ctrl.start()
         finally:
-            if saved is not None:
-                _os2.environ["LOCALAPPDATA"] = saved
-        check(ctrl.state == "error" and "LOCALAPPDATA" in (ctrl.error or ""),
-              "Windows install without LOCALAPPDATA fails with a reason")
+            _os2.name = saved_name
+        check(st["state"] == "error" and "PowerShell" in (st["error"] or ""),
+              "Windows install refers to the copy commands instead of running one")
 
         print("invite derivation")
         ri = c.post("/local-api/invite", json={"username": "alice", "swarm_password": "base123"})

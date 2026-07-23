@@ -162,13 +162,13 @@
   // Which C3 install instructions to show. The companion runs on the user's own
   // machine, so the OS it detects is the one they'll install onto.
   type Os = "unix" | "windows";
-  let c3Os: Os = $state(
-    /win/i.test(navigator.platform || navigator.userAgent || "") ? "windows" : "unix",
-  );
+  const isWin = /win/i.test(navigator.platform || navigator.userAgent || "");
+  let c3Os: Os = $state(isWin ? "windows" : "unix");
   // Transcribed from docs/C3.md — the Windows section (a native binary, no WSL)
   // previously existed only in that doc, while this page claimed the opposite.
-  // These are the manual fallback now: the Install/Update button below does the
-  // same work through the companion.
+  // On macOS/Linux these are the manual fallback and the Install/Update button
+  // does the same work through the companion; on Windows they are the whole
+  // story — driving that download from here proved unreliable.
   const C3_INSTALL_UNIX = "curl -fsSL https://cthree.cloud/install.sh | sh";
   const C3_INSTALL_WIN = `# Create an install folder.
 $dir = "$env:LOCALAPPDATA\\Programs\\c3"
@@ -214,10 +214,11 @@ c3 --version`;
     try { preflight = await localApi.preflight(); } catch { /* keep last */ }
   }
 
-  // ── Install / update the c3 CLI from here ──
+  // ── Install / update the c3 CLI from here (macOS/Linux) ──
   // One endpoint for both: C3 is a young platform shipping new versions
   // constantly, and re-running the installer overwrites the binary in place.
-  // Same start-then-poll shape as the Docker install below.
+  // Same start-then-poll shape as the Docker install below. Windows gets the
+  // PowerShell commands instead — see the markup.
   let c3Install: any = $state(null);
   let c3Poll: ReturnType<typeof setInterval> | null = null;
   function stopC3Poll() {
@@ -694,38 +695,56 @@ c3 --version`;
       {#if preflight && !c3CliInstalled}
         <div class="banner warn">
           <b>Install the c3 CLI</b> — C3 benchmarking needs it even with an API
-          key (the CLI submits the jobs). Install it here, or run it yourself
-          and hit Recheck.
-          <div style="display:flex;gap:8px;align-items:center;margin:10px 0 4px;flex-wrap:wrap">
-            <button class="primary" disabled={c3Install?.state === "pending"} onclick={startC3Install}>
-              {c3Install?.state === "pending" ? "Installing…" : "Install c3"}
-            </button>
-            <button onclick={recheckPreflight}>↻ Recheck</button>
-          </div>
-          {#if c3Install?.state === "error"}
-            <div class="banner err" style="white-space:pre-wrap;margin:8px 0 0">{c3Install.error || "Install failed."}</div>
-          {/if}
-          {#if c3Install?.output}
-            <pre class="mono muted" style="white-space:pre-wrap">{c3Install.output}</pre>
-          {/if}
-          <details class="alt" style="margin-top:10px">
-            <summary>Install it yourself instead</summary>
-            <nav class="tabs" style="margin:10px 0">
-              <button class:active={c3Os === "unix"} onclick={() => (c3Os = "unix")}>macOS / Linux</button>
-              <button class:active={c3Os === "windows"} onclick={() => (c3Os = "windows")}>Windows</button>
-            </nav>
-            {#if c3Os === "unix"}
-              <CopyCommand text={C3_INSTALL_UNIX} />
-            {:else}
-              <div class="hint" style="margin:0 0 8px">In <b>PowerShell</b>:</div>
+          key (the CLI submits the jobs).
+          {#if isWin}
+            <!-- Windows: the commands, not a button. Installing it from here
+                 meant downloading the release binary and editing PATH for
+                 them, which didn't hold up. In PowerShell: -->
+            Run this in <b>PowerShell</b>, then hit Recheck.
+            <div style="margin-top:10px">
               <CopyCommand text={C3_INSTALL_WIN} multiline />
-              <div class="hint">
-                Other open terminals won't see the new <code>PATH</code> until
-                restarted. On an ARM Windows machine use
-                <code>c3-windows-arm64.exe</code> instead.
-              </div>
+            </div>
+            <div class="hint">
+              Other open terminals won't see the new <code>PATH</code> until
+              restarted. On an ARM Windows machine use
+              <code>c3-windows-arm64.exe</code> instead.
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;margin:10px 0 4px;flex-wrap:wrap">
+              <button onclick={recheckPreflight}>↻ Recheck</button>
+            </div>
+          {:else}
+            Install it here, or run it yourself and hit Recheck.
+            <div style="display:flex;gap:8px;align-items:center;margin:10px 0 4px;flex-wrap:wrap">
+              <button class="primary" disabled={c3Install?.state === "pending"} onclick={startC3Install}>
+                {c3Install?.state === "pending" ? "Installing…" : "Install c3"}
+              </button>
+              <button onclick={recheckPreflight}>↻ Recheck</button>
+            </div>
+            {#if c3Install?.state === "error"}
+              <div class="banner err" style="white-space:pre-wrap;margin:8px 0 0">{c3Install.error || "Install failed."}</div>
             {/if}
-          </details>
+            {#if c3Install?.output}
+              <pre class="mono muted" style="white-space:pre-wrap">{c3Install.output}</pre>
+            {/if}
+            <details class="alt" style="margin-top:10px">
+              <summary>Install it yourself instead</summary>
+              <nav class="tabs" style="margin:10px 0">
+                <button class:active={c3Os === "unix"} onclick={() => (c3Os = "unix")}>macOS / Linux</button>
+                <button class:active={c3Os === "windows"} onclick={() => (c3Os = "windows")}>Windows</button>
+              </nav>
+              {#if c3Os === "unix"}
+                <CopyCommand text={C3_INSTALL_UNIX} />
+              {:else}
+                <div class="hint" style="margin:0 0 8px">In <b>PowerShell</b>:</div>
+                <CopyCommand text={C3_INSTALL_WIN} multiline />
+                <div class="hint">
+                  Other open terminals won't see the new <code>PATH</code> until
+                  restarted. On an ARM Windows machine use
+                  <code>c3-windows-arm64.exe</code> instead.
+                </div>
+              {/if}
+            </details>
+          {/if}
           <div class="hint" style="margin-top:10px">
             Restart this companion after installing if Recheck still
             doesn't see it{#if supportsC3 || dockerInstalled}, or switch to
@@ -750,31 +769,41 @@ c3 --version`;
             new versions constantly, and an old CLI can fail at deploy time.
             {#if c3Version}<br /><span class="mono muted">{c3Version}</span>{/if}
           </p>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
-            <button disabled={c3Install?.state === "pending"} onclick={startC3Install}>
-              {c3Install?.state === "pending" ? "Updating…" : "↻ Update c3"}
-            </button>
-            <button onclick={recheckPreflight}>Recheck version</button>
-          </div>
-          {#if c3Install?.state === "error"}
-            <div class="banner err" style="white-space:pre-wrap;margin:10px 0 0">{c3Install.error || "Update failed."}</div>
-          {/if}
-          {#if c3Install?.output}
-            <pre class="mono muted" style="white-space:pre-wrap">{c3Install.output}</pre>
-          {/if}
-          <details class="alt" style="margin-top:8px">
-            <summary>Update it yourself instead</summary>
-            <nav class="tabs" style="margin:10px 0">
-              <button class:active={c3Os === "unix"} onclick={() => (c3Os = "unix")}>macOS / Linux</button>
-              <button class:active={c3Os === "windows"} onclick={() => (c3Os = "windows")}>Windows</button>
-            </nav>
-            {#if c3Os === "unix"}
-              <CopyCommand text={C3_INSTALL_UNIX} />
-            {:else}
-              <div class="hint" style="margin:0 0 8px">In <b>PowerShell</b>:</div>
-              <CopyCommand text={C3_UPDATE_WIN} multiline />
+          {#if isWin}
+            <!-- Windows updates the same way it installs: download over the
+                 top, from PowerShell. -->
+            <div class="hint" style="margin:0 0 8px">In <b>PowerShell</b>:</div>
+            <CopyCommand text={C3_UPDATE_WIN} multiline />
+            <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+              <button onclick={recheckPreflight}>Recheck version</button>
+            </div>
+          {:else}
+            <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+              <button disabled={c3Install?.state === "pending"} onclick={startC3Install}>
+                {c3Install?.state === "pending" ? "Updating…" : "↻ Update c3"}
+              </button>
+              <button onclick={recheckPreflight}>Recheck version</button>
+            </div>
+            {#if c3Install?.state === "error"}
+              <div class="banner err" style="white-space:pre-wrap;margin:10px 0 0">{c3Install.error || "Update failed."}</div>
             {/if}
-          </details>
+            {#if c3Install?.output}
+              <pre class="mono muted" style="white-space:pre-wrap">{c3Install.output}</pre>
+            {/if}
+            <details class="alt" style="margin-top:8px">
+              <summary>Update it yourself instead</summary>
+              <nav class="tabs" style="margin:10px 0">
+                <button class:active={c3Os === "unix"} onclick={() => (c3Os = "unix")}>macOS / Linux</button>
+                <button class:active={c3Os === "windows"} onclick={() => (c3Os = "windows")}>Windows</button>
+              </nav>
+              {#if c3Os === "unix"}
+                <CopyCommand text={C3_INSTALL_UNIX} />
+              {:else}
+                <div class="hint" style="margin:0 0 8px">In <b>PowerShell</b>:</div>
+                <CopyCommand text={C3_UPDATE_WIN} multiline />
+              {/if}
+            </details>
+          {/if}
         </div>
       {/if}
       <div class="field">

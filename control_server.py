@@ -27,7 +27,6 @@ import asyncio
 import hashlib
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -654,18 +653,17 @@ class RailwayInstallController:
                 "error": self.error}
 
     def start(self) -> dict:
-        # Windows has no curl-pipe-bash contract, but it does have npm — which
-        # ships the same CLI. So the button works there too, provided Node is
-        # present; installing Node itself needs winget and a fresh shell, which
-        # we can't do for them, so that stays a manual step (the host page only
-        # shows it when npm is actually missing).
-        if os.name == "nt" and not _ensure_on_path("npm"):
+        # Windows has no curl-pipe-bash contract. It does have npm, which ships
+        # the same CLI, but driving that from here proved unreliable — so the
+        # host page shows the npm command instead and never calls this. Fail
+        # fast with that hint rather than a confusing shell error.
+        if os.name == "nt":
             self.state = "error"
             self.error = (
-                "Node isn't installed, and the Railway CLI comes from npm on "
-                "Windows. In PowerShell:\n"
-                "    winget install OpenJS.NodeJS.LTS\n"
-                "then open a NEW PowerShell window and click Recheck."
+                "On Windows the Railway CLI comes from npm. In PowerShell:\n"
+                "    npm.cmd install -g @railway/cli\n"
+                "(install Node first with `winget install OpenJS.NodeJS.LTS` "
+                "and open a NEW PowerShell window), then click Recheck."
             )
             return self.status()
         with self._lock:
@@ -676,15 +674,8 @@ class RailwayInstallController:
             self.error = None
             # `-s --` forwards `-y` to the piped script; without a controlling
             # TTY the installer would otherwise wait on a confirmation prompt.
-            cmd = (
-                # npm installs the CLI as railway.cmd; _launch_argv routes the
-                # npm shim itself through the command interpreter for the same
-                # CreateProcess reason.
-                _launch_argv("npm", "install", "-g", "@railway/cli")
-                if os.name == "nt" else
-                ["bash", "-c",
-                 "curl -fsSL https://railway.com/install.sh | bash -s -- -y"]
-            )
+            cmd = ["bash", "-c",
+                   "curl -fsSL https://railway.com/install.sh | bash -s -- -y"]
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -904,7 +895,6 @@ class DockerInstallController:
 # ── C3 CLI install / update ────────────────────────────────────────────
 
 _C3_INSTALL_SH = "https://cthree.cloud/install.sh"
-_C3_WIN_RELEASE = "https://cthree.cloud/releases/latest/c3-windows-{arch}.exe"
 
 
 def c3_version() -> str | None:
@@ -928,14 +918,13 @@ class C3InstallController:
     C3 is a young platform shipping often, so this is deliberately an *update*
     path too, not just a first install: re-running it overwrites the binary in
     place. Mirrors the Railway/Docker controllers (POST starts, the UI polls
-    status()), with one difference on Windows.
+    status()).
 
-    Windows has no curl-pipe-sh contract, and shelling out to PowerShell adds an
-    execution-policy failure mode for no gain — the vendor "installer" there is
-    just a file download. So we do it in Python: fetch the release binary, write
-    it into %LOCALAPPDATA%\\Programs\\c3, and persist that dir on the user's PATH
-    via the registry (the same idempotent append the documented PowerShell
-    snippet performs), plus this process's own PATH so Recheck sees it at once.
+    POSIX only, like the Railway installer. Windows has no curl-pipe-sh
+    contract; downloading the release binary and editing PATH from here was
+    tried and didn't hold up, so the contributor page shows the documented
+    PowerShell commands instead and never calls this — start() there fails
+    fast with the same hint rather than pretending.
 
     One attempt at a time; a new start() supersedes any pending run."""
 
@@ -952,63 +941,6 @@ class C3InstallController:
     def status(self) -> dict:
         return {"state": self.state, "output": self.output[-4000:],
                 "error": self.error, "version": self.version}
-
-    # ── Windows: download the release binary ourselves ──
-    @staticmethod
-    def _win_arch() -> str:
-        machine = (platform.machine() or "").lower()
-        return "arm64" if machine in ("arm64", "aarch64") else "amd64"
-
-    def _install_windows(self, token: int) -> None:
-        localapp = os.environ.get("LOCALAPPDATA")
-        if not localapp:
-            self._fail(token, "LOCALAPPDATA isn't set, so there's no standard "
-                              "place to install c3.")
-            return
-        target_dir = Path(localapp) / "Programs" / "c3"
-        exe = target_dir / "c3.exe"
-        url = _C3_WIN_RELEASE.format(arch=self._win_arch())
-        self._log(f"Downloading {url}\n  → {exe}\n")
-        try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            # Download to a temp file first: overwriting c3.exe in place would
-            # leave a half-written binary behind if the transfer drops.
-            tmp = exe.with_suffix(".exe.download")
-            with urllib.request.urlopen(url, timeout=120) as resp, tmp.open("wb") as fh:
-                shutil.copyfileobj(resp, fh)
-            os.replace(tmp, exe)
-        except (OSError, urllib.error.URLError) as exc:
-            self._fail(token, f"download failed: {exc}")
-            return
-        self._log("Downloaded. Adding the folder to your PATH…\n")
-        try:
-            self._persist_windows_path(str(target_dir))
-        except OSError as exc:
-            # Non-fatal: the binary is there, and we still put it on THIS
-            # process's PATH — only new terminals miss out.
-            self._log(f"  (couldn't write the persistent PATH entry: {exc})\n")
-        parts = os.environ.get("PATH", "").split(os.pathsep)
-        if str(target_dir) not in parts:
-            os.environ["PATH"] = os.pathsep.join([str(target_dir), *parts])
-        self._finish(token)
-
-    @staticmethod
-    def _persist_windows_path(directory: str) -> None:
-        """Append `directory` to the user's persistent PATH, once."""
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0,
-                            winreg.KEY_READ | winreg.KEY_WRITE) as key:
-            try:
-                current, kind = winreg.QueryValueEx(key, "Path")
-            except OSError:
-                current, kind = "", winreg.REG_EXPAND_SZ
-            entries = [p for p in str(current).split(os.pathsep) if p.strip()]
-            if any(p.rstrip("\\").lower() == directory.rstrip("\\").lower()
-                   for p in entries):
-                return
-            entries.append(directory)
-            winreg.SetValueEx(key, "Path", 0, kind or winreg.REG_EXPAND_SZ,
-                              os.pathsep.join(entries))
 
     # ── POSIX: the vendor one-liner ──
     def _install_posix(self, token: int) -> None:
@@ -1062,6 +994,13 @@ class C3InstallController:
         self.state = "done"
 
     def start(self) -> dict:
+        if os.name == "nt":
+            self.state = "error"
+            self.error = (
+                "On Windows, install c3 from PowerShell — the page shows the "
+                "commands — then click Recheck."
+            )
+            return self.status()
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 self._proc.kill()
@@ -1074,10 +1013,7 @@ class C3InstallController:
 
         def _run() -> None:
             try:
-                if os.name == "nt":
-                    self._install_windows(token)
-                else:
-                    self._install_posix(token)
+                self._install_posix(token)
             except Exception as exc:  # never leave the UI stuck on "pending"
                 self._fail(token, f"unexpected error: {exc}")
 
