@@ -950,9 +950,17 @@ def _benchmark_with_compile_fix(
         # fix. Numeric HTTP codes now only match as standalone words.
         is_code_error = "error[" in build_err or (
             "error:" in build_err and "Compiling" in build_err)
-        infra_markers = ["API Error", "c3 CLI not found",
+        infra_markers = ["API Error", "API error", "c3 CLI not found",
                          "c3 CLI is out of date", "Docker image",
-                         "Could not parse job ID", "timeout"]
+                         # c3_compute emits these lowercase; the old
+                         # capitalised marker never matched.
+                         "could not parse job ID",
+                         "was never recognised by C3", "timeout",
+                         # A C3 deploy refused for billing reasons is an
+                         # account problem, not a Rust problem — without this
+                         # every shard's 402 spent an LLM "compile fix" on
+                         # code that compiles fine.
+                         "INSUFFICIENT_CREDITS"]
         is_infra = not is_code_error and (
             any(m in build_err for m in infra_markers)
             or re.search(r"\b(401|403|500)\b", build_err)

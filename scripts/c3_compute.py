@@ -47,6 +47,11 @@ _POLL_INTERVAL_SECS = 15
 _C3_CLI_TIMEOUT_SECS = 60
 _C3_LOGS_TIMEOUT_SECS = 120
 _C3_PULL_TIMEOUT_SECS = 600
+# How long a deployed job may stay unknown to `c3 squeue` before we call it
+# unrecognised rather than slow. Generous enough to cover a job that hasn't
+# propagated yet or a few minutes of API flakiness, short enough that a bad
+# job ID doesn't hold a fleet pool slot for hours.
+_UNRECOGNISED_JOB_GRACE_SECS = 600
 _DEFAULT_CPU_IMAGE = "rust:1-bookworm"
 _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 _DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
@@ -701,9 +706,21 @@ def _merge_shard_benchmarks(shard_benches: list[dict], challenge: str) -> dict:
 
 
 def _parse_c3_id(text: str) -> str | None:
+    """Pull the C3 job ID out of `c3 deploy` output.
+
+    Order matters. A deploy prints the job NAME before the job ID, and this
+    project's names are `tig-<challenge>-<run_id>` — so on the `job_scheduling`
+    challenge the name `tig-job_scheduling-3aae77f7b5` contains a `job_…` token
+    that a loose pattern grabs first. Polling then asks C3 about a job that
+    never existed, gets no status back, and waits out the whole poll timeout
+    while the real job completes unpulled. Hence: match C3's actual ID shape
+    (`job_<epoch-ms>_<suffix>`) before anything looser, and never let the
+    fallback start mid-token (the `-` before `job_scheduling` above).
+    """
     for pat in [
         r'"(?:id|job_id|jobId)"\s*:\s*"(job_[^"]+)"',
-        r"\b(job_[a-zA-Z0-9_-]+)\b",
+        r"(?<![\w-])(job_\d{6,}_[a-zA-Z0-9]+)\b",
+        r"(?<![\w-])(job_[a-zA-Z0-9_-]+)\b",
     ]:
         m = re.search(pat, text)
         if m:
@@ -789,7 +806,16 @@ def _poll_c3_job(
     walltime_secs: int,
     timeout_secs: int | None = None,
 ) -> str:
-    """Poll a C3 job until it reaches a terminal state."""
+    """Poll a C3 job until it reaches a terminal state.
+
+    A job whose status NEVER resolves once is not a slow job — it's a job C3
+    has never heard of (a mis-parsed ID, a deploy that half-landed). Waiting
+    out the full walltime for that is silent and expensive: the fleet pool slot
+    is held the whole time and the agent looks hung. So give an unrecognised ID
+    a bounded grace period and then fail fast with a message that names the
+    cause. A job that resolves even once gets the full timeout — after that,
+    unknown really can mean transient API flakiness.
+    """
     wait_secs = timeout_secs if timeout_secs is not None else max(1800, walltime_secs + 2700)
     deadline = time.monotonic() + wait_secs
     poll = 0
@@ -797,9 +823,12 @@ def _poll_c3_job(
     # with sharding there are several concurrent polls and the old cadence
     # filled the console with identical RUNNING lines.
     last_printed: str | None = None
+    ever_resolved = False
+    unknown_deadline = time.monotonic() + min(_UNRECOGNISED_JOB_GRACE_SECS, wait_secs)
     while time.monotonic() < deadline:
         status = _read_job_status(job_id, env, cwd)
         if status:
+            ever_resolved = True
             if any(s in status for s in _TERMINAL_OK):
                 return "completed"
             if any(s in status for s in _TERMINAL_BAD):
@@ -807,8 +836,14 @@ def _poll_c3_job(
             if status != last_printed or poll % 20 == 0:
                 print(f"    [C3] {job_id}: {status}")
                 last_printed = status
-        elif poll % 20 == 0:
-            print(f"    [C3] Still waiting on {job_id} (poll {poll + 1})...")
+        else:
+            if not ever_resolved and time.monotonic() >= unknown_deadline:
+                print(f"    [C3] {job_id} never appeared in `c3 squeue` after "
+                      f"{_UNRECOGNISED_JOB_GRACE_SECS // 60}m — giving up "
+                      f"instead of waiting out the {wait_secs // 60}m timeout")
+                return "unrecognised"
+            if poll % 20 == 0:
+                print(f"    [C3] Still waiting on {job_id} (poll {poll + 1})...")
         poll += 1
         time.sleep(_POLL_INTERVAL_SECS)
     return "timeout"
@@ -1095,6 +1130,16 @@ def _run_one_c3_job_inner(
     status = _poll_c3_job(
         job_id, env, stage, walltime_secs, _c3_poll_timeout(args)
     )
+    if status == "unrecognised":
+        # C3 doesn't know this ID, so pull/logs/cancel would all just burn
+        # their timeouts against nothing. The real job (if the deploy landed)
+        # is findable by its unique job_name — cancel it so it can't run on
+        # untracked and keep billing the account.
+        _cancel_deployed_job(stage, env)
+        return None, (
+            f"[C3] job {job_id} was never recognised by C3 — the deploy "
+            f"output may not have carried a usable job ID:\n{combined[-1000:]}"
+        )
     cancel_output = ""
     if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
         cancel_output = _cancel_c3_job(job_id, env, stage)
