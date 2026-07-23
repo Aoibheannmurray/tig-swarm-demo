@@ -902,6 +902,66 @@ def _query_c3_plan_cap(c3_key: str | None) -> int | None:
     return _select_concurrency_limit(subscription, tiers or {})
 
 
+def _warn_orphaned_c3_jobs(c3_key: str | None, log=print) -> None:
+    """Warn about leftover ``tig-*`` C3 jobs still queued/running on this
+    account before launch — never cancel them.
+
+    A prior fleet whose jobs outlive it (C3 gives each a 2h walltime) keeps
+    holding chips against the plan's concurrency cap, so a fresh fleet can't
+    claim its full slot budget and benchmarks stall on the concurrency-limit
+    retry (c3_compute._run_one_c3_job_inner). Surfacing them — with the exact
+    ``c3 cancel`` line — lets the user reclaim the chips if they want to. Pure
+    courtesy: silent when nothing is stale, and any error (no CLI, no auth,
+    unparseable payload) is swallowed so this never blocks a launch."""
+    if shutil.which("c3") is None:
+        return
+    env = os.environ.copy()
+    if c3_key:
+        env["C3_API_KEY"] = c3_key
+    try:
+        proc = subprocess.run(
+            ["c3", "squeue", "--json"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    # Reuse the same job-shape + status parsing the C3 poller uses, so this
+    # can't drift from what counts as an active job elsewhere.
+    from c3_compute import _iter_job_dicts, _normalise_status, _NON_TERMINAL
+
+    stale: list[tuple[str, str, str]] = []
+    for job in _iter_job_dicts(data):
+        name = str(job.get("name") or job.get("job_name") or "")
+        if not name.startswith("tig-"):
+            continue  # only our benchmark jobs — leave unrelated jobs alone
+        status = _normalise_status(
+            job.get("status") or job.get("state") or job.get("phase")
+        ) or ""
+        if not any(s in status for s in _NON_TERMINAL):
+            continue  # terminal/unknown — not holding a chip
+        jid = next(
+            (str(job[k]) for k in ("id", "job_id", "jobId") if job.get(k)), "?"
+        )
+        stale.append((jid, name, status))
+    if not stale:
+        return
+    log(f"  [fleet] WARNING: {len(stale)} C3 job(s) from a previous run are "
+        f"still holding chips against your concurrency cap "
+        f"(a fresh benchmark may queue behind them):")
+    for jid, name, status in stale:
+        log(f"  [fleet]     {jid}  {name}  {status}")
+    ids = " ".join(jid for jid, _, _ in stale)
+    log(f"  [fleet]   they free on their own at their walltime, or reclaim the "
+        f"chips now with:  c3 cancel {ids}")
+
+
 def _resolve_fleet_c3_key(agents: list[dict]) -> str | None:
     """The single C3 key the fleet shares: env override, then any agent's
     resolved `c3_api_key` (top-level default already merged in by _load_fleet),
@@ -986,8 +1046,13 @@ def cmd_run(
     c3_agents = [a for a in agents if (a.get("compute") or "local") == "c3"]
     fleet_pool_size = None
     if c3_agents:
+        fleet_c3_key = _resolve_fleet_c3_key(agents)
         _fleet_log("  [fleet] querying C3 subscription for the concurrency cap…")
-        fleet_pool_size = _query_c3_plan_cap(_resolve_fleet_c3_key(agents))
+        fleet_pool_size = _query_c3_plan_cap(fleet_c3_key)
+        # Courtesy check: leftover jobs from a previous fleet hold chips against
+        # the same cap, so a fresh fleet can't get its full slot budget. Warn
+        # (never cancel — the user owns that call); silent when nothing's stale.
+        _warn_orphaned_c3_jobs(fleet_c3_key, log=_fleet_log)
     if fleet_pool_size:
         _fleet_log(f"  [fleet] C3 subscription cap: {fleet_pool_size} concurrent job(s) "
                    f"(fleet-wide pool size + shards per benchmark)")
