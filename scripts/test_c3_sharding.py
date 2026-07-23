@@ -236,7 +236,87 @@ def test_runners_export_track_starts():
     print("PASS test_runners_export_track_starts")
 
 
+# ── shard-count policy: a slot must repay its provisioning ──────────
+
+_CPU4 = {"timeout": 30, "c3_hardware": "cpu-e2-4vcpu-16gb"}
+
+
+def _shards(total, cap=3, **over):
+    return c3_compute._worthwhile_shards(total, {**_CPU4, **over}, cap)
+
+
+def test_small_benchmark_runs_as_one_job():
+    # The regression this policy exists for: 6 instances x 30s is ~60s of
+    # solving on a 4-worker box. Three shards meant three provisions and three
+    # builds to save half a minute — and starved both fleet-mates of a slot.
+    assert _shards(6) == 1
+    assert _shards(6, c3_warm_images=False) == 1
+
+
+def test_large_benchmark_still_uses_the_whole_cap():
+    assert _shards(200, timeout=60) == 3
+    assert _shards(200, timeout=60, c3_warm_images=False) == 3
+    assert _shards(2000, cap=10, timeout=60) == 10
+
+
+def test_shards_scale_between_the_extremes():
+    # 40 instances / 4 workers = 10 waves x 30s = 300s of solving. A second
+    # warm box (60s) repays itself (saves 150s); a third (saves 50s) does not.
+    assert _shards(40) == 2
+
+
+def test_warm_images_shard_sooner_than_full_source():
+    warm = _shards(40)
+    cold = _shards(40, c3_warm_images=False)
+    assert warm > cold, (warm, cold)
+
+
+def test_never_more_shards_than_waves_or_instances():
+    # 2 instances can't fill 3 boxes however cheap provisioning gets.
+    assert _shards(2, c3_shard_fixed_secs=0.001) <= 2
+    # 8 instances on 4 workers is 2 waves: a 3rd shard would idle cores.
+    assert _shards(8, timeout=100000, c3_shard_fixed_secs=1) == 2
+
+
+def test_gpu_still_shards_hard():
+    # One solver per GPU job, so sharding IS the parallelism — the policy must
+    # not de-shard GPU work the way it does a 4-worker CPU box.
+    gpu = {"timeout": 60, "is_gpu": True, "c3_hardware": "l40"}
+    assert c3_compute._worthwhile_shards(20, gpu, 3) == 3
+
+
+def test_falls_back_to_the_cap_without_cost_inputs():
+    # No per-instance timeout -> nothing to reason about; keep prior behaviour.
+    assert c3_compute._worthwhile_shards(200, {"c3_hardware": "cpu-e2-4vcpu-16gb"}, 3) == 3
+    # Fixed cost explicitly zeroed -> sharding is free, use the cap.
+    assert _shards(200, c3_shard_fixed_secs=0) == 3
+
+
+def test_explicit_bench_workers_and_hardware_are_honoured():
+    assert c3_compute._hardware_vcpus("cpu-e2-48vcpu-192gb") == 48
+    assert c3_compute._hardware_vcpus("l40") == 0
+    assert c3_compute._estimate_shard_workers(
+        {"c3_hardware": "cpu-e2-48vcpu-192gb"}) == 24
+    assert c3_compute._estimate_shard_workers(
+        {"c3_hardware": "cpu-e2-48vcpu-192gb", "bench_workers": 8}) == 8
+    # A 48-vCPU box chews through the same work in far fewer waves, so it
+    # needs fewer shards than a 4-vCPU one (shown against a cap high enough
+    # that neither simply saturates it).
+    big = _shards(200, cap=10, timeout=60, c3_hardware="cpu-e2-48vcpu-192gb")
+    small = _shards(200, cap=10, timeout=60)
+    assert big < small, (big, small)
+
+
 def _main():
+    test_small_benchmark_runs_as_one_job()
+    test_large_benchmark_still_uses_the_whole_cap()
+    test_shards_scale_between_the_extremes()
+    test_warm_images_shard_sooner_than_full_source()
+    test_never_more_shards_than_waves_or_instances()
+    test_gpu_still_shards_hard()
+    test_falls_back_to_the_cap_without_cost_inputs()
+    test_explicit_bench_workers_and_hardware_are_honoured()
+    print("PASS shard-count policy")
     test_balanced_sizes_examples()
     test_plan_shards_balanced_remainder()
     test_plan_shards_balanced_four_machines()

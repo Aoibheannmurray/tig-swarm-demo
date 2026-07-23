@@ -59,19 +59,21 @@ Algorithms author against `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases
 the crate as `tig_challenges`, so a file also compiles when ported to the
 upstream tig-monorepo).
 
-**Warm images (optional, C3 fast path).** `Dockerfile.warm` bakes the swarm
+**Warm images (the DEFAULT C3 path).** `Dockerfile.warm` bakes the swarm
 crate source + a pre-built release cargo target into
 `tig-swarm-warm-{cpu,gpu}` (build: `scripts/build_warm_image.sh`; publish: CI
 `build-warm-images.yml`, amd64-only — C3 is amd64 and local compute never
-uses these). When configured, the C3 job uploads ONLY the algorithm dir +
+uses these). The C3 job uploads ONLY the algorithm dir +
 scripts + config, injects the algorithm into the baked crate at `/app`, and
 incremental-builds in well under a minute instead of a 10–20 min cold
-compile. Opt in per fleet/agent via `c3_warm_images: true` (pulls
-`docker.io/tigfoundation/tig-swarm-warm-{cpu|gpu}:latest` — the TIG
+compile. This is on by default: every C3 benchmark pulls
+`docker.io/tigfoundation/tig-swarm-warm-{cpu|gpu}:latest` (the TIG
 Foundation's public namespace, published by CI; override the namespace with
-`tig_dockerhub: <ns>` / env `TIG_DOCKERHUB`), or pin an exact ref with
-`c3_warm_image: <full ref>` (or env `TIG_C3_WARM_IMAGE`). Unset = the plain
-full-source path above. Rebuild/republish the images whenever `src/` (the
+`tig_dockerhub: <ns>` / env `TIG_DOCKERHUB`), or an exact ref pinned with
+`c3_warm_image: <full ref>` (or env `TIG_C3_WARM_IMAGE`). Opt out with
+`c3_warm_images: false` (or `TIG_C3_WARM_IMAGES=0`) to fall back to the
+full-source path above — worth doing only when running a namespace whose
+images aren't published. Rebuild/republish the images whenever `src/` (the
 challenge harnesses) or the Cargo manifests change — CI does this on push to
 staging; a job-side cmp-guarded overlay of the Cargo manifests AND the
 `src/` harness tree (uploaded with algorithm dirs excluded, ~0.5MB) keeps a
@@ -81,8 +83,7 @@ build with method-not-found errors on APIs the current crate supports. See
 `scripts/test_warm_c3.py`.
 
 **Distributed C3 (balanced sharding + fleet pool).** On the C3 path a
-benchmark's instances are split into exactly
-`min(c3_max_parallel_jobs, total_instances)` **balanced** shards (sizes differ
+benchmark's instances are split into **balanced** shards (sizes differ
 by ≤1 instance: 22 over 3 → 8,7,7), packing *across* track boundaries (a shard
 may carry slices from several tracks). Each shard is its own C3 job running
 `benchmark.py` on its per-track window — `TIG_TRACK_STARTS` offsets instance
@@ -90,12 +91,31 @@ indices, and the per-instance seed depends only on the global index
 (`tig_generator --start` / `tig_gpu_benchmark --index`), so shard windows are
 byte-identical to the unsharded run. The per-shard `benchmark.json`s are
 merged (`_merge_shard_benchmarks`) and re-aggregated with `benchmark.aggregate`,
-so the score matches a single-job run exactly — only faster. With
-`c3_max_parallel_jobs=1` a benchmark runs as a single job. One benchmark can
+so the score matches a single-job run exactly — only faster. One benchmark can
 therefore use every chip the plan allows (e.g. free plan = 3) while the rest
 of the fleet waits on LLM responses. See `scripts/test_c3_sharding.py`.
-Sharding pays off most on warm images (per-shard fixed cost is seconds); on
-the full-source path each shard repeats the cold compile.
+
+**How many shards — the cap is a ceiling, not a target.**
+`c3_max_parallel_jobs` bounds the shard count; `_worthwhile_shards` decides
+how much of it to spend. A shard is not free: it provisions its own C3 box and
+repeats the build, and because shards run in *parallel* the slowest provision
+sets the wall clock. Measured here, three identical 1-instance full-source
+shards deployed 8s apart finished 2m37s / 6m01s / 9m20s after submit — so a
+benchmark with a minute of solving in it gains nothing from three boxes, bills
+three machines, and holds the whole fleet's slot pool while it does.
+
+The rule: going from `s-1` to `s` shards saves `solve / (s·(s-1))` of wall
+clock, so take it only while that beats one shard's fixed cost
+(`_SHARD_FIXED_SECS_WARM` 60s / `_SHARD_FIXED_SECS_FULL_SOURCE` 300s, override
+per swarm with `c3_shard_fixed_secs`). `solve` is
+`ceil(instances / workers) × timeout`, where `workers` mirrors
+`benchmark.resolve_bench_workers` (explicit `bench_workers`, else half the
+vCPUs parsed out of the `c3_hardware` profile name). Never more shards than
+solving waves — a shard that can't fill its workers idles cores and still pays
+a full provision. So 6 instances × 30s → 1 job; 200 × 60s → the full cap. GPU
+jobs are one solver each, so sharding *is* their parallelism and they still
+fan out. Missing cost inputs (no `timeout`, `c3_shard_fixed_secs: 0`) fall back
+to using the whole cap.
 
 **Big CPU machines (auto).** With `c3_hardware` unset/`auto`, each CPU
 benchmark queries the C3 control plane and deploys on the best CPU profile

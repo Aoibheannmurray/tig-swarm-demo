@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import threading
 import re
@@ -52,6 +53,19 @@ _C3_PULL_TIMEOUT_SECS = 600
 # propagated yet or a few minutes of API flakiness, short enough that a bad
 # job ID doesn't hold a fleet pool slot for hours.
 _UNRECOGNISED_JOB_GRACE_SECS = 600
+# Warm images are the default C3 path (see _warm_c3_image). They remove the
+# cold cargo build from every shard, which is most of a shard's fixed cost.
+_WARM_IMAGES_DEFAULT = True
+# Wall clock a shard burns before it solves anything: provision + image pull +
+# build. Measured on this fleet — three IDENTICAL 1-instance full-source shards
+# deployed 8s apart finished 2m37s / 6m01s / 9m20s after submit — so it is both
+# large and highly variable. Warm images drop the build and land near a minute.
+# Override per swarm with `c3_shard_fixed_secs`.
+_SHARD_FIXED_SECS_FULL_SOURCE = 300.0
+_SHARD_FIXED_SECS_WARM = 60.0
+# vCPUs to assume when the hardware profile name doesn't carry a count (e.g.
+# `auto`, resolved job-side). The small C3 CPU profiles are 4-vCPU.
+_ASSUMED_SHARD_VCPUS = 4
 _DEFAULT_CPU_IMAGE = "rust:1-bookworm"
 _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 _DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
@@ -232,6 +246,23 @@ def _select_docker_image(args: argparse.Namespace, config: dict) -> str:
     )
 
 
+def _flag(value, default: bool) -> bool:
+    """Interpret a tri-state config/env flag: unset (None / empty string) means
+    `default`, the usual falsey spellings mean False, anything else True.
+
+    Needed because these knobs now default ON — a bare truthiness test would
+    read `TIG_C3_WARM_IMAGES=0` as "enabled", so opting back out via env would
+    be impossible."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    return text not in ("0", "false", "no", "off")
+
+
 def _warm_c3_image(cfg: dict) -> str | None:
     """Resolve the pre-baked WARM image for this challenge's flavor, or None
     to use the plain toolchain image + full-source staging.
@@ -239,17 +270,27 @@ def _warm_c3_image(cfg: dict) -> str | None:
     Warm images (Dockerfile.warm / scripts/build_warm_image.sh) carry the
     swarm crate source and a pre-built release cargo target, so a job only
     injects the algorithm dir and does an incremental build — seconds-to-a-
-    minute instead of a cold 10-20 minute compile.
+    minute instead of a cold 10-20 minute compile. That fixed cost is what
+    makes sharding worth paying for (see _worthwhile_shards), so warm is the
+    DEFAULT: the full-source path is the fallback you opt into, not the norm.
 
     Resolution: explicit ref (`c3_warm_image` config / TIG_C3_WARM_IMAGE env)
-    wins; else opt-in via `c3_warm_images: true` (or TIG_C3_WARM_IMAGES=1)
-    derives docker.io/<ns>/tig-swarm-warm-{cpu|gpu}:latest from the
+    wins; else `docker.io/<ns>/tig-swarm-warm-{cpu|gpu}:latest` from the
     `tig_dockerhub` config / TIG_DOCKERHUB env namespace (default: the TIG
-    Foundation's public namespace, published by CI build-warm-images.yml)."""
+    Foundation's public namespace, published by CI build-warm-images.yml).
+    Opt out with `c3_warm_images: false` (or TIG_C3_WARM_IMAGES=0) — worth
+    doing only if you're running a namespace whose images aren't published.
+
+    A drifted or stale-cached image self-corrects: the job overlays the
+    current Cargo manifests and src/ tree under a cmp guard, so a benchmark
+    stays correct (just slower) rather than failing on a missing API."""
     explicit = cfg.get("c3_warm_image") or os.environ.get("TIG_C3_WARM_IMAGE")
     if explicit:
         return explicit
-    if not (cfg.get("c3_warm_images") or os.environ.get("TIG_C3_WARM_IMAGES")):
+    enabled = cfg.get("c3_warm_images")
+    if enabled is None:
+        enabled = os.environ.get("TIG_C3_WARM_IMAGES")
+    if not _flag(enabled, _WARM_IMAGES_DEFAULT):
         return None
     ns = (cfg.get("tig_dockerhub") or os.environ.get("TIG_DOCKERHUB")
           or "tigfoundation")
@@ -608,12 +649,103 @@ exit "$status"
 
 
 def _max_parallel(cfg: dict) -> int:
-    """Fleet-wide C3 slot count = balanced shard count per benchmark. Clamped >= 1."""
+    """Fleet-wide C3 slot count = the CEILING on a benchmark's shard count
+    (`_worthwhile_shards` decides how much of it to actually use). Clamped >= 1."""
     try:
         value = int(cfg.get("c3_max_parallel_jobs", _DEFAULT_MAX_PARALLEL_JOBS))
     except (TypeError, ValueError):
         value = _DEFAULT_MAX_PARALLEL_JOBS
     return max(1, value)
+
+
+# ── How many of those slots a given benchmark should actually spend ──
+
+
+def _hardware_vcpus(hardware: str | None) -> int:
+    """vCPU count out of a C3 profile name (`cpu-e2-48vcpu-192gb` -> 48).
+    0 when the name doesn't carry one (`auto`, `l40`)."""
+    m = re.search(r"(\d+)vcpu", str(hardware or "").lower())
+    return int(m.group(1)) if m else 0
+
+
+def _estimate_shard_workers(cfg: dict) -> int:
+    """Concurrent solvers ONE shard job will run, mirroring
+    benchmark.resolve_bench_workers' machine-scaled default (half the vCPUs ~=
+    the physical cores). Only used to size the shard plan, so an estimate is
+    fine. GPU jobs are one solver per job — sharding IS their parallelism."""
+    if _is_gpu_config(cfg):
+        return 1
+    for raw in (os.environ.get("TIG_BENCH_WORKERS"), cfg.get("bench_workers")):
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    vcpus = _hardware_vcpus(cfg.get("c3_hardware")) or _ASSUMED_SHARD_VCPUS
+    return max(4, vcpus // 2)
+
+
+def _shard_fixed_secs(cfg: dict) -> float:
+    """Wall clock one extra shard costs before it does any solving."""
+    override = cfg.get("c3_shard_fixed_secs")
+    if override not in (None, ""):
+        try:
+            value = float(override)
+        except (TypeError, ValueError):
+            value = -1.0
+        if value >= 0:
+            return value
+    return (_SHARD_FIXED_SECS_WARM if _warm_c3_image(cfg)
+            else _SHARD_FIXED_SECS_FULL_SOURCE)
+
+
+def _worthwhile_shards(total: int, cfg: dict, cap: int) -> int:
+    """How many shards this benchmark should use — at most `cap`, often fewer.
+
+    Sharding is not free: every shard provisions its own C3 box and repeats the
+    build, and because shards run in PARALLEL the slowest provision sets the
+    wall clock. Splitting a benchmark whose solving takes a minute across three
+    boxes that take five minutes each to appear buys nothing, bills three
+    machines, and starves fleet-mates of their slot pool.
+
+    So spend a slot only when it pays for itself. Going from `s-1` to `s`
+    shards saves `solve / (s * (s - 1))` of wall clock; take it only while that
+    beats the fixed cost of the machine it takes to get it. Never plan more
+    shards than solving "waves" either — a shard that can't fill its workers
+    leaves cores idle and still pays a full provision.
+
+    Falls back to the old "use the whole cap" behavior when the inputs needed
+    to reason about cost are missing (no per-instance timeout, fixed cost
+    explicitly zeroed)."""
+    cap = max(1, min(int(cap), max(1, int(total))))
+    if cap == 1:
+        return 1
+    try:
+        timeout = float(cfg.get("timeout") or 0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    fixed = _shard_fixed_secs(cfg)
+    if timeout <= 0 or fixed <= 0:
+        return cap
+    workers = max(1, _estimate_shard_workers(cfg))
+    waves = math.ceil(total / workers)
+    solve = waves * timeout
+    best = 1
+    for s in range(2, min(cap, waves) + 1):
+        if solve / (s * (s - 1)) <= fixed:
+            break
+        best = s
+    return best
+
+
+def _instance_units(tracks: dict) -> list[tuple[str, int]]:
+    """The (track_key, count) pairs a benchmark actually runs. The ``seed`` key
+    and any non-positive / non-int count are skipped (matches benchmark.py)."""
+    return [
+        (k, v) for k, v in (tracks or {}).items()
+        if k != "seed" and isinstance(v, int) and v > 0
+    ]
 
 
 def _balanced_sizes(total: int, num_machines: int) -> list[int]:
@@ -644,10 +776,7 @@ def _plan_shards(tracks: dict, num_machines: int) -> list[list[dict]]:
     ``num_machines <= 1`` yields a single shard holding every slice (the
     single-job behavior). The ``seed`` key and any non-positive / non-int
     count are skipped (matches benchmark.py)."""
-    units = [
-        (k, v) for k, v in (tracks or {}).items()
-        if k != "seed" and isinstance(v, int) and v > 0
-    ]
+    units = _instance_units(tracks)
     total = sum(count for _, count in units)
     if total == 0:
         return []
@@ -1248,16 +1377,25 @@ def run_benchmark_c3(
     else:
         cfg["c3_hardware"] = _resolve_c3_hardware(cfg, requested)
 
-    # Balanced intra-benchmark sharding: split this benchmark's instances into
-    # min(c3_max_parallel_jobs, total_instances) shard jobs so ONE benchmark
-    # can use every chip the plan allows (e.g. an agent benchmarking while its
-    # fleet-mates wait on LLM responses). Each shard runs its per-track window
-    # (TIG_TRACK_STARTS) and the per-instance results are merged + re-scored,
-    # so the score matches a single-job run exactly.
+    # Balanced intra-benchmark sharding: split this benchmark's instances
+    # across shard jobs so ONE benchmark can use several chips at once (e.g. an
+    # agent benchmarking while its fleet-mates wait on LLM responses). Each
+    # shard runs its per-track window (TIG_TRACK_STARTS) and the per-instance
+    # results are merged + re-scored, so the score matches a single-job run
+    # exactly. The plan cap is a CEILING, not a target: _worthwhile_shards
+    # spends a slot only when the wall clock it saves beats the provisioning it
+    # costs, so a small benchmark runs as one job instead of three.
     tracks = cfg.get("tracks") or {}
-    shards = _plan_shards(tracks, _max_parallel(cfg))
+    cap = _max_parallel(cfg)
+    total_instances = sum(count for _, count in _instance_units(tracks))
+    num_shards = _worthwhile_shards(total_instances, cfg, cap)
+    shards = _plan_shards(tracks, num_shards)
     if not shards:
         return None, f"[C3] No positive-count tracks to benchmark for {challenge}"
+    if num_shards < cap:
+        print(f"    [C3] {total_instances} instance(s): using {num_shards} of "
+              f"{cap} slot(s) — {cap - num_shards} more would cost longer in "
+              f"provisioning than they'd save in solving")
 
     # Fleet-wide FCFS pool: all agents sharing one C3 key gate on it, so
     # total live jobs never exceed the pool cap. A lone agent (no

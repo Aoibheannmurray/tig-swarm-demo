@@ -20,26 +20,38 @@ def _clear_env():
 
 def test_warm_image_resolution():
     _clear_env()
-    # Off by default.
-    assert c3_compute._warm_c3_image({"challenge": "knapsack"}) is None
-    # Explicit ref wins outright.
+    # ON by default — warm is the normal C3 path, full-source is the fallback.
+    assert c3_compute._warm_c3_image({"challenge": "knapsack"}) == (
+        "docker.io/tigfoundation/tig-swarm-warm-cpu:latest"
+    )
+    assert c3_compute._warm_c3_image({"is_gpu": True}) == (
+        "docker.io/tigfoundation/tig-swarm-warm-gpu:latest"
+    )
+    # Explicit ref wins outright — even over an opt-out.
     assert c3_compute._warm_c3_image(
-        {"c3_warm_image": "docker.io/me/custom:v1"}
+        {"c3_warm_image": "docker.io/me/custom:v1", "c3_warm_images": False}
     ) == "docker.io/me/custom:v1"
-    # Opt-in bool derives the flavor image from the namespace.
+    # Explicit opt-out falls back to the full-source path.
+    assert c3_compute._warm_c3_image({"c3_warm_images": False}) is None
+    # Namespace override.
     cfg = {"c3_warm_images": True, "tig_dockerhub": "somens"}
     assert c3_compute._warm_c3_image(cfg) == "docker.io/somens/tig-swarm-warm-cpu:latest"
     assert c3_compute._warm_c3_image({**cfg, "is_gpu": True}) == (
         "docker.io/somens/tig-swarm-warm-gpu:latest"
     )
-    # Opt-in without a namespace defaults to the TIG Foundation's public one.
-    assert c3_compute._warm_c3_image({"c3_warm_images": True}) == (
-        "docker.io/tigfoundation/tig-swarm-warm-cpu:latest"
-    )
-    # Env forms.
+    # Env forms — including the falsey spellings, which must actually disable
+    # rather than read as "a non-empty string, so on".
     os.environ["TIG_C3_WARM_IMAGES"] = "1"
     os.environ["TIG_DOCKERHUB"] = "envns"
     assert c3_compute._warm_c3_image({}) == "docker.io/envns/tig-swarm-warm-cpu:latest"
+    for falsey in ("0", "false", "no", "off", "FALSE"):
+        os.environ["TIG_C3_WARM_IMAGES"] = falsey
+        assert c3_compute._warm_c3_image({}) is None, falsey
+    # Config beats env in both directions.
+    os.environ["TIG_C3_WARM_IMAGES"] = "0"
+    assert c3_compute._warm_c3_image({"c3_warm_images": True}) is not None
+    os.environ["TIG_C3_WARM_IMAGES"] = "1"
+    assert c3_compute._warm_c3_image({"c3_warm_images": False}) is None
     _clear_env()
     print("PASS test_warm_image_resolution")
 

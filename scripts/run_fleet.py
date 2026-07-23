@@ -1031,8 +1031,13 @@ def cmd_run(
         # worktrees live on persistent fleet/<name> branches whose scripts/ may
         # predate the config passthrough, but c3_compute._warm_c3_image has
         # honored these env vars from the start.
-        if agent.get("c3_warm_images"):
-            env["TIG_C3_WARM_IMAGES"] = "1"
+        # Tri-state: warm images default ON in c3_compute, so an explicit
+        # `c3_warm_images: false` has to be forwarded too — otherwise the
+        # opt-out is silently dropped and the agent runs warm anyway.
+        if agent.get("c3_warm_images") is not None:
+            env["TIG_C3_WARM_IMAGES"] = (
+                "1" if agent["c3_warm_images"] else "0"
+            )
         if agent.get("c3_warm_image"):
             env["TIG_C3_WARM_IMAGE"] = str(agent["c3_warm_image"])
         if agent.get("tig_dockerhub"):
