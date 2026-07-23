@@ -88,6 +88,24 @@ _DEPLOY_BACKOFF_CAP_SECS = 20.0   # per-retry window ceiling
 _DEPLOY_RETRY_SIGNATURES = (
     "status 429", "ServiceUnavailable", "concurrent request rate",
 )
+# The OTHER 429: the plan's concurrent-chip cap (free 3 / pro 10 / …). The
+# fleet pool (c3_pool.py) keeps THIS fleet's live jobs under the cap, but C3's
+# real-time count can still reject a submit — a just-released sibling chip that
+# C3 still counts as "running" for a few seconds of teardown, a manual/lone
+# `c3` job holding a chip outside the pool, or a pool sized above the account's
+# true limit. The error says "No new job was queued", so nothing is orphaned:
+# unlike a compile error a chip WILL free, so we wait for one and retry instead
+# of failing the benchmark. Patient (chips free on a minute scale) but bounded,
+# so a persistent external hold eventually surfaces a clear, actionable error
+# rather than parking forever. The pool slot is held throughout, so this shard
+# stays first in line for the freed chip. Checked BEFORE the object-store
+# throttle: this needs the long wait, not the sub-20s upload backoff.
+_CONCURRENCY_RETRY_SIGNATURES = (
+    "CONCURRENCY_LIMIT", "Concurrency limit reached", "maximum concurrent chip",
+)
+_CONCURRENCY_MAX_WAIT_SECS = 900.0   # total budget to wait for a chip to free
+_CONCURRENCY_RETRY_MIN_SECS = 15.0   # jittered gap between submit retries
+_CONCURRENCY_RETRY_MAX_SECS = 30.0
 # ── Helpers ────────────────────────────────────────────────────────
 
 
@@ -1209,7 +1227,10 @@ def _run_one_c3_job_inner(
         cmd.extend(["-p", provider])
 
     combined = ""
-    for attempt in range(1, _DEPLOY_MAX_ATTEMPTS + 1):
+    throttle_attempt = 0
+    concurrency_deadline: float | None = None
+    concurrency_waits = 0
+    while True:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace", cwd=stage, env=env,
@@ -1234,16 +1255,45 @@ def _run_one_c3_job_inner(
                     echo_stderr=echo_stderr,
                 )
             return None, stale
+        # Plan concurrent-chip cap (see _CONCURRENCY_RETRY_SIGNATURES): wait for
+        # a chip to free and retry — no job was queued, so nothing is orphaned.
+        # Checked before the object-store throttle because it needs the long
+        # wait, not the sub-20s upload backoff.
+        if any(sig in combined for sig in _CONCURRENCY_RETRY_SIGNATURES):
+            now = time.monotonic()
+            if concurrency_deadline is None:
+                concurrency_deadline = now + _CONCURRENCY_MAX_WAIT_SECS
+            if now >= concurrency_deadline:
+                return None, (
+                    f"c3 deploy failed ({proc.returncode}): C3 concurrent-chip "
+                    f"limit still reached after waiting "
+                    f"{_CONCURRENCY_MAX_WAIT_SECS / 60:.0f}m for a chip to free "
+                    f"— jobs outside this fleet (a manual `c3` run, or another "
+                    f"fleet on the same C3 key) are holding every slot. Cancel "
+                    f"them (`c3 squeue` / `c3 cancel`) or raise the plan "
+                    f"tier:\n{combined[-1500:]}"
+                )
+            concurrency_waits += 1
+            delay = random.uniform(_CONCURRENCY_RETRY_MIN_SECS, _CONCURRENCY_RETRY_MAX_SECS)
+            remaining = concurrency_deadline - now
+            print(
+                f"    [C3][{label}]   C3 concurrent-chip limit reached; waiting "
+                f"{delay:.0f}s for a slot (retry {concurrency_waits}, "
+                f"≤{remaining / 60:.0f}m left)"
+            )
+            time.sleep(delay)
+            continue
         # Retry only the object-store throttle (see _DEPLOY_RETRY_SIGNATURES);
         # every other deploy failure fails fast.
         throttled = any(sig in combined for sig in _DEPLOY_RETRY_SIGNATURES)
-        if not throttled or attempt == _DEPLOY_MAX_ATTEMPTS:
+        throttle_attempt += 1
+        if not throttled or throttle_attempt >= _DEPLOY_MAX_ATTEMPTS:
             return None, f"c3 deploy failed ({proc.returncode}):\n{combined[-2000:]}"
-        window = min(_DEPLOY_BACKOFF_CAP_SECS, _DEPLOY_BACKOFF_BASE_SECS * 2 ** (attempt - 1))
+        window = min(_DEPLOY_BACKOFF_CAP_SECS, _DEPLOY_BACKOFF_BASE_SECS * 2 ** (throttle_attempt - 1))
         delay = random.uniform(0, window)
         print(
             f"    [C3][{label}]   deploy throttled (429 same-object); "
-            f"retry {attempt}/{_DEPLOY_MAX_ATTEMPTS - 1} in {delay:.1f}s"
+            f"retry {throttle_attempt}/{_DEPLOY_MAX_ATTEMPTS - 1} in {delay:.1f}s"
         )
         time.sleep(delay)
 

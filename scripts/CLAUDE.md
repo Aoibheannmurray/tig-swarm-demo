@@ -146,6 +146,19 @@ so the pool size always matches the real subscription. A configured
 `c3_max_parallel_jobs` is only a fallback used when the query fails (offline /
 no C3 auth). See `scripts/test_c3_pool.py` and `scripts/test_c3_plan_cap.py`.
 
+**Retry safety net for the plan cap (`CONCURRENCY_LIMIT` 429).** The pool keeps
+*this fleet's* live jobs under the cap, but C3's real-time chip count can still
+reject a `c3 deploy` with `429 (CONCURRENCY_LIMIT)` — teardown lag on a
+just-released sibling chip, a manual/lone `c3` job holding a chip outside the
+pool, or a pool sized above the account's true tier. That 429 reports "No new
+job was queued", so nothing is orphaned: `_run_one_c3_job_inner` treats it as
+retryable and *waits for a chip to free* (patient — chips free on a minute
+scale — but bounded by `_CONCURRENCY_MAX_WAIT_SECS`, after which it surfaces an
+actionable error naming `c3 squeue`/`c3 cancel`), holding its pool slot
+throughout so it stays first in line. This is distinct from the object-store
+upload throttle (`_DEPLOY_RETRY_SIGNATURES`, sub-20s backoff) and is checked
+first. See `scripts/test_c3_concurrency_retry.py`.
+
 ## Tests
 
 No pytest. `test_*.py` are self-running scripts (`if __name__ == "__main__"`) —
