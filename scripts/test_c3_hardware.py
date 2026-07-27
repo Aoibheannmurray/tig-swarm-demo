@@ -46,20 +46,28 @@ def test_picks_largest_available():
     print("PASS test_picks_largest_available")
 
 
-def test_default_blocklist_skips_broken_pool():
-    # cpu-d3-96vcpu-384gb is blocklisted by default (C3-JOB-2457736F44XT):
-    # even when C3 lists it available it must never be auto-picked.
+def test_session_blocklist_skips_a_pool_that_misbehaved():
+    # Nothing is blocklisted out of the box — the largest box wins. Once a
+    # profile has proven undeliverable in THIS session, auto moves off it
+    # without the contributor changing any config.
     orig = c3_compute._run_c3
+    orig_blocked = set(c3_compute._session_hw_blocklist)
     try:
+        c3_compute._session_hw_blocklist.clear()
         _with_listing(_listing(
             _profile("cpu-d3-96vcpu-384gb", 96, "high", True, 2.28),
             _profile("cpu-e2-48vcpu-192gb", 48, "medium", True, 1.15),
         ))
+        assert c3_compute._best_cpu_hardware({}) == "cpu-d3-96vcpu-384gb"
+        # ...it never gives a queued job a machine, so drop it and re-pick.
+        c3_compute._blocklist_profile_for_session("cpu-d3-96vcpu-384gb", "test")
         assert c3_compute._best_cpu_hardware({}) == "cpu-e2-48vcpu-192gb"
     finally:
         c3_compute._run_c3 = orig
         c3_compute._hw_cache = None
-    print("PASS test_default_blocklist_skips_broken_pool")
+        c3_compute._session_hw_blocklist.clear()
+        c3_compute._session_hw_blocklist.update(orig_blocked)
+    print("PASS test_session_blocklist_skips_a_pool_that_misbehaved")
 
 
 def test_config_and_env_extend_blocklist():
@@ -169,7 +177,7 @@ def test_result_is_cached():
 
 def _main():
     test_picks_largest_available()
-    test_default_blocklist_skips_broken_pool()
+    test_session_blocklist_skips_a_pool_that_misbehaved()
     test_config_and_env_extend_blocklist()
     test_prefers_higher_availability_tier_over_size()
     test_skips_unavailable_and_gpu_profiles()

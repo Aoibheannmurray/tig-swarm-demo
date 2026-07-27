@@ -170,16 +170,36 @@ _AVAILABILITY_RANK = {"high": 3, "medium": 2, "low": 1}
 _HW_CACHE_TTL_SECS = 600
 _hw_cache: tuple[float, str] | None = None
 # Profiles auto-selection must never pick, even when C3 lists them available.
-# cpu-d3-96vcpu-384gb: jobs on the pool die with an internal C3 error
-# (support code C3-JOB-2457736F44XT, 2026-07-15) — even a trivial `nproc` job
-# failed while the 48-vCPU pool ran it fine. Re-test occasionally; extend or
-# override per-fleet via `c3_hardware_blocklist` config / TIG_C3_HW_BLOCKLIST
-# env (comma-separated; merged with this default).
-_DEFAULT_HW_BLOCKLIST = frozenset({"cpu-d3-96vcpu-384gb"})
+# Deliberately EMPTY: a hardcoded list goes stale in both directions — it keeps
+# avoiding pools C3 has since fixed, and says nothing about the one that breaks
+# tomorrow. (It used to pin cpu-d3-96vcpu-384gb, whose jobs died with an
+# internal C3 error under support code C3-JOB-2457736F44XT on 2026-07-15.)
+# Bad pools are now learned per session instead — see
+# _blocklist_profile_for_session. Add a standing entry per fleet via
+# `c3_hardware_blocklist` config / TIG_C3_HW_BLOCKLIST env (comma-separated;
+# merged with this default and with what the session has learned).
+_DEFAULT_HW_BLOCKLIST: frozenset[str] = frozenset()
+
+
+# Profiles this process has watched fail to provision. `auto` re-queries C3
+# every 10 minutes and would otherwise keep re-picking the same dead pool for
+# the rest of the session — the agent hangs, the human switches hardware by
+# hand. Session-scoped on purpose: a pool that's wedged now may be fine in an
+# hour, so this never persists to disk.
+_session_hw_blocklist: set[str] = set()
+
+
+def _blocklist_profile_for_session(profile: str, why: str) -> None:
+    global _hw_cache
+    if not profile or profile in _session_hw_blocklist:
+        return
+    _session_hw_blocklist.add(profile)
+    _hw_cache = None  # force a re-pick on the next benchmark
+    print(f"    [C3] not auto-selecting {profile} again this session ({why})")
 
 
 def _hw_blocklist(cfg: dict | None) -> frozenset[str]:
-    extra: set[str] = set()
+    extra: set[str] = set(_session_hw_blocklist)
     raw = (cfg or {}).get("c3_hardware_blocklist")
     if isinstance(raw, str):
         extra.update(p.strip() for p in raw.split(",") if p.strip())
@@ -895,6 +915,18 @@ def _iter_job_dicts(data) -> Iterable[dict]:
 _TERMINAL_OK = ("COMPLETED", "SYNCED", "SUCCEEDED", "SUCCESS")
 _TERMINAL_BAD = ("FAILED", "CANCELLED", "CANCELED", "ERROR", "TIMED_OUT", "TIMEOUT")
 _NON_TERMINAL = ("PENDING", "SCHEDULING", "RUNNING", "QUEUED", "SUBMITTED")
+# States that mean "accepted, but no machine yet". A pool that never
+# provisions parks a job in one of these indefinitely — see _poll_c3_job.
+_PRE_RUN = ("PENDING", "SCHEDULING", "QUEUED", "SUBMITTED")
+# How long a job may sit in a pre-run state before we treat the pool as unable
+# to deliver. Generous (a busy pool does queue) but nowhere near the poll
+# timeout, which is walltime-derived: at the default c3_time of 02:00:00 that
+# is 2h45m of an agent looking hung. Override with `c3_queue_grace_secs` in
+# config or TIG_C3_QUEUE_GRACE; 0 disables the check.
+_QUEUE_GRACE_SECS = 1200
+# Stable substring so callers can tell this apart from a job that ran and
+# failed. Survives the shard-error grouping in run_benchmark_c3.
+_NEVER_STARTED_MARKER = "never left the C3 queue"
 
 
 def _run_c3(
@@ -952,6 +984,7 @@ def _poll_c3_job(
     cwd: Path,
     walltime_secs: int,
     timeout_secs: int | None = None,
+    cfg: dict | None = None,
 ) -> str:
     """Poll a C3 job until it reaches a terminal state.
 
@@ -962,9 +995,19 @@ def _poll_c3_job(
     a bounded grace period and then fail fast with a message that names the
     cause. A job that resolves even once gets the full timeout — after that,
     unknown really can mean transient API flakiness.
+
+    The same reasoning covers a job C3 *does* know about but never starts.
+    Some pools accept a deploy and leave it QUEUED forever; that resolves a
+    status fine, so the unrecognised-ID guard above never fires and the agent
+    burns the whole walltime-derived timeout on a machine it will never get.
+    A job that hasn't reached RUNNING within the queue grace gives up as
+    `never_started`, which the caller turns into "try different hardware".
     """
     wait_secs = timeout_secs if timeout_secs is not None else max(1800, walltime_secs + 2700)
     deadline = time.monotonic() + wait_secs
+    queue_grace = min(_queue_grace_secs(cfg), wait_secs)
+    queue_deadline = time.monotonic() + queue_grace
+    ever_running = False
     poll = 0
     # Log on status CHANGE plus a ~5-minute heartbeat, not every minute:
     # with sharding there are several concurrent polls and the old cadence
@@ -980,6 +1023,15 @@ def _poll_c3_job(
                 return "completed"
             if any(s in status for s in _TERMINAL_BAD):
                 return "failed"
+            if not any(s in status for s in _PRE_RUN):
+                ever_running = True  # RUNNING (or anything past the queue)
+            elif (not ever_running and queue_grace
+                    and time.monotonic() >= queue_deadline):
+                print(f"    [C3] {job_id} sat in {status} for "
+                      f"{queue_grace // 60}m without starting — giving up on "
+                      f"this pool instead of waiting out the "
+                      f"{wait_secs // 60}m timeout")
+                return "never_started"
             if status != last_printed or poll % 20 == 0:
                 print(f"    [C3] {job_id}: {status}")
                 last_printed = status
@@ -994,6 +1046,18 @@ def _poll_c3_job(
         poll += 1
         time.sleep(_POLL_INTERVAL_SECS)
     return "timeout"
+
+
+def _queue_grace_secs(cfg: dict | None) -> int:
+    """Seconds a job may sit unstarted before we call the pool undeliverable.
+    Config `c3_queue_grace_secs` / env TIG_C3_QUEUE_GRACE; 0 disables."""
+    raw = os.environ.get("TIG_C3_QUEUE_GRACE")
+    if raw is None:
+        raw = (cfg or {}).get("c3_queue_grace_secs", _QUEUE_GRACE_SECS)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _QUEUE_GRACE_SECS
 
 
 def _c3_poll_timeout(args: argparse.Namespace) -> int | None:
@@ -1213,6 +1277,7 @@ def _update_c3_cli_once() -> bool:
 def _run_one_c3_job_inner(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
     _cli_updated: bool = False, echo_stderr: bool = True,
+    cfg: dict | None = None,
 ) -> tuple[dict | None, str]:
     """Deploy one already-staged benchmark job, poll it, pull artifacts, and
     return its ``benchmark.json`` dict. ``stage`` must already contain the
@@ -1252,7 +1317,7 @@ def _run_one_c3_job_inner(
             if not _cli_updated and _update_c3_cli_once():
                 return _run_one_c3_job_inner(
                     args, env, stage, label, _cli_updated=True,
-                    echo_stderr=echo_stderr,
+                    echo_stderr=echo_stderr, cfg=cfg,
                 )
             return None, stale
         # Plan concurrent-chip cap (see _CONCURRENCY_RETRY_SIGNATURES): wait for
@@ -1307,7 +1372,7 @@ def _run_one_c3_job_inner(
     walltime_secs = _parse_walltime(args.c3_time)
     print(f"    [C3][{label}] job {job_id} — polling for completion...")
     status = _poll_c3_job(
-        job_id, env, stage, walltime_secs, _c3_poll_timeout(args)
+        job_id, env, stage, walltime_secs, _c3_poll_timeout(args), cfg=cfg,
     )
     if status == "unrecognised":
         # C3 doesn't know this ID, so pull/logs/cancel would all just burn
@@ -1319,6 +1384,19 @@ def _run_one_c3_job_inner(
             f"[C3] job {job_id} was never recognised by C3 — the deploy "
             f"output may not have carried a usable job ID:\n{combined[-1000:]}"
         )
+    if status == "never_started":
+        # It's still queued, so it still holds a chip against the plan cap.
+        # Cancel before returning or the slot leaks until C3 reaps it.
+        _cancel_c3_job(job_id, env, stage)
+        profile = str((cfg or {}).get("c3_hardware") or "?")
+        if (cfg or {}).get("c3_hardware_auto"):
+            _blocklist_profile_for_session(
+                profile, "it accepted a job and never ran it")
+        return None, (
+            f"[C3] job {job_id} {_NEVER_STARTED_MARKER} on {profile} — the "
+            f"pool accepted the job but never gave it a machine. Cancelled it "
+            f"rather than waiting out the full timeout."
+        )
     cancel_output = ""
     if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
         cancel_output = _cancel_c3_job(job_id, env, stage)
@@ -1329,6 +1407,16 @@ def _run_one_c3_job_inner(
     _pull_artifacts(job_id, env, stage)
     if status != "completed":
         bench_stderr = _read_benchmark_stderr(stage)
+        # A job that died without our benchmark writing a single byte never
+        # got as far as running the code — that's the pool, not the algorithm
+        # (a cargo error would be sitting in bench_stderr). This is the shape
+        # the old hardcoded blocklist existed for: a profile whose jobs die on
+        # an internal C3 error, where even a trivial `nproc` job fails.
+        if (status == "failed" and not bench_stderr
+                and (cfg or {}).get("c3_hardware_auto")):
+            _blocklist_profile_for_session(
+                str(cfg.get("c3_hardware") or "?"),
+                "its job died before the benchmark produced any output")
         if bench_stderr:
             # Don't dump the stderr here: sibling shards usually fail with the
             # IDENTICAL error (they compile the same code), so per-shard dumps
@@ -1372,17 +1460,72 @@ def _run_one_c3_job_inner(
 
 def _run_one_c3_shard(
     args: argparse.Namespace, env: dict, stage: Path, label: str,
-    pool,
+    pool, cfg: dict | None = None,
 ) -> tuple[dict | None, str]:
     """Fleet-wide-cap wrapper around one shard's deploy+poll. Holds a C3 slot
     from the shared FCFS `pool` for this shard's entire lifetime, so all agents
     sharing one C3 key never exceed c3_max_parallel_jobs total live C3 jobs
     (respecting the plan's concurrency limit); extra shards queue FCFS."""
     with pool.lease():
-        return _run_one_c3_job_inner(args, env, stage, label, echo_stderr=False)
+        return _run_one_c3_job_inner(args, env, stage, label,
+                                    echo_stderr=False, cfg=cfg)
+
+
+# Consecutive failed C3 benchmarks in THIS agent process. C3 is a young
+# platform, and a wedged pool or a control-plane outage costs far more than
+# the failures themselves: the agent keeps paying an LLM for edits it can
+# never score. After a short streak, say plainly that local Docker exists.
+_C3_TROUBLE_STREAK = 3
+_consecutive_c3_failures = 0
+_c3_advice_shown = False
+
+
+def _note_c3_outcome(ok: bool, challenge: str) -> None:
+    """Track the C3 failure streak and, once it's clearly not a blip, tell the
+    human how to get unstuck. Printed rather than returned: the error string
+    goes on to the compile-fix router and the LLM prompt, where a paragraph of
+    operator advice is noise (and has misrouted errors before)."""
+    global _consecutive_c3_failures, _c3_advice_shown
+    if ok:
+        _consecutive_c3_failures = 0
+        _c3_advice_shown = False
+        return
+    _consecutive_c3_failures += 1
+    if _consecutive_c3_failures < _C3_TROUBLE_STREAK or _c3_advice_shown:
+        return
+    _c3_advice_shown = True  # once per streak, not once per failure
+    print(
+        f"\n    [C3] ⚠  {_consecutive_c3_failures} C3 benchmarks in a row have "
+        f"failed for {challenge}.\n"
+        f"    [C3]    Nothing has been scored since, and each iteration still "
+        f"spends LLM tokens.\n"
+        f"    [C3]    To keep working while C3 is unhappy, switch this agent "
+        f"to local compute:\n"
+        f"    [C3]      • in the setup UI: Reconfigure fleet → Compute → "
+        f"local, then Save & start\n"
+        f"    [C3]      • or in fleet.config.json, set \"compute\": \"local\" "
+        f"on the agent and relaunch\n"
+        f"    [C3]    Local needs Docker and compiles on this machine (slower "
+        f"first run, no C3 credits).\n"
+        f"    [C3]    If you'd rather stay on C3, pinning \"c3_hardware\": "
+        f"\"cpu-d3-4vcpu-16gb\" avoids\n"
+        f"    [C3]    the larger pools, which are the ones that usually fail "
+        f"to provision.\n"
+    )
 
 
 def run_benchmark_c3(
+    args: argparse.Namespace, config: dict, server: str,
+    seed: str | None = None, hyperparameters: str | None = None,
+) -> tuple[dict | None, str]:
+    """Run one benchmark on C3. Thin wrapper: `_run_benchmark_c3` does the
+    work, this records the outcome so a run of failures can offer a way out."""
+    bench, err = _run_benchmark_c3(args, config, server, seed, hyperparameters)
+    _note_c3_outcome(bench is not None, str(config.get("challenge", "unknown")))
+    return bench, err
+
+
+def _run_benchmark_c3(
     args: argparse.Namespace, config: dict, server: str,
     seed: str | None = None, hyperparameters: str | None = None,
 ) -> tuple[dict | None, str]:
@@ -1424,6 +1567,10 @@ def run_benchmark_c3(
     ).strip().lower()
     if raw_hw in _AUTO_HARDWARE_VALUES and not _is_gpu_config(cfg):
         cfg["c3_hardware"] = _best_cpu_hardware(env, cfg)
+        # Remembered so a pool that never provisions can be dropped from
+        # future auto-picks. An explicitly pinned profile is the contributor's
+        # decision and is never second-guessed.
+        cfg["c3_hardware_auto"] = True
     else:
         cfg["c3_hardware"] = _resolve_c3_hardware(cfg, requested)
 
@@ -1484,7 +1631,8 @@ def run_benchmark_c3(
                 return None, f"[C3] Failed to create staged project: {exc}"
             print("    [C3] C3 will upload the staged workspace and pull the Docker Hub image")
             with slot_pool.lease():
-                bench, err = _run_one_c3_job_inner(args, env, base, challenge)
+                bench, err = _run_one_c3_job_inner(
+                    args, env, base, challenge, cfg=cfg)
             if bench is None:
                 return None, f"[C3] {err}"
             return bench, ""
@@ -1538,7 +1686,8 @@ def run_benchmark_c3(
         # parks on the pool until a slot frees.
         with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
             futures = {
-                executor.submit(_run_one_c3_shard, args, env, stage, label, slot_pool): idx
+                executor.submit(_run_one_c3_shard, args, env, stage, label,
+                                slot_pool, cfg): idx
                 for idx, stage, label in jobs
             }
             for future in as_completed(futures):

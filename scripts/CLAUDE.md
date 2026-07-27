@@ -130,6 +130,34 @@ hardware and contention instead. GPUs: one job = one GPU regardless of
 profile; parallelism comes from sharding (default `l40` — cheapest, highest
 availability).
 
+**Pools that accept a job and never run it.** "Available" in the control-plane
+listing is not a promise of a machine: a pool can take the deploy and park the
+job in QUEUED forever. That resolves a status fine, so the unrecognised-ID
+guard never fires and `_poll_c3_job` used to wait out its walltime-derived
+timeout — 2h45m at the default `c3_time`, with the agent apparently hung and
+its pool slot held. A job that hasn't reached RUNNING within
+`c3_queue_grace_secs` (default 20 min, env `TIG_C3_QUEUE_GRACE`, 0 disables)
+now returns `never_started`: the job is cancelled (queued still means a chip
+held) and, if the profile was auto-selected, added to a **session** blocklist
+(`_session_hw_blocklist`) so the next benchmark picks a different box rather
+than re-picking the dead one all run.
+
+Nothing ships blocklisted (`_DEFAULT_HW_BLOCKLIST` is empty): a hardcoded list
+goes stale in both directions — it keeps avoiding pools C3 has fixed and knows
+nothing about the one that breaks tomorrow. Bad pools are learned instead,
+from two signals: a job that never started, and a job that reached FAILED
+without `benchmark.stderr` containing a single byte (it died before running
+our code — a cargo error from LLM-authored code always leaves stderr behind,
+and must never cost a profile its place, or a few bad edits would blocklist
+the whole account). Both require the profile to have been auto-selected; a
+pinned `c3_hardware` is the contributor's call and is never second-guessed. A
+standing per-fleet list still lives in `c3_hardware_blocklist` /
+`TIG_C3_HW_BLOCKLIST`. Separately, `_note_c3_outcome` counts consecutive failed C3
+benchmarks and after `_C3_TROUBLE_STREAK` (3) prints how to switch the agent
+to local compute — printed, never folded into the error string, which feeds
+the compile-fix router and the LLM prompt. See
+`scripts/test_c3_queue_stall.py`.
+
 **Fleet-wide C3 slot pool.** Every agent in a fleet shares ONE C3 key, so all
 C3 shard jobs gate on a fleet-wide FCFS slot pool (`c3_pool.py`) of
 `c3_max_parallel_jobs` slots: total live C3 jobs never exceed the plan cap,
