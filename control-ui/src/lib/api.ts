@@ -31,9 +31,14 @@ export const localApi = {
   // Live model catalog for one provider (including the installed Codex CLI).
   // Never throws for "no key" / unsupported CLI provider — those come back as
   // {models: [], error} so the caller can use the curated fallback.
-  models: (provider: string, refresh = false) =>
+  // `custom` sends its own endpoint along: that catalog belongs to the
+  // contributor's server, not to a provider we ship a table for.
+  models: (provider: string, refresh = false, endpoint?: { api_base?: string; api_key_env?: string }) =>
     fetch(`${LOCAL}/models?provider=${encodeURIComponent(provider)}` +
-      (refresh ? "&refresh=true" : "")).then(jsonOrThrow),
+      (refresh ? "&refresh=true" : "") +
+      (endpoint?.api_base ? `&api_base=${encodeURIComponent(endpoint.api_base)}` : "") +
+      (endpoint?.api_key_env ? `&api_key_env=${encodeURIComponent(endpoint.api_key_env)}` : "")
+    ).then(jsonOrThrow),
 
   getFleetConfig: () => fetch(`${LOCAL}/fleet/config`).then(jsonOrThrow),
   setFleetConfig: (params: any) =>

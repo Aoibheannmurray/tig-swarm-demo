@@ -88,7 +88,9 @@ def _read_json(path: Path) -> dict:
     "Expecting value: line 1 column 1"."""
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
-from llm_backends import DEFAULT_MODELS, call_llm, estimate_cost
+from llm_backends import (
+    DEFAULT_MODELS, call_llm, estimate_cost, is_local_api_base,
+)
 
 import challenge_files
 import cleaner_prepass
@@ -1753,7 +1755,9 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def resolve_api_key(provider: str, api_key: str | None) -> str:
+def resolve_api_key(
+    provider: str, api_key: str | None, api_base: str | None = None,
+) -> str:
     if provider in ("claude-code", "claude-code-agentic", "codex-agentic"):
         return ""
     if api_key:
@@ -1778,6 +1782,12 @@ def resolve_api_key(provider: str, api_key: str | None) -> str:
     import secrets_local
     key = secrets_local.resolve(env_var) or ""
     if not key:
+        # A self-hosted endpoint (llama.cpp, vLLM, Ollama, LM Studio) normally
+        # authenticates nothing, so demanding a key here would block the one
+        # setup that legitimately has none. Public providers still must have
+        # one — the failure is far clearer now than as a 401 mid-iteration.
+        if is_local_api_base(api_base):
+            return ""
         sys.exit(f"No API key. Set ${env_var} or pass --api-key.")
     return key
 
@@ -1870,7 +1880,7 @@ def main() -> int:
     if args.compute not in ("local", "c3"):
         sys.exit(f"Unknown compute provider: {args.compute}")
 
-    api_key = resolve_api_key(args.provider, args.api_key)
+    api_key = resolve_api_key(args.provider, args.api_key, args.api_base)
     model = args.model or DEFAULT_MODELS.get(args.provider, "")
 
     # server_url is materialized into agent.config.json by run_fleet from the

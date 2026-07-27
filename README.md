@@ -179,6 +179,14 @@ To inspect recorded Claude Code agentic sessions and tool activity, see
 | `claude-code`         | `claude` CLI login (no API key needed)                                           |
 | `claude-code-agentic` | `claude` CLI login                                                               |
 | `codex-agentic`       | `codex login`                                                                    |
+| `custom`              | Setup-only name for your own OpenAI-compatible endpoint — see below              |
+
+Picking **Custom / local LLM** in setup asks for the endpoint URL, the model id
+it serves, and the name of the variable holding its key, then writes them as a
+`provider: "openai"` agent with an explicit `api_base`. A key is optional when
+the endpoint is on your own machine or local network — llama.cpp, vLLM, Ollama
+and LM Studio check none by default. Benchmarking is independent of this, so a
+local model can still use C3 cloud compute.
 
 
 

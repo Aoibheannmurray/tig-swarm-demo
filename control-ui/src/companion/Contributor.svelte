@@ -64,6 +64,20 @@
     if (selectedProvider && model === "") model = selectedProvider.default_model || "";
   });
 
+  // ── Custom / self-hosted endpoint ──
+  // `needs_api_base` comes from the provider table (scripts/init_fleet.py), so
+  // this stays a capability check rather than a hardcoded "custom" test.
+  let needsApiBase = $derived(!!selectedProvider?.needs_api_base);
+  let apiBase = $state("http://127.0.0.1:8000/v1");
+  // The env var the key is stored under. Named by the contributor because it's
+  // their server: a placeholder, a real token, or nothing at all.
+  let customKeyEnv = $state("");
+  let effectiveKeyEnv = $derived(
+    needsApiBase
+      ? (customKeyEnv.trim() || selectedProvider?.api_key_env || "")
+      : (selectedProvider?.api_key_env || "")
+  );
+
   // ── Model list ──
   // Two sources, because neither alone is enough: `popular_models` is a short
   // curated shortlist that works with no API key and is the fallback for CLI
@@ -87,14 +101,21 @@
   );
   // The live list minus anything already shown under "Recommended".
   let otherModels = $derived(liveModels.filter((m) => !popular.includes(m)));
+  // A self-hosted endpoint has no curated shortlist, so until it answers with
+  // a catalog the only sane control is a text box — a dropdown whose sole
+  // entry is "Custom…" is a dead end dressed as a choice.
+  let modelAsText = $derived(customModel || (needsApiBase && liveModels.length === 0));
 
   async function loadModels(refresh = false) {
     if (!provider) return;
     const requestedProvider = provider;
+    const endpoint = needsApiBase
+      ? { api_base: apiBase.trim(), api_key_env: effectiveKeyEnv }
+      : undefined;
     modelsLoading = true;
     modelsError = "";
     try {
-      const res = await localApi.models(requestedProvider, refresh);
+      const res = await localApi.models(requestedProvider, refresh, endpoint);
       if (provider !== requestedProvider) return;
       const found = (res.models ?? []) as string[];
       // On first load, follow Codex's current top-priority model rather than a
@@ -304,7 +325,7 @@ c3 --version`;
       keyMsg = `Saved ${name}.`;
       // The provider's own key is what the live model list needs — fetch it now
       // that one exists, rather than leaving the dropdown on the shortlist.
-      if (name === selectedProvider?.api_key_env) {
+      if (name === effectiveKeyEnv) {
         if (opts.silent) {
           // Auto-save on Continue: don't make the step change wait on someone
           // else's API.
@@ -332,7 +353,7 @@ c3 --version`;
   // The env-var names this fleet will need: the chosen provider's key (if any)
   // plus C3 when benchmarking in the cloud.
   let neededKeys = $derived([
-    ...(selectedProvider?.api_key_env ? [selectedProvider.api_key_env] : []),
+    ...(effectiveKeyEnv ? [effectiveKeyEnv] : []),
     ...(compute === "c3" ? ["C3_API_KEY"] : []),
   ]);
 
@@ -425,6 +446,10 @@ c3 --version`;
       const params: any = {
         server_url: serverUrl, username, swarm_password: swarmPassword,
         provider, model, count, prefix: prefix || undefined,
+        // Only meaningful for a custom endpoint; build_fleet_config ignores
+        // them for every other provider.
+        api_base: needsApiBase ? apiBase.trim() : undefined,
+        api_key_env: needsApiBase ? effectiveKeyEnv : undefined,
         compute, hardware: compute === "c3" ? hardware : undefined,
         c3_api_key: compute === "c3" ? c3ApiKey : undefined,
         role: role === "auto" ? undefined : role,
@@ -522,15 +547,54 @@ c3 --version`;
       </select>
       {#if selectedProvider}<div class="hint">{selectedProvider.blurb}</div>{/if}
     </div>
+
+    <!-- Self-hosted endpoint. Before the key and the model, because both mean
+         nothing until we know which server we're talking to. -->
+    {#if needsApiBase}
+      <div class="field">
+        <label for="apibase">Endpoint URL</label>
+        <input id="apibase" type="text" bind:value={apiBase}
+          onchange={() => loadModels(true)}
+          placeholder="http://127.0.0.1:8000/v1" />
+        <div class="hint">
+          Where your server listens — usually ending in <code>/v1</code>.
+          Anything speaking the OpenAI chat-completions API works:
+          llama.cpp, vLLM, Ollama, LM Studio, a private gateway.
+          It's written to <code>fleet.config.json</code> as
+          <code>api_base</code>, and only this machine ever calls it.
+        </div>
+      </div>
+      <div class="field">
+        <label for="keyenv">API key variable <span class="muted">(optional)</span></label>
+        <input id="keyenv" type="text" bind:value={customKeyEnv}
+          onchange={() => loadModels(true)}
+          placeholder={selectedProvider?.api_key_env || "CUSTOM_LLM_API_KEY"} />
+        <div class="hint">
+          The name your key is stored under. Most local servers check no key at
+          all — leave this alone and skip the field below if yours doesn't.
+        </div>
+      </div>
+      <div class="note bare" style="margin-bottom:18px">
+        <p>
+          Benchmarks are separate from the model: a local LLM still works with
+          C3 cloud compute on the next step. Every field here stays editable
+          afterwards under <b>Reconfigure fleet</b>, which edits
+          <code>fleet.config.json</code> directly — including per-agent
+          settings this wizard doesn't ask about.
+        </p>
+      </div>
+    {/if}
+
     <!-- The key comes BEFORE the model, because it is what fills the model
          list: asking someone to pick a model first is asking them to choose
          from options that don't exist yet. -->
-    {#if selectedProvider?.api_key_env}
-      {@const kn = selectedProvider.api_key_env}
+    {#if effectiveKeyEnv}
+      {@const kn = effectiveKeyEnv}
       <div class="field">
         <label for="apikey">API key</label>
         <div class="hint" style="margin:0 0 8px">
-          Needs <code>{kn}</code>.
+          {#if needsApiBase}Optional — set <code>{kn}</code> only if your
+            endpoint requires it.{:else}Needs <code>{kn}</code>.{/if}
           {#if secrets[kn]?.set}
             <span class="pill ok">set ({secrets[kn].source})</span>
           {:else}
@@ -567,13 +631,20 @@ c3 --version`;
 
     <div class="field">
       <label for="model">Model</label>
-      {#if customModel}
+      {#if modelAsText}
         <input id="model" type="text" bind:value={model}
-          placeholder={selectedProvider?.default_model || "model id"} />
+          placeholder={selectedProvider?.default_model
+            || (needsApiBase ? "the id your endpoint serves" : "model id")} />
         <div class="hint">
-          <button class="linky" onclick={() => { customModel = false; model = popular[0] || ""; }}>
-            ← back to the list
-          </button>
+          {#if needsApiBase && !liveModels.length}
+            Exactly as your server reports it — e.g.
+            <code>Qwen3-Coder-Next-Q8_0</code>. Load the list above to pick
+            from what it's actually serving.
+          {:else}
+            <button class="linky" onclick={() => { customModel = false; model = popular[0] || ""; }}>
+              ← back to the list
+            </button>
+          {/if}
         </div>
       {:else}
         <select id="model" value={model}
@@ -589,7 +660,9 @@ c3 --version`;
             </optgroup>
           {/if}
           {#if otherModels.length}
-            <optgroup label={`All models on your account (${otherModels.length})`}>
+            <optgroup label={needsApiBase
+              ? `Served by your endpoint (${otherModels.length})`
+              : `All models on your account (${otherModels.length})`}>
               {#each otherModels as m}<option value={m}>{m}</option>{/each}
             </optgroup>
           {/if}
@@ -602,15 +675,17 @@ c3 --version`;
       {/if}
       <div class="hint" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         {#if modelsLoading}
-          <span>Loading this account's models…</span>
+          <span>{needsApiBase ? "Asking your endpoint what it serves…" : "Loading this account's models…"}</span>
         {:else if modelsError}
           <span>{modelsError}</span>
         {:else if provider === "codex-agentic" && liveModels.length}
           <span>{liveModels.length} models available in Codex CLI.</span>
+        {:else if needsApiBase && liveModels.length}
+          <span>{liveModels.length} served by your endpoint.</span>
         {:else if otherModels.length}
           <span>{liveModels.length} models available on your account.</span>
         {/if}
-        {#if selectedProvider?.api_key_env || provider === "codex-agentic"}
+        {#if effectiveKeyEnv || provider === "codex-agentic"}
           <button class="linky" onclick={() => loadModels(true)} disabled={modelsLoading}>↻ Refresh list</button>
         {/if}
       </div>
@@ -940,6 +1015,9 @@ c3 --version`;
       <li><span>Server</span><b>{serverUrl}</b></li>
       <li><span>Username</span><b>{username}</b></li>
       <li><span>Provider</span><b>{provider}{model ? ` · ${model}` : ""}</b></li>
+      {#if needsApiBase}
+        <li><span>Endpoint</span><b>{apiBase}</b></li>
+      {/if}
       <li><span>Agents</span><b>{count}{prefix ? ` · ${prefix}-*` : ""}</b></li>
       <li><span>Compute</span><b>{compute === "c3" ? `c3 / ${hardware}` : "local"}</b></li>
       <li><span>Tacit</span><b>{tacitText.trim()

@@ -67,8 +67,12 @@
   const neededKeys = $derived.by(() => {
     const names = new Set<string>();
     for (const a of config?.agents ?? []) {
+      // The agent's own api_key_env wins: a custom/self-hosted endpoint is
+      // written as provider `openai` but keeps its key under whatever name
+      // the contributor chose, not OPENAI_API_KEY.
       const p = providers.find((x: any) => x.key === a.provider);
-      if (p?.api_key_env) names.add(p.api_key_env);
+      const env = (a.api_key_env || "").trim() || p?.api_key_env;
+      if (env) names.add(env);
       if (a.compute === "c3") names.add("C3_API_KEY");
     }
     return [...names];

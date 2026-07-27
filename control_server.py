@@ -1061,16 +1061,56 @@ def _readable_api_error(exc: Exception) -> str:
     return raw if len(raw) <= 300 else raw[:300] + "…"
 
 
-def _live_models(provider: str, *, refresh: bool = False) -> dict:
+def _live_models_custom(api_base: str | None, api_key_env: str | None) -> dict:
+    """Model catalog for a contributor's own OpenAI-compatible endpoint.
+
+    Worth doing rather than making them type an id from memory: local servers
+    name models after the weights file they loaded (`Qwen3-Coder-Next-Q8_0`),
+    which nobody recalls exactly. Not cached — the URL is a live form field and
+    a server that just loaded a different model must show it immediately."""
+    base = (api_base or "").strip()
+    if not base:
+        return {"models": [], "error": (
+            "Enter your endpoint URL above to list the models it serves."
+        )}
+    # Optional by design: llama.cpp/vLLM/Ollama default to no auth at all.
+    api_key = secrets_local.resolve((api_key_env or "").strip()) or None
+    try:
+        from llm_backends import list_models
+        found = list_models("openai", api_key=api_key, api_base=base)
+    except ValueError as exc:
+        return {"models": [], "error": str(exc)}
+    except (RuntimeError, OSError) as exc:
+        return {"models": [], "error": (
+            f"Could not reach {base}: {_readable_api_error(exc)}. Check the "
+            "server is running and the URL includes the right port and path "
+            "(usually ending in /v1)."
+        )}
+    return {"models": found, "error": None}
+
+
+def _live_models(
+    provider: str,
+    *,
+    refresh: bool = False,
+    api_base: str | None = None,
+    api_key_env: str | None = None,
+) -> dict:
     """`{"models": [...], "error": str | None}` for one provider key.
 
     Wraps llm_backends.list_models (the same call `scripts/list_models.py`
     exposes on the CLI) with the two things the UI needs: the API key resolved
     from the local secret store, and failure expressed as data rather than an
-    exception — the dropdown always has its curated shortlist to fall back on."""
+    exception — the dropdown always has its curated shortlist to fall back on.
+
+    `api_base` / `api_key_env` are the custom-provider path: that endpoint is
+    the contributor's own, so its URL and key name arrive with the request
+    instead of coming from the provider table."""
     spec = next((p for p in init_fleet.PROVIDERS if p[0] == provider), None)
     if spec is None:
         return {"models": [], "error": f"unknown provider: {provider}"}
+    if provider in init_fleet.NEEDS_API_BASE:
+        return _live_models_custom(api_base, api_key_env)
     api_key_env = spec[3]
     # The Claude CLI has no `models list` command (Codex does). But it drives
     # the same vendor, so an ANTHROPIC_API_KEY the contributor happens to have
@@ -1292,15 +1332,23 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         }
 
     @app.get("/local-api/models")
-    def models(provider: str, refresh: bool = False) -> dict:
+    def models(
+        provider: str,
+        refresh: bool = False,
+        api_base: str | None = None,
+        api_key_env: str | None = None,
+    ) -> dict:
         """The models `provider` exposes, fetched live from its API or CLI.
 
         Powers the wizard's model dropdown, so a contributor picks from what
         their account actually has today instead of typing an id from memory.
-        Never an error response: a missing key, unsupported CLI provider, or a
-        catalog hiccup returns an empty list plus a reason, and the UI falls
-        back to the provider's curated shortlist."""
-        return _live_models(provider, refresh=refresh)
+        `api_base`/`api_key_env` carry the custom provider's own endpoint.
+        Never an error response: a missing key, unsupported CLI provider, an
+        unreachable local server, or a catalog hiccup returns an empty list
+        plus a reason, and the UI falls back to typing an id by hand."""
+        return _live_models(
+            provider, refresh=refresh, api_base=api_base, api_key_env=api_key_env,
+        )
 
     @app.get("/local-api/challenges")
     def challenges() -> dict:

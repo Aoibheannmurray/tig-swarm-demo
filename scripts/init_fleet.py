@@ -49,6 +49,11 @@ EXAMPLE_PATH = ROOT / "fleet.config.example.json"
 sys.path.insert(0, str(ROOT / "server"))
 import tiers  # noqa: E402
 
+# Flat scripts/ import (see scripts/CLAUDE.md) — one definition of "is this
+# endpoint on my own machine?", shared with run_fleet/run_loop so the wizard's
+# advice and the launcher's key handling can't disagree.
+from llm_backends import is_local_api_base  # noqa: E402
+
 # Windows console crashes on the box-drawing characters / checkmark glyphs this
 # wizard prints when the active code page isn't UTF-8 ("UnicodeEncodeError:
 # 'charmap' codec can't encode …"). Force the stream to UTF-8 with replacement
@@ -68,6 +73,19 @@ _OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # DeepSeek's OpenAI-compatible endpoint. Like OpenRouter, the wizard writes it
 # as provider `openai` with an explicit api_base.
 _DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
+
+# `custom` is not a vendor — it is "whatever OpenAI-compatible endpoint you
+# point me at": a local llama.cpp / vLLM / Ollama / LM Studio server, or a
+# private gateway. Nothing about it can be defaulted, so the contributor
+# supplies all three moving parts (model id, api_base, key env var) and
+# build_fleet_config writes them through as provider `openai` — the same remap
+# OpenRouter and DeepSeek get, just with a URL we don't know in advance.
+_CUSTOM_API_KEY_ENV = "CUSTOM_LLM_API_KEY"
+
+# Providers whose endpoint URL the contributor supplies. Surfaced by
+# get_providers() as `needs_api_base` so the setup UI knows to ask for one
+# rather than hardcoding a provider key.
+NEEDS_API_BASE = frozenset({"custom"})
 
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the
 # provider list in scripts/run_loop.py. Tuple: (label, default_model,
@@ -166,6 +184,18 @@ PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str, list[str]]] = [
      "Agentic Codex CLI — uses `codex login`. Subscription only.",
      ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
       "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]),
+    # Last on purpose: it's the escape hatch, not a recommendation. No default
+    # model and no shortlist — only the contributor's own server knows what it
+    # serves, and the UI lists it live from api_base/v1/models.
+    ("custom",
+     "Custom / local LLM",
+     "",
+     _CUSTOM_API_KEY_ENV,
+     "local-llm",
+     True,
+     "Your own OpenAI-compatible endpoint — llama.cpp, vLLM, Ollama, "
+     "LM Studio, or a private gateway.",
+     []),
 ]
 
 
@@ -593,6 +623,9 @@ def get_providers() -> list[dict]:
             "name_stub": p[4],
             "supports_c3": p[5],
             "blurb": p[6],
+            # The UI asks for an endpoint URL (and lists models from it)
+            # instead of showing a vendor's catalog.
+            "needs_api_base": p[0] in NEEDS_API_BASE,
             # Shortlist for the UI's "Recommended" group. The full catalog is
             # fetched live per provider (see /local-api/models).
             "popular_models": list(p[7]),
@@ -618,7 +651,9 @@ def build_fleet_config(params: dict) -> dict:
     provider (a key from get_providers, may be openrouter/deepseek); model
     (optional — falls back to the provider default); either `names` (explicit
     list) or `count` + optional `prefix`; compute (local|c3); hardware
-    (optional C3 profile); c3_api_key (optional, stored only for C3)."""
+    (optional C3 profile); c3_api_key (optional, stored only for C3);
+    api_base + api_key_env (required / optional respectively for the `custom`
+    provider, ignored otherwise)."""
     server_url = (params.get("server_url") or "").strip()
     username = (params.get("username") or "").strip()
     swarm_password = (params.get("swarm_password") or "").strip()
@@ -634,14 +669,36 @@ def build_fleet_config(params: dict) -> dict:
     # OpenRouter / DeepSeek are OpenAI-compatible: written as provider `openai`
     # with an explicit api_base (mirrors the wizard).
     api_base: str | None = None
+    is_custom = provider == "custom"
     if provider == "openrouter":
         provider = "openai"
         api_base = _OPENROUTER_API_BASE
     elif provider == "deepseek":
         provider = "openai"
         api_base = _DEEPSEEK_API_BASE
+    elif is_custom:
+        # Same remap, but every part comes from the contributor: we have no
+        # endpoint to default to, and the key env var is theirs to name (their
+        # server may want a token, a placeholder, or nothing at all).
+        provider = "openai"
+        api_base = (params.get("api_base") or "").strip()
+        if not api_base:
+            raise ValueError(
+                "api_base is required for a custom provider — the URL of your "
+                "OpenAI-compatible endpoint, e.g. http://127.0.0.1:8000/v1"
+            )
+        if not re.match(r"https?://", api_base, re.IGNORECASE):
+            raise ValueError(
+                f"api_base must be an http:// or https:// URL, got {api_base!r}"
+            )
+        api_key_env = (params.get("api_key_env") or "").strip() or _CUSTOM_API_KEY_ENV
 
     model = (params.get("model") or "").strip() or (default_model or "")
+    if is_custom and not model:
+        raise ValueError(
+            "model is required for a custom provider — the id your endpoint "
+            "serves, e.g. Qwen3-Coder-Next-Q8_0"
+        )
 
     names = params.get("names")
     if names:
@@ -755,8 +812,23 @@ def run_wizard(force: bool = False) -> int:
     # does the OpenAI-compatible remap, so it lives in exactly one place.
     provider, default_model, api_key_env, name_stub, supports_c3 = _select_provider()
 
+    # A custom endpoint has nothing to default: ask for the URL first, since
+    # it's what makes the model id meaningful.
+    api_base = None
+    if provider == "custom":
+        print()
+        print("  Your endpoint must speak the OpenAI chat-completions API.")
+        api_base = _prompt("api_base", default="http://127.0.0.1:8000/v1")
+        api_key_env = _prompt(
+            "env var holding its API key (any name; leave the default if "
+            "your server checks no key)",
+            default=_CUSTOM_API_KEY_ENV,
+        )
+
     if default_model:
         model = _prompt("model (press Enter for default)", default=default_model)
+    elif provider == "custom":
+        model = _prompt("model (the id your endpoint serves)")
     else:
         model = _prompt("model", allow_empty=True)
 
@@ -810,6 +882,8 @@ def run_wizard(force: bool = False) -> int:
         "swarm_password": swarm_password,
         "provider": provider,   # raw key; remap happens inside build_fleet_config
         "model": model,
+        "api_base": api_base,
+        "api_key_env": api_key_env if provider == "custom" else None,
         "names": names,
         "compute": compute,
         "hardware": hardware,
@@ -836,7 +910,10 @@ def run_wizard(force: bool = False) -> int:
         print(
             f"  reminder: run `c3 login`, or {setline} before launching"
         )
-    if api_key_env and not os.environ.get(api_key_env, "").strip():
+    # A self-hosted endpoint usually authenticates nothing, so telling its
+    # owner to export a key would be inventing a requirement they don't have.
+    if (api_key_env and not os.environ.get(api_key_env, "").strip()
+            and not is_local_api_base(api_base)):
         # Windows `cmd`/PowerShell don't understand `export`; print the
         # platform-correct set-the-env-var command so it can be pasted as-is.
         if os.name == "nt":

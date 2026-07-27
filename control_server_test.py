@@ -274,6 +274,57 @@ def main() -> int:
         control_server._refresh_windows_path()
         check(True, "PATH refresh is a safe no-op off Windows")
 
+        print("custom provider (self-hosted LLM endpoint)")
+        import llm_backends as _llm
+        import secrets_local as _secrets
+        orig_list, orig_sresolve = _llm.list_models, _secrets.resolve
+        seen: list[dict] = []
+
+        def _fake_list(provider, api_key=None, api_base=None):
+            seen.append({"provider": provider, "api_key": api_key, "api_base": api_base})
+            return ["Qwen3-Coder-Next-Q8_0", "gpt-oss-120b"]
+
+        try:
+            _llm.list_models = _fake_list
+            _secrets.resolve = lambda name, *a, **k: "local-token" if name == "xxxx" else ""
+
+            # No URL yet: say what to do, don't call anything.
+            res = control_server._live_models("custom")
+            check(res["models"] == [] and "endpoint URL" in (res["error"] or ""),
+                  "custom without an api_base asks for one")
+            check(not seen, "custom without an api_base makes no request")
+
+            res = control_server._live_models(
+                "custom", api_base="http://127.0.0.1:8000/v1", api_key_env="xxxx")
+            check(res["error"] is None and len(res["models"]) == 2,
+                  "custom lists the models its endpoint serves")
+            check(seen[-1] == {"provider": "openai", "api_key": "local-token",
+                               "api_base": "http://127.0.0.1:8000/v1"},
+                  "custom calls the given endpoint as an OpenAI-compatible one")
+
+            # No key configured is the normal case for a local server.
+            _secrets.resolve = lambda name, *a, **k: ""
+            control_server._live_models("custom", api_base="http://127.0.0.1:8000/v1")
+            check(seen[-1]["api_key"] is None, "custom lists models without a key")
+
+            # Unreachable server: a reason and a hint, never an exception.
+            def _boom(*a, **k):
+                raise OSError("Connection refused")
+            _llm.list_models = _boom
+            res = control_server._live_models("custom", api_base="http://127.0.0.1:8000/v1")
+            check(res["models"] == [] and "http://127.0.0.1:8000/v1" in (res["error"] or ""),
+                  "unreachable endpoint reports the URL it tried")
+
+            # The endpoint args must not leak into the vendor providers.
+            _llm.list_models = _fake_list
+            seen.clear()
+            res = control_server._live_models(
+                "anthropic", api_base="http://127.0.0.1:8000/v1")
+            check(not seen and res["models"] == [],
+                  "a vendor provider ignores an api_base it was handed")
+        finally:
+            _llm.list_models, _secrets.resolve = orig_list, orig_sresolve
+
         print("browser launch (WSL / headless)")
         import io as _io
         import contextlib as _contextlib

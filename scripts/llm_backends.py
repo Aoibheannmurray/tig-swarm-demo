@@ -13,11 +13,13 @@ with ``input_tokens`` and ``output_tokens`` (both int, 0 when unavailable).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -31,6 +33,36 @@ DEFAULT_MODELS = {
 
 VENICE_API_BASE = "https://api.venice.ai/api/v1"
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+
+# Hostnames that can only mean "a machine on this network" — the rest is
+# decided by the address itself (see is_local_api_base).
+_LOCAL_HOST_SUFFIXES = (".local", ".internal", ".lan", ".home.arpa")
+
+
+def is_local_api_base(api_base: str | None) -> bool:
+    """Does this OpenAI-compatible endpoint live on the caller's own machine
+    or private network?
+
+    Self-hosted inference servers (llama.cpp, vLLM, Ollama, LM Studio) ship
+    with no authentication by default, so a missing API key is the normal
+    case for them and a misconfiguration for a public provider. Callers use
+    this to tell those two apart instead of refusing to launch either.
+    """
+    if not api_base:
+        return False
+    raw = api_base.strip()
+    if "://" not in raw:
+        raw = "http://" + raw  # bare "127.0.0.1:8000" has no scheme to split on
+    host = (urllib.parse.urlsplit(raw).hostname or "").strip().lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(_LOCAL_HOST_SUFFIXES):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # a public DNS name
+    return ip.is_loopback or ip.is_private or ip.is_link_local
 
 Usage = dict[str, int]  # {"input_tokens": N, "output_tokens": N}
 
@@ -349,10 +381,11 @@ def call_openai(
             "messages": messages,
             token_param: _max_tokens_for_model(model),
         },
-        {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
+        # No key, no Authorization header: a self-hosted server that checks
+        # nothing would still see `Bearer ` and some reject the empty value
+        # outright. Same rule list_models applies.
+        {"Content-Type": "application/json",
+         **({"Authorization": f"Bearer {api_key}"} if api_key else {})},
     )
     # OpenRouter (and some gateways) return provider/moderation errors in the
     # body with HTTP 200 rather than a 4xx/5xx, so _post_json doesn't raise.

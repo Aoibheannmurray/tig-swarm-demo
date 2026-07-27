@@ -50,6 +50,15 @@
       "api_base": "https://api.deepseek.com/v1",
       "compute": "c3",
       "hardware": "auto"
+    },
+    {
+      "name": "my-local-llm",
+      "provider": "openai",
+      "model": "Qwen3-Coder-Next-Q8_0",
+      "api_key_env": "CUSTOM_LLM_API_KEY",
+      "api_base": "http://127.0.0.1:8000/v1",
+      "compute": "local",
+      "role": "explorer"
     }
   ]
 }

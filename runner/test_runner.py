@@ -87,6 +87,31 @@ def test_validation_rejects_local_and_agentic_and_caps():
     print("PASS test_validation_rejects_local_and_agentic_and_caps")
 
 
+def test_validation_rejects_contributor_local_llm_endpoint():
+    """A custom/local LLM is provider `openai` + an api_base on the
+    contributor's own box — which the runner, a different machine, can't
+    reach. Caught at enroll time instead of as connection-refused every
+    iteration."""
+    def with_base(base):
+        plan = _c3_plan(1)
+        plan["agents"][0]["api_base"] = base
+        try:
+            validation.validate_plan(plan)
+        except validation.EnrollmentError as exc:
+            return str(exc)
+        return None
+
+    for base in ("http://127.0.0.1:8000/v1", "http://localhost:11434/v1",
+                 "http://192.168.1.9:8000/v1", "http://my-box.local:1234/v1"):
+        assert with_base(base), f"{base} should be rejected"
+        assert base in with_base(base), "the message must name the endpoint"
+    # A public OpenAI-compatible gateway is fine — that's OpenRouter/DeepSeek,
+    # which the runner has always accepted.
+    assert with_base("https://openrouter.ai/api/v1") is None
+    assert with_base("https://api.deepseek.com/v1") is None
+    print("PASS test_validation_rejects_contributor_local_llm_endpoint")
+
+
 # ── store ──
 
 def test_store_upsert_preserves_status_and_created():
@@ -156,6 +181,7 @@ if __name__ == "__main__":
     test_vault_unavailable_without_key()
     test_validation_accepts_c3_api_plan()
     test_validation_rejects_local_and_agentic_and_caps()
+    test_validation_rejects_contributor_local_llm_endpoint()
     test_store_upsert_preserves_status_and_created()
     test_supervisor_lifecycle_and_isolation()
     print("ALL PASS")

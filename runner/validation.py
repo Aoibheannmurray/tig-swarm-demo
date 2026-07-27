@@ -16,11 +16,39 @@ rather than failing halfway through a launch.
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import urllib.parse
 
 # Providers that drive a local interactive CLI (its own OAuth/subscription
 # login), which a headless runner cannot satisfy.
 AGENTIC_PROVIDERS = frozenset({"claude-code", "claude-code-agentic", "codex-agentic"})
+
+_LOCAL_HOST_SUFFIXES = (".local", ".internal", ".lan", ".home.arpa")
+
+
+def _is_local_api_base(api_base: str) -> bool:
+    """Does this endpoint only exist on the contributor's own network?
+
+    Mirrors llm_backends.is_local_api_base — duplicated rather than imported
+    because the runner ships as its own image and cannot see scripts/ (same
+    reason server/providers.json is a copy). Kept small enough to stay honest.
+    """
+    raw = (api_base or "").strip()
+    if not raw:
+        return False
+    if "://" not in raw:
+        raw = "http://" + raw
+    host = (urllib.parse.urlsplit(raw).hostname or "").strip().lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(_LOCAL_HOST_SUFFIXES):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
 
 
 def max_agents_per_contributor() -> int:
@@ -76,6 +104,18 @@ def validate_plan(config: dict, *, existing_total_agents: int = 0) -> list[dict]
                 "CLI login and can't run on the hosted runner. Use an API "
                 "provider (Anthropic / OpenAI / Google / OpenRouter) for "
                 "hosted agents, or run this agent locally."
+            )
+        # A custom/local LLM endpoint is written as provider `openai` plus an
+        # api_base. If that address is on the contributor's own machine, the
+        # runner — a different machine entirely — can never reach it, and the
+        # agent would fail every iteration on connection refused.
+        api_base = (agent.get("api_base") or "").strip()
+        if _is_local_api_base(api_base):
+            raise EnrollmentError(
+                f"Agent “{name}” calls {api_base}, which is on your own "
+                "machine or local network — the hosted runner can't reach it. "
+                "Use a provider with a public API for hosted agents, or run "
+                "this agent locally with `python run.py`."
             )
         compute = (agent.get("compute") or "").strip()
         if compute != "c3":

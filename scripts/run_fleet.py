@@ -45,6 +45,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from llm_backends import is_local_api_base
 from proc_utils import group_kwargs, kill_tree, term_tree
 import secrets_local
 
@@ -544,6 +545,11 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
     `secrets.local.json` store, then (on an interactive terminal only) a
     one-time prompt that saves the pasted key to that store. Exits with an
     actionable message when none of those yields a key.
+
+    The exception is a self-hosted endpoint (`api_base` on this machine or the
+    local network — llama.cpp, vLLM, Ollama): those usually check no key at
+    all, so an absent one is normal. Use a stored key if there is one, but
+    never prompt for or demand it.
     """
     provider = agent.get("provider") or "anthropic"
     if provider in ("claude-code", "claude-code-agentic", "codex-agentic"):
@@ -553,6 +559,9 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
 
     target = _PROVIDER_TO_DEFAULT_ENV[provider]
     source = agent.get("api_key_env") or target
+    if is_local_api_base(agent.get("api_base")):
+        stored = secrets_local.resolve(source)
+        return (target, stored) if stored else (None, None)
     value = secrets_local.prompt_and_store(
         source, label=f"{source} for agent {agent['name']}",
     )
