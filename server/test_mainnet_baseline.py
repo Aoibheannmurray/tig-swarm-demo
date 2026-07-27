@@ -224,6 +224,46 @@ async def test_measure_button_queues_onto_the_next_reset():
     print("PASS test_measure_button_queues_onto_the_next_reset")
 
 
+async def test_the_whole_measure_chain_end_to_end():
+    """Request → the reset adopts the mainnet entry → the agent benchmarks it
+    unchanged → the score becomes the baseline.
+
+    This seam shipped broken: the button sets status='requested' while the
+    capture accepted only 'pending', so pressing "Measure" silently disabled
+    the very capture it was asking for. Both halves had tests; the join
+    between them did not — observed live as a swarm that benchmarked the
+    mainnet algorithm and still showed no bar."""
+    db, server = _fresh()
+    await db.init_db()
+    await _seed(db, server)
+    from models import AdminMeasureMainnetBaseline, IterationCreate
+    import trajectory_reset
+
+    key = await _key(db)
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+
+    async with db.connect() as conn:
+        # The reset steers at the mainnet entry...
+        pool = [{"id": 1, "algorithm_code": "other\n", "score": 5.0},
+                {"id": 2, "algorithm_code": _CODE, "score": None}]
+        picked = await trajectory_reset._pick_inactive(conn, CHALLENGE, pool)
+        assert picked["id"] == 2, picked
+        # ...the agent benchmarks it unchanged and publishes.
+        req = IterationCreate(
+            agent_id="darth-vader", title="t", description="d",
+            strategy_tag="mainnet", algorithm_code=picked["algorithm_code"],
+            score=177591.0, feasible=True, challenge=CHALLENGE)
+        captured = await server._maybe_capture_mainnet_baseline(
+            conn, CHALLENGE, req, timestamp=TS)
+        assert captured is True, "a requested measurement must be captured"
+        view = await server._mainnet_baseline_view(conn, CHALLENGE, "max")
+    assert view["status"] == "ready", view
+    assert view["score"] == 177591.0, view
+    assert view["measured_by"] == "agent:darth-vader", view
+    print("PASS test_the_whole_measure_chain_end_to_end")
+
+
 async def test_measure_button_reports_an_unfulfillable_request():
     """Seeding into the seed pool only leaves nothing for a reset to adopt, so
     the request would sit unfulfilled forever. Say that, don't just say OK."""
@@ -271,6 +311,7 @@ async def main():
     await test_editing_the_instance_set_marks_the_score_stale()
     await test_view_is_absent_until_an_algorithm_is_known()
     await test_measure_button_queues_onto_the_next_reset()
+    await test_the_whole_measure_chain_end_to_end()
     await test_measure_button_reports_an_unfulfillable_request()
     await test_measure_button_refuses_when_nothing_is_known()
     print("\nAll mainnet-baseline tests passed.")

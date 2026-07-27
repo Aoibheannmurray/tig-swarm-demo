@@ -1846,12 +1846,17 @@ async def _maybe_capture_mainnet_baseline(
     """Adopt this iteration's score as the mainnet baseline if it benchmarked
     the mainnet algorithm unchanged. Returns whether it did.
 
-    Only fires while the row is still 'pending': once a real measurement
-    exists, a later agent re-running the same code must not overwrite it with
-    a noisier one. Infeasible runs are ignored — the bar has to be a score the
-    algorithm can actually reach here."""
+    Fires while the row is un-measured — both 'pending' (waiting for whoever
+    gets there first) and 'requested' (the admin button steered a reset at it).
+    'requested' MUST be included: the button's whole purpose is to make this
+    happen, and accepting only 'pending' meant pressing it silently disabled
+    the capture it was asking for. Once 'ready', a later agent re-running the
+    same code must not overwrite a real measurement with a noisier one.
+    Infeasible runs are ignored — the bar has to be a score the algorithm can
+    actually reach here."""
     row = await db.get_mainnet_baseline(conn, challenge)
-    if not row or row["status"] != "pending" or not row["code_fingerprint"]:
+    if (not row or row["status"] not in ("pending", "requested")
+            or not row["code_fingerprint"]):
         return False
     if not req.feasible:
         return False
