@@ -534,7 +534,7 @@ def _seed_worktree(
 # ── API keys ───────────────────────────────────────────────────────
 
 
-def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
+def _resolve_api_key(agent: dict, log=print) -> tuple[str | None, str | None]:
     """Return (env_var_to_set, value) for this agent's subprocess.
 
     Returns (None, None) for claude-code, claude-code-agentic, and
@@ -562,6 +562,16 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
     if is_local_api_base(agent.get("api_base")):
         stored = secrets_local.resolve(source)
         return (target, stored) if stored else (None, None)
+    # prompt_and_store() blocks on input() when the key is missing and stdin is
+    # a terminal. Say so FIRST: its own prompt goes to stdout, which the web
+    # companion doesn't show and a redirected launch buffers, so the fleet
+    # looked hung with no clue that it was waiting on a human.
+    if not secrets_local.resolve(source):
+        log(f"  [fleet] {agent['name']}: no {source} found in your environment "
+            f"or secrets.local.json")
+        if sys.stdin.isatty() and not os.environ.get("TIG_SWARM_NO_PROMPT"):
+            log(f"  [fleet] waiting for you to paste {source} at the prompt "
+                f"below (Ctrl-C to cancel)…")
     value = secrets_local.prompt_and_store(
         source, label=f"{source} for agent {agent['name']}",
     )
@@ -577,8 +587,13 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
 
 # ── First-run bootstrap ────────────────────────────────────────────
 
+# Ceiling on the one-shot `setup.py sync` at launch. run_sync's own HTTP calls
+# are short-timeout and fail soft, so this only catches a wedge — but without
+# it the wedge is unbounded and silent (output is captured).
+_SYNC_TIMEOUT_SECS = 180
 
-def _ensure_root_swarm_cache(server_url: str) -> None:
+
+def _ensure_root_swarm_cache(server_url: str, log=print) -> None:
     """Run `setup.py sync` once at the host root so .swarm-cache.json exists
     before _seed_worktree tries to copy it into each worktree.
 
@@ -597,12 +612,31 @@ def _ensure_root_swarm_cache(server_url: str) -> None:
         if cached_url and cached_url != server_url.rstrip("/"):
             cache.unlink()
 
-    print(f"  [fleet] syncing swarm state from {server_url}…")
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "setup.py"), "sync"],
-        cwd=ROOT, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-    )
+    # log(), not print(): the web companion streams the fleet log to the
+    # browser, and everything this function printed went to the companion's own
+    # stdout instead — so a slow or unreachable server showed up in the UI as
+    # the previous line and nothing after it.
+    log(f"  [fleet] syncing swarm state from {server_url}…")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "setup.py"), "sync"],
+            cwd=ROOT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            # Bounded so an unreachable or wedged server can't hang the launch
+            # indefinitely with its output captured and invisible. Generous:
+            # a sleeping Railway instance can take a while to wake.
+            timeout=_SYNC_TIMEOUT_SECS,
+        )
+    except subprocess.TimeoutExpired:
+        sys.exit(
+            f"  [fleet] `setup.py sync` didn't finish within "
+            f"{_SYNC_TIMEOUT_SECS}s while contacting the swarm server.\n"
+            f"  Tried: {server_url}\n"
+            f"  Check that URL opens in a browser (a Railway swarm that has\n"
+            f"  been idle can take a minute to wake — try again once it does).\n"
+            f"  If the URL is wrong, fix `server_url` in fleet.config.json.\n"
+            f"  To see what sync is doing, run it directly: python setup.py sync"
+        )
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
         sys.exit(f"  [fleet] setup.py sync failed:\n{err}")
@@ -1019,25 +1053,32 @@ def cmd_run(
     # C3 API round-trip). Routing them through `on_output` gives the UI real
     # progress and makes any stall visible instead of silent.
     def _fleet_log(msg: str) -> None:
-        print(msg)
+        # flush: Python block-buffers stdout when it isn't a terminal, so a
+        # piped or redirected launch (`| tee`, nohup, a service manager)
+        # otherwise shows NOTHING until the buffer fills — during exactly the
+        # bootstrap where a stall needs to be visible.
+        print(msg, flush=True)
         if on_output is not None:
             try:
                 on_output("fleet", msg.strip())
             except Exception:  # a UI consumer must never kill the fleet
                 pass
 
-    _fleet_log("  [fleet] preparing to launch — resolving keys and swarm state…")
+    # One message used to cover key resolution AND the swarm sync, so a stall
+    # in either looked identical and the user had nothing to act on or report.
+    # Each step now names itself before it can block.
+    _fleet_log(f"  [fleet] resolving API keys for {len(agents)} agent(s)…")
 
     # Resolve every API key up front so missing secrets fail fast before any
     # worktree work or subprocess starts.
-    key_envs = [_resolve_api_key(a) for a in agents]
+    key_envs = [_resolve_api_key(a, log=_fleet_log) for a in agents]
 
     # Make sure .swarm-cache.json exists at root before any worktree is seeded.
     # _seed_worktree copies the root cache into each worktree; without it,
     # run_loop.py's first call to load_config() would bail with the legacy
     # "Run `python setup.py sync` first" error that contributors aren't
     # expected to know how to fix.
-    _ensure_root_swarm_cache(server_url)
+    _ensure_root_swarm_cache(server_url, log=_fleet_log)
 
     use_color = sys.stdout.isatty()
     procs: list[tuple[str, subprocess.Popen, threading.Thread]] = []
