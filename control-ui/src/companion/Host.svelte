@@ -236,6 +236,14 @@
 
   // Copy a credential to the clipboard for pasting into the Admin Console.
   // Keyed by field so only the clicked row flips to "Copied".
+  // Credentials in the persistent "Manage this swarm" card are masked until
+  // asked for. They're already in memory (/local-api/swarm/admin sends them on
+  // every load), so this isn't about network exposure — it's so a host on a
+  // screenshare or a projector doesn't broadcast their admin key by opening a
+  // page. Reveal is per-field and resets on reload.
+  let revealed: Record<string, boolean> = $state({});
+  const MASK = "••••••••••••••••";
+
   let copied = $state("");
   async function copyText(field: string, text: string) {
     try {
@@ -636,7 +644,32 @@
     <ul class="creds">
       <li><span>Server</span><a href={admin.server_url} target="_blank" rel="noreferrer">{admin.server_url}</a></li>
       <li><span>Active challenge</span><b>{admin.active_challenge ?? "—"}</b></li>
+      <!-- The provisioning card shows these once and is gone on the next page
+           load, which left hosts who didn't copy them with no way back to
+           them short of finding swarm.admin.json themselves. -->
+      {#each [["admin_key", "Admin key", admin.admin_key], ["swarm_password", "Base password", admin.swarm_password]] as [field, label, value]}
+        {#if value}
+          <li>
+            <span>{label}</span>
+            <div class="credval">
+              <code class:masked={!revealed[field]}>{revealed[field] ? value : MASK}</code>
+              <button type="button" class="copybtn"
+                onclick={() => (revealed[field] = !revealed[field])}>
+                {revealed[field] ? "Hide" : "Reveal"}
+              </button>
+              <button type="button" class="copybtn" onclick={() => copyText(field, value)}>
+                {copied === field ? "Copied" : "Copy"}
+              </button>
+            </div>
+          </li>
+        {/if}
+      {/each}
     </ul>
+    <div class="hint" style="margin:-2px 0 4px">
+      Stored locally in <code>swarm.admin.json</code>, never uploaded. The base
+      password doesn't authenticate on its own — each contributor gets their own
+      derived one from a join link.
+    </div>
     <div class="row" style="align-items:flex-end">
       <div class="field" style="margin-bottom:0">
         <label for="sw">Switch active challenge</label>
@@ -755,6 +788,10 @@
   .creds li b.bad { color: #c0392b; }
   .credval { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .credval code { overflow-wrap: anywhere; }
+  /* Masked dots sit low and cramped in the mono face; nudge them onto the
+     baseline so a hidden row lines up with the revealed one and the list
+     doesn't jump when it's toggled. */
+  .credval code.masked { letter-spacing: 2px; color: var(--ink-dim); user-select: none; }
   .copybtn { flex: 0 0 auto; font-size: 12px; padding: 3px 9px; border: 1px solid var(--border-subtle); border-radius: 6px; background: transparent; color: var(--ink-dim); cursor: pointer; }
   .copybtn:hover { color: var(--ink); border-color: var(--ink-dim); }
   .tracks { margin: 4px 0 14px; }
