@@ -1,6 +1,7 @@
 import aiosqlite
 import base64
 import gzip
+import hashlib
 import json
 import secrets
 from contextlib import asynccontextmanager
@@ -244,6 +245,41 @@ CREATE TABLE IF NOT EXISTS seed_pool (
 -- shape as fleet.config.json, secrets hard-rejected at the API layer.
 -- `tacit_text` is the contributor's hosted tacit-knowledge notes. The
 -- local runner fetches both in --join mode (P2).
+-- The TIG mainnet algorithm's score ON THIS SWARM'S OWN INSTANCES, so the
+-- dashboard can show members the bar they are trying to clear. One row per
+-- challenge: the top-adoption mainnet algorithm, benchmarked unchanged.
+--
+-- Deliberately NOT measured during `setup.py create` — nobody should wait on a
+-- benchmark to finish standing up a swarm. A row starts life 'pending' (a
+-- single cheap INSERT) and is filled in afterwards by whichever comes first:
+-- the host measuring it on demand, or an agent organically benchmarking the
+-- mainnet seed, which the server recognises by `code_fingerprint`.
+--
+-- `config_fingerprint` is what makes the comparison honest. A score is only
+-- meaningful against the exact instance set that produced it, so we record a
+-- hash of the challenge's tracks + timeout at benchmark time; when the host
+-- later edits either, the dashboard marks the baseline stale instead of
+-- silently comparing against a different problem.
+CREATE TABLE IF NOT EXISTS mainnet_baselines (
+    challenge TEXT PRIMARY KEY,
+    algo_name TEXT NOT NULL,
+    adoption_pct REAL,
+    -- NULL until measured; `status` says whether that's expected.
+    score REAL,
+    feasible INTEGER NOT NULL DEFAULT 1,
+    -- 'pending'   — known algorithm, not benchmarked here yet
+    -- 'ready'     — score is real and current
+    -- 'unavailable' — no compatible mainnet algorithm for this challenge
+    status TEXT NOT NULL DEFAULT 'pending',
+    -- sha256 of the mainnet algorithm's code, so an agent that benchmarks the
+    -- seed unchanged is recognised and its score adopted for free.
+    code_fingerprint TEXT,
+    config_fingerprint TEXT,
+    measured_by TEXT,
+    benchmarked_at TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS contributor_configs (
     username TEXT PRIMARY KEY,
     config_json TEXT,
@@ -1301,6 +1337,109 @@ async def get_challenge_config(
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
+
+
+# ── Mainnet baseline ────────────────────────────────────────────────
+
+
+def config_fingerprint(tracks: object, timeout: object) -> str:
+    """Identity of the instance set a score was earned on.
+
+    Two scores are only comparable if they solved the same problems, so the
+    dashboard needs to know when the host has edited tracks or the solver
+    timeout since the baseline was measured."""
+    payload = json.dumps({"tracks": tracks, "timeout": timeout}, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def code_fingerprint(algorithm_code: str) -> str:
+    """Identity of an algorithm's source, so a score published for the
+    unmodified mainnet algorithm can be recognised wherever it comes from."""
+    return hashlib.sha256(algorithm_code.encode("utf-8")).hexdigest()
+
+
+async def get_mainnet_baseline(
+    conn: aiosqlite.Connection, challenge: str,
+) -> dict | None:
+    cursor = await conn.execute(
+        "SELECT * FROM mainnet_baselines WHERE challenge = ?", (challenge,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def record_mainnet_algorithm(
+    conn: aiosqlite.Connection,
+    challenge: str,
+    algo_name: str,
+    *,
+    created_at: str,
+    adoption_pct: float | None = None,
+    code_fingerprint_: str | None = None,
+) -> str:
+    """Note WHICH mainnet algorithm this challenge is measured against, without
+    measuring it. One INSERT — safe to call from anything on the setup path,
+    because it adds no benchmark and no network round trip of its own.
+
+    Returns 'inserted' | 'updated' | 'unchanged'. A new algorithm (mainnet's
+    top-adoption entry changed) resets the row to pending: the old score
+    belongs to different code."""
+    existing = await get_mainnet_baseline(conn, challenge)
+    if existing and existing["algo_name"] == algo_name and (
+        code_fingerprint_ is None or existing["code_fingerprint"] == code_fingerprint_
+    ):
+        return "unchanged"
+    if existing:
+        await conn.execute(
+            "UPDATE mainnet_baselines SET algo_name = ?, adoption_pct = ?, "
+            "code_fingerprint = ?, score = NULL, status = 'pending', "
+            "config_fingerprint = NULL, measured_by = NULL, benchmarked_at = NULL "
+            "WHERE challenge = ?",
+            (algo_name, adoption_pct, code_fingerprint_, challenge),
+        )
+        return "updated"
+    await conn.execute(
+        "INSERT INTO mainnet_baselines (challenge, algo_name, adoption_pct, "
+        "code_fingerprint, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+        (challenge, algo_name, adoption_pct, code_fingerprint_, created_at),
+    )
+    return "inserted"
+
+
+async def set_mainnet_baseline_score(
+    conn: aiosqlite.Connection,
+    challenge: str,
+    score: float,
+    *,
+    feasible: bool,
+    benchmarked_at: str,
+    measured_by: str,
+    config_fingerprint_: str | None = None,
+) -> bool:
+    """Fill in a measured score. Returns False when no row exists — the caller
+    must have recorded WHICH algorithm it measured first, so a score can never
+    be attributed to an unknown one."""
+    cursor = await conn.execute(
+        "UPDATE mainnet_baselines SET score = ?, feasible = ?, status = 'ready', "
+        "config_fingerprint = ?, measured_by = ?, benchmarked_at = ? "
+        "WHERE challenge = ?",
+        (score, 1 if feasible else 0, config_fingerprint_, measured_by,
+         benchmarked_at, challenge),
+    )
+    return cursor.rowcount > 0
+
+
+async def mark_mainnet_baseline_unavailable(
+    conn: aiosqlite.Connection, challenge: str, *, created_at: str,
+) -> None:
+    """No compatible mainnet algorithm exists for this challenge. Recorded so
+    the dashboard can say so once instead of showing a permanent 'pending'."""
+    await conn.execute(
+        "INSERT INTO mainnet_baselines (challenge, algo_name, status, created_at) "
+        "VALUES (?, '', 'unavailable', ?) "
+        "ON CONFLICT(challenge) DO UPDATE SET status = 'unavailable'",
+        (challenge, created_at),
+    )
 
 
 async def list_challenge_configs(conn: aiosqlite.Connection) -> list[dict]:

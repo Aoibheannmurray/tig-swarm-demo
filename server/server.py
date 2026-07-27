@@ -23,6 +23,7 @@ from models import (
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
     AdminRevoke, AdminSeedInactive, AdminSeedPool, AdminSeedFromMainnet,
     AdminClearInactive,
+    AdminMeasureMainnetBaseline,
     AdminSeedsQuery,
     ContributorConfigPut, MAX_CONTRIB_CONFIG_LEN,
     MessageCreate,
@@ -320,6 +321,43 @@ def get_num_instances_for(cfg: dict, solution_data=None) -> int:
         return total or 1
     except Exception:
         return 1
+
+
+async def _mainnet_baseline_view(conn, challenge: str, direction: str) -> dict | None:
+    """The mainnet bar for this challenge, as the dashboard needs it.
+
+    Returns None when the swarm has never been told which mainnet algorithm it
+    is measured against — the panels then render nothing rather than an empty
+    frame. Otherwise always carries `status`, so the UI can distinguish "not
+    measured yet" from "no mainnet algorithm exists for this challenge" from a
+    real score.
+
+    `stale` is the honest part: a score only means something against the
+    instance set that produced it, so if the host has edited this challenge's
+    tracks or timeout since, we say so instead of comparing a number against a
+    different problem."""
+    row = await db.get_mainnet_baseline(conn, challenge)
+    if row is None:
+        return None
+    cfg = await db.get_challenge_config(conn, challenge)
+    current_fp = db.config_fingerprint(
+        json.loads(cfg["tracks"]) if cfg and cfg.get("tracks") else None,
+        cfg.get("timeout") if cfg else None,
+    )
+    stale = bool(
+        row["config_fingerprint"] and row["config_fingerprint"] != current_fp
+    )
+    return {
+        "algorithm": row["algo_name"] or None,
+        "adoption_pct": row["adoption_pct"],
+        "score": row["score"] if row["status"] == "ready" else None,
+        "feasible": bool(row["feasible"]),
+        "status": row["status"],
+        "measured_by": row["measured_by"],
+        "benchmarked_at": row["benchmarked_at"],
+        "stale": stale,
+        "direction": direction,
+    }
 
 
 async def get_baseline_score(conn, challenge: str) -> float | None:
@@ -1676,6 +1714,7 @@ async def _dashboard_state(challenge: str, credentialed: bool = False) -> dict:
         leaderboard = await db.compute_leaderboard(
             conn, challenge, await inactive_cutoff(), direction=direction,
         )
+        mainnet_baseline = await _mainnet_baseline_view(conn, challenge, direction)
 
     global_best_score = global_best["score"] if global_best else None
 
@@ -1744,6 +1783,7 @@ async def _dashboard_state(challenge: str, credentialed: bool = False) -> dict:
             for h in recent_hypotheses
         ],
         "leaderboard": leaderboard,
+        "mainnet_baseline": mainnet_baseline,
     }
 
 
@@ -1798,6 +1838,35 @@ class _IterationVerdict:
     target_best_experiment_id: str | None
     delta_vs_best_pct: float | None
     delta_vs_trajectory_best_pct: float | None
+
+
+async def _maybe_capture_mainnet_baseline(
+    conn, challenge: str, req: IterationCreate, *, timestamp: str,
+) -> bool:
+    """Adopt this iteration's score as the mainnet baseline if it benchmarked
+    the mainnet algorithm unchanged. Returns whether it did.
+
+    Only fires while the row is still 'pending': once a real measurement
+    exists, a later agent re-running the same code must not overwrite it with
+    a noisier one. Infeasible runs are ignored — the bar has to be a score the
+    algorithm can actually reach here."""
+    row = await db.get_mainnet_baseline(conn, challenge)
+    if not row or row["status"] != "pending" or not row["code_fingerprint"]:
+        return False
+    if not req.feasible:
+        return False
+    if db.code_fingerprint(req.algorithm_code or "") != row["code_fingerprint"]:
+        return False
+    cfg = await db.get_challenge_config(conn, challenge)
+    await db.set_mainnet_baseline_score(
+        conn, challenge, req.score, feasible=True, benchmarked_at=timestamp,
+        measured_by=f"agent:{req.agent_id}",
+        config_fingerprint_=db.config_fingerprint(
+            json.loads(cfg["tracks"]) if cfg and cfg.get("tracks") else None,
+            cfg.get("timeout") if cfg else None,
+        ),
+    )
+    return True
 
 
 async def _evaluate_iteration(
@@ -2243,6 +2312,15 @@ async def create_iteration(
             conn, req, challenge=challenge, direction=direction,
             verdict=verdict, exp_id=exp_id, trajectory_id=trajectory_id,
             enc=enc, timestamp=timestamp,
+        )
+
+        # Free measurement: an agent that benchmarks the mainnet seed unchanged
+        # (the seed-adoption path does exactly this before mutating) has just
+        # produced the number the dashboard wants. Recognise it by code hash so
+        # nobody has to spend a second benchmark on it — and so a swarm that
+        # never runs the host-side measurement still gets a real bar.
+        await _maybe_capture_mainnet_baseline(
+            conn, challenge, req, timestamp=timestamp,
         )
 
         agent_name = await get_agent_name(conn, req.agent_id)
@@ -3113,6 +3191,12 @@ async def admin_seed_from_mainnet(req: AdminSeedFromMainnet):
         # Blocking urllib fetch — off the event loop.
         info, note = await asyncio.to_thread(mainnet_seed.fetch_top_reshaped, ch)
         if info is None:
+            # Record the absence too: the dashboard should say "no mainnet
+            # algorithm for this challenge" once, not sit on "pending" forever.
+            async with db.connect() as conn:
+                await db.mark_mainnet_baseline_unavailable(
+                    conn, ch, created_at=now())
+                await conn.commit()
             results.append({"challenge": ch, "ok": False, "reason": note})
             continue
         code_files = info["code_files"]
@@ -3121,6 +3205,14 @@ async def admin_seed_from_mainnet(req: AdminSeedFromMainnet):
         actions = {}
         timestamp = now()
         async with db.connect() as conn:
+            # Note WHICH algorithm this challenge is measured against. One
+            # INSERT, no benchmark — the score is filled in later, by the host
+            # on demand or by the first agent to run this code unchanged.
+            actions["baseline"] = await db.record_mainnet_algorithm(
+                conn, ch, info["algo_name"], created_at=timestamp,
+                adoption_pct=round(info["adoption"] / 1e16, 4),
+                code_fingerprint_=db.code_fingerprint(entry),
+            )
             if want_seed:
                 actions["seed_pool"] = await db.upsert_authored_seed(
                     conn, ch, "mainnet", entry, created_at=timestamp,
@@ -3141,6 +3233,64 @@ async def admin_seed_from_mainnet(req: AdminSeedFromMainnet):
             "adoption_pct": round(info["adoption"] / 1e16, 4), "actions": actions,
         })
     return {"target": req.target, "results": results}
+
+
+@app.post("/api/admin/measure_mainnet_baseline")
+async def admin_measure_mainnet_baseline(req: AdminMeasureMainnetBaseline):
+    """Ask the swarm to measure the mainnet algorithm on its own instances.
+
+    This server has no Docker and no C3 — it cannot benchmark anything — so
+    the button queues the work for the fleet rather than doing it. The mainnet
+    algorithm is already in the inactive pool with no score; marking the
+    baseline 'requested' makes the next trajectory reset adopt THAT entry
+    instead of a random one, and the existing needs_benchmark path has the
+    agent benchmark it unchanged before mutating. The published score is
+    recognised by code fingerprint and becomes the baseline.
+
+    So it costs the swarm no extra benchmark — it steers one reset the swarm
+    was going to do anyway. Returns the queue state; the dashboard shows
+    'measuring' until a score lands."""
+    await verify_admin(req)
+    challenge = await resolve_challenge(req.challenge)
+    async with db.connect() as conn:
+        row = await db.get_mainnet_baseline(conn, challenge)
+        if row is None:
+            raise HTTPException(
+                status_code=400,
+                detail=("No mainnet algorithm recorded for this challenge yet. "
+                        "Run “Seed from mainnet” first — it fetches the "
+                        "top-adoption algorithm and notes which one applies."),
+            )
+        if row["status"] == "unavailable":
+            raise HTTPException(
+                status_code=400,
+                detail=f"No compatible mainnet algorithm exists for {challenge}.",
+            )
+        # Make sure the thing to be measured is actually adoptable. Seeding
+        # with target="seed_pool" alone leaves nothing in the inactive pool for
+        # a reset to pick up, and the request would never be fulfilled.
+        agent_id = await db.ensure_synthetic_agent(conn, "tig-foundation", now())
+        in_pool = await db.count_inactive_from_agent(conn, agent_id, challenge)
+        await conn.execute(
+            "UPDATE mainnet_baselines SET status = 'requested', score = NULL, "
+            "measured_by = NULL, benchmarked_at = NULL WHERE challenge = ?",
+            (challenge,),
+        )
+        await conn.commit()
+    return {
+        "challenge": challenge,
+        "algorithm": row["algo_name"],
+        "status": "requested",
+        "queued": bool(in_pool),
+        "detail": (
+            "Queued — the next agent trajectory reset on this challenge will "
+            "benchmark it unchanged and publish the score."
+            if in_pool else
+            "Queued, but no mainnet entry is in the inactive pool for agents "
+            "to adopt. Re-run “Seed from mainnet” with target “inactive” or "
+            "“both”, or the request cannot be fulfilled."
+        ),
+    }
 
 
 @app.post("/api/admin/seeds")

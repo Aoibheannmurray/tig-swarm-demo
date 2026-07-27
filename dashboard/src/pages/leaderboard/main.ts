@@ -55,6 +55,15 @@ async function loadInitialState(apiUrl: string) {
         timestamp: new Date().toISOString(),
       });
     }
+    // The mainnet bar for this challenge — drawn as a threshold on the
+    // chart and a ranked row in the leaderboard. Sent even when null so a
+    // challenge switch clears the previous challenge's bar.
+    handleMessage({
+      type: "mainnet_baseline",
+      challenge: getViewedChallenge(),
+      baseline: state.mainnet_baseline ?? null,
+      timestamp: new Date().toISOString(),
+    });
     console.log(`[Leaderboard] Loaded ${state.leaderboard?.length ?? 0} entries`);
   } catch (e) {
     console.warn("[Leaderboard] Failed to load initial state:", e);

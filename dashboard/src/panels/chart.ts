@@ -7,8 +7,9 @@ import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
 import { getDashboardUrls } from "../lib/bootstrap";
 import { isBetter } from "../lib/swarmConfig";
+import { isComparable } from "../lib/mainnetBaseline";
 import { AgentProgressStore, type AgentExperiment } from "./agentProgressStore";
-import type { Panel, WSMessage } from "../types";
+import type { MainnetBaseline, Panel, WSMessage } from "../types";
 
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
 const GRID_LINE = () => token("--border-subtle", "rgba(26,26,26,0.08)");
@@ -44,6 +45,9 @@ export class ChartPanel implements Panel {
   private svg!: any;
   private g!: any;
   private globalData: DataPoint[] = [];
+  // The mainnet threshold for the viewed challenge (null until /api/state
+  // reports one). Survives `reset`: it belongs to the challenge, not the run.
+  private baseline: MainnetBaseline | null = null;
   private globalStartTime = 0;
   private width = 0;
   private height = 0;
@@ -201,6 +205,11 @@ export class ChartPanel implements Panel {
   }
 
   handleMessage(msg: WSMessage) {
+    if (msg.type === "mainnet_baseline") {
+      this.baseline = msg.baseline;
+      this.redraw();
+      return;
+    }
     if (msg.type === "reset") {
       this.globalData = [];
       this.globalStartTime = 0;
@@ -433,6 +442,8 @@ export class ChartPanel implements Panel {
         .attr("stroke", GRID_LINE())
         .attr("stroke-width", 0.5);
     });
+
+    this.drawBaseline(chartG, yScale, w, fs);
 
     const trailTime = latestData + xPad;
     for (let i = 0; i < this.globalData.length; i++) {
@@ -757,10 +768,67 @@ export class ChartPanel implements Panel {
 
   private getGlobalYDomain(): [number, number] | null {
     if (this.globalData.length < 1) return null;
-    const scoreMin = min(this.globalData, (d) => d.score);
-    const scoreMax = max(this.globalData, (d) => d.score);
+    let scoreMin = min(this.globalData, (d) => d.score);
+    let scoreMax = max(this.globalData, (d) => d.score);
     if (scoreMin == null || scoreMax == null) return null;
+    // Keep the mainnet line inside the view. A threshold the swarm hasn't
+    // reached yet sits above every plotted point, and a line drawn off the top
+    // of the chart is worse than no line — the one thing it has to show is how
+    // far away it is.
+    const bar = this.baselineScore();
+    if (bar !== null) {
+      scoreMin = Math.min(scoreMin, bar);
+      scoreMax = Math.max(scoreMax, bar);
+    }
     return this.padYDomain(scoreMin, scoreMax);
+  }
+
+  // The mainnet score, only when it can honestly be drawn on this axis.
+  private baselineScore(): number | null {
+    return isComparable(this.baseline) ? this.baseline!.score : null;
+  }
+
+  // The dashed mainnet threshold plus its label. Drawn into the UNCLIPPED
+  // group with the gridlines: it is a reference like an axis, not a data mark,
+  // so it should span the full plot width and keep its label readable at the
+  // edge even when the user has panned the data away.
+  private drawBaseline(chartG: any, yScale: any, w: number, fs: number): void {
+    const bar = this.baselineScore();
+    if (bar === null) return;
+    const y = yScale(bar);
+    // Panned out of view — drawing it pinned to an edge would misrepresent
+    // where the bar actually sits.
+    if (!Number.isFinite(y) || y < 0 || y > yScale.range()[0]) return;
+
+    const accent = token("--color-accent", "#c2410c");
+    chartG.append("line")
+      .attr("class", "chart-mainnet-line")
+      .attr("x1", 0).attr("x2", w)
+      .attr("y1", y).attr("y2", y)
+      .attr("stroke", accent)
+      .attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", "7 5")
+      .attr("opacity", 0.85);
+
+    const b = this.baseline!;
+    const label = `mainnet · ${b.algorithm ?? "?"} · ${formatScore(bar)}`;
+    // Above the line normally; below it when the line is near the top, so the
+    // text never escapes the plot.
+    const above = y > fs + 8;
+    const text = chartG.append("text")
+      .attr("class", "chart-mainnet-label")
+      .attr("x", w - 4)
+      .attr("y", above ? y - 6 : y + fs + 4)
+      .attr("text-anchor", "end")
+      .attr("fill", accent)
+      .attr("font-size", `${Math.max(9, fs - 1)}px`)
+      .attr("font-family", "var(--mono, monospace)")
+      .text(label);
+    // A readable halo: the line and the best-so-far curve both run underneath.
+    text.attr("paint-order", "stroke")
+      .attr("stroke", token("--bg-page", "#fff"))
+      .attr("stroke-width", 3)
+      .attr("stroke-linejoin", "round");
   }
 
   // Pad the y-domain in the active scale's own space. Linear mode pads

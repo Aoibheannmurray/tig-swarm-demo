@@ -35,7 +35,40 @@ export type WSMessage =
   | AdminBroadcastMsg
   | ResetMsg
   | TrajectoryReset
+  | MainnetBaselineUpdate
   | SwarmConfigUpdated;
+
+// The TIG mainnet algorithm's score on THIS swarm's own instances — the bar
+// members are trying to clear. Served on /api/state as `mainnet_baseline`.
+export interface MainnetBaseline {
+  // Mainnet algorithm name (e.g. "hgs_advance"). Null when none applies.
+  algorithm: string | null;
+  // Share of mainnet adoption it holds, as a percentage.
+  adoption_pct: number | null;
+  // Null unless status === "ready".
+  score: number | null;
+  feasible: boolean;
+  // "pending"     — algorithm known, not benchmarked here yet
+  // "requested"   — a measurement is queued onto the next trajectory reset
+  // "ready"       — score is real
+  // "unavailable" — no compatible mainnet algorithm for this challenge
+  status: "pending" | "requested" | "ready" | "unavailable";
+  measured_by: string | null;
+  benchmarked_at: string | null;
+  // The host edited tracks/timeout since it was measured, so the score was
+  // earned on a different instance set and must not be compared as-is.
+  stale: boolean;
+  direction: "min" | "max";
+}
+
+// Synthesized by each page from /api/state (not a server broadcast) so the
+// panels take it through the same handleMessage path as everything else.
+export interface MainnetBaselineUpdate {
+  type: "mainnet_baseline";
+  challenge: string;
+  baseline: MainnetBaseline | null;
+  timestamp: string;
+}
 
 export interface AgentJoined {
   type: "agent_joined";

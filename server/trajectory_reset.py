@@ -75,6 +75,28 @@ class ResetOutcome:
     timestamp: str
 
 
+async def _pick_inactive(conn, challenge: str, inactive_pool: list) -> dict:
+    """Which pooled algorithm this reset adopts — random, except when the host
+    has asked for a mainnet baseline measurement.
+
+    The server can't benchmark anything itself (no Docker, no C3 in its
+    image), so an admin "measure it" request is a standing preference rather
+    than a job: the next reset that happens anyway adopts the mainnet entry,
+    benchmarks it unchanged via the existing needs_benchmark path, and the
+    published score is recognised by fingerprint. Costs the swarm nothing it
+    wasn't already spending.
+    """
+    row = await db.get_mainnet_baseline(conn, challenge)
+    if row and row["status"] == "requested" and row["code_fingerprint"]:
+        for entry in inactive_pool:
+            # Unscored: a scored entry would inherit its score as the floor and
+            # skip the benchmark, which is the whole point of adopting it here.
+            if entry.get("score") is None and db.code_fingerprint(
+                    entry.get("algorithm_code") or "") == row["code_fingerprint"]:
+                return entry
+    return random.choice(inactive_pool)
+
+
 async def maybe_reset_trajectory(
     conn,
     *,
@@ -167,7 +189,7 @@ async def maybe_reset_trajectory(
                       "reason": reset_reason}
         seed_start = _start
     else:
-        picked = random.choice(inactive_pool)
+        picked = await _pick_inactive(conn, challenge, inactive_pool)
         new_code = picked["algorithm_code"]
         new_kernel_code = picked.get("kernel_code")
         new_files = db.row_files(picked)

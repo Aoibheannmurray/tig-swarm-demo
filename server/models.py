@@ -294,6 +294,12 @@ class AdminSeedPool(AdminAuth):
     score: Optional[float] = None
 
 
+class AdminMeasureMainnetBaseline(AdminAuth):
+    """Owner-only: queue a measurement of the mainnet algorithm on this
+    swarm's own instances. `challenge` omitted = the active one."""
+    challenge: Optional["ChallengeName"] = None
+
+
 class AdminSeedsQuery(AdminAuth):
     """Owner-only: list one challenge's seed pool as metadata (tags, sources,
     scores, code sizes — not the code bodies). Read-only; exists so the Admin
