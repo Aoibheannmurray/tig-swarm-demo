@@ -274,6 +274,91 @@ def main() -> int:
         control_server._refresh_windows_path()
         check(True, "PATH refresh is a safe no-op off Windows")
 
+        print("browser launch (WSL / headless)")
+        import io as _io
+        import contextlib as _contextlib
+        import shutil as _shutil
+        import subprocess as _subprocess
+        orig_which, orig_run = _shutil.which, _subprocess.run
+        orig_environ = dict(_os.environ)
+
+        def _fake_platform(available: set[str], rc: dict[str, int]):
+            """Stub which()/run() so only `available` tools exist, each exiting
+            with the rc given. Returns the list that records what was run."""
+            calls: list[list[str]] = []
+            _shutil.which = lambda name, *a, **k: (
+                f"/fake/{name}" if name in available else None
+            )
+
+            def _run(argv, *a, **k):
+                calls.append(list(argv))
+                return _subprocess.CompletedProcess(argv, rc.get(argv[0], 0))
+
+            _subprocess.run = _run
+            return calls
+
+        try:
+            for var in ("WSL_DISTRO_NAME", "WSL_INTEROP", "DISPLAY", "WAYLAND_DISPLAY"):
+                _os.environ.pop(var, None)
+            _os.environ["WSL_DISTRO_NAME"] = "Ubuntu"
+            check(control_server._is_wsl(), "WSL detected from WSL_DISTRO_NAME")
+
+            # wslu installed: the URL goes to wslview and nothing else is tried.
+            calls = _fake_platform({"wslview", "cmd.exe", "explorer.exe"}, {})
+            check(control_server._open_browser("http://127.0.0.1:8787/"),
+                  "WSL: opens via wslview")
+            check(len(calls) == 1 and calls[0][0] == "wslview",
+                  "WSL: wslview is preferred and stops the chain")
+
+            # No wslu — falls through to the Windows shell openers.
+            calls = _fake_platform({"cmd.exe", "explorer.exe"}, {})
+            check(control_server._open_browser("http://127.0.0.1:8787/"),
+                  "WSL: falls back to cmd.exe when wslview is absent")
+            check(calls[-1][0] == "cmd.exe" and "start" in calls[-1],
+                  "WSL: cmd.exe start carries the URL")
+
+            # explorer.exe is the last resort AND exits 1 on success — the
+            # launch must still count, or the user gets a bogus warning.
+            calls = _fake_platform({"explorer.exe"}, {"explorer.exe": 1})
+            check(control_server._open_browser("http://127.0.0.1:8787/"),
+                  "WSL: explorer.exe exit code 1 still counts as opened")
+
+            # Interop disabled: no opener exists, so report failure rather than
+            # claiming a tab was opened.
+            calls = _fake_platform(set(), {})
+            check(not control_server._open_browser("http://127.0.0.1:8787/"),
+                  "WSL: no opener available reports failure")
+
+            # ...and the caller tells the user to click the link themselves.
+            buf = _io.StringIO()
+            with _contextlib.redirect_stdout(buf):
+                control_server._announce_browser("http://127.0.0.1:8787/", False)
+            check("127.0.0.1:8787" in buf.getvalue() and "yourself" in buf.getvalue(),
+                  "failed launch prints the URL to visit manually")
+            buf = _io.StringIO()
+            with _contextlib.redirect_stdout(buf):
+                control_server._announce_browser("http://127.0.0.1:8787/", True)
+            check(buf.getvalue() == "", "--no-browser stays silent")
+
+            # Headless Linux (no WSL, no display): skip xdg-open entirely.
+            if sys.platform not in ("darwin", "win32"):
+                _os.environ.pop("WSL_DISTRO_NAME", None)
+                orig_read = control_server.Path.read_text
+                control_server.Path.read_text = lambda self, *a, **k: (
+                    "Linux version 6.8.0-71-generic"
+                    if str(self) == "/proc/version" else orig_read(self, *a, **k)
+                )
+                try:
+                    check(not control_server._is_wsl(), "plain Linux is not WSL")
+                    check(not control_server._open_browser("http://127.0.0.1:8787/"),
+                          "headless Linux: no launch attempted")
+                finally:
+                    control_server.Path.read_text = orig_read
+        finally:
+            _shutil.which, _subprocess.run = orig_which, orig_run
+            _os.environ.clear()
+            _os.environ.update(orig_environ)
+
         print("fleet status / websocket")
         check(c.get("/local-api/fleet/status").json()["state"] == "idle", "fleet idle before start")
         # TestClient stamps Host "testserver" on WS handshakes regardless of

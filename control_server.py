@@ -1964,14 +1964,93 @@ def _clear_companion_portfile() -> None:
             pass
 
 
+def _is_wsl() -> bool:
+    """Running under the Windows Subsystem for Linux? The browser lives on the
+    Windows side, so xdg-open (and every browser it probes for) is absent."""
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
+def _open_browser_wsl(url: str) -> bool:
+    """Hand the URL to Windows. Tries the openers in preference order and
+    returns whether one of them took it."""
+    # cmd.exe warns ("UNC paths are not supported") and falls back to C:\Windows
+    # when its cwd is inside the Linux filesystem; starting it from /mnt/c keeps
+    # that off the user's screen.
+    cwd = "/mnt/c" if os.path.isdir("/mnt/c") else None
+    candidates: list[tuple[list[str], bool]] = [
+        # (argv, trust the exit code)
+        (["wslview", url], True),  # wslu — the purpose-built one, if installed
+        (["powershell.exe", "-NoProfile", "-NonInteractive",
+          "-Command", "Start-Process", f"'{url}'"], True),
+        (["cmd.exe", "/c", "start", "", url], True),
+        # explorer.exe opens the URL and *then* exits 1 — a long-standing quirk.
+        # Its exit code says nothing, so take the launch as success.
+        (["explorer.exe", url], False),
+    ]
+    for argv, trust_rc in candidates:
+        if shutil.which(argv[0]) is None:
+            continue
+        try:
+            rc = subprocess.run(
+                argv, cwd=cwd, timeout=15,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if rc == 0 or not trust_rc:
+            return True
+    return False
+
+
+def _open_browser(url: str) -> bool:
+    """Best-effort browser launch, reporting whether it actually happened.
+
+    webbrowser.open() is not enough on its own: under WSL it finds xdg-open,
+    which probes ~16 Linux browsers that aren't installed, prints a wall of
+    "not found" to stderr, and gives up — while webbrowser still reports
+    success (it only checks that the child spawned). So route WSL to the
+    Windows side, skip the attempt entirely where there's no GUI to open into,
+    and keep xdg-open's spam off the terminal in the remaining cases.
+    """
+    if _is_wsl():
+        return _open_browser_wsl(url)
+    if sys.platform not in ("darwin", "win32") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        return False  # headless box / container — nothing to open into
+    try:
+        # The browser child inherits whatever fd 2 is at spawn time, so silence
+        # it at the fd level. Nothing else writes to stderr here: this runs
+        # before uvicorn starts, on the main thread.
+        with open(os.devnull, "w") as devnull:
+            saved = os.dup(2)
+            try:
+                os.dup2(devnull.fileno(), 2)
+                return bool(webbrowser.open(url))
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+    except Exception:
+        return False
+
+
+def _announce_browser(url: str, no_browser: bool) -> None:
+    """Open the tab, or tell the user to click the link themselves."""
+    if no_browser:
+        return
+    if not _open_browser(url):
+        print(f"  (couldn't open a browser automatically — visit {url} yourself)")
+
+
 def _reopen_running(url: str, no_browser: bool) -> int:
     print(f"TIG Swarm Control is already running — opening {url}")
     print("  (Ctrl-C in ITS terminal stops it.)")
-    if not no_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+    _announce_browser(url, no_browser)
     return 0
 
 
@@ -2064,11 +2143,7 @@ def main() -> int:
             "anyone who can reach this host. The DNS-rebinding guard is "
             "DISABLED for this bind. Only do this on a trusted network."
         )
-    if not args.no_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+    _announce_browser(url, args.no_browser)
 
     _write_companion_portfile(host, port)
     try:
