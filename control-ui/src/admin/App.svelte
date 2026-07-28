@@ -247,11 +247,16 @@
   let knobDraft: Record<string, number> = $state({});
   let settingsMsg = $state("");
   let hpoMsg = $state("");
+  // Failed-attempts archive is a boolean toggle (stored as 0/1 in the
+  // config table), so it lives outside the numeric knobDraft and is folded
+  // into the swarm-settings save below.
+  let archiveDraft: boolean | undefined = $state(undefined);
   $effect(() => {
     if (config && tab === "settings") {
       for (const k of ALL_KNOBS) {
         if (knobDraft[k.key] === undefined) knobDraft[k.key] = config[k.key];
       }
+      if (archiveDraft === undefined) archiveDraft = !!config.failed_attempts_archive;
     }
   });
   async function saveKnobs(knobs: { key: string }[], which: "swarm" | "hpo") {
@@ -263,6 +268,10 @@
       if (v !== undefined && v !== null && Number.isFinite(v) && v !== config[k.key]) {
         changed[k.key] = Math.floor(v);
       }
+    }
+    if (which === "swarm" && archiveDraft !== undefined
+        && Number(archiveDraft) !== (config.failed_attempts_archive ?? 0)) {
+      changed.failed_attempts_archive = archiveDraft ? 1 : 0;
     }
     if (!Object.keys(changed).length) { setMsg("Nothing changed."); return; }
     try {
@@ -602,6 +611,23 @@
             </div>
           </div>
         {/each}
+        <div class="row knobrow" style="align-items:center">
+          <div style="flex:1">
+            <div>Failed-attempts archive <span class="mono muted">(failed_attempts_archive)</span></div>
+            <div class="hint" style="margin-top:2px">
+              store agents' failure retrospectives + distilled lessons in the
+              server DB and offer them back as a third stagnation hint — each
+              agent only ever sees its own. Off by default; contributors can
+              opt individual agents out with failed_attempts_write: false.
+            </div>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" aria-label="Failed-attempts archive" bind:checked={archiveDraft} />
+              <span class="mono muted">{archiveDraft ? "on" : "off"}</span>
+            </label>
+          </div>
+        </div>
         <div class="actions"><div class="spacer"></div><button class="primary" onclick={() => saveKnobs(SWARM_KNOBS, "swarm")}>Save swarm settings</button></div>
         {#if settingsMsg}<div class="banner ok" style="margin-top:14px">{settingsMsg}</div>{/if}
       </div>
