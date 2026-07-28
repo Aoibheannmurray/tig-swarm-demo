@@ -1598,6 +1598,32 @@ async def clear_inactive_pool(
     return cur.rowcount
 
 
+async def has_inactive_with_code(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str, algorithm_code: str,
+) -> bool:
+    """Is this EXACT algorithm already sitting unconsumed in the pool for
+    `agent_id`?
+
+    The mainnet seeder needs this rather than a bare "does any row exist"
+    count. It records a fingerprint of the code it fetched, and the capture
+    and adoption paths both match on that hash — so what matters is not
+    whether the source has *a* seed here, but whether the seed it has is the
+    one the fingerprint describes. Two different reshapes of the same mainnet
+    algorithm (host-side challenge_files vs server-side mainnet_seed, kept
+    only in "rough sync") hash differently and would otherwise leave the
+    baseline permanently unmeasurable."""
+    cursor = await conn.execute(
+        "SELECT algorithm_code FROM inactive_algorithms "
+        "WHERE agent_id = ? AND challenge = ?",
+        (agent_id, challenge),
+    )
+    target = code_fingerprint(algorithm_code)
+    for row in await cursor.fetchall():
+        if code_fingerprint(row["algorithm_code"] or "") == target:
+            return True
+    return False
+
+
 async def count_inactive_from_agent(
     conn: aiosqlite.Connection, agent_id: str, challenge: str
 ) -> int:

@@ -302,6 +302,136 @@ async def test_measure_button_refuses_when_nothing_is_known():
     print("PASS test_measure_button_refuses_when_nothing_is_known")
 
 
+async def test_a_differently_reshaped_pool_entry_is_not_mistaken_for_this_one():
+    """The drift trap. Two reshapes of the same mainnet algorithm — host-side
+    challenge_files vs server-side mainnet_seed, kept only in "rough sync" —
+    produce different bytes and therefore different hashes. The old guard
+    counted rows, so an entry from the other path satisfied it, the deposit
+    was skipped, and the fingerprint just recorded described code that existed
+    nowhere. Nothing could ever match it and nothing said so."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminSeedFromMainnet
+
+    key = await _key(db)
+    async with db.connect() as conn:
+        agent_id = await db.ensure_synthetic_agent(conn, "tig-foundation", TS)
+        # What the OTHER reshape left behind: same algorithm, different bytes.
+        await db.deposit_inactive(
+            conn, agent_id, CHALLENGE, _CODE.replace("/* mainnet */", "/*mainnet*/"),
+            None, TS)
+        await conn.commit()
+
+    res = await server.admin_seed_from_mainnet(
+        AdminSeedFromMainnet(admin_key=key, challenge=CHALLENGE, target="both"))
+    assert res["results"][0]["actions"]["inactive"] == "seeded", res
+
+    async with db.connect() as conn:
+        row = await db.get_mainnet_baseline(conn, CHALLENGE)
+        # The invariant that was broken: the recorded fingerprint must have a
+        # matching entry an agent can actually adopt.
+        assert await db.has_inactive_with_code(conn, agent_id, CHALLENGE, _CODE)
+        assert row["code_fingerprint"] == db.code_fingerprint(_CODE)
+        # The other entry is left alone — it may be someone's real seed, and
+        # deleting it to tidy our own bookkeeping is a bad trade.
+        cur = await conn.execute(
+            "SELECT COUNT(*) c FROM inactive_algorithms WHERE challenge = ?",
+            (CHALLENGE,))
+        assert (await cur.fetchone())["c"] == 2
+    print("PASS test_a_differently_reshaped_pool_entry_is_not_mistaken_for_this_one")
+
+
+async def test_an_unrelated_seed_no_longer_blocks_mainnet():
+    """seed_inactive's source_label DEFAULTS to "tig-foundation", so a host
+    admin-seeding any algorithm without setting one used to block mainnet
+    deposits on that challenge outright."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminSeedInactive, AdminSeedFromMainnet
+
+    key = await _key(db)
+    await server.admin_seed_inactive(AdminSeedInactive(
+        admin_key=key, challenge=CHALLENGE,
+        algorithm_code="// somebody's own algorithm\n"))
+    res = await server.admin_seed_from_mainnet(
+        AdminSeedFromMainnet(admin_key=key, challenge=CHALLENGE, target="both"))
+    assert res["results"][0]["actions"]["inactive"] == "seeded", res
+    print("PASS test_an_unrelated_seed_no_longer_blocks_mainnet")
+
+
+async def test_seeding_the_same_algorithm_twice_stays_idempotent():
+    """The looser guard must not turn repeat runs into duplicate pool rows."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminSeedFromMainnet
+    key = await _key(db)
+    for expected in ("seeded", "already_seeded", "already_seeded"):
+        res = await server.admin_seed_from_mainnet(
+            AdminSeedFromMainnet(admin_key=key, challenge=CHALLENGE, target="both"))
+        assert res["results"][0]["actions"]["inactive"] == expected, res
+    async with db.connect() as conn:
+        cur = await conn.execute(
+            "SELECT COUNT(*) c FROM inactive_algorithms WHERE challenge = ?",
+            (CHALLENGE,))
+        assert (await cur.fetchone())["c"] == 1
+    print("PASS test_seeding_the_same_algorithm_twice_stays_idempotent")
+
+
+async def test_the_host_cli_path_registers_the_baseline_too():
+    """`setup.py create` deposits mainnet via seed_inactive, which never
+    touched mainnet_baselines — so every CLI-seeded swarm had the algorithm
+    in its pool and no bar on its dashboard."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminSeedInactive
+
+    key = await _key(db)
+    res = await server.admin_seed_inactive(AdminSeedInactive(
+        admin_key=key, challenge=CHALLENGE, algorithm_code=_CODE,
+        mainnet_algo_name="hgs_advance", mainnet_adoption_pct=41.2))
+    assert res["seeded"] is True, res
+    async with db.connect() as conn:
+        row = await db.get_mainnet_baseline(conn, CHALLENGE)
+    assert row["algo_name"] == "hgs_advance", row
+    assert row["adoption_pct"] == 41.2, row
+    assert row["code_fingerprint"] == db.code_fingerprint(_CODE), row
+    assert row["status"] == "pending", row
+
+    # An ordinary seed carries no mainnet fields and must register nothing.
+    db, server = _fresh()
+    await db.init_db()
+    key = await _key(db)
+    await server.admin_seed_inactive(AdminSeedInactive(
+        admin_key=key, challenge=CHALLENGE, algorithm_code="// plain\n"))
+    async with db.connect() as conn:
+        assert await db.get_mainnet_baseline(conn, CHALLENGE) is None
+    print("PASS test_the_host_cli_path_registers_the_baseline_too")
+
+
+async def test_baseline_registers_even_when_the_deposit_is_skipped():
+    """Registration is about WHICH algorithm the challenge is measured
+    against; a duplicate deposit being skipped is no reason to leave the
+    dashboard with no bar."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminSeedInactive
+
+    key = await _key(db)
+    seed = AdminSeedInactive(
+        admin_key=key, challenge=CHALLENGE, algorithm_code=_CODE,
+        mainnet_algo_name="hgs_advance")
+    await server.admin_seed_inactive(seed)
+    async with db.connect() as conn:
+        await conn.execute("DELETE FROM mainnet_baselines")
+        await conn.commit()
+    res = await server.admin_seed_inactive(seed)  # now hits already_seeded
+    assert res["seeded"] is False and res["reason"] == "already_seeded", res
+    async with db.connect() as conn:
+        row = await db.get_mainnet_baseline(conn, CHALLENGE)
+    assert row is not None and row["algo_name"] == "hgs_advance", row
+    print("PASS test_baseline_registers_even_when_the_deposit_is_skipped")
+
+
 async def main():
     await test_seeding_records_the_algorithm_without_measuring_it()
     await test_a_challenge_with_no_mainnet_algorithm_says_so()
@@ -314,6 +444,11 @@ async def main():
     await test_the_whole_measure_chain_end_to_end()
     await test_measure_button_reports_an_unfulfillable_request()
     await test_measure_button_refuses_when_nothing_is_known()
+    await test_a_differently_reshaped_pool_entry_is_not_mistaken_for_this_one()
+    await test_an_unrelated_seed_no_longer_blocks_mainnet()
+    await test_seeding_the_same_algorithm_twice_stays_idempotent()
+    await test_the_host_cli_path_registers_the_baseline_too()
+    await test_baseline_registers_even_when_the_deposit_is_skipped()
     print("\nAll mainnet-baseline tests passed.")
 
 

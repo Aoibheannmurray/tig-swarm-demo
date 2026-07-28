@@ -3090,6 +3090,18 @@ async def admin_seed_inactive(req: AdminSeedInactive):
         # the challenge, skip — re-running `setup.py create` must not pile up
         # duplicate mainnet seeds. Consume-once means an adopted seed leaves no
         # row, so a later create still re-seeds.
+        # Register the mainnet baseline when the caller says this IS the
+        # mainnet algorithm. Done BEFORE the idempotency return below: the
+        # registration is about which algorithm this challenge is measured
+        # against, and skipping a duplicate deposit is no reason to leave the
+        # dashboard with no bar. Cheap — one row, no benchmark.
+        if req.mainnet_algo_name:
+            await db.record_mainnet_algorithm(
+                conn, req.challenge, req.mainnet_algo_name, created_at=timestamp,
+                adoption_pct=req.mainnet_adoption_pct,
+                code_fingerprint_=db.code_fingerprint(req.algorithm_code),
+            )
+            await conn.commit()
         existing = await db.count_inactive_from_agent(
             conn, agent_id, req.challenge,
         )
@@ -3225,9 +3237,24 @@ async def admin_seed_from_mainnet(req: AdminSeedFromMainnet):
                 )
             if want_inactive:
                 agent_id = await db.ensure_synthetic_agent(conn, "tig-foundation", timestamp)
-                if await db.count_inactive_from_agent(conn, agent_id, ch):
+                # Ask whether THIS algorithm is pooled, not whether the source
+                # has anything pooled. The old count-based guard had two
+                # failure modes, both silent: a pool entry from the host-side
+                # reshape (byte-different from this one, see mainnet_seed's
+                # "rough sync" note) satisfied the count while never matching
+                # the fingerprint we just recorded, and any unrelated admin
+                # seed under the default "tig-foundation" label blocked
+                # mainnet deposits on the challenge outright. Either way the
+                # baseline could never be measured and nothing said so.
+                if await db.has_inactive_with_code(conn, agent_id, ch, entry):
                     actions["inactive"] = "already_seeded"
                 else:
+                    # Deposit alongside whatever else is there rather than
+                    # replacing it: another entry under this label may be a
+                    # legitimate seed someone else put in, and deleting a
+                    # contributor's algorithm to fix our own bookkeeping is a
+                    # bad trade. An exact duplicate can't accumulate — the
+                    # check above short-circuits every later run.
                     await db.deposit_inactive(
                         conn, agent_id, ch, entry, None, timestamp,
                         kernel_code=info["kernel_code"], algorithm_files=files_json)
