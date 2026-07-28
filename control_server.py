@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import os
 import re
@@ -72,13 +71,16 @@ import init_fleet
 import run_fleet
 import secrets_local
 import setup as setup_mod
+import ui_buildstamp
 
-UI_SRC_ROOT = ROOT / "control-ui"
-UI_DIST = UI_SRC_ROOT / "dist"
+UI_SRC_ROOT = ui_buildstamp.UI_SRC_ROOT
+UI_DIST = ui_buildstamp.UI_DIST
 # Written into dist/ after every rebuild (and committed with it); lets startup
 # tell "bundle matches the sources" from "someone edited src/ and forgot to
-# rebuild" without trusting mtimes, which a git checkout scrambles.
-UI_BUILD_STAMP = UI_DIST / ".buildstamp"
+# rebuild" without trusting mtimes, which a git checkout scrambles. `npm run
+# build` writes it too (postbuild), so a normal rebuild-and-commit leaves it
+# current and contributors don't rebuild on first launch for nothing.
+UI_BUILD_STAMP = ui_buildstamp.STAMP_PATH
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
 TACIT_PATH = ROOT / "tacit_knowledge.md"
 # Runtime record of where the companion for THIS checkout actually listens
@@ -89,25 +91,10 @@ COMPANION_PORT_FILE = ROOT / ".companion-port.json"
 
 
 def _ui_source_digest() -> str:
-    """Content hash of everything that feeds the Svelte build — sources, static
-    assets, entry HTML, configs, lockfile — with dist/, node_modules/, and
-    hidden files excluded (dotfile junk like .DS_Store must not perturb the
-    digest across machines)."""
-    h = hashlib.sha256()
-    for dirpath, dirnames, filenames in os.walk(UI_SRC_ROOT):
-        dirnames[:] = sorted(
-            d for d in dirnames
-            if d not in ("dist", "node_modules") and not d.startswith(".")
-        )
-        for name in sorted(filenames):
-            if name.startswith("."):
-                continue
-            path = Path(dirpath) / name
-            h.update(path.relative_to(UI_SRC_ROOT).as_posix().encode())
-            h.update(b"\0")
-            h.update(path.read_bytes())
-            h.update(b"\0")
-    return h.hexdigest()
+    """Content hash of everything that feeds the Svelte build. Delegates to
+    scripts/ui_buildstamp.py, which `npm run build` also calls — the digest has
+    to be identical on both sides or the stamp is worse than useless."""
+    return ui_buildstamp.source_digest()
 
 
 def _freshen_ui_bundle() -> None:

@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "postbuild": "python3 ../scripts/ui_buildstamp.py --write",
     "build:fast": "vite build",
+    "postbuild:fast": "python3 ../scripts/ui_buildstamp.py --write",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run"
