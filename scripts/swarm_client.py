@@ -303,6 +303,43 @@ def post_message(
         print(f"  [WARN] post_message failed: {e}", file=sys.stderr)
 
 
+def post_failure_record(
+    server: str, agent_id: str,
+    *, kind: str, challenge: str | None = None,
+    agent_token: str | None = None,
+    lesson: str = "", approach_summary: str = "", what_was_tried: str = "",
+    observed_outcome: str = "", possible_reasons: str = "",
+) -> None:
+    """Post an LLM-authored failed-attempt artifact to the server's
+    failed-attempts archive (kind='retrospective' or 'lesson').
+
+    Fire-and-forget: offline / old servers (404) / a server with the
+    archive toggled off (`stored: False`) are all logged and ignored —
+    the archive is additive telemetry and must never fail an iteration."""
+    payload = {
+        "agent_id": agent_id, "kind": kind,
+        "approach_summary": approach_summary,
+        "what_was_tried": what_was_tried,
+        "observed_outcome": observed_outcome,
+        "possible_reasons": possible_reasons,
+        "lesson": lesson,
+    }
+    if challenge:
+        payload["challenge"] = challenge
+    try:
+        resp = server_post(
+            f"{server}/api/failure_records", payload,
+            timeout=10, agent_token=agent_token,
+        )
+        if not resp.get("stored"):
+            print(
+                f"  [FAILARC] record not stored "
+                f"({resp.get('reason', 'unknown')})",
+            )
+    except _NET_ERRORS as e:
+        print(f"  [FAILARC] post failed: {e}", file=sys.stderr)
+
+
 # ── Publish ────────────────────────────────────────────────────────
 
 

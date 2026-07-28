@@ -186,10 +186,11 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
     num_trajectories INTEGER DEFAULT 0,
     tacit_knowledge_count INTEGER DEFAULT 0,
     inspiration_count INTEGER DEFAULT 0,
-    -- "tacit_knowledge" / "inspiration" / NULL — the most recent hint the
-    -- server gave this agent on this challenge. Set when /api/state issues
-    -- the hint, cleared when the agent publishes the next iteration (whose
-    -- experiments.received_hint absorbs the value).
+    failed_attempts_count INTEGER DEFAULT 0,
+    -- "tacit_knowledge" / "inspiration" / "failed_attempts" / NULL — the most
+    -- recent hint the server gave this agent on this challenge. Set when
+    -- /api/state issues the hint, cleared when the agent publishes the next
+    -- iteration (whose experiments.received_hint absorbs the value).
     pending_hint TEXT,
     pending_inspiration_source TEXT,
     -- The source agent's trajectory_id captured at hint-out time. Recorded
@@ -286,6 +287,30 @@ CREATE TABLE IF NOT EXISTS contributor_configs (
     tacit_text TEXT,
     updated_at TEXT NOT NULL
 );
+
+-- Failed-attempts archive: LLM-authored artifacts only (structured
+-- retrospectives written when a trajectory dies, plus the one-line "- LLM:"
+-- tacit lessons). The lightweight per-iteration failure record is DERIVED
+-- from experiments (beats_trajectory_best=0) at read time, never written
+-- here — no code bodies either; experiment_id links back to experiments.
+-- Gated by config.failed_attempts_archive; records are only ever served
+-- back to the agent that wrote them (per-agent visibility).
+CREATE TABLE IF NOT EXISTS failure_records (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    trajectory_id TEXT,
+    experiment_id TEXT,
+    kind TEXT NOT NULL DEFAULT 'retrospective',  -- 'retrospective' | 'lesson'
+    approach_summary TEXT DEFAULT '',
+    what_was_tried TEXT DEFAULT '',
+    observed_outcome TEXT DEFAULT '',
+    possible_reasons TEXT DEFAULT '',
+    lesson TEXT DEFAULT '',
+    best_score REAL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
 """
 
 # Indexes are split out from the main schema so they can be applied after
@@ -316,6 +341,7 @@ CREATE INDEX IF NOT EXISTS idx_exp_baseline ON experiments(challenge, feasible, 
 -- admission (server/seed_diversity.py), NOT a per-(tag, source) unique index —
 -- the old idx_seed_pool_dedup is dropped in the init_db migrations.
 CREATE INDEX IF NOT EXISTS idx_seed_pool_lookup ON seed_pool(challenge, strategy_tag);
+CREATE INDEX IF NOT EXISTS idx_failure_records_agent ON failure_records(agent_id, challenge, created_at);
 """
 
 DEFAULT_CONFIG = {
@@ -367,6 +393,7 @@ _ENV_CONFIG_KEYS = (
     ("HPO_MIN_IMPROVEMENTS", "hpo_min_improvements"),
     ("HPO_SEARCH_BUDGET", "hpo_search_budget"),
     ("HPO_NUM_SUGGESTED_CONFIGS", "hpo_num_suggested_configs"),
+    ("FAILED_ATTEMPTS_ARCHIVE", "failed_attempts_archive"),
 )
 
 
@@ -571,6 +598,9 @@ async def init_db() -> None:
             "  SELECT MAX(id) FROM seed_pool WHERE source = 'authored' "
             "  GROUP BY challenge, strategy_tag)"
         )
+        # Offered-count for the third stagnation hint type, "failed_attempts"
+        # (mirrors tacit_knowledge_count / inspiration_count).
+        await _add_column(db, "agent_challenge_state", "failed_attempts_count", "INTEGER DEFAULT 0")
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -1134,6 +1164,7 @@ async def compute_leaderboard(
             acs.num_trajectories as num_trajectories,
             COALESCE(hints.tacit_knowledge_count, 0) as tacit_knowledge_count,
             COALESCE(hints.inspiration_count, 0) as inspiration_count,
+            COALESCE(hints.failed_attempts_count, 0) as failed_attempts_count,
             acs.total_input_tokens as total_input_tokens,
             acs.total_output_tokens as total_output_tokens,
             acs.total_estimated_cost as total_estimated_cost,
@@ -1147,7 +1178,9 @@ async def compute_leaderboard(
                    SUM(CASE WHEN received_hint = 'tacit_knowledge' THEN 1 ELSE 0 END)
                        AS tacit_knowledge_count,
                    SUM(CASE WHEN received_hint = 'inspiration' THEN 1 ELSE 0 END)
-                       AS inspiration_count
+                       AS inspiration_count,
+                   SUM(CASE WHEN received_hint = 'failed_attempts' THEN 1 ELSE 0 END)
+                       AS failed_attempts_count
             FROM experiments
             WHERE challenge = ?
             GROUP BY agent_id
@@ -1180,6 +1213,7 @@ async def compute_leaderboard(
             "num_trajectories": row["num_trajectories"] or 0,
             "tacit_knowledge_count": row["tacit_knowledge_count"] or 0,
             "inspiration_count": row["inspiration_count"] or 0,
+            "failed_attempts_count": row["failed_attempts_count"] or 0,
             "total_tokens": (row["total_input_tokens"] or 0) + (row["total_output_tokens"] or 0),
             "estimated_cost_usd": round(row["total_estimated_cost"] or 0, 4),
             "active": row["last_active_at"] >= inactive_cutoff if inactive_cutoff and row["last_active_at"] else False,
@@ -1275,6 +1309,7 @@ async def increment_agent_challenge_counters(
     num_trajectories_inc: int = 0,
     tacit_knowledge_inc: int = 0,
     inspiration_inc: int = 0,
+    failed_attempts_inc: int = 0,
     best_ever_score: float | None = None,
     direction: str = "max",
     input_tokens: int = 0,
@@ -1304,18 +1339,123 @@ async def increment_agent_challenge_counters(
                 num_trajectories = num_trajectories + ?,
                 tacit_knowledge_count = tacit_knowledge_count + ?,
                 inspiration_count = inspiration_count + ?,
+                failed_attempts_count = failed_attempts_count + ?,
                 total_input_tokens = total_input_tokens + ?,
                 total_output_tokens = total_output_tokens + ?,
                 total_estimated_cost = total_estimated_cost + ?
                 {best_clause}
               WHERE agent_id = ? AND challenge = ?"""
     params: list = [runs, improvements, num_trajectories_inc,
-                    tacit_knowledge_inc, inspiration_inc,
+                    tacit_knowledge_inc, inspiration_inc, failed_attempts_inc,
                     input_tokens, output_tokens, estimated_cost]
     if best_ever_score is not None:
         params.extend([best_ever_score, best_ever_score, best_ever_score])
     params.extend([agent_id, challenge])
     await conn.execute(sql, params)
+
+
+# ── failure_records helpers ──
+
+
+async def insert_failure_record(
+    conn: aiosqlite.Connection,
+    *,
+    record_id: str,
+    agent_id: str,
+    challenge: str,
+    trajectory_id: str | None,
+    experiment_id: str | None,
+    kind: str,
+    approach_summary: str,
+    what_was_tried: str,
+    observed_outcome: str,
+    possible_reasons: str,
+    lesson: str,
+    best_score: float | None,
+    created_at: str,
+    max_per_agent: int,
+) -> None:
+    """Insert an LLM-authored failure artifact and prune retention in the
+    same transaction: only the newest `max_per_agent` rows survive per
+    (agent, challenge)."""
+    await conn.execute(
+        """INSERT INTO failure_records
+             (id, agent_id, challenge, trajectory_id, experiment_id, kind,
+              approach_summary, what_was_tried, observed_outcome,
+              possible_reasons, lesson, best_score, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (record_id, agent_id, challenge, trajectory_id, experiment_id, kind,
+         approach_summary, what_was_tried, observed_outcome,
+         possible_reasons, lesson, best_score, created_at),
+    )
+    await conn.execute(
+        """DELETE FROM failure_records
+            WHERE agent_id = ? AND challenge = ?
+              AND id NOT IN (SELECT id FROM failure_records
+                              WHERE agent_id = ? AND challenge = ?
+                              ORDER BY created_at DESC, id DESC LIMIT ?)""",
+        (agent_id, challenge, agent_id, challenge, max(1, int(max_per_agent))),
+    )
+
+
+async def list_failure_records(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str, limit: int
+) -> list[dict]:
+    """Newest-first LLM-authored failure artifacts for ONE agent. The
+    agent_id filter is the per-agent-visibility guarantee — records are
+    never served across agents."""
+    cursor = await conn.execute(
+        """SELECT id, trajectory_id, experiment_id, kind, approach_summary,
+                  what_was_tried, observed_outcome, possible_reasons,
+                  lesson, best_score, created_at
+             FROM failure_records
+            WHERE agent_id = ? AND challenge = ?
+            ORDER BY created_at DESC, id DESC LIMIT ?""",
+        (agent_id, challenge, limit),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def list_rejected_experiments(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str, limit: int
+) -> list[dict]:
+    """Derived lightweight failure records: the agent's own most recent
+    non-improving iterations, joined to their hypothesis. No new storage —
+    experiments already keeps everything."""
+    cursor = await conn.execute(
+        """SELECT e.id, e.score, e.feasible, e.delta_vs_trajectory_best_pct,
+                  e.trajectory_id, e.created_at, e.notes,
+                  h.title, h.strategy_tag, h.description
+             FROM experiments e
+             LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
+            WHERE e.agent_id = ? AND e.challenge = ?
+              AND e.beats_trajectory_best = 0
+            ORDER BY e.created_at DESC LIMIT ?""",
+        (agent_id, challenge, limit),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    for r in rows:
+        r["description"] = (r.get("description") or "")[:500]
+        r["notes"] = (r.get("notes") or "")[:500]
+    return rows
+
+
+async def has_failure_material(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str
+) -> bool:
+    """True when the failed_attempts hint has something to serve for this
+    agent: an archived LLM record OR a rejected iteration to derive a
+    lightweight record from. Two cheap indexed EXISTS."""
+    cursor = await conn.execute(
+        """SELECT EXISTS(SELECT 1 FROM failure_records
+                          WHERE agent_id = ? AND challenge = ?)
+                OR EXISTS(SELECT 1 FROM experiments
+                           WHERE agent_id = ? AND challenge = ?
+                             AND beats_trajectory_best = 0) AS present""",
+        (agent_id, challenge, agent_id, challenge),
+    )
+    row = await cursor.fetchone()
+    return bool(row["present"]) if row else False
 
 
 # ── challenge_configs helpers ──

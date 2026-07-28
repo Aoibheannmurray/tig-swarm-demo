@@ -26,6 +26,7 @@ from models import (
     AdminMeasureMainnetBaseline,
     AdminSeedsQuery,
     ContributorConfigPut, MAX_CONTRIB_CONFIG_LEN,
+    FailureRecordCreate,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
@@ -89,6 +90,17 @@ SWARM_DEFAULTS: dict[str, int] = {
     "hpo_min_improvements": 4,
     "hpo_search_budget": 13,
     "hpo_num_suggested_configs": 5,
+    # Failed-attempts archive: when 1, LLM-authored failure retrospectives /
+    # tacit lessons are stored in `failure_records` and "failed_attempts"
+    # joins the stagnation-hint rotation (served per-agent only — an agent
+    # is shown its OWN dead ends, framed as material for a modified retry,
+    # never as prohibitions). 0 (default) = off: posts are no-op'd and the
+    # hint is never offered.
+    "failed_attempts_archive": 0,
+    # Retention: newest N LLM records kept per (agent, challenge).
+    "failure_records_max_per_agent": 40,
+    # How many records (of each kind) ride along when the hint fires.
+    "failed_attempts_hint_records": 3,
 }
 
 # Float-valued swarm tunables (swarm_setting only returns ints).
@@ -975,7 +987,8 @@ _CONTRIB_AGENT_KEYS = frozenset({
     "name", "provider", "model", "api_base", "api_key_env",
     "compute", "hardware", "c3_hardware", "c3_time", "c3_cloud_provider",
     "c3_no_build", "c3_max_parallel_jobs",
-    "log_prompts", "detailed_prompts", "tacit_write", "role", "edit_mode",
+    "log_prompts", "detailed_prompts", "tacit_write", "failed_attempts_write",
+    "role", "edit_mode",
     "hpo_min_improvements", "hpo_first_tune_improvements",
     "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
     "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
@@ -1561,13 +1574,28 @@ async def _agent_state(
         inspiration_kernel_code = None
         inspiration_agent_name = None
         stagnation_hint = None
+        failed_attempts_payload = None
         n_stagnation = swarm_setting(config, "stagnation_threshold")
         if trajectory_reset is None and runs_since >= n_stagnation:
-            stagnation_hint = random.choice(["tacit_knowledge", "inspiration"])
+            hint_choices = ["tacit_knowledge", "inspiration"]
+            # "failed_attempts" joins the rotation only when the archive is
+            # on AND this agent has material (an LLM record or a rejected
+            # iteration to derive one from) — never an empty hint.
+            if swarm_setting(config, "failed_attempts_archive") and (
+                await db.has_failure_material(conn, agent_id, challenge)
+            ):
+                hint_choices.append("failed_attempts")
+            stagnation_hint = random.choice(hint_choices)
             if stagnation_hint == "tacit_knowledge":
                 await db.increment_agent_challenge_counters(
                     conn, agent_id, challenge,
                     tacit_knowledge_inc=1,
+                    runs_since_improvement_inc=0,
+                )
+            elif stagnation_hint == "failed_attempts":
+                await db.increment_agent_challenge_counters(
+                    conn, agent_id, challenge,
+                    failed_attempts_inc=1,
                     runs_since_improvement_inc=0,
                 )
             else:
@@ -1599,6 +1627,20 @@ async def _agent_state(
                     # up the source's *current* trajectory_bests later (that
                     # row is wiped when the source agent stagnates).
                     pending_source_traj = chosen.get("trajectory_id")
+            if stagnation_hint == "failed_attempts":
+                # The agent's OWN prior dead ends: archived LLM artifacts
+                # plus lightweight records derived from its rejected
+                # iterations. Per-agent by construction — both queries
+                # filter on the requesting (token-verified) agent_id.
+                n_records = swarm_setting(config, "failed_attempts_hint_records")
+                failed_attempts_payload = {
+                    "retrospectives": await db.list_failure_records(
+                        conn, agent_id, challenge, n_records
+                    ),
+                    "recent_rejected": await db.list_rejected_experiments(
+                        conn, agent_id, challenge, n_records
+                    ),
+                }
             # Stash the hint (and inspiration source) so the next
             # iteration this agent publishes can be tagged with them.
             # /api/iterations reads + clears them atomically.
@@ -1683,6 +1725,7 @@ async def _agent_state(
             "inspiration_code": inspiration_code,
             "inspiration_agent_name": inspiration_agent_name,
             "stagnation_hint": stagnation_hint,
+            "failed_attempts": failed_attempts_payload,
             "trajectory_reset": trajectory_reset,
             "seed_start": seed_start,
             "leaderboard": leaderboard,
@@ -2308,6 +2351,59 @@ async def _broadcast_iteration(
         entries=leaderboard,
         timestamp=timestamp,
     ))
+
+
+@app.post("/api/failure_records")
+async def create_failure_record(
+    req: FailureRecordCreate,
+    token_agent_id: str = Depends(verify_agent_token),
+):
+    """Store an LLM-authored failed-attempt artifact (a structured
+    retrospective written when a trajectory dies, or a one-line tacit
+    lesson). Gated by the `failed_attempts_archive` swarm toggle — when
+    off this is a 200 no-op so older/misconfigured clients never error.
+
+    Provenance (trajectory_id, experiment_id, best_score) is filled
+    server-side, never trusted from the client. The client posts after
+    publish but before the next /api/state poll (where the trajectory
+    reset runs), so acs.current_trajectory_id is still the dying
+    trajectory. A late post would attribute to the successor trajectory —
+    acceptable telemetry drift, not corruption.
+    """
+    require_token_matches(token_agent_id, req.agent_id)
+    config = await get_config_cached()
+    if not swarm_setting(config, "failed_attempts_archive"):
+        return {"stored": False, "reason": "archive_disabled"}
+    challenge = await resolve_challenge(req.challenge)
+    max_per_agent = swarm_setting(config, "failure_records_max_per_agent")
+    record_id = new_id()
+    async with db.connect() as conn:
+        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
+        cursor = await conn.execute(
+            "SELECT id FROM experiments WHERE agent_id = ? AND challenge = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (req.agent_id, challenge),
+        )
+        latest_exp = await cursor.fetchone()
+        await db.insert_failure_record(
+            conn,
+            record_id=record_id,
+            agent_id=req.agent_id,
+            challenge=challenge,
+            trajectory_id=(acs or {}).get("current_trajectory_id"),
+            experiment_id=latest_exp["id"] if latest_exp else None,
+            kind=req.kind,
+            approach_summary=req.approach_summary,
+            what_was_tried=req.what_was_tried,
+            observed_outcome=req.observed_outcome,
+            possible_reasons=req.possible_reasons,
+            lesson=req.lesson,
+            best_score=(acs or {}).get("best_ever_score"),
+            created_at=now(),
+            max_per_agent=max_per_agent,
+        )
+        await conn.commit()
+    return {"stored": True, "id": record_id}
 
 
 @app.post("/api/iterations", response_model=IterationResponse)
@@ -3672,6 +3768,9 @@ async def get_swarm_config():
         "hpo_min_improvements": swarm_setting(config, "hpo_min_improvements"),
         "hpo_search_budget": swarm_setting(config, "hpo_search_budget"),
         "hpo_num_suggested_configs": swarm_setting(config, "hpo_num_suggested_configs"),
+        # Failed-attempts archive toggle, read client-side so the loop knows
+        # whether to distill + post failure retrospectives.
+        "failed_attempts_archive": swarm_setting(config, "failed_attempts_archive"),
     }
 
 
@@ -3732,6 +3831,9 @@ async def update_swarm_config(req: SwarmConfigUpdate):
             ("hpo_min_improvements", str(req.hpo_min_improvements) if req.hpo_min_improvements is not None else None),
             ("hpo_search_budget", str(req.hpo_search_budget) if req.hpo_search_budget is not None else None),
             ("hpo_num_suggested_configs", str(req.hpo_num_suggested_configs) if req.hpo_num_suggested_configs is not None else None),
+            ("failed_attempts_archive", str(req.failed_attempts_archive) if req.failed_attempts_archive is not None else None),
+            ("failure_records_max_per_agent", str(req.failure_records_max_per_agent) if req.failure_records_max_per_agent is not None else None),
+            ("failed_attempts_hint_records", str(req.failed_attempts_hint_records) if req.failed_attempts_hint_records is not None else None),
         ):
             if value is not None:
                 await conn.execute(

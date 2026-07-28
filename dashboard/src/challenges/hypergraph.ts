@@ -1,5 +1,6 @@
 import { select, type Selection } from "d3-selection";
 import { DisplayPanelBase } from "./base";
+import { placeClusterLabel } from "./hypergraphLabels";
 
 interface GalaxyView {
   shown_partitions: number[];
@@ -244,24 +245,36 @@ export class HypergraphPanel extends DisplayPanelBase<AllHypergraphData> {
     html += `</g>`;
 
     // ── Centroid labels ──
-    // Title goes radially outward from the ellipse centre; count always sits
-    // BELOW the title (closer to the cluster) so the count never escapes the
-    // viewBox top for above-centre clusters, while staying readable as
-    // "title, then count" left-to-right top-to-bottom for every cluster.
+    // Name and count share ONE line ("p4 · 12,480"): the ring plus its halos
+    // fills the viewBox almost edge to edge, and a two-line block simply does
+    // not fit outside the top and bottom clusters — those labels used to be
+    // drawn off-canvas. placeClusterLabel pushes each label radially outward
+    // (sideways for the left/right clusters, where the space is) and clamps it
+    // inside the box.
     if (showLabels) {
-      const midY = g.height / 2;
       html += `<g class="hg-labels">`;
       for (let s = 0; s < g.centroids.length; s++) {
         const [cx, cy] = g.centroids[s];
-        const label = `p${g.shown_partitions[s]}`;
-        const sublabel = `${g.shown_sizes[s].toLocaleString()}`;
-        const aboveCentre = cy < midY;
-        const labelY = aboveCentre ? cy - haloR - 10 : cy + haloR + 12;
-        const subY = labelY + 12;
-        html += `<text x="${cx}" y="${labelY}" text-anchor="middle" `
-          + `font-size="12" font-family="var(--ui)" fill="var(--text-bright)">${label}</text>`;
-        html += `<text x="${cx}" y="${subY}" text-anchor="middle" `
-          + `font-size="10" font-family="var(--ui)" fill="var(--text-dim)">${sublabel}</text>`;
+        const name = `p${g.shown_partitions[s]}`;
+        const count = g.shown_sizes[s].toLocaleString();
+        const spot = placeClusterLabel({
+          index: s,
+          centroids: g.centroids,
+          clusterR: g.cluster_r,
+          haloR,
+          width: g.width,
+          height: g.height,
+          textLen: name.length + count.length + 3,   // + " · "
+        });
+        // Painted with a page-coloured halo: a clamped label sits over its own
+        // atmosphere (and, for an over-cap cluster, the dashed violation ring),
+        // and cut ribbons cross the side labels.
+        html += `<text x="${spot.x}" y="${spot.y}" text-anchor="${spot.anchor}" `
+          + `font-size="12" font-family="var(--ui)" paint-order="stroke" `
+          + `stroke="var(--bg-page)" stroke-width="3" stroke-linejoin="round">`
+          + `<tspan fill="var(--text-bright)">${name}</tspan>`
+          + `<tspan fill="var(--text-dim)"> · ${count}</tspan>`
+          + `</text>`;
       }
       html += `</g>`;
     }
