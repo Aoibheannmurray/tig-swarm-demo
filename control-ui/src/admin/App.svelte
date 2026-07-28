@@ -557,14 +557,15 @@
           </div>
         </div>
         <p class="lede">
-          Scores that mainnet algorithm on <b>{poolChallenge}</b>'s own
-          instances and shows it on the dashboard — as a line on the benchmark
-          chart and a ranked entry on the leaderboard — so members can see when
-          they beat it. Seed into the <b>inactive</b> pool first (above). The
-          next agent to check in benchmarks the algorithm unchanged and
-          publishes the score — usually within one iteration. That agent's own
-          work is banked to the pool on the way past, and setup time is
-          unaffected.
+          Scores the current top-adoption mainnet algorithm on
+          <b>{poolChallenge}</b>'s own instances and shows it on the dashboard
+          — as a line on the benchmark chart and a ranked entry on the
+          leaderboard — so members can see when they beat it. Nothing needs
+          seeding first: it fetches and pools the algorithm if this challenge
+          doesn't have it. The next agent to check in benchmarks it unchanged
+          and publishes the score, usually within one iteration; that agent's
+          own work is banked to the pool on the way past. Press it again to
+          re-measure after changing instances or the timeout.
         </p>
         <div class="actions" style="justify-content:flex-start">
           <button onclick={() => pool("clear")}>Clear inactive pool</button>

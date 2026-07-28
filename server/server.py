@@ -1880,17 +1880,13 @@ async def _measurement_stale_cutoff() -> str:
             - timedelta(seconds=_MEASUREMENT_CLAIM_TTL_SECS)).isoformat()
 
 
-async def _mainnet_measurement_claimable(conn, challenge: str) -> bool:
-    """Is a measurement outstanding AND actually performable right now?
+async def _pooled_mainnet_entry_exists(conn, challenge: str, row) -> bool:
+    """Is there an UNSCORED copy of the recorded mainnet algorithm in the
+    inactive pool for an agent to adopt?
 
-    The second half matters: forcing an agent off its trajectory is only
-    justified if there is an unscored, fingerprint-matching entry in the pool
-    for it to adopt. Without that check a stale request would reset an agent
-    for nothing, over and over."""
-    row = await db.get_mainnet_baseline(conn, challenge)
+    Unscored matters: a scored entry inherits its score as the trajectory
+    floor and skips the benchmark, which is the one thing we need it for."""
     if not row or not row["code_fingerprint"]:
-        return False
-    if row["status"] not in ("requested", "measuring"):
         return False
     pool = await db.get_inactive_with_deactivations(conn, challenge)
     return any(
@@ -1898,6 +1894,18 @@ async def _mainnet_measurement_claimable(conn, challenge: str) -> bool:
         and db.code_fingerprint(e.get("algorithm_code") or "") == row["code_fingerprint"]
         for e in pool
     )
+
+
+async def _mainnet_measurement_claimable(conn, challenge: str) -> bool:
+    """Is a measurement outstanding AND actually performable right now?
+
+    The second half matters: forcing an agent off its trajectory is only
+    justified if there is something for it to adopt. Without that check a
+    stale request would reset an agent for nothing, over and over."""
+    row = await db.get_mainnet_baseline(conn, challenge)
+    if not row or row["status"] not in ("requested", "measuring"):
+        return False
+    return await _pooled_mainnet_entry_exists(conn, challenge, row)
 
 
 async def _maybe_capture_mainnet_baseline(
@@ -3329,59 +3337,94 @@ async def admin_seed_from_mainnet(req: AdminSeedFromMainnet):
 
 @app.post("/api/admin/measure_mainnet_baseline")
 async def admin_measure_mainnet_baseline(req: AdminMeasureMainnetBaseline):
-    """Ask the swarm to measure the mainnet algorithm on its own instances.
+    """Measure the mainnet algorithm on this swarm's own instances.
 
-    This server has no Docker and no C3 — it cannot benchmark anything — so
-    the button queues the work for the fleet rather than doing it. The mainnet
-    algorithm is already in the inactive pool with no score; marking the
-    baseline 'requested' makes the next trajectory reset adopt THAT entry
-    instead of a random one, and the existing needs_benchmark path has the
-    agent benchmark it unchanged before mutating. The published score is
-    recognised by code fingerprint and becomes the baseline.
+    One button, no prerequisites. It used to require the host to run "Seed
+    from mainnet" into the *inactive* pool first and then press this — two
+    steps with a non-obvious ordering, where getting it wrong produced a
+    request that could never be fulfilled and said so only in small print. It
+    now provisions whatever is missing: fetches the top-adoption algorithm if
+    this challenge has none recorded, and deposits it into the inactive pool
+    if nothing adoptable is there.
 
-    So it costs the swarm no extra benchmark — it steers one reset the swarm
-    was going to do anyway. Returns the queue state; the dashboard shows
-    'measuring' until a score lands."""
+    The server has no Docker and no C3 — it cannot benchmark — so the last
+    step queues the work for the fleet: marking the baseline 'requested' makes
+    the next agent to check in adopt that entry and benchmark it unchanged
+    (see _mainnet_measurement_claimable), and the published score is
+    recognised by code fingerprint.
+
+    Pressing it again re-measures: the score is cleared and re-taken, which is
+    what you want after editing tracks or the timeout, since the old number
+    was earned on a different instance set."""
+    import mainnet_seed
+
     await verify_admin(req)
     challenge = await resolve_challenge(req.challenge)
+
+    # Only fetch when we actually need to. A fetch is two HTTP calls to
+    # someone else's API; if the algorithm is already recorded AND an
+    # adoptable copy is pooled, there is nothing to provision.
     async with db.connect() as conn:
         row = await db.get_mainnet_baseline(conn, challenge)
-        if row is None:
+        ready = await _pooled_mainnet_entry_exists(conn, challenge, row)
+
+    provisioned: list[str] = []
+    if not ready:
+        info, note = await asyncio.to_thread(
+            mainnet_seed.fetch_top_reshaped, challenge)
+        if info is None:
+            # Record the absence so the dashboard says so once instead of
+            # sitting on "measuring…" for a challenge that can never resolve.
+            async with db.connect() as conn:
+                await db.mark_mainnet_baseline_unavailable(
+                    conn, challenge, created_at=now())
+                await conn.commit()
             raise HTTPException(
                 status_code=400,
-                detail=("No mainnet algorithm recorded for this challenge yet. "
-                        "Run “Seed from mainnet” first — it fetches the "
-                        "top-adoption algorithm and notes which one applies."),
+                detail=(f"No compatible mainnet algorithm for {challenge}: "
+                        f"{note}"),
             )
-        if row["status"] == "unavailable":
-            raise HTTPException(
-                status_code=400,
-                detail=f"No compatible mainnet algorithm exists for {challenge}.",
+        entry = info["code_files"]["mod.rs"]
+        timestamp = now()
+        async with db.connect() as conn:
+            action = await db.record_mainnet_algorithm(
+                conn, challenge, info["algo_name"], created_at=timestamp,
+                adoption_pct=round(info["adoption"] / 1e16, 4),
+                code_fingerprint_=db.code_fingerprint(entry),
             )
-        # Make sure the thing to be measured is actually adoptable. Seeding
-        # with target="seed_pool" alone leaves nothing in the inactive pool for
-        # a reset to pick up, and the request would never be fulfilled.
-        agent_id = await db.ensure_synthetic_agent(conn, "tig-foundation", now())
-        in_pool = await db.count_inactive_from_agent(conn, agent_id, challenge)
+            if action != "unchanged":
+                provisioned.append(f"recorded {info['algo_name']}")
+            agent_id = await db.ensure_synthetic_agent(
+                conn, "tig-foundation", timestamp)
+            if not await db.has_inactive_with_code(
+                    conn, agent_id, challenge, entry):
+                await db.deposit_inactive(
+                    conn, agent_id, challenge, entry, None, timestamp,
+                    kernel_code=info["kernel_code"],
+                    algorithm_files=_files_json(info["code_files"]))
+                provisioned.append("added it to the inactive pool")
+            await conn.commit()
+
+    async with db.connect() as conn:
         await conn.execute(
             "UPDATE mainnet_baselines SET status = 'requested', score = NULL, "
             "measured_by = NULL, benchmarked_at = NULL WHERE challenge = ?",
             (challenge,),
         )
         await conn.commit()
+        row = await db.get_mainnet_baseline(conn, challenge)
+
+    lead = (f"{'; '.join(provisioned)}. " if provisioned else "")
     return {
         "challenge": challenge,
         "algorithm": row["algo_name"],
         "status": "requested",
-        "queued": bool(in_pool),
+        "queued": True,
+        "provisioned": provisioned,
         "detail": (
-            "Claimed by the next agent to check in: it benchmarks the "
-            "algorithm unchanged and publishes the score, usually within an "
-            "iteration. Its own work is banked to the pool first."
-            if in_pool else
-            "Queued, but no mainnet entry is in the inactive pool for agents "
-            "to adopt. Re-run “Seed from mainnet” with target “inactive” or "
-            "“both”, or the request cannot be fulfilled."
+            f"{lead}Claimed by the next agent to check in: it benchmarks the "
+            f"algorithm unchanged and publishes the score, usually within an "
+            f"iteration. Its own work is banked to the pool first."
         ),
     }
 

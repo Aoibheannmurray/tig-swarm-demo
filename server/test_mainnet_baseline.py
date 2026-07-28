@@ -264,42 +264,104 @@ async def test_the_whole_measure_chain_end_to_end():
     print("PASS test_the_whole_measure_chain_end_to_end")
 
 
-async def test_measure_button_reports_an_unfulfillable_request():
-    """Seeding into the seed pool only leaves nothing for a reset to adopt, so
-    the request would sit unfulfilled forever. Say that, don't just say OK."""
+async def test_measure_button_provisions_everything_itself():
+    """One button, no prerequisites. It used to require "Seed from mainnet"
+    into the INACTIVE pool first — two steps with an ordering that, done
+    wrong, produced a request nothing could ever fulfil."""
     db, server = _fresh()
     await db.init_db()
-    from models import AdminSeedFromMainnet, AdminMeasureMainnetBaseline
+    from models import AdminMeasureMainnetBaseline
+
+    # Nothing seeded at all: no baseline row, empty pools.
     key = await _key(db)
-    await server.admin_seed_from_mainnet(
-        AdminSeedFromMainnet(admin_key=key, challenge=CHALLENGE, target="seed_pool"))
     res = await server.admin_measure_mainnet_baseline(
         AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
-    assert res["queued"] is False, res
-    assert "inactive" in res["detail"], res
-    print("PASS test_measure_button_reports_an_unfulfillable_request")
+    assert res["queued"] is True, res
+    assert res["algorithm"] == "topalgo", res
+    assert "recorded topalgo" in res["provisioned"], res
+    assert "added it to the inactive pool" in res["provisioned"], res
+
+    async with db.connect() as conn:
+        row = await db.get_mainnet_baseline(conn, CHALLENGE)
+        # Genuinely performable, not merely marked requested.
+        assert await server._mainnet_measurement_claimable(conn, CHALLENGE)
+    assert row["status"] == "requested", row
+    print("PASS test_measure_button_provisions_everything_itself")
 
 
-async def test_measure_button_refuses_when_nothing_is_known():
+async def test_measure_button_re_deposits_a_consumed_entry():
+    """Adoption is consume-once, so a failed or repeated measurement leaves
+    the pool empty. Pressing again must refill it rather than queueing against
+    nothing — the state the beta swarm got stuck in."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminMeasureMainnetBaseline
+    key = await _key(db)
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+
+    async with db.connect() as conn:  # an agent adopts it; the row is deleted
+        for e in await db.get_inactive_with_deactivations(conn, CHALLENGE):
+            await db.remove_inactive(conn, e["id"])
+        await conn.commit()
+        assert not await server._mainnet_measurement_claimable(conn, CHALLENGE)
+
+    res = await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+    assert "added it to the inactive pool" in res["provisioned"], res
+    async with db.connect() as conn:
+        assert await server._mainnet_measurement_claimable(conn, CHALLENGE)
+    print("PASS test_measure_button_re_deposits_a_consumed_entry")
+
+
+async def test_measure_button_does_not_refetch_when_ready():
+    """A fetch is two calls to someone else's API. With the algorithm recorded
+    and an adoptable copy pooled, there is nothing to provision."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminMeasureMainnetBaseline
+    import mainnet_seed
+    key = await _key(db)
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+
+    calls = []
+    orig = mainnet_seed.fetch_top_reshaped
+
+    def _counted(ch):
+        calls.append(ch)
+        return orig(ch)
+
+    mainnet_seed.fetch_top_reshaped = _counted
+    try:
+        res = await server.admin_measure_mainnet_baseline(
+            AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+    finally:
+        mainnet_seed.fetch_top_reshaped = orig
+    assert calls == [], f"should not refetch when ready, got {calls}"
+    assert res["provisioned"] == [], res
+    assert res["queued"] is True, res
+    print("PASS test_measure_button_does_not_refetch_when_ready")
+
+
+async def test_measure_button_still_refuses_what_it_cannot_do():
+    """A challenge with no compatible mainnet algorithm must say so, not
+    queue a measurement that can never complete."""
     db, server = _fresh()
     await db.init_db()
     from models import AdminMeasureMainnetBaseline
     from fastapi import HTTPException
     key = await _key(db)
-    for setup, needle in (
-        (None, "Seed from mainnet"),
-        ("vehicle_routing", "No compatible mainnet algorithm"),
-    ):
-        if setup:
-            await _seed(db, server, challenge=setup)  # marks it unavailable
-        try:
-            await server.admin_measure_mainnet_baseline(
-                AdminMeasureMainnetBaseline(
-                    admin_key=key, challenge=setup or CHALLENGE))
-            raise AssertionError(f"expected a refusal for {setup or CHALLENGE}")
-        except HTTPException as exc:
-            assert needle in exc.detail, exc.detail
-    print("PASS test_measure_button_refuses_when_nothing_is_known")
+    try:
+        await server.admin_measure_mainnet_baseline(
+            AdminMeasureMainnetBaseline(admin_key=key, challenge="vehicle_routing"))
+        raise AssertionError("expected a refusal")
+    except HTTPException as exc:
+        assert "No compatible mainnet algorithm" in exc.detail, exc.detail
+    async with db.connect() as conn:
+        row = await db.get_mainnet_baseline(conn, "vehicle_routing")
+    assert row["status"] == "unavailable", row
+    print("PASS test_measure_button_still_refuses_what_it_cannot_do")
 
 
 async def test_a_differently_reshaped_pool_entry_is_not_mistaken_for_this_one():
@@ -532,16 +594,26 @@ async def test_a_dead_claimant_does_not_park_the_measurement():
 
 
 async def test_no_agent_is_disturbed_when_nothing_is_adoptable():
-    """A request with no matching pool entry must not reset agents forever."""
+    """A request with nothing to adopt must not reset agents, over and over.
+
+    The button now provisions the pool entry itself, so this state no longer
+    arises from pressing it — it arises AFTER an adoption, because the pool is
+    consume-once: the measuring agent takes the entry, and if its benchmark
+    fails the request is still outstanding with nothing left to adopt. That is
+    exactly what happened on the beta swarm when the mainnet algorithm would
+    not compile."""
     db, server = _fresh()
     await db.init_db()
-    from models import AdminSeedFromMainnet, AdminMeasureMainnetBaseline
+    from models import AdminMeasureMainnetBaseline
     key = await _key(db)
-    # seed_pool only — nothing in the inactive pool to adopt.
-    await server.admin_seed_from_mainnet(AdminSeedFromMainnet(
-        admin_key=key, challenge=CHALLENGE, target="seed_pool"))
     await server.admin_measure_mainnet_baseline(
         AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+
+    async with db.connect() as conn:  # the entry is adopted and consumed
+        for e in await db.get_inactive_with_deactivations(conn, CHALLENGE):
+            await db.remove_inactive(conn, e["id"])
+        await conn.commit()
+
     a1 = await _agent_with_a_trajectory(db, server, "a1")
     st = await server.get_state(agent_id=a1, challenge=CHALLENGE, token_agent_id=a1)
     assert (st.get("trajectory_reset") or {}).get("reason") != "mainnet_baseline", st
@@ -558,8 +630,10 @@ async def main():
     await test_view_is_absent_until_an_algorithm_is_known()
     await test_measure_button_queues_onto_the_next_reset()
     await test_the_whole_measure_chain_end_to_end()
-    await test_measure_button_reports_an_unfulfillable_request()
-    await test_measure_button_refuses_when_nothing_is_known()
+    await test_measure_button_provisions_everything_itself()
+    await test_measure_button_re_deposits_a_consumed_entry()
+    await test_measure_button_does_not_refetch_when_ready()
+    await test_measure_button_still_refuses_what_it_cannot_do()
     await test_a_differently_reshaped_pool_entry_is_not_mistaken_for_this_one()
     await test_an_unrelated_seed_no_longer_blocks_mainnet()
     await test_seeding_the_same_algorithm_twice_stays_idempotent()
