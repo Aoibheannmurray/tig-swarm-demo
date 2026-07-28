@@ -1415,9 +1415,26 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         if not isinstance(agents, list) or not agents:
             return JSONResponse({"error": "at least one agent is required"}, status_code=400)
         names = []
+        legal = init_fleet.wire_providers()
         for a in agents:
             if not isinstance(a, dict) or not str(a.get("name", "")).strip():
                 return JSONResponse({"error": "every agent needs a name"}, status_code=400)
+            # A setup-level key (deepseek / openrouter / custom) is a valid
+            # answer to "which vendor?" but NOT a valid config value — run_fleet
+            # exits with "unknown provider" on it. Catch it here, where we can
+            # say what to write instead, rather than at launch.
+            prov = str(a.get("provider", "")).strip()
+            if prov and prov not in legal:
+                wire, base = init_fleet.resolve_wire_provider(prov)
+                hint = (
+                    f" — write provider {wire!r}"
+                    + (f" with api_base {base!r}" if base else "")
+                    if wire in legal else ""
+                )
+                return JSONResponse(
+                    {"error": f"agent {a['name']!r}: unknown provider {prov!r}{hint}"},
+                    status_code=400,
+                )
             names.append(a["name"])
         if len(names) != len(set(names)):
             return JSONResponse({"error": "agent names must be unique"}, status_code=400)

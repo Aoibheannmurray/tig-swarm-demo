@@ -8,6 +8,8 @@
     "supports_c3": true,
     "blurb": "Claude, called directly over Anthropic's API.",
     "needs_api_base": false,
+    "wire_provider": "anthropic",
+    "api_base": null,
     "popular_models": [
       "claude-opus-4-8",
       "claude-sonnet-5",
@@ -23,6 +25,8 @@
     "supports_c3": true,
     "blurb": "GPT, called directly over OpenAI's API.",
     "needs_api_base": false,
+    "wire_provider": "openai",
+    "api_base": null,
     "popular_models": [
       "gpt-5",
       "gpt-5-mini",
@@ -38,6 +42,8 @@
     "supports_c3": true,
     "blurb": "Gemini, called directly over Google's API.",
     "needs_api_base": false,
+    "wire_provider": "google",
+    "api_base": null,
     "popular_models": [
       "gemini-2.5-pro",
       "gemini-2.5-flash"
@@ -52,6 +58,8 @@
     "supports_c3": true,
     "blurb": "Private, uncensored inference over an OpenAI-compatible API.",
     "needs_api_base": false,
+    "wire_provider": "venice",
+    "api_base": null,
     "popular_models": [
       "zai-org-glm-5",
       "qwen3-235b",
@@ -67,6 +75,8 @@
     "supports_c3": true,
     "blurb": "One key, many providers. Models are `publisher/model` strings.",
     "needs_api_base": false,
+    "wire_provider": "openai",
+    "api_base": "https://openrouter.ai/api/v1",
     "popular_models": [
       "qwen/qwen3-coder",
       "anthropic/claude-opus-4.8",
@@ -83,6 +93,8 @@
     "supports_c3": true,
     "blurb": "DeepSeek's own API \u2014 strong models at a low price.",
     "needs_api_base": false,
+    "wire_provider": "openai",
+    "api_base": "https://api.deepseek.com/v1",
     "popular_models": [
       "deepseek-v4-pro",
       "deepseek-chat",
@@ -98,6 +110,8 @@
     "supports_c3": true,
     "blurb": "Uses the `claude` CLI's own login. No API key needed.",
     "needs_api_base": false,
+    "wire_provider": "claude-code",
+    "api_base": null,
     "popular_models": [
       "opus",
       "sonnet",
@@ -116,6 +130,8 @@
     "supports_c3": true,
     "blurb": "Tooled, sandboxed Claude CLI \u2014 more capable, 5-20x more tokens.",
     "needs_api_base": false,
+    "wire_provider": "claude-code-agentic",
+    "api_base": null,
     "popular_models": [
       "opus",
       "sonnet",
@@ -132,6 +148,8 @@
     "supports_c3": true,
     "blurb": "Agentic Codex CLI \u2014 uses `codex login`. Subscription only.",
     "needs_api_base": false,
+    "wire_provider": "codex-agentic",
+    "api_base": null,
     "popular_models": [
       "gpt-5.6-sol",
       "gpt-5.6-terra",
@@ -151,6 +169,8 @@
     "supports_c3": true,
     "blurb": "Your own OpenAI-compatible endpoint \u2014 llama.cpp, vLLM, Ollama, LM Studio, or a private gateway.",
     "needs_api_base": true,
+    "wire_provider": "openai",
+    "api_base": null,
     "popular_models": []
   }
 ]

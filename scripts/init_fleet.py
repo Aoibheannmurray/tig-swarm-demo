@@ -87,6 +87,33 @@ _CUSTOM_API_KEY_ENV = "CUSTOM_LLM_API_KEY"
 # rather than hardcoding a provider key.
 NEEDS_API_BASE = frozenset({"custom"})
 
+# Setup-level provider key → what actually lands in fleet.config.json.
+# OpenRouter / DeepSeek / a custom endpoint are all OpenAI-compatible, so they
+# are written as provider `openai` plus an api_base; only the fixed-endpoint
+# ones can name the URL here (custom's comes from the contributor).
+#
+# Surfaced through get_providers() as `wire_provider` / `api_base` because the
+# setup keys are NOT valid config values: run_fleet exits with "unknown
+# provider 'deepseek'" if one is written straight into fleet.config.json. Any
+# UI that edits the config directly has to apply this same mapping — and
+# recognise it in reverse to tell which vendor an `openai` entry really is.
+_WIRE_REMAP: dict[str, tuple[str, str | None]] = {
+    "openrouter": ("openai", _OPENROUTER_API_BASE),
+    "deepseek": ("openai", _DEEPSEEK_API_BASE),
+    "custom": ("openai", None),
+}
+
+
+def resolve_wire_provider(key: str) -> tuple[str, str | None]:
+    """(provider, api_base) as written into fleet.config.json for a setup-level
+    provider key. Unmapped keys pass through unchanged with no api_base."""
+    return _WIRE_REMAP.get(key, (key, None))
+
+
+def wire_providers() -> frozenset[str]:
+    """Every provider value that may legally appear in fleet.config.json."""
+    return frozenset(resolve_wire_provider(p[0])[0] for p in PROVIDERS)
+
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the
 # provider list in scripts/run_loop.py. Tuple: (label, default_model,
 # api_key_env or None, short_name_stub, supports_c3, blurb, popular_models).
@@ -626,6 +653,12 @@ def get_providers() -> list[dict]:
             # The UI asks for an endpoint URL (and lists models from it)
             # instead of showing a vendor's catalog.
             "needs_api_base": p[0] in NEEDS_API_BASE,
+            # What this choice becomes in fleet.config.json. A UI that edits
+            # the config directly must write these — not `key` — or the fleet
+            # dies at launch with "unknown provider"; reading them backwards is
+            # also how it tells a DeepSeek agent from a plain OpenAI one.
+            "wire_provider": resolve_wire_provider(p[0])[0],
+            "api_base": resolve_wire_provider(p[0])[1],
             # Shortlist for the UI's "Recommended" group. The full catalog is
             # fetched live per provider (see /local-api/models).
             "popular_models": list(p[7]),
@@ -667,20 +700,14 @@ def build_fleet_config(params: dict) -> dict:
     default_model, api_key_env, supports_c3 = spec[2], spec[3], spec[5]
 
     # OpenRouter / DeepSeek are OpenAI-compatible: written as provider `openai`
-    # with an explicit api_base (mirrors the wizard).
-    api_base: str | None = None
+    # with an explicit api_base (see _WIRE_REMAP, which the config editor reads
+    # through get_providers() so both paths write the same shape).
     is_custom = provider == "custom"
-    if provider == "openrouter":
-        provider = "openai"
-        api_base = _OPENROUTER_API_BASE
-    elif provider == "deepseek":
-        provider = "openai"
-        api_base = _DEEPSEEK_API_BASE
-    elif is_custom:
+    provider, api_base = resolve_wire_provider(provider)
+    if is_custom:
         # Same remap, but every part comes from the contributor: we have no
         # endpoint to default to, and the key env var is theirs to name (their
         # server may want a token, a placeholder, or nothing at all).
-        provider = "openai"
         api_base = (params.get("api_base") or "").strip()
         if not api_base:
             raise ValueError(
