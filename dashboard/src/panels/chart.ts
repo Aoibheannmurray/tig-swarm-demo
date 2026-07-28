@@ -661,6 +661,13 @@ export class ChartPanel implements Panel {
           .attr("transform", `translate(${x0},${y0})`)
           .attr("fill", color).attr("opacity", 0.95)
           .attr("stroke", color).attr("stroke-width", 0.5);
+      } else if (event === "failed_attempts") {
+        // Hollow diamond — agent was shown its own archived failed attempts.
+        plotG.append("path")
+          .attr("d", symbol(symbolDiamond, 55)())
+          .attr("transform", `translate(${x0},${y0})`)
+          .attr("fill", "none").attr("opacity", 0.95)
+          .attr("stroke", color).attr("stroke-width", 1.4);
       } else {
         plotG.append("circle")
           .attr("cx", x0)
@@ -709,10 +716,11 @@ export class ChartPanel implements Panel {
   ) {
     // Stack short rows in the top-right corner. Each row is a tiny marker
     // followed by a label. Kept compact so it doesn't crowd the plot.
-    const items: { kind: "trajectory_deactivated" | "tacit_knowledge" | "inspiration"; label: string }[] = [
+    const items: { kind: "trajectory_deactivated" | "tacit_knowledge" | "inspiration" | "failed_attempts"; label: string }[] = [
       { kind: "trajectory_deactivated", label: "trajectory deactivated" },
       { kind: "tacit_knowledge",        label: "tacit knowledge" },
       { kind: "inspiration",            label: "inspiration" },
+      { kind: "failed_attempts",        label: "failed attempts" },
     ];
     const lineH = Math.max(12, fs + 2);
     // "trajectory deactivated" is the longest label (~21 chars). Reserve
@@ -738,6 +746,12 @@ export class ChartPanel implements Panel {
           .attr("d", symbol(symbolStar, 36)())
           .attr("transform", `translate(${x0},${cy})`)
           .attr("fill", color).attr("opacity", 0.9);
+      } else if (item.kind === "failed_attempts") {
+        legend.append("path")
+          .attr("d", symbol(symbolDiamond, 32)())
+          .attr("transform", `translate(${x0},${cy})`)
+          .attr("fill", "none").attr("opacity", 0.9)
+          .attr("stroke", color).attr("stroke-width", 1.2);
       } else {
         legend.append("path")
           .attr("d", symbol(symbolSquare, 30)())
@@ -883,7 +897,7 @@ function snapToStep(v: number, step: number): number {
 
 function pickEventKind(
   e: AgentExperiment,
-): "trajectory_deactivated" | "tacit_knowledge" | "inspiration" | null {
+): "trajectory_deactivated" | "tacit_knowledge" | "inspiration" | "failed_attempts" | null {
   // Priority: a trajectory deactivation is the loudest event, so it wins
   // when both apply (rare — the agent published an iteration that was then
   // the last on a trajectory which became inactive on its next /api/state
@@ -891,6 +905,7 @@ function pickEventKind(
   if (e.trajectoryDeactivated) return "trajectory_deactivated";
   if (e.receivedHint === "tacit_knowledge") return "tacit_knowledge";
   if (e.receivedHint === "inspiration") return "inspiration";
+  if (e.receivedHint === "failed_attempts") return "failed_attempts";
   return null;
 }
 

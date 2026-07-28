@@ -190,6 +190,40 @@ class IterationCreate(BaseModel):
         return v
 
 
+# Failed-attempts archive: LLM-authored artifacts posted by the agent loop
+# when a trajectory dies (structured retrospective) or when a tacit lesson is
+# distilled. Fields are clamped rather than 422'd — the artifact is
+# best-effort telemetry, and losing it to an over-long field is the worse
+# failure. Provenance (trajectory_id, experiment_id, best_score) is filled
+# server-side, never trusted from the client.
+MAX_FAILURE_FIELD_LEN = 2000   # per structured field (~300 words)
+MAX_LESSON_LEN = 300
+
+
+class FailureRecordCreate(BaseModel):
+    agent_id: str
+    challenge: Optional["ChallengeName"] = None
+    kind: Literal["retrospective", "lesson"] = "retrospective"
+    approach_summary: str = ""
+    what_was_tried: str = ""
+    observed_outcome: str = ""
+    possible_reasons: str = ""
+    lesson: str = ""
+
+    @field_validator(
+        "approach_summary", "what_was_tried", "observed_outcome",
+        "possible_reasons", mode="before",
+    )
+    @classmethod
+    def _clamp_field(cls, v):
+        return str(v)[:MAX_FAILURE_FIELD_LEN] if v is not None else ""
+
+    @field_validator("lesson", mode="before")
+    @classmethod
+    def _clamp_lesson(cls, v):
+        return str(v)[:MAX_LESSON_LEN] if v is not None else ""
+
+
 class AdminAuth(BaseModel):
     admin_key: str
 
@@ -362,6 +396,11 @@ class SwarmConfigUpdate(AdminAuth):
     hpo_min_improvements: Optional[int] = None
     hpo_search_budget: Optional[int] = None
     hpo_num_suggested_configs: Optional[int] = None
+    # Failed-attempts archive: 1 = store LLM retrospectives/lessons in the DB
+    # and offer the "failed_attempts" stagnation hint. 0 = off (default).
+    failed_attempts_archive: Optional[int] = None
+    failure_records_max_per_agent: Optional[int] = None
+    failed_attempts_hint_records: Optional[int] = None
 
 
 class MessageCreate(BaseModel):

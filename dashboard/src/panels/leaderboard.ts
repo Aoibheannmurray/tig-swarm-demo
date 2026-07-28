@@ -10,7 +10,8 @@ type SortKey =
   | "runs_since_improvement"
   | "num_trajectories"
   | "tacit_knowledge_count"
-  | "inspiration_count";
+  | "inspiration_count"
+  | "failed_attempts_count";
 type SortDir = "asc" | "desc";
 
 // Default cap on rendered rows. The server returns every agent with a
@@ -29,6 +30,7 @@ const DEFAULT_DIR: Record<SortKey, SortDir> = {
   num_trajectories: "desc",
   tacit_knowledge_count: "desc",
   inspiration_count: "desc",
+  failed_attempts_count: "desc",
 };
 
 export class LeaderboardPanel implements Panel {
@@ -60,6 +62,7 @@ export class LeaderboardPanel implements Panel {
           <button type="button" class="lb-col-sm lb-sortable" data-sort="num_trajectories">Traj<span class="lb-arrow"></span></button>
           <button type="button" class="lb-col-sm lb-sortable" data-sort="tacit_knowledge_count" title="Tacit knowledge reads">TK<span class="lb-arrow"></span></button>
           <button type="button" class="lb-col-sm lb-sortable" data-sort="inspiration_count" title="Inspiration reads">Insp<span class="lb-arrow"></span></button>
+          <button type="button" class="lb-col-sm lb-sortable" data-sort="failed_attempts_count" title="Failed-attempt recalls">FA<span class="lb-arrow"></span></button>
         </div>
         <div class="leaderboard-list" id="leaderboard-list"></div>
       </div>
@@ -177,6 +180,7 @@ export class LeaderboardPanel implements Panel {
         <span class="lb-col-sm">${entry.num_trajectories}</span>
         <span class="lb-col-sm">${entry.tacit_knowledge_count}</span>
         <span class="lb-col-sm">${entry.inspiration_count}</span>
+        <span class="lb-col-sm">${entry.failed_attempts_count ?? 0}</span>
       `;
 
       this.list.appendChild(row);

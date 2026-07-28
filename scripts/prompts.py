@@ -38,6 +38,21 @@ def _tacit_write_enabled(config: dict) -> bool:
     return bool(value)
 
 
+def _failed_attempts_enabled(config: dict) -> bool:
+    """Whether failure retrospectives should be produced and posted to the
+    server's failed-attempts archive (mirrors
+    `run_loop.failed_attempts_enabled`). Requires BOTH the swarm-wide
+    `failed_attempts_archive` toggle (synced from /api/swarm_config,
+    default off) AND the per-agent `failed_attempts_write` opt-out to be
+    true (default true, same string forms as `tacit_write`)."""
+    if not config.get("failed_attempts_archive"):
+        return False
+    value = config.get("failed_attempts_write", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
+
+
 # ── Strategy tags ──────────────────────────────────────────────────
 
 
@@ -144,6 +159,67 @@ def _format_inspiration(state: dict, is_gpu: bool, headline: str) -> list[str]:
     return out
 
 
+# Neutral framing is the point: the archive is served as "prior attempts and
+# outcomes", never as a ban list — a failed idea may work with a key
+# modification, so the agent is invited to hypothesize a variant.
+_FAILED_ATTEMPTS_HEADER = (
+    "Prior attempts and their outcomes (informational — NOT prohibitions):\n"
+    "You tried the approaches below on this challenge before and they did not\n"
+    "improve your score at the time. This is context, not a ban list — an idea\n"
+    "that failed once may succeed with a key modification, different\n"
+    "parameters, or against your current (different) code. Consider\n"
+    "hypothesizing a MODIFIED or SIMILAR approach that addresses what appears\n"
+    "to have gone wrong, or take a different direction if you have a stronger\n"
+    "idea."
+)
+
+
+def _format_failed_attempts(state: dict) -> list[str]:
+    """Render the server's failed_attempts hint payload (the agent's OWN
+    archived retrospectives/lessons + recent rejected iterations)."""
+    fa = state.get("failed_attempts") or {}
+    retros = fa.get("retrospectives") or []
+    rejected = fa.get("recent_rejected") or []
+    if not retros and not rejected:
+        return []
+    parts = ["\n" + _FAILED_ATTEMPTS_HEADER]
+    for r in retros:
+        if r.get("kind") == "lesson":
+            lesson = (r.get("lesson") or "").strip()
+            if lesson:
+                parts.append(f"\nLesson you distilled earlier:\n  {lesson}")
+            continue
+        lines = ["\nRetrospective from a previous trajectory of yours:"]
+        for label, key in (
+            ("Approach", "approach_summary"),
+            ("What was tried", "what_was_tried"),
+            ("Observed outcome", "observed_outcome"),
+            ("Possible reasons", "possible_reasons"),
+        ):
+            value = (r.get(key) or "").strip()
+            if value:
+                lines.append(f"  {label}: {value}")
+        if len(lines) > 1:
+            parts.append("\n".join(lines))
+    if rejected:
+        lines = ["\nRecent iterations of yours that did not improve the score:"]
+        for e in rejected:
+            tag = e.get("strategy_tag") or "?"
+            title = e.get("title") or "?"
+            score = e.get("score")
+            delta = e.get("delta_vs_trajectory_best_pct")
+            desc = f"  - [{tag}] {title}"
+            if score is not None:
+                desc += f" — score {score}"
+            if delta is not None:
+                desc += f", {delta}% vs trajectory best"
+            if not e.get("feasible", True):
+                desc += " (infeasible)"
+            lines.append(desc)
+        parts.append("\n".join(lines))
+    return parts
+
+
 def build_hypothesis_user_prompt(
     state: dict, config: dict, *, role: str = "explorer",
     assigned_tag: str | None = None,
@@ -201,6 +277,8 @@ def build_hypothesis_user_prompt(
             parts.extend(_format_inspiration(
                 state, is_gpu, "Study this approach for ideas:",
             ))
+    elif hint == "failed_attempts":
+        parts.extend(_format_failed_attempts(state))
 
     reset = state.get("trajectory_reset")
     if reset:
@@ -259,8 +337,39 @@ _TACIT_DISTILL_SYSTEM = (
 )
 
 
+# Archive variant: the lesson rules above PLUS a structured retrospective of
+# the dying trajectory, for the server's failed-attempts archive. Delimited
+# line-prefix format (not JSON) — matches the TITLE:/DESCRIPTION: parsing
+# style used everywhere else and survives models that wrap JSON in prose.
+_TACIT_DISTILL_ARCHIVE_SYSTEM = (
+    _TACIT_DISTILL_SYSTEM
+    + "\n\n"
+    "ADDITIONALLY, after the lesson line, write a structured retrospective "
+    "of this dying trajectory. Unlike the lesson, the retrospective MAY be "
+    "challenge-specific and concrete — it is stored privately for YOUR "
+    "future self on this challenge, as a record of \"I tried this and it "
+    "didn't work\", NOT as a prohibition list.\n\n"
+    "Full output format (five labeled sections, each value may span "
+    "multiple lines until the next label; ~100 words per section, total "
+    "under ~400 words):\n"
+    "LESSON: <the `- LLM: ` line as specified above, or SKIP>\n"
+    "APPROACH_SUMMARY: <1-3 sentences: the overall strategy this "
+    "trajectory pursued>\n"
+    "WHAT_WAS_TRIED: <the concrete variations attempted, most recent "
+    "first>\n"
+    "OBSERVED_OUTCOME: <what the scores/diagnostics actually did>\n"
+    "POSSIBLE_REASONS: <your best hypotheses for WHY it did not work>\n\n"
+    "The LESSON and retrospective skips are independent: LESSON may be "
+    "SKIP while the retrospective is still worth writing, and vice versa. "
+    "If the trajectory has too little material for ANY retrospective, "
+    "output RETROSPECTIVE_SKIP alone on its own line instead of the four "
+    "retrospective sections."
+)
+
+
 def build_tacit_distillation_prompts(
     state: dict, config: dict, current_code: str, existing_tacit: str,
+    *, include_retrospective: bool = False,
 ) -> tuple[str, str]:
     """Build (system, user) prompts for the tacit-knowledge distillation
     call. Fired by the driver after the iteration that's about to trigger
@@ -311,6 +420,20 @@ def build_tacit_distillation_prompts(
         if current_code else "Current algorithm: (none on disk)"
     )
 
+    if include_retrospective:
+        final_instruction = (
+            "Now: produce the five labeled sections (LESSON, "
+            "APPROACH_SUMMARY, WHAT_WAS_TRIED, OBSERVED_OUTCOME, "
+            "POSSIBLE_REASONS) from the failed hypotheses above. LESSON "
+            "may be SKIP; output RETROSPECTIVE_SKIP alone if the "
+            "trajectory has too little material for a retrospective."
+        )
+    else:
+        final_instruction = (
+            "Now: write one `- LLM: ` line distilling a transferable lesson "
+            "from the failed hypotheses above, or output SKIP if nothing new "
+            "and transferable has emerged."
+        )
     user = (
         "Trajectory summary\n"
         f"- Best score on this trajectory: {traj_best}\n"
@@ -323,11 +446,13 @@ def build_tacit_distillation_prompts(
         "\n"
         f"{code_block}\n"
         "\n"
-        "Now: write one `- LLM: ` line distilling a transferable lesson "
-        "from the failed hypotheses above, or output SKIP if nothing new "
-        "and transferable has emerged."
+        f"{final_instruction}"
     )
-    return _TACIT_DISTILL_SYSTEM, user
+    system = (
+        _TACIT_DISTILL_ARCHIVE_SYSTEM if include_retrospective
+        else _TACIT_DISTILL_SYSTEM
+    )
+    return system, user
 
 
 def parse_tacit_distillation(response: str) -> str | None:
@@ -348,6 +473,80 @@ def parse_tacit_distillation(response: str) -> str | None:
         # First non-empty line wasn't what we asked for — reject.
         return None
     return None
+
+
+# Per-field clamp for retrospective sections (mirrors the server's
+# MAX_FAILURE_FIELD_LEN in server/models.py — the server clamps again, this
+# just avoids shipping pathological output over the wire).
+_RETRO_FIELD_MAX = 2000
+_RETRO_HEADERS = {
+    "APPROACH_SUMMARY": "approach_summary",
+    "WHAT_WAS_TRIED": "what_was_tried",
+    "OBSERVED_OUTCOME": "observed_outcome",
+    "POSSIBLE_REASONS": "possible_reasons",
+}
+
+
+def parse_failure_retrospective(response: str) -> dict | None:
+    """Parse the archive-distillation output into
+    {approach_summary, what_was_tried, observed_outcome, possible_reasons,
+    lesson} — `lesson` is the `- LLM: …` line or None (LESSON: SKIP).
+
+    Returns None when the model output RETROSPECTIVE_SKIP or produced no
+    retrospective sections at all (the lesson, if any, is then recoverable
+    via `parse_archive_lesson` — the two skips are independent). Values
+    accumulate across lines until the next label; each is clamped to
+    _RETRO_FIELD_MAX chars."""
+    if not response:
+        return None
+    fields: dict[str, list[str]] = {}
+    lesson_raw: str | None = None
+    current: str | None = None
+    for line in response.strip().splitlines():
+        s = line.strip()
+        if s.upper() == "RETROSPECTIVE_SKIP":
+            return None
+        matched = False
+        for header, key in _RETRO_HEADERS.items():
+            if s.upper().startswith(header + ":"):
+                current = key
+                fields[key] = [s[len(header) + 1:].strip()]
+                matched = True
+                break
+        if matched:
+            continue
+        if s.upper().startswith("LESSON:"):
+            lesson_raw = s[len("LESSON:"):].strip()
+            current = None
+            continue
+        if current and s:
+            fields[current].append(s)
+    if not fields:
+        return None
+    out = {
+        key: " ".join(v for v in values if v)[:_RETRO_FIELD_MAX]
+        for key, values in fields.items()
+    }
+    if not any(out.values()):
+        return None
+    for key in _RETRO_HEADERS.values():
+        out.setdefault(key, "")
+    out["lesson"] = parse_tacit_distillation(lesson_raw) if lesson_raw else None
+    return out
+
+
+def parse_archive_lesson(response: str) -> str | None:
+    """Extract the `- LLM: …` lesson from archive-format distillation
+    output (the `LESSON:` label), independent of whether the retrospective
+    was skipped. Falls back to plain `parse_tacit_distillation` for a
+    model that ignored the labels and answered in the bare format."""
+    if not response:
+        return None
+    for line in response.strip().splitlines():
+        s = line.strip()
+        if s.upper().startswith("LESSON:"):
+            return parse_tacit_distillation(s[len("LESSON:"):].strip())
+    return parse_tacit_distillation(response)
 
 
 # ── Code generation prompts ────────────────────────────────────────
@@ -1566,14 +1765,25 @@ def build_agentic_user_prompt(
             "present) for strategy hints the contributor wrote down. If "
             "absent, fall back to the inspiration_code block above if any."
         )
+    elif hint == "failed_attempts":
+        fa_parts = _format_failed_attempts(state)
+        if fa_parts:
+            parts.append(
+                "\n## Stagnation hint — your own prior failed attempts"
+                + "".join(fa_parts)
+            )
 
     stagnation_limit = int(config.get("stagnation_limit") or 0)
-    in_band_distill = (
-        _tacit_write_enabled(config)
-        and not DRIVER_DISTILL_FOR_AGENTIC
+    # Last iteration before the server resets this trajectory — the shared
+    # trigger for BOTH in-band contributions (tacit lesson + failure
+    # retrospective). Each is gated by its own toggle so tacit-off/archive-on
+    # (and the reverse) still fires the enabled one.
+    at_distill_point = (
+        not DRIVER_DISTILL_FOR_AGENTIC
         and stagnation_limit >= 3
         and stagnation == stagnation_limit - 1
     )
+    in_band_distill = _tacit_write_enabled(config) and at_distill_point
     if in_band_distill:
         parts.append(
             "\n## Tacit-knowledge contribution\n"
@@ -1595,6 +1805,22 @@ def build_agentic_user_prompt(
             "- Under 30 words. No code, no scores, no instance IDs.\n"
             "- Skip silently if nothing genuinely new and transferable has "
             "emerged since the last `- LLM:` entry already in the file."
+        )
+
+    if _failed_attempts_enabled(config) and at_distill_point:
+        parts.append(
+            "\n## Failure retrospective (failed-attempts archive)\n"
+            "Also before you stop: write a structured retrospective of "
+            "this dying trajectory as JSON to "
+            "`.swarm/failure_retrospective.json` (same directory as "
+            "hypothesis.json), with exactly these four string keys:\n"
+            '{"approach_summary": "...", "what_was_tried": "...",\n'
+            ' "observed_outcome": "...", "possible_reasons": "..."}\n'
+            "Keep each field under ~100 words. Unlike the tacit lesson, "
+            "this MAY be challenge-specific and concrete — it is stored "
+            "privately for YOUR future self on this challenge, as a record "
+            "of \"I tried this and it didn't work\", not a prohibition. "
+            "Skip the file only if the trajectory has no real material."
         )
 
     parts.append(

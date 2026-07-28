@@ -113,6 +113,11 @@ _AGENT_CONFIG_KEYS = (
     # false to stop this agent appending `- LLM:` lessons to its
     # tacit_knowledge_personal.md (driver-side and in-band paths both gated).
     "tacit_write",
+    # Per-agent opt-out for the server's failed-attempts archive (default
+    # True). Only matters when the host has enabled the swarm-wide
+    # `failed_attempts_archive` toggle; set false to stop this agent posting
+    # failure retrospectives/lessons to the server.
+    "failed_attempts_write",
     # Contributor-owned behavior role (explorer/exploiter). Materialized at
     # spawn AND re-synced live by the monitor loop so editing it in
     # fleet.config.json takes effect on the agent's next iteration.
