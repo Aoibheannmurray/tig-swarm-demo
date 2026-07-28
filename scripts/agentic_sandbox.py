@@ -26,6 +26,11 @@ HYPOTHESIS_RELPATH = ".swarm/hypothesis.json"
 # pass (Fix 1 in docs/hyperparameter-search-plan.md). Read back by the loop.
 HYPERPARAMS_RELPATH = ".swarm/hyperparameters.json"
 
+# Where the agent writes its failure retrospective on the last iteration
+# before a trajectory reset (failed-attempts archive). Read back + posted by
+# the loop after the agent exits, then deleted.
+FAILURE_RETRO_RELPATH = ".swarm/failure_retrospective.json"
+
 # Worktree branch namespace for agentic runs that aren't part of a fleet.
 # Fleet runs use the fleet/<name> namespace (see run_fleet.py); agentic
 # single-contributor runs use agentic/<short-id> so the two don't collide.
@@ -134,17 +139,17 @@ def seed_worktree_config(workdir: Path) -> None:
 
 
 def reset_iteration_state(workdir: Path) -> None:
-    """Clear per-iteration scratch state before launching the agent.
-
-    Right now that's just .swarm/hypothesis.json — if a previous iteration's
-    file lingered, the loop would mis-attribute it to this iteration's
-    edits.
+    """Clear per-iteration scratch state before launching the agent:
+    .swarm/hypothesis.json and .swarm/failure_retrospective.json — if a
+    previous iteration's file lingered, the loop would mis-attribute it to
+    this iteration's edits.
     """
     swarm_dir = workdir / ".swarm"
     swarm_dir.mkdir(exist_ok=True)
-    hyp = workdir / HYPOTHESIS_RELPATH
-    if hyp.exists():
-        hyp.unlink()
+    for relpath in (HYPOTHESIS_RELPATH, FAILURE_RETRO_RELPATH):
+        stale = workdir / relpath
+        if stale.exists():
+            stale.unlink()
 
 
 _STRATEGY_TAG_FALLBACK = "other"

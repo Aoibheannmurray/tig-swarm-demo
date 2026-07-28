@@ -11,6 +11,9 @@ export interface LeaderboardEntry {
   num_trajectories: number;
   tacit_knowledge_count: number;
   inspiration_count: number;
+  // Optional: only present once the server has the failed-attempts archive
+  // (older cached payloads may omit it).
+  failed_attempts_count?: number;
   total_tokens: number;
   estimated_cost_usd: number;
   active: boolean;

@@ -105,6 +105,7 @@ class _LeaderboardEntry(BaseModel):
     num_trajectories: int
     tacit_knowledge_count: int
     inspiration_count: int
+    failed_attempts_count: int = 0
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
     active: bool

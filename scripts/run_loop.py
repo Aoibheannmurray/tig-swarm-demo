@@ -106,6 +106,7 @@ from swarm_client import (
     AgentTokenRevoked,
     agent_exists,
     get_state,
+    post_failure_record,
     post_message,
     publish_results,
     register_agent,
@@ -128,6 +129,8 @@ from prompts import (
     build_search_replace_system_prompt,
     build_search_replace_user_prompt,
     build_tacit_distillation_prompts,
+    parse_archive_lesson,
+    parse_failure_retrospective,
     parse_hypothesis,
     parse_tacit_distillation,
 )
@@ -210,6 +213,22 @@ def tacit_write_enabled(config: dict) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in ("false", "0", "no", "off", "")
     return bool(value)
+
+
+def failed_attempts_enabled(config: dict) -> bool:
+    """Whether failure retrospectives/lessons should be posted to the
+    server's failed-attempts archive. Requires BOTH the swarm-wide
+    `failed_attempts_archive` toggle (synced from /api/swarm_config each
+    iteration, default off) AND the per-agent `failed_attempts_write`
+    opt-out (default True, same string forms as `tacit_write`). Mirrored
+    by `prompts._failed_attempts_enabled` for the in-band prompt block."""
+    if not config.get("failed_attempts_archive"):
+        return False
+    value = config.get("failed_attempts_write", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
+
 
 _PROMPT_LOG_DIR = ROOT / "prompts_log"
 
@@ -1481,8 +1500,11 @@ def _should_distill_tacit(
     `build_agentic_user_prompt` instead, unless
     prompts.DRIVER_DISTILL_FOR_AGENTIC is flipped on.
 
-    Gated by the per-agent `tacit_write` config flag (default True)."""
-    if not tacit_write_enabled(config):
+    Fires when EITHER output channel is enabled: the local tacit file
+    (`tacit_write`, default True) or the server's failed-attempts archive
+    (`failed_attempts_archive` swarm toggle + `failed_attempts_write`).
+    _distill_tacit_if_due gates each output on its own flag."""
+    if not (tacit_write_enabled(config) or failed_attempts_enabled(config)):
         return False
     if is_new_best:
         return False
@@ -1522,13 +1544,21 @@ def _distill_tacit_if_due(
     state: dict, config: dict, is_new_best: bool, provider: str,
     model: str, api_key: str | None, api_base: str | None,
     files: ChallengeFiles,
+    *, server: str | None = None, agent_id: str | None = None,
+    agent_token: str | None = None, challenge: str | None = None,
+    posted_lessons: set[str] | None = None,
 ) -> tuple[int, int]:
-    """If the trigger fires, run one LLM call to distill a transferable
-    failure-lesson from this trajectory and append it to the worktree's
-    tacit file. Returns the (input_tokens, output_tokens) used (zero
-    when the trigger doesn't fire or the model returned SKIP)."""
+    """If the trigger fires, run one LLM call to distill from this dying
+    trajectory. Output routing: when the failed-attempts archive is on,
+    the server DB is the source of truth — the lesson and the structured
+    retrospective are POSTed there and the local tacit file is NOT
+    touched. Only when the archive is off (and `tacit_write` is on) does
+    the lesson fall back to the legacy file append.
+    Returns the (input_tokens, output_tokens) used (zero when the trigger
+    doesn't fire or the model returned SKIP)."""
     if not _should_distill_tacit(state, config, is_new_best, provider):
         return 0, 0
+    archive = failed_attempts_enabled(config) and server and agent_id
 
     current_code, _ = files.read()
     tacit_path = ROOT / "tacit_knowledge_personal.md"
@@ -1536,6 +1566,7 @@ def _distill_tacit_if_due(
 
     system_prompt, user_prompt = build_tacit_distillation_prompts(
         state, config, current_code, existing_tacit,
+        include_retrospective=bool(archive),
     )
 
     print("  [TACIT] Trajectory about to reset — distilling failure lesson…")
@@ -1549,13 +1580,109 @@ def _distill_tacit_if_due(
         print(f"  [TACIT] distillation call failed: {e}")
         return 0, 0
 
-    line = parse_tacit_distillation(response)
+    line = (parse_archive_lesson(response) if archive
+            else parse_tacit_distillation(response))
     if line is None:
         print("  [TACIT] model returned SKIP (or unparseable) — no entry added")
-    else:
+    elif tacit_write_enabled(config) and not archive:
+        # Legacy local-file path — only when the DB archive isn't taking
+        # the lesson (archive on = DB is the source of truth, file stays
+        # untouched).
         _append_tacit_line(line)
         print(f"  [TACIT] appended: {line[:120]}")
+
+    if line is not None and posted_lessons is not None:
+        # Shared with _post_agentic_failure_artifacts so a driver-appended
+        # lesson is never re-posted by the agentic file diff.
+        posted_lessons.add(line)
+    if archive:
+        if line is not None:
+            post_failure_record(
+                server, agent_id, kind="lesson", challenge=challenge,
+                agent_token=agent_token, lesson=line,
+            )
+        retro = parse_failure_retrospective(response)
+        if retro is not None:
+            post_failure_record(
+                server, agent_id, kind="retrospective", challenge=challenge,
+                agent_token=agent_token,
+                approach_summary=retro.get("approach_summary", ""),
+                what_was_tried=retro.get("what_was_tried", ""),
+                observed_outcome=retro.get("observed_outcome", ""),
+                possible_reasons=retro.get("possible_reasons", ""),
+            )
+            print("  [FAILARC] posted failure retrospective")
     return usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+
+
+def _read_tacit_lesson_lines(path: Path) -> set[str]:
+    """The `- LLM:` bullets currently in a tacit file (empty set if absent)."""
+    if not path.exists():
+        return set()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {ln.strip() for ln in text.splitlines() if ln.strip().startswith("- LLM:")}
+
+
+def _post_agentic_failure_artifacts(
+    workdir: Path, config: dict, server: str, agent_id: str,
+    agent_token: str | None, challenge: str | None,
+    posted_lessons: set[str],
+) -> None:
+    """Post the in-band artifacts an agentic run left behind (gated by
+    failed_attempts_enabled):
+      - `.swarm/failure_retrospective.json` → kind='retrospective', plus
+        its optional `lesson` key → kind='lesson' (the file is deleted
+        afterwards; reset_iteration_state also clears it at iteration
+        start, so a stale one can't be re-attributed), and
+      - any NEW `- LLM:` lines in the worktree's tacit file (vs
+        `posted_lessons`, which this mutates) → kind='lesson'. With the
+        archive on the prompt no longer asks for file appends, so this is
+        a safety net for agents that write the file anyway."""
+    retro_path = workdir / agentic_sandbox.FAILURE_RETRO_RELPATH
+    enabled = failed_attempts_enabled(config)
+    if retro_path.exists():
+        try:
+            raw = json.loads(retro_path.read_text(encoding="utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            raw = None
+        try:
+            retro_path.unlink()
+        except OSError:
+            pass
+        if enabled and isinstance(raw, dict):
+            fields = {
+                key: str(raw.get(key) or "")[:2000]
+                for key in ("approach_summary", "what_was_tried",
+                            "observed_outcome", "possible_reasons")
+            }
+            if any(fields.values()):
+                post_failure_record(
+                    server, agent_id, kind="retrospective",
+                    challenge=challenge, agent_token=agent_token, **fields,
+                )
+                print("  [FAILARC] posted agentic failure retrospective")
+            # The transferable lesson rides the same JSON (the prompt no
+            # longer directs it into the tacit file when the archive is on).
+            lesson = parse_tacit_distillation(str(raw.get("lesson") or ""))
+            if lesson and lesson not in posted_lessons:
+                posted_lessons.add(lesson)
+                post_failure_record(
+                    server, agent_id, kind="lesson", challenge=challenge,
+                    agent_token=agent_token, lesson=lesson,
+                )
+
+    current = _read_tacit_lesson_lines(workdir / "tacit_knowledge_personal.md")
+    new_lines = current - posted_lessons
+    # Mark as handled even when disabled/offline: the archive is
+    # fire-and-forget telemetry, and retrying the same line every
+    # iteration would spam the server on a flapping toggle.
+    posted_lessons |= new_lines
+    if enabled:
+        for line in sorted(new_lines):
+            post_failure_record(
+                server, agent_id, kind="lesson", challenge=challenge,
+                agent_token=agent_token, lesson=line,
+            )
 
 
 def _read_worktree_files(
@@ -2056,6 +2183,13 @@ def main() -> int:
     print(f"Server: {server}")
     print()
 
+    # Lessons already in the tacit file at startup are pre-existing (synced
+    # in by the fleet or written by a previous run) — only lines that appear
+    # DURING this run get posted to the failed-attempts archive.
+    posted_lessons = _read_tacit_lesson_lines(
+        (workdir or ROOT) / "tacit_knowledge_personal.md"
+    )
+
     # Contributor-owned role, re-read from agent.config.json every iteration so
     # an edit to fleet.config.json (propagated into the worktree by run_fleet)
     # takes effect on the next loop. Defaults to 'explorer'.
@@ -2130,13 +2264,22 @@ def main() -> int:
                          "cleaner_trigger_chars", "cleaner_target_pct",
                          "cleaner_score_delta_pct", "cleaner_cooldown_iters",
                          "no_benchmark_freeze_limit",
-                         "c3_warm_images", "c3_warm_image", "tig_dockerhub"):
+                         "c3_warm_images", "c3_warm_image", "tig_dockerhub",
+                         # Per-agent write gates for the tacit file and the
+                         # failed-attempts archive (tacit_write_enabled /
+                         # failed_attempts_enabled read them off `config`).
+                         "tacit_write", "failed_attempts_write"):
             if _hpo_key in _agent_cfg:
                 config[_hpo_key] = _agent_cfg[_hpo_key]
 
         try:
             swarm_cfg = server_get(f"{server}/api/swarm_config")
             config["available_challenges"] = swarm_cfg.get("available_challenges", {})
+            # Swarm-wide failed-attempts archive toggle (host-set, default
+            # off). Combined with the per-agent gate above by
+            # failed_attempts_enabled(config).
+            config["failed_attempts_archive"] = swarm_cfg.get(
+                "failed_attempts_archive", 0)
         except Exception:
             pass
 
@@ -2681,9 +2824,21 @@ def main() -> int:
             state, config, is_new_best,
             args.provider, model, api_key, args.api_base,
             files,
+            server=server, agent_id=agent_id, agent_token=agent_token,
+            challenge=bench.get("challenge") or iter_challenge,
+            posted_lessons=posted_lessons,
         )
         iter_input_tokens += tk_in
         iter_output_tokens += tk_out
+
+        if is_agentic and workdir is not None:
+            # In-band artifacts the agentic run left behind: the failure
+            # retrospective file + any new tacit lessons (both gated inside
+            # on failed_attempts_enabled).
+            _post_agentic_failure_artifacts(
+                workdir, config, server, agent_id, agent_token,
+                bench.get("challenge") or iter_challenge, posted_lessons,
+            )
 
         elapsed = time.time() - t_start
         print(f"  [DONE] Iteration {iteration} finished in {elapsed:.0f}s")

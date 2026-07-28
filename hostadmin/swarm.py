@@ -403,6 +403,7 @@ def push_config_to_server(
         "stagnation_threshold": cfg.get("stagnation_threshold", 2),
         "stagnation_limit": cfg.get("stagnation_limit", 4),
         "hypothesis_recall_threshold": cfg.get("hypothesis_recall_threshold", 3),
+        "failed_attempts_archive": cfg.get("failed_attempts_archive", 0),
     }
     url = f"{server_url.rstrip('/')}/api/swarm_config"
 
@@ -798,6 +799,10 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
     stagnation_threshold = params["stagnation_threshold"]
     stagnation_limit = params["stagnation_limit"]
     hypothesis_recall_threshold = params["hypothesis_recall_threshold"]
+    # Failed-attempts archive (0/1). Defaults off for callers that don't
+    # set it (e.g. the control-ui host companion) — toggleable later from
+    # the Admin Console's Settings tab.
+    failed_attempts_archive = 1 if params.get("failed_attempts_archive") else 0
     # HPO knobs default in for other callers (e.g. the control-ui companion)
     # that don't set them explicitly.
     hpo_first_tune_improvements = params.get("hpo_first_tune_improvements", 10)
@@ -854,6 +859,7 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         "STAGNATION_THRESHOLD": str(stagnation_threshold),
         "STAGNATION_LIMIT": str(stagnation_limit),
         "HYPOTHESIS_RECALL_THRESHOLD": str(hypothesis_recall_threshold),
+        "FAILED_ATTEMPTS_ARCHIVE": str(failed_attempts_archive),
         "HPO_FIRST_TUNE_IMPROVEMENTS": str(hpo_first_tune_improvements),
         "HPO_MIN_IMPROVEMENTS": str(hpo_min_improvements),
         "HPO_SEARCH_BUDGET": str(hpo_search_budget),
@@ -901,6 +907,7 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
         "stagnation_threshold": stagnation_threshold,
         "stagnation_limit": stagnation_limit,
         "hypothesis_recall_threshold": hypothesis_recall_threshold,
+        "failed_attempts_archive": failed_attempts_archive,
         "scoring_direction": challenge_meta["scoring_direction"],
         "tracks": active_sub["tracks"],
         "timeout": active_sub["timeout"],
@@ -1193,6 +1200,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         stagnation_limit = _arg_value(args, "stagnation_limit")
         stagnation_limit = 4 if stagnation_limit is None else stagnation_limit
         hypothesis_recall_threshold = _arg_value(args, "hypothesis_recall_threshold") or 3
+        failed_attempts_archive = 1 if _arg_enabled(args, "failed_attempts_archive") else 0
         (hpo_first_tune_improvements, hpo_min_improvements,
          hpo_search_budget, hpo_num_suggested_configs) = _resolve_hpo_settings(args)
     else:
@@ -1211,6 +1219,18 @@ def run_create(args: argparse.Namespace | None = None) -> int:
             "showing prior failed hypotheses for the current program)",
             3, minimum=1,
         )
+        if _arg_enabled(args, "failed_attempts_archive"):
+            failed_attempts_archive = 1
+        else:
+            ans = prompt(
+                "Store failed attempts in the server DB? Agents' failure "
+                "retrospectives + distilled lessons are archived per-agent and "
+                "served back as a stagnation hint (\"you tried this before\"), "
+                "instead of appended to local tacit_knowledge files. "
+                "Toggleable later in the Admin Console. [y/N]",
+                default="N",
+            )
+            failed_attempts_archive = 1 if ans.strip().lower() in ("y", "yes") else 0
         (hpo_first_tune_improvements, hpo_min_improvements,
          hpo_search_budget, hpo_num_suggested_configs) = _resolve_hpo_settings(
             args, interactive=True,
@@ -1228,6 +1248,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
         "stagnation_threshold": stagnation_threshold,
         "stagnation_limit": stagnation_limit,
         "hypothesis_recall_threshold": hypothesis_recall_threshold,
+        "failed_attempts_archive": failed_attempts_archive,
         "hpo_first_tune_improvements": hpo_first_tune_improvements,
         "hpo_min_improvements": hpo_min_improvements,
         "hpo_search_budget": hpo_search_budget,

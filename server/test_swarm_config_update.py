@@ -103,7 +103,26 @@ async def test_hpo_and_stagnation_knobs_roundtrip():
     print("PASS test_hpo_and_stagnation_knobs_roundtrip")
 
 
+async def test_failed_attempts_archive_roundtrip():
+    db, server = _fresh_modules()
+    await db.init_db()
+    from models import SwarmConfigUpdate
+    key = await _admin_key(db)
+
+    # Off by default.
+    cfg = await server.get_swarm_config()
+    assert cfg["failed_attempts_archive"] == 0, cfg
+
+    await server.update_swarm_config(SwarmConfigUpdate(
+        admin_key=key, failed_attempts_archive=1,
+    ))
+    cfg = await server.get_swarm_config()
+    assert cfg["failed_attempts_archive"] == 1, cfg
+    print("PASS test_failed_attempts_archive_roundtrip")
+
+
 if __name__ == "__main__":
     asyncio.run(test_tracks_only_update_preserves_subconfig())
     asyncio.run(test_hpo_and_stagnation_knobs_roundtrip())
+    asyncio.run(test_failed_attempts_archive_roundtrip())
     print("ALL PASS")
