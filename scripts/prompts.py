@@ -1775,15 +1775,20 @@ def build_agentic_user_prompt(
 
     stagnation_limit = int(config.get("stagnation_limit") or 0)
     # Last iteration before the server resets this trajectory — the shared
-    # trigger for BOTH in-band contributions (tacit lesson + failure
-    # retrospective). Each is gated by its own toggle so tacit-off/archive-on
-    # (and the reverse) still fires the enabled one.
+    # trigger for the in-band contributions. When the failed-attempts
+    # archive is on, the DB is the source of truth: the lesson travels
+    # inside failure_retrospective.json (block below) and the local tacit
+    # file is NOT written; the file-append instruction is the archive-off
+    # legacy path.
     at_distill_point = (
         not DRIVER_DISTILL_FOR_AGENTIC
         and stagnation_limit >= 3
         and stagnation == stagnation_limit - 1
     )
-    in_band_distill = _tacit_write_enabled(config) and at_distill_point
+    in_band_distill = (
+        _tacit_write_enabled(config) and at_distill_point
+        and not _failed_attempts_enabled(config)
+    )
     if in_band_distill:
         parts.append(
             "\n## Tacit-knowledge contribution\n"
@@ -1813,14 +1818,20 @@ def build_agentic_user_prompt(
             "Also before you stop: write a structured retrospective of "
             "this dying trajectory as JSON to "
             "`.swarm/failure_retrospective.json` (same directory as "
-            "hypothesis.json), with exactly these four string keys:\n"
+            "hypothesis.json), with these string keys:\n"
             '{"approach_summary": "...", "what_was_tried": "...",\n'
-            ' "observed_outcome": "...", "possible_reasons": "..."}\n'
-            "Keep each field under ~100 words. Unlike the tacit lesson, "
-            "this MAY be challenge-specific and concrete — it is stored "
-            "privately for YOUR future self on this challenge, as a record "
-            "of \"I tried this and it didn't work\", not a prohibition. "
-            "Skip the file only if the trajectory has no real material."
+            ' "observed_outcome": "...", "possible_reasons": "...",\n'
+            ' "lesson": "- LLM: ..."}\n'
+            "Keep each field under ~100 words. The four retrospective "
+            "fields MAY be challenge-specific and concrete — they are "
+            "stored privately for YOUR future self on this challenge, as a "
+            "record of \"I tried this and it didn't work\", not a "
+            "prohibition. `lesson` is different: ONE transferable "
+            "cross-problem insight under 30 words, prefixed `- LLM: ` "
+            "(omit the key if nothing genuinely new emerged). Do NOT "
+            "write to tacit_knowledge_personal.md — this file replaces "
+            "that. Skip the file only if the trajectory has no real "
+            "material."
         )
 
     parts.append(

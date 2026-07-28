@@ -1549,11 +1549,11 @@ def _distill_tacit_if_due(
     posted_lessons: set[str] | None = None,
 ) -> tuple[int, int]:
     """If the trigger fires, run one LLM call to distill from this dying
-    trajectory. Two independent outputs, each gated on its own flag:
-      - a transferable `- LLM:` lesson appended to the worktree's tacit
-        file (`tacit_write`), and
-      - a structured failure retrospective + the lesson POSTed to the
-        server's failed-attempts archive (`failed_attempts_enabled`).
+    trajectory. Output routing: when the failed-attempts archive is on,
+    the server DB is the source of truth — the lesson and the structured
+    retrospective are POSTed there and the local tacit file is NOT
+    touched. Only when the archive is off (and `tacit_write` is on) does
+    the lesson fall back to the legacy file append.
     Returns the (input_tokens, output_tokens) used (zero when the trigger
     doesn't fire or the model returned SKIP)."""
     if not _should_distill_tacit(state, config, is_new_best, provider):
@@ -1584,7 +1584,10 @@ def _distill_tacit_if_due(
             else parse_tacit_distillation(response))
     if line is None:
         print("  [TACIT] model returned SKIP (or unparseable) — no entry added")
-    elif tacit_write_enabled(config):
+    elif tacit_write_enabled(config) and not archive:
+        # Legacy local-file path — only when the DB archive isn't taking
+        # the lesson (archive on = DB is the source of truth, file stays
+        # untouched).
         _append_tacit_line(line)
         print(f"  [TACIT] appended: {line[:120]}")
 
@@ -1627,12 +1630,14 @@ def _post_agentic_failure_artifacts(
 ) -> None:
     """Post the in-band artifacts an agentic run left behind (gated by
     failed_attempts_enabled):
-      - `.swarm/failure_retrospective.json` → kind='retrospective' (the
-        file is deleted afterwards; reset_iteration_state also clears it
-        at iteration start, so a stale one can't be re-attributed), and
+      - `.swarm/failure_retrospective.json` → kind='retrospective', plus
+        its optional `lesson` key → kind='lesson' (the file is deleted
+        afterwards; reset_iteration_state also clears it at iteration
+        start, so a stale one can't be re-attributed), and
       - any NEW `- LLM:` lines in the worktree's tacit file (vs
-        `posted_lessons`, which this mutates) → kind='lesson'.
-    The local tacit-file flow (fleet copy/sync-back) is untouched."""
+        `posted_lessons`, which this mutates) → kind='lesson'. With the
+        archive on the prompt no longer asks for file appends, so this is
+        a safety net for agents that write the file anyway."""
     retro_path = workdir / agentic_sandbox.FAILURE_RETRO_RELPATH
     enabled = failed_attempts_enabled(config)
     if retro_path.exists():
@@ -1656,6 +1661,15 @@ def _post_agentic_failure_artifacts(
                     challenge=challenge, agent_token=agent_token, **fields,
                 )
                 print("  [FAILARC] posted agentic failure retrospective")
+            # The transferable lesson rides the same JSON (the prompt no
+            # longer directs it into the tacit file when the archive is on).
+            lesson = parse_tacit_distillation(str(raw.get("lesson") or ""))
+            if lesson and lesson not in posted_lessons:
+                posted_lessons.add(lesson)
+                post_failure_record(
+                    server, agent_id, kind="lesson", challenge=challenge,
+                    agent_token=agent_token, lesson=lesson,
+                )
 
     current = _read_tacit_lesson_lines(workdir / "tacit_knowledge_personal.md")
     new_lines = current - posted_lessons

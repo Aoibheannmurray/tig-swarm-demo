@@ -129,6 +129,16 @@ def add_create_setup_args(parser: argparse.ArgumentParser) -> None:
             "(use either, both, or neither)."
         ),
     )
+    parser.add_argument(
+        "--failed-attempts-archive", action="store_true",
+        help=(
+            "Enable the failed-attempts archive: agents' failure "
+            "retrospectives and distilled lessons are stored in the server "
+            "DB (per-agent, served back as a stagnation hint) instead of "
+            "appended to the local tacit_knowledge markdown files. "
+            "Toggleable later from the Admin Console's Settings tab."
+        ),
+    )
 
 
 def main() -> int:

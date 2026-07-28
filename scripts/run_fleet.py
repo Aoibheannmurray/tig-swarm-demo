@@ -116,7 +116,9 @@ _AGENT_CONFIG_KEYS = (
     # Per-agent opt-out for the server's failed-attempts archive (default
     # True). Only matters when the host has enabled the swarm-wide
     # `failed_attempts_archive` toggle; set false to stop this agent posting
-    # failure retrospectives/lessons to the server.
+    # failure retrospectives/lessons to the server. Note: with the archive
+    # on, distilled lessons go to the DB ONLY — the local tacit file is no
+    # longer appended to (the DB is the source of truth).
     "failed_attempts_write",
     # Contributor-owned behavior role (explorer/exploiter). Materialized at
     # spawn AND re-synced live by the monitor loop so editing it in

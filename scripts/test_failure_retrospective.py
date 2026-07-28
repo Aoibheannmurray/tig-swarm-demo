@@ -157,6 +157,34 @@ def test_should_distill_matrix():
     print("PASS test_should_distill_matrix")
 
 
+def test_agentic_prompt_block_routing():
+    """With the archive ON, the in-band prompt must ask for the
+    retrospective JSON (including the `lesson` key) and must NOT instruct
+    appending to tacit_knowledge_personal.md — the DB is the source of
+    truth. Archive OFF keeps the legacy file-append block."""
+    from prompts import build_agentic_user_prompt
+    state = {"my_runs_since_improvement": 3}  # = stagnation_limit - 1
+
+    cfg_off = {"stagnation_limit": 4, "challenge": "knapsack"}
+    p = build_agentic_user_prompt(state, cfg_off)
+    assert "## Tacit-knowledge contribution" in p
+    assert "failure_retrospective.json" not in p
+
+    cfg_on = dict(cfg_off, failed_attempts_archive=1)
+    p = build_agentic_user_prompt(state, cfg_on)
+    assert "## Tacit-knowledge contribution" not in p, (
+        "archive on must suppress the tacit-file append instruction"
+    )
+    assert "failure_retrospective.json" in p
+    assert '"lesson"' in p, "the lesson must ride the retrospective JSON"
+
+    # Off-trigger iterations get neither block regardless of toggles.
+    p = build_agentic_user_prompt({"my_runs_since_improvement": 1}, cfg_on)
+    assert "failure_retrospective.json" not in p
+    assert "## Tacit-knowledge contribution" not in p
+    print("PASS test_agentic_prompt_block_routing")
+
+
 def test_enabled_helpers_agree():
     """run_loop.failed_attempts_enabled and prompts._failed_attempts_enabled
     must agree — one gates the driver path, the other the in-band block."""
@@ -184,5 +212,6 @@ if __name__ == "__main__":
     test_clamping()
     test_prompt_variants()
     test_should_distill_matrix()
+    test_agentic_prompt_block_routing()
     test_enabled_helpers_agree()
     print("\nAll failure-retrospective tests passed.")
