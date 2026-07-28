@@ -168,9 +168,15 @@ def _validate_entry(entry_code: str, config: dict, files) -> str | None:
 # into the worktree's agent.config.json live, and the next iteration picks them
 # up without a fleet restart.
 #
-# Adding a key here is only half the wiring — it must also be in
-# run_fleet._HOT_RELOAD_KEYS or nothing ever propagates it into the worktree.
-# scripts/test_fleet_hot_reload.py asserts the two stay in step.
+# Adding a key here is only a quarter of the wiring. It must also be in three
+# lists in run_fleet, or it silently does nothing:
+#   _AGENT_CONFIG_KEYS       — or it never reaches the worktree at spawn
+#   _HOT_RELOAD_KEYS         — or it reaches the worktree, but only on restart
+#   _FLEET_WIDE_DEFAULT_KEYS — or a top-level fleet.config.json setting is
+#                              ignored and it has to be repeated per agent
+# scripts/test_fleet_hot_reload.py asserts all four stay in step, in both
+# directions. It is the only thing standing between a new knob and a config
+# field that reads as supported and quietly is not.
 #
 # Do NOT add keys that are read once at startup (provider, model, api_base,
 # compute, c3_hardware, c3_max_parallel_jobs, log_prompts, detailed_prompts).
