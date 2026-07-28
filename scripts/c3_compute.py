@@ -66,7 +66,10 @@ _SHARD_FIXED_SECS_WARM = 60.0
 # vCPUs to assume when the hardware profile name doesn't carry a count (e.g.
 # `auto`, resolved job-side). The small C3 CPU profiles are 4-vCPU.
 _ASSUMED_SHARD_VCPUS = 4
-_DEFAULT_CPU_IMAGE = "rust:1-bookworm"
+# Exact, not floating `rust:1-bookworm`: a floating tag silently changes
+# compiler under a running swarm, and must match rust-toolchain.toml or
+# rustup downloads the pinned toolchain inside every job.
+_DEFAULT_CPU_IMAGE = "rust:1.89-bookworm"
 _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 _DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
 _DEFAULT_GPU_HARDWARE = "l40"
@@ -376,6 +379,22 @@ def _write_current_source_files(stage: Path, config: dict) -> None:
             _write_container_file(kernel_path, kernel_code)
 
 
+def _copy_build_config(stage: Path) -> None:
+    """Stage `.cargo/config.toml` + `rust-toolchain.toml` into a C3 workspace.
+
+    Best-effort by design: an older clone may not have either file, and a
+    missing build config must not fail the benchmark — it just means the job
+    builds the way it did before these were introduced."""
+    cargo_dir = stage / ".cargo"
+    for rel in (Path(".cargo") / "config.toml", Path("rust-toolchain.toml")):
+        src = ROOT / rel
+        if not src.exists():
+            continue
+        if rel.parent.name == ".cargo":
+            cargo_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, stage / rel)
+
+
 def _create_workspace(stage: Path, config: dict, server: str) -> dict:
     """Create the minimal TIG workspace C3 should upload."""
     challenge = config.get("challenge", "unknown")
@@ -384,6 +403,11 @@ def _create_workspace(stage: Path, config: dict, server: str) -> dict:
 
     for name in ("Cargo.toml", "Cargo.lock", "requirements.txt"):
         _copy_required(ROOT / name, stage / name)
+    # The build config and toolchain pin travel with the manifests. Without
+    # them the job compiles under a different compiler and WITHOUT
+    # --cap-lints, so a lint promotion fails in the cloud while local builds
+    # pass — the hardest version of this bug to track down.
+    _copy_build_config(stage)
 
     src_stage = stage / "src"
     src_stage.mkdir(parents=True, exist_ok=True)
@@ -541,6 +565,7 @@ def _create_warm_workspace(stage: Path, config: dict, server: str) -> dict:
 
     for name in ("Cargo.toml", "Cargo.lock"):
         _copy_required(ROOT / name, stage / name)
+    _copy_build_config(stage)
 
     shutil.copytree(
         ROOT / "src", stage / "src",
@@ -647,6 +672,11 @@ cp .swarm-cache.json "$APP/.swarm-cache.json"
 cp -f scripts/*.py "$APP/scripts/"
 cmp -s Cargo.toml "$APP/Cargo.toml" || cp Cargo.toml "$APP/Cargo.toml"
 cmp -s Cargo.lock "$APP/Cargo.lock" || cp Cargo.lock "$APP/Cargo.lock"
+mkdir -p "$APP/.cargo"
+cmp -s .cargo/config.toml "$APP/.cargo/config.toml" 2>/dev/null \
+  || cp .cargo/config.toml "$APP/.cargo/config.toml" 2>/dev/null || true
+cmp -s rust-toolchain.toml "$APP/rust-toolchain.toml" 2>/dev/null \
+  || cp rust-toolchain.toml "$APP/rust-toolchain.toml" 2>/dev/null || true
 
 # Overlay the current crate source (challenge harnesses) file-by-file, same
 # cmp guard: an up-to-date image keeps every baked mtime (pure cache hit),

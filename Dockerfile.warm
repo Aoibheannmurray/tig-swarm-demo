@@ -25,7 +25,11 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install -r /tmp/requirements.txt --break-system-packages
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# Pinned to match rust-toolchain.toml so the image ships the toolchain the
+# build actually uses — otherwise rustup honours the pin by DOWNLOADING it
+# on first cargo invocation, inside every job.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+      --default-toolchain 1.89.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app

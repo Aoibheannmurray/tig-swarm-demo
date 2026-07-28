@@ -1,0 +1,27 @@
+# Pin the compiler so a score is reproducible and an upgrade is a decision.
+#
+# Before this, four independent paths each installed "whatever stable rustup
+# serves today" — Dockerfile.cpu, Dockerfile.gpu, Dockerfile.warm, and C3's
+# `rust:1-bookworm` — so they could drift apart from each other AND from the
+# version any given machine's cached image was built with. Two agents could
+# score the same algorithm on different compilers on the same afternoon, and
+# nothing recorded which.
+#
+# rustup honours this file automatically wherever it runs, so it also covers
+# contributors building on their own machines.
+#
+# UPGRADING: bump `channel` here and the matching pins together, or the
+# alignment is lost and toolchains start downloading at job time —
+#   * Dockerfile.cpu / Dockerfile.gpu / Dockerfile.warm  (--default-toolchain)
+#   * scripts/c3_compute.py `_DEFAULT_CPU_IMAGE`         (rust:<version>-bookworm)
+# then republish the warm images, whose baked cargo target is compiler-specific.
+# `--cap-lints warn` in .cargo/config.toml is what makes such an upgrade safe
+# from lint promotions; it does not make it free.
+
+[toolchain]
+channel = "1.89.0"
+# rustfmt + clippy are explicit rather than profile-implied: the agentic
+# backends allow agents to run `cargo fmt` and `cargo clippy` in their
+# worktrees (see scripts/agentic_backends.py), and a minimal profile would
+# leave those commands missing.
+components = ["rustfmt", "clippy"]
