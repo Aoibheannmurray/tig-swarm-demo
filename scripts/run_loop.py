@@ -162,6 +162,35 @@ def _validate_entry(entry_code: str, config: dict, files) -> str | None:
     return validate_code(entry_code, config, files=bundle)
 
 
+# Config keys this loop re-reads from agent.config.json on EVERY iteration and
+# re-applies onto `config` (see the merge inside the loop). Everything here is
+# therefore hot-reloadable: run_fleet's monitor patches fleet.config.json edits
+# into the worktree's agent.config.json live, and the next iteration picks them
+# up without a fleet restart.
+#
+# Adding a key here is only half the wiring — it must also be in
+# run_fleet._HOT_RELOAD_KEYS or nothing ever propagates it into the worktree.
+# scripts/test_fleet_hot_reload.py asserts the two stay in step.
+#
+# Do NOT add keys that are read once at startup (provider, model, api_base,
+# compute, c3_hardware, c3_max_parallel_jobs, log_prompts, detailed_prompts).
+# Propagating those would rewrite the file and log a reassuring "changed" line
+# while the running process kept using its startup value — worse than the
+# honest "restart required", because it looks like it worked.
+LIVE_CONFIG_KEYS = (
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
+    "cleaner_trigger_chars", "cleaner_target_pct",
+    "cleaner_score_delta_pct", "cleaner_cooldown_iters",
+    "no_benchmark_freeze_limit",
+    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
+    # Per-agent write gates for the tacit file and the failed-attempts
+    # archive (tacit_write_enabled / failed_attempts_enabled read them
+    # off `config`).
+    "tacit_write", "failed_attempts_write",
+)
+
+
 def _normalize_role(value: object) -> str:
     """Map a config/state `role` value to 'exploiter' or 'explorer' (default).
 
@@ -919,6 +948,17 @@ def _try_compile_fix(
     if not fixed:
         print("  Empty fix response — giving up")
         return False, usage["input_tokens"], usage["output_tokens"]
+
+    # Re-insert imports the model stranded while rewriting the file. Every
+    # OTHER codegen path already does this; the compile-fix path did not, and
+    # that omission made the fix loop actively harmful: asked to repair a
+    # borrow error, the model returns a whole file without `use
+    # serde_json::{Map, Value}`, so the next build fails with E0412 on the
+    # hyperparameters signature — a NEW error, in the code we were repairing.
+    # Both retries then get spent chasing the damage instead of the original
+    # fault. Observed on knapsack: E0382 → E0412 → E0412 → freeze.
+    fixed = ensure_common_imports(ensure_challenge_import(
+        fixed, config["challenge"]))
 
     violation = _validate_entry(fixed, config, files)
     if violation:
@@ -2258,19 +2298,9 @@ def main() -> int:
         # Absent keys fall back to the defaults baked into
         # _maybe_tune_hyperparameters / the _CLEANER_* constants /
         # c3_compute._warm_c3_image (unset = full-source staging).
-        for _hpo_key in ("hpo_min_improvements", "hpo_first_tune_improvements",
-                         "hpo_num_suggested_configs",
-                         "hpo_search_budget", "hpo_seed",
-                         "cleaner_trigger_chars", "cleaner_target_pct",
-                         "cleaner_score_delta_pct", "cleaner_cooldown_iters",
-                         "no_benchmark_freeze_limit",
-                         "c3_warm_images", "c3_warm_image", "tig_dockerhub",
-                         # Per-agent write gates for the tacit file and the
-                         # failed-attempts archive (tacit_write_enabled /
-                         # failed_attempts_enabled read them off `config`).
-                         "tacit_write", "failed_attempts_write"):
-            if _hpo_key in _agent_cfg:
-                config[_hpo_key] = _agent_cfg[_hpo_key]
+        for _live_key in LIVE_CONFIG_KEYS:
+            if _live_key in _agent_cfg:
+                config[_live_key] = _agent_cfg[_live_key]
 
         try:
             swarm_cfg = server_get(f"{server}/api/swarm_config")

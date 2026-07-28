@@ -154,6 +154,9 @@ export const hostedApi = {
   seedFromMainnet: (adminKey: string, challenge: string | null, target: string) =>
     fetch(`${hostedBase()}/api/admin/seed_from_mainnet`,
       post({ admin_key: adminKey, challenge, target })).then(jsonOrThrow),
+  measureMainnetBaseline: (adminKey: string, challenge: string) =>
+    fetch(`${hostedBase()}/api/admin/measure_mainnet_baseline`,
+      post({ admin_key: adminKey, challenge })).then(jsonOrThrow),
   clearInactive: (adminKey: string, challenge: string) =>
     fetch(`${hostedBase()}/api/admin/clear_inactive`, post({ admin_key: adminKey, challenge })).then(jsonOrThrow),
   resetChallenge: (adminKey: string, challenge: string) =>

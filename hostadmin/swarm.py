@@ -320,6 +320,12 @@ def seed_inactive_pool_from_mainnet(
             "algorithm_files": code_files,
             "kernel_code": kernel_code,
             "source_label": "tig-foundation",
+            # Tell the server this seed IS the mainnet algorithm, so it can
+            # register the challenge's baseline (the bar the dashboard shows
+            # members they're clearing). Older servers ignore the extra
+            # fields; the deposit is unaffected either way.
+            "mainnet_algo_name": algo_name,
+            "mainnet_adoption_pct": round(info["adoption"] / 1e16, 4),
         }
         try:
             body = _post_admin(

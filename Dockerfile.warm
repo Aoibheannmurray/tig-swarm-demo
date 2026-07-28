@@ -25,10 +25,19 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install -r /tmp/requirements.txt --break-system-packages
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# Install rustup WITHOUT a toolchain, then let the pin decide which one.
+# rust-toolchain.toml is the single source of truth for the version AND its
+# components, so bumping Rust is a one-line change there and nowhere else —
+# verified by scripts/test_toolchain_pin.py. Baking it at image-build time
+# matters: otherwise rustup honours the pin by DOWNLOADING the toolchain on
+# first cargo invocation, inside every job.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+      --default-toolchain none --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY scripts ./scripts

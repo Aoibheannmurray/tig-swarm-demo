@@ -72,6 +72,15 @@ async function loadInitialState(apiUrl: string) {
         timestamp: new Date().toISOString(),
       });
     }
+    // The mainnet bar for this challenge — drawn as a threshold on the
+    // chart and a ranked row in the leaderboard. Sent even when null so a
+    // challenge switch clears the previous challenge's bar.
+    handleMessage({
+      type: "mainnet_baseline",
+      challenge: ch,
+      baseline: state.mainnet_baseline ?? null,
+      timestamp: new Date().toISOString(),
+    });
 
     console.log(`[Benchmark] Loaded ${replay.length} best-history points`);
   } catch (e) {

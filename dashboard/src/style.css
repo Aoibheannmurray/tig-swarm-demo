@@ -1339,6 +1339,57 @@ html, body {
   background: var(--bg-elevated);
 }
 
+/* The TIG mainnet algorithm, pinned into the standings as a competitor. It has
+   to read as a different KIND of thing from an agent row — a fixed bar, not a
+   participant — while still sitting in the ranking, so: rules above and below
+   to set it apart, no agent dot, and the accent reserved for it. */
+.lb-mainnet {
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  border-radius: 0;
+  margin: 3px 0;
+}
+
+.lb-mainnet:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.lb-mainnet-mark {
+  color: var(--color-accent);
+  text-align: center;
+}
+
+.lb-mainnet .lb-name {
+  /* Name over provenance, so the row carries which algorithm and how widely
+     adopted it is without needing another column. */
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  line-height: 1.25;
+}
+
+.lb-mainnet-title {
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  font-size: 11.5px;
+  color: var(--color-accent);
+}
+
+.lb-mainnet-sub {
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  font-family: var(--mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.lb-mainnet .lb-score {
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
 .lb-rank {
   width: 28px;
   flex-shrink: 0;
