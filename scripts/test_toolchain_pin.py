@@ -81,19 +81,52 @@ def test_every_build_path_agrees_on_the_version():
           "C3's image tag is exact, not a floating major")
 
 
+def _fake_root(root: Path) -> None:
+    """A minimal repo the workspace builders accept.
+
+    Hermetic on purpose: `src/<ch>/algorithm` is gitignored, so the real ROOT
+    has no algorithm on a fresh checkout and a test using it passes on a
+    working tree and fails in CI."""
+    (root / "Cargo.toml").write_text("[package]\n")
+    (root / "Cargo.lock").write_text("# lock\n")
+    (root / "requirements.txt").write_text("\n")
+    (root / "src").mkdir()
+    (root / "src" / "lib.rs").write_text("// lib\n")
+    (root / "src" / "knapsack").mkdir()
+    (root / "src" / "knapsack" / "mod.rs").write_text("// harness\n")
+    algo = root / "src" / "knapsack" / "algorithm"
+    algo.mkdir()
+    (algo / "mod.rs").write_text("// algo\n")
+    (root / "scripts").mkdir()
+    (root / "scripts" / "benchmark.py").write_text("# bench\n")
+    # The files under test.
+    (root / ".cargo").mkdir()
+    (root / ".cargo" / "config.toml").write_text(
+        '[build]\nrustflags = ["--cap-lints", "warn"]\n')
+    (root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.89.0"\n')
+
+
 def test_c3_workspaces_carry_the_build_config():
     """The silent-rot case: staged by hand, so a new root file is invisible to
     C3 until someone adds it to the list."""
     cfg = {"challenge": "knapsack", "tracks": {}}
-    for builder, label in ((c3_compute._create_workspace, "full-source"),
-                           (c3_compute._create_warm_workspace, "warm")):
-        with tempfile.TemporaryDirectory() as tmp:
-            stage = Path(tmp)
-            builder(stage, cfg, "https://swarm.example")
-            check((stage / ".cargo" / "config.toml").exists(),
-                  f"{label} C3 workspace carries .cargo/config.toml")
-            check((stage / "rust-toolchain.toml").exists(),
-                  f"{label} C3 workspace carries rust-toolchain.toml")
+    orig_root = c3_compute.ROOT
+    try:
+        for builder, label in ((c3_compute._create_workspace, "full-source"),
+                               (c3_compute._create_warm_workspace, "warm")):
+            with tempfile.TemporaryDirectory() as fake, \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(fake)
+                _fake_root(root)
+                c3_compute.ROOT = root
+                stage = Path(tmp)
+                builder(stage, cfg, "https://swarm.example")
+                check((stage / ".cargo" / "config.toml").exists(),
+                      f"{label} C3 workspace carries .cargo/config.toml")
+                check((stage / "rust-toolchain.toml").exists(),
+                      f"{label} C3 workspace carries rust-toolchain.toml")
+    finally:
+        c3_compute.ROOT = orig_root
 
     # The warm path also overlays onto a baked image at job time; that script
     # must refresh both files or a stale image keeps its own build rules.
