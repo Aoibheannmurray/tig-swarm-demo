@@ -257,6 +257,16 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       } as any);
     }
 
+    // The mainnet bar for this challenge — drawn as a threshold on the chart
+    // and a ranked row in the leaderboard. Dispatched even when null so a
+    // challenge switch clears the previous challenge's bar.
+    handleMessage({
+      type: "mainnet_baseline",
+      challenge: getViewedChallenge(),
+      baseline: state.mainnet_baseline ?? null,
+      timestamp: new Date().toISOString(),
+    } as any);
+
     // Merge experiments + hypotheses into a single chronologically-sorted
     // stream and dispatch oldest-first. feed.ts prepends each event, so
     // the last-dispatched lands at the top — meaning the newest event

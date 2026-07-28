@@ -63,6 +63,7 @@ Output JSON shape:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -466,18 +467,61 @@ def _ensure_docker_daemon() -> None:
     sys.exit(1)
 
 
+_IMAGE_INPUT_LABEL = "tig.swarm.inputs"
+
+
+def _image_inputs_digest(dockerfile: str) -> str:
+    """Fingerprint of everything that decides what the local image contains.
+
+    The toolchain pin is in here because it is not part of the Dockerfile: an
+    image baked against a different rustc still *works*, but rustup honours
+    `rust-toolchain.toml` by DOWNLOADING the pinned toolchain inside the
+    container — 6 components, on every single benchmark."""
+    h = hashlib.sha256()
+    for rel in (dockerfile, "rust-toolchain.toml", ".cargo/config.toml",
+                "requirements.txt"):
+        path = ROOT_DIR / rel
+        h.update(rel.encode())
+        try:
+            h.update(path.read_bytes())
+        except OSError:
+            h.update(b"<absent>")
+    return h.hexdigest()[:16]
+
+
 def _ensure_docker_image(image: str, dockerfile: str) -> None:
-    """Ensure the local Docker image exists, building it if missing."""
-    if subprocess.run(
-        ["docker", "image", "inspect", image], capture_output=True
-    ).returncode == 0:
-        return
-    print(
-        f"Docker image '{image}' not found — building from {dockerfile}…",
-        file=sys.stderr,
+    """Ensure the local Docker image exists AND matches its build inputs.
+
+    Existence alone was the check, so the image was built once and then reused
+    forever: editing the Dockerfile, the toolchain pin or requirements.txt
+    changed nothing until someone manually removed the image. That is not
+    merely stale — a pin the image doesn't satisfy makes every benchmark
+    re-download a toolchain before it can compile."""
+    want = _image_inputs_digest(dockerfile)
+    probe = subprocess.run(
+        ["docker", "image", "inspect", "-f",
+         f'{{{{index .Config.Labels "{_IMAGE_INPUT_LABEL}"}}}}', image],
+        capture_output=True, text=True,
     )
+    if probe.returncode == 0:
+        if probe.stdout.strip() == want:
+            return
+        print(
+            f"Docker image '{image}' is stale (build inputs changed) — "
+            f"rebuilding from {dockerfile}…",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"Docker image '{image}' not found — building from {dockerfile}…",
+            file=sys.stderr,
+        )
     build = subprocess.run(
-        ["docker", "build", "-f", dockerfile, "-t", image, str(ROOT_DIR)],
+        ["docker", "build", "-f", dockerfile,
+         # Stamp the inputs onto the image so the next run can tell whether
+         # this build is still current without re-deriving anything.
+         "--label", f"{_IMAGE_INPUT_LABEL}={want}",
+         "-t", image, str(ROOT_DIR)],
     )
     if build.returncode != 0:
         print(

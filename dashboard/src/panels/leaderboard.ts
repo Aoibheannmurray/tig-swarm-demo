@@ -1,6 +1,9 @@
-import type { Panel, WSMessage, LeaderboardEntry } from "../types";
+import type { Panel, WSMessage, LeaderboardEntry, MainnetBaseline } from "../types";
 import { getAgentColor } from "../lib/colors";
 import { formatScore, shortenModel, escapeHTML } from "../lib/format";
+import {
+  isComparable, statusLabel, baselineRank, countBeating,
+} from "../lib/mainnetBaseline";
 
 type SortKey =
   | "current_score"
@@ -36,6 +39,7 @@ const DEFAULT_DIR: Record<SortKey, SortDir> = {
 export class LeaderboardPanel implements Panel {
   private list!: HTMLElement;
   private currentEntries: LeaderboardEntry[] = [];
+  private baseline: MainnetBaseline | null = null;
   private sortKey: SortKey = "best_ever_score";
   private sortDir: SortDir = "desc";
   private maxRows: number;
@@ -92,9 +96,25 @@ export class LeaderboardPanel implements Panel {
       return;
     }
 
+    if (msg.type === "mainnet_baseline") {
+      this.baseline = msg.baseline;
+      this.render();
+      return;
+    }
+
     if (msg.type !== "leaderboard_update") return;
     this.currentEntries = msg.entries.slice();
     this.render();
+  }
+
+  // Which column the ghost row can be ranked against. Sorting by "runs" or
+  // "stagnation" puts agents in an order the mainnet algorithm has no position
+  // in — it has no runs — so the row is hidden rather than parked at a rank
+  // that would misread as a claim.
+  private baselineScoreKey(): "current_score" | "best_ever_score" | null {
+    return this.sortKey === "current_score" || this.sortKey === "best_ever_score"
+      ? this.sortKey
+      : null;
   }
 
   private updateHeaderIndicators() {
@@ -120,6 +140,45 @@ export class LeaderboardPanel implements Panel {
     return sorted;
   }
 
+  // The mainnet algorithm as a pinned competitor. Deliberately a row in the
+  // same table rather than a separate readout: the question people actually
+  // have is "have we passed it", and a rank answers that without arithmetic.
+  private buildGhostRow(scoreKey: "current_score" | "best_ever_score"): HTMLElement {
+    const b = this.baseline!;
+    const row = document.createElement("div");
+    row.className = "leaderboard-row lb-mainnet";
+    // No agent id: the FLIP pass keys on it, and a synthetic one would make
+    // the row animate as if it were an agent changing rank.
+    row.dataset.agentId = "";
+    const beaten = countBeating(
+      this.currentEntries, b.score!, b.direction, (e) => e[scoreKey],
+    );
+    const total = this.currentEntries.length;
+    const scoreText = formatScore(b.score);
+    const adoption = b.adoption_pct !== null
+      ? ` · ${b.adoption_pct.toFixed(1)}% adoption` : "";
+    row.innerHTML = `
+      <span class="lb-rank lb-mainnet-mark">◆</span>
+      <span class="lb-name">
+        <span class="lb-mainnet-title">TIG MAINNET</span>
+        <span class="lb-mainnet-sub">${escapeHTML(b.algorithm ?? "")}${adoption}</span>
+      </span>
+      <span class="lb-model"></span>
+      <span class="lb-col-sm"></span>
+      <span class="lb-col-sm"></span>
+      <span class="lb-col-sm"></span>
+      <span class="lb-score">${scoreKey === "current_score" ? scoreText : ""}</span>
+      <span class="lb-score">${scoreKey === "best_ever_score" ? scoreText : ""}</span>
+      <span class="lb-col-sm"></span>
+      <span class="lb-col-sm"></span>
+      <span class="lb-col-sm"></span>
+    `;
+    row.title = beaten
+      ? `${beaten} of ${total} agents have beaten mainnet (${b.algorithm})`
+      : `Nothing has beaten mainnet (${b.algorithm}) yet`;
+    return row;
+  }
+
   private render() {
     this.updateHeaderIndicators();
 
@@ -139,9 +198,21 @@ export class LeaderboardPanel implements Panel {
 
     const sorted = this.sortEntries(this.currentEntries).slice(0, this.maxRows);
 
+    // Where the mainnet row belongs, computed against EVERY entry rather than
+    // the truncated view: an agent scrolled off the tile has still beaten it,
+    // and the count under the row must say so.
+    const scoreKey = this.baselineScoreKey();
+    const ghostAt = this.baseline && isComparable(this.baseline) && scoreKey
+      ? baselineRank(
+          this.sortEntries(this.currentEntries), this.baseline.score!,
+          this.baseline.direction, (e) => e[scoreKey],
+        )
+      : null;
+
     this.list.innerHTML = "";
     sorted.forEach((entry, i) => {
       const rank = i + 1;
+      if (ghostAt === rank) this.list.appendChild(this.buildGhostRow(scoreKey!));
       const row = document.createElement("div");
       row.className = `leaderboard-row${entry.active ? "" : " lb-inactive"}`;
       row.dataset.agentId = entry.agent_id;
@@ -185,6 +256,12 @@ export class LeaderboardPanel implements Panel {
 
       this.list.appendChild(row);
     });
+
+    // Everyone in view has beaten it — the row belongs at the bottom, and
+    // dropping it would silently remove the good news.
+    if (ghostAt !== null && ghostAt > sorted.length) {
+      this.list.appendChild(this.buildGhostRow(scoreKey!));
+    }
 
     // FLIP animation for reordered rows
     if (firstRects.size > 0) {

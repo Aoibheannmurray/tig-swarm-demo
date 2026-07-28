@@ -277,6 +277,13 @@ class AdminSeedInactive(AdminAuth):
     # Free-form label for the synthetic agent the pool entry is attributed
     # to (e.g. "tig-foundation"). The server creates the agent on first use.
     source_label: str = "tig-foundation"
+    # Set when this seed IS the current top-adoption mainnet algorithm, so the
+    # server can register it as the challenge's mainnet baseline (the bar the
+    # dashboard shows). Without it, algorithms deposited by the host CLI are
+    # invisible to the baseline system even though they are exactly what it
+    # wants to measure. Absent = an ordinary seed; nothing is registered.
+    mainnet_algo_name: Optional[str] = None
+    mainnet_adoption_pct: Optional[float] = None
 
 
 class AdminSeedFromMainnet(AdminAuth):
@@ -326,6 +333,12 @@ class AdminSeedPool(AdminAuth):
     # whole thing.
     algorithm_files: Optional[dict] = None
     score: Optional[float] = None
+
+
+class AdminMeasureMainnetBaseline(AdminAuth):
+    """Owner-only: queue a measurement of the mainnet algorithm on this
+    swarm's own instances. `challenge` omitted = the active one."""
+    challenge: Optional["ChallengeName"] = None
 
 
 class AdminSeedsQuery(AdminAuth):

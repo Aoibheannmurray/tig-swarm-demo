@@ -1,3 +1,14 @@
+// `dangerous_implicit_autorefs` became DENY-by-default in Rust 1.89, turning
+// `&(*raw_ptr).field[i]` — a normal shape in hand-optimised pointer code —
+// from a warning into a hard error. The build images install unpinned latest
+// stable rustup, so the day 1.89 shipped, every algorithm using that pattern
+// stopped compiling: mainnet imports (superfast_knap_v1 failed here with 252
+// errors), pooled seeds, and LLM-written code alike. Allowing it restores the
+// pre-1.89 behaviour rather than loosening anything — this crate compiles
+// third-party and generated Rust it does not control, and a lint promotion
+// upstream must not silently break a running swarm.
+#![allow(dangerous_implicit_autorefs)]
+
 // Self-alias so vendored challenge modules + agent algorithms can refer to this
 // crate as `tig_challenges` — the same import path the monorepo's tig-algorithms
 // uses. This lets one algorithm file compile BOTH here (swarm crate) and when

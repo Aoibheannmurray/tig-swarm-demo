@@ -218,6 +218,20 @@
     finally { seedingMainnet = false; }
   }
 
+  // Measure the mainnet algorithm on this swarm's own instances, so the
+  // dashboard can show members the bar they're clearing. The server can't
+  // benchmark (no Docker/C3 in its image), so this queues the work for the
+  // fleet — see the endpoint's docstring.
+  let measuringBaseline = $state(false);
+  async function measureMainnetBaseline() {
+    poolMsg = ""; error = ""; measuringBaseline = true;
+    try {
+      const r = await hostedApi.measureMainnetBaseline(adminKey, poolChallenge);
+      poolMsg = `Mainnet baseline for ${r.challenge} (${r.algorithm}): ${r.detail}`;
+    } catch (e: any) { error = e.message; }
+    finally { measuringBaseline = false; }
+  }
+
   let challengeNames = $derived(config ? Object.keys(config.available_challenges ?? {}) : []);
 
   // ── Settings (stagnation + HPO knobs, hot-editable) ──
@@ -543,6 +557,24 @@
           Fetches the current top-adoption TIG mainnet algorithm (server-side)
           and deposits it {poolAllChallenges ? "for every configured challenge" : `for ${poolChallenge}`}.
           Multi-file aware; a challenge with no compatible mainnet algorithm is skipped.
+        </p>
+        <div class="row" style="align-items:flex-end;gap:12px">
+          <div style="flex:0 0 auto;margin-bottom:2px">
+            <button onclick={measureMainnetBaseline} disabled={measuringBaseline}>
+              {measuringBaseline ? "Queueing…" : "Measure mainnet baseline"}
+            </button>
+          </div>
+        </div>
+        <p class="lede">
+          Scores the current top-adoption mainnet algorithm on
+          <b>{poolChallenge}</b>'s own instances and shows it on the dashboard
+          — as a line on the benchmark chart and a ranked entry on the
+          leaderboard — so members can see when they beat it. Nothing needs
+          seeding first: it fetches and pools the algorithm if this challenge
+          doesn't have it. The next agent to check in benchmarks it unchanged
+          and publishes the score, usually within one iteration; that agent's
+          own work is banked to the pool on the way past. Press it again to
+          re-measure after changing instances or the timeout.
         </p>
         <div class="actions" style="justify-content:flex-start">
           <button onclick={() => pool("clear")}>Clear inactive pool</button>

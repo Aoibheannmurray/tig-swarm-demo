@@ -20,6 +20,10 @@ const CHALLENGE_SCOPED_TYPES = new Set<WSMessage["type"]>([
   "leaderboard_update",
   "chat_message",
   "trajectory_reset",
+  // Each challenge has its own mainnet algorithm and its own bar; a late
+  // response for the challenge the user just navigated away from must not
+  // repaint the chart's threshold line with a number from elsewhere.
+  "mainnet_baseline",
   "reset",
 ]);
 
