@@ -28,6 +28,12 @@ on:
       - "Cargo.lock"
       - "requirements.txt"
       - "Dockerfile.warm"
+      # The bake is compiler- and RUSTFLAGS-specific: cargo fingerprints both,
+      # so a change to either invalidates the baked target. Without these
+      # paths, bumping Rust would silently turn every C3 job back into a cold
+      # 10-20 minute compile.
+      - "rust-toolchain.toml"
+      - ".cargo/config.toml"
       - ".github/workflows/build-warm-images.yml"
 
 permissions:
@@ -73,12 +79,20 @@ jobs:
             --build-arg "BASE=${{ matrix.base }}" \
             -t "tig-swarm-warm-${{ matrix.flavor }}" .
 
-      - name: Push (latest + sha)
+      - name: Push (latest + sha + toolchain)
         env:
           NS: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           SHA="$(git rev-parse --short HEAD)"
-          for tag in latest "$SHA"; do
+          # A toolchain-scoped tag, so a Rust bump is additive instead of
+          # mutating :latest under every running swarm at once. A swarm can
+          # pin `c3_warm_image` to its own compiler's tag and keep hitting an
+          # image whose baked target still matches its fingerprint, while the
+          # next version is built and tested alongside. Rolling back becomes a
+          # config change rather than a rebuild.
+          RUSTV="$(grep -oP 'channel\s*=\s*"\K[^"]+' rust-toolchain.toml)"
+          echo "toolchain tag: ${RUSTV:-<none>}"
+          for tag in latest "$SHA" ${RUSTV:+"rust$RUSTV"}; do
             docker tag "tig-swarm-warm-${{ matrix.flavor }}" \
               "docker.io/$NS/tig-swarm-warm-${{ matrix.flavor }}:$tag"
             docker push "docker.io/$NS/tig-swarm-warm-${{ matrix.flavor }}:$tag"

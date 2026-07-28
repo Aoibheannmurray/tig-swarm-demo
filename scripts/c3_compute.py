@@ -66,10 +66,26 @@ _SHARD_FIXED_SECS_WARM = 60.0
 # vCPUs to assume when the hardware profile name doesn't carry a count (e.g.
 # `auto`, resolved job-side). The small C3 CPU profiles are 4-vCPU.
 _ASSUMED_SHARD_VCPUS = 4
-# Exact, not floating `rust:1-bookworm`: a floating tag silently changes
-# compiler under a running swarm, and must match rust-toolchain.toml or
-# rustup downloads the pinned toolchain inside every job.
-_DEFAULT_CPU_IMAGE = "rust:1.89-bookworm"
+def pinned_rust_version(default: str = "1.89.0") -> str:
+    """The compiler version from rust-toolchain.toml — the single source of
+    truth every build path derives from.
+
+    Falls back to `default` for a clone predating the pin, so an older
+    checkout still benchmarks instead of failing on a missing file."""
+    try:
+        text = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+    except OSError:
+        return default
+    m = re.search(r'^\s*channel\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return m.group(1) if m else default
+
+
+# Exact, not floating `rust:1-bookworm`: a floating tag silently changes the
+# compiler under a running swarm. Cargo fingerprints the rustc version, so a
+# tag that drifts away from the pin doesn't just lose reproducibility — it
+# invalidates the warm image's baked target and turns every job back into a
+# cold compile. Derived, never hand-written twice.
+_DEFAULT_CPU_IMAGE = f"rust:{pinned_rust_version()}-bookworm"
 _DEFAULT_GPU_IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 _DEFAULT_CPU_HARDWARE = "cpu-d3-4vcpu-16gb"
 _DEFAULT_GPU_HARDWARE = "l40"
@@ -324,7 +340,17 @@ def _warm_c3_image(cfg: dict) -> str | None:
 
     A drifted or stale-cached image self-corrects: the job overlays the
     current Cargo manifests and src/ tree under a cmp guard, so a benchmark
-    stays correct (just slower) rather than failing on a missing API."""
+    stays correct (just slower) rather than failing on a missing API.
+
+    UPGRADING RUST: CI also publishes a toolchain-scoped tag
+    (`tig-swarm-warm-{cpu|gpu}:rust<version>`). `:latest` stays the default
+    because it always exists, but it is republished in place — so a Rust bump
+    changes the image under every running swarm at once, and cargo
+    fingerprints the compiler, meaning the baked target no longer matches and
+    every job cold-compiles. To upgrade without that: pin `c3_warm_image` to
+    your CURRENT compiler's tag, bump the pin, let CI publish the new one,
+    then move the fleets over. Rolling back is then a config edit, not a
+    rebuild."""
     explicit = cfg.get("c3_warm_image") or os.environ.get("TIG_C3_WARM_IMAGE")
     if explicit:
         return explicit

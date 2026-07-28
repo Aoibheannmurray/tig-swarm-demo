@@ -158,6 +158,34 @@ to local compute — printed, never folded into the error string, which feeds
 the compile-fix router and the LLM prompt. See
 `scripts/test_c3_queue_stall.py`.
 
+**Rust toolchain & lint policy.** `rust-toolchain.toml` is the single source
+of truth for the compiler version; `.cargo/config.toml` caps every lint at
+`warn`. Both are load-bearing and both must reach every build path — the C3
+workspace builders stage them next to `Cargo.toml`, and the warm-image overlay
+refreshes them onto a stale baked image.
+
+Why each exists: rustc promotes lints to deny-by-default periodically (1.89 did
+it to `dangerous_implicit_autorefs`, and the mainnet import
+`superfast_knap_v1` failed with 252 errors from a pattern that had compiled the
+week before). This crate compiles Rust it does not control — LLM output,
+harvested seeds, reshaped mainnet imports — so `--cap-lints warn` covers lints
+that don't exist yet. It caps LINTS ONLY; real compile errors still reject a
+broken algorithm. Pinning is what makes the *warm images* work at all: cargo
+fingerprints the rustc version, so an unpinned base image invalidates the baked
+target on every Rust release and silently turns warm jobs back into cold
+compiles.
+
+**Bumping Rust** is a one-line edit to `rust-toolchain.toml` — the Dockerfiles
+`COPY` it and run `rustup toolchain install`, and `c3_compute.pinned_rust_version`
+derives the C3 image tag from it. `scripts/test_toolchain_pin.py` fails if
+anyone re-hardcodes a version. After the bump, CI republishes the warm images
+(it watches both files) and tags them `:rust<version>` as well as `:latest`.
+To upgrade without disturbing running swarms, pin `c3_warm_image` to the
+CURRENT compiler's tag first, bump, let CI publish, then move fleets over —
+`:latest` is republished in place, so it changes under everyone at once.
+If a new mainnet algorithm won't build on the pin, test it on the full-source
+path (`c3_warm_images: false` + a newer `c3_image`) before moving the fleet.
+
 **Fleet-wide C3 slot pool.** Every agent in a fleet shares ONE C3 key, so all
 C3 shard jobs gate on a fleet-wide FCFS slot pool (`c3_pool.py`) of
 `c3_max_parallel_jobs` slots: total live C3 jobs never exceed the plan cap,

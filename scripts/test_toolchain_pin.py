@@ -64,21 +64,64 @@ def test_toolchain_is_pinned():
           "rustfmt + clippy are installed for the agentic sandbox")
 
 
-def test_every_build_path_agrees_on_the_version():
-    """Four entry points install Rust independently. If they disagree, the
-    pin causes a toolchain DOWNLOAD inside each job instead of preventing
-    drift — slower than before and just as unreproducible."""
+def test_the_version_is_written_down_exactly_once():
+    """Every build path DERIVES the version rather than repeating it, so a
+    bump is one edit. A duplicated literal is how the paths drift apart, and
+    a path that disagrees with the pin makes rustup download a toolchain
+    inside each job — slower than the drift it was meant to prevent."""
     channel = _pinned_channel()
-    major_minor = ".".join(channel.split(".")[:2])
+    # The Dockerfiles must not name a version; they read the pin.
     for name in ("Dockerfile.cpu", "Dockerfile.gpu", "Dockerfile.warm"):
         text = (ROOT / name).read_text()
-        check(f"--default-toolchain {channel}" in text,
-              f"{name} installs the pinned toolchain")
-    check(c3_compute._DEFAULT_CPU_IMAGE.startswith(f"rust:{major_minor}"),
-          f"C3's default CPU image matches the pin "
+        check(f"--default-toolchain {channel}" not in text,
+              f"{name} does not hardcode the version")
+        check("COPY rust-toolchain.toml" in text and "rustup toolchain install" in text,
+              f"{name} installs the toolchain the pin names")
+    # c3_compute derives its image tag from the same file.
+    src = (ROOT / "scripts" / "c3_compute.py").read_text()
+    check(f'"rust:{channel}-bookworm"' not in src,
+          "c3_compute does not hardcode the image tag")
+    check(c3_compute._DEFAULT_CPU_IMAGE == f"rust:{channel}-bookworm",
+          f"C3's image is derived from the pin "
           f"(got {c3_compute._DEFAULT_CPU_IMAGE!r})")
     check(":1-" not in c3_compute._DEFAULT_CPU_IMAGE,
           "C3's image tag is exact, not a floating major")
+
+
+def test_bumping_the_pin_moves_every_path():
+    """The property that makes a one-line bump safe: change the file, and the
+    derived values follow. Guards against someone re-hardcoding a version."""
+    orig = c3_compute.ROOT
+    import tempfile as _tf
+    try:
+        with _tf.TemporaryDirectory() as fake:
+            root = Path(fake)
+            (root / "rust-toolchain.toml").write_text(
+                '[toolchain]\nchannel = "1.99.0"\n')
+            c3_compute.ROOT = root
+            check(c3_compute.pinned_rust_version() == "1.99.0",
+                  "a bumped pin is read straight from the file")
+    finally:
+        c3_compute.ROOT = orig
+    # A clone predating the pin still resolves something usable.
+    try:
+        with _tf.TemporaryDirectory() as fake:
+            c3_compute.ROOT = Path(fake)
+            check(bool(c3_compute.pinned_rust_version()),
+                  "a clone without the pin falls back rather than crashing")
+    finally:
+        c3_compute.ROOT = orig
+
+
+def test_ci_rebuilds_warm_images_when_the_build_rules_change():
+    """The bake is compiler- and RUSTFLAGS-specific. If CI doesn't rebuild on
+    those, a bump leaves every C3 job cold-compiling against a stale image."""
+    wf = (ROOT / ".github" / "workflows" / "build-warm-images.yml").read_text()
+    check("rust-toolchain.toml" in wf, "CI rebuilds warm images on a toolchain bump")
+    check(".cargo/config.toml" in wf, "CI rebuilds warm images on a RUSTFLAGS change")
+    # Toolchain-scoped tag: makes an upgrade additive instead of mutating
+    # :latest under every running swarm at once.
+    check("rust$RUSTV" in wf, "CI publishes a toolchain-scoped image tag")
 
 
 def _fake_root(root: Path) -> None:
@@ -158,7 +201,9 @@ if __name__ == "__main__":
     test_lints_are_capped()
     print("toolchain pin")
     test_toolchain_is_pinned()
-    test_every_build_path_agrees_on_the_version()
+    test_the_version_is_written_down_exactly_once()
+    test_bumping_the_pin_moves_every_path()
+    test_ci_rebuilds_warm_images_when_the_build_rules_change()
     print("reaching every build path")
     test_c3_workspaces_carry_the_build_config()
     test_missing_build_config_is_not_fatal()
