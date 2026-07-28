@@ -1052,9 +1052,22 @@ html, body {
   flex-direction: column;
 }
 
-.chart-panel svg {
+/* The plot and its two scrollbars share a grid: the SVG takes the big cell,
+ * the y-bar the right gutter, the x-bar the bottom one. The gutters are
+ * always reserved so showing a thumb never reflows (and re-measures) the
+ * chart. */
+.chart-plot-wrap {
   flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 10px;
+  grid-template-rows: minmax(0, 1fr) 10px;
+}
+
+.chart-panel svg {
+  grid-area: 1 / 1;
   width: 100%;
+  height: 100%;
 }
 
 .chart-tabs {
@@ -1089,9 +1102,46 @@ html, body {
   border-radius: 6px;
 }
 
-/* Pan/zoom affordance on the benchmark chart. */
-#chart-svg { cursor: grab; }
-#chart-svg:active { cursor: grabbing; }
+/* Pan/zoom affordance on the benchmark chart. The cursor is taken over by
+ * JS on hover (ew-/ns-resize over an axis gutter, where a gesture drives
+ * that axis alone); this is the pre-interaction default. */
+#chart-svg { cursor: grab; touch-action: none; }
+
+/* Per-axis scrollbars. Each thumb spans the fraction of the axis currently
+ * in view, so at fit it fills the track and reads as "nothing hidden". */
+.chart-scroll {
+  position: relative;
+  border-radius: 5px;
+  background: var(--border-subtle);
+  touch-action: none;
+  cursor: pointer;
+}
+.chart-scroll-x { grid-area: 2 / 1; margin-top: 2px; }
+.chart-scroll-y { grid-area: 1 / 2; margin-left: 2px; }
+
+.chart-scroll-thumb {
+  position: absolute;
+  border-radius: 5px;
+  background: var(--ink-dim);
+  opacity: 0.25;
+}
+.chart-scroll-x .chart-scroll-thumb { top: 0; bottom: 0; left: 0; width: 100%; }
+.chart-scroll-y .chart-scroll-thumb { left: 0; right: 0; top: 0; height: 100%; }
+
+.chart-scroll.is-zoomed .chart-scroll-thumb {
+  background: var(--color-accent);
+  opacity: 0.55;
+}
+.chart-scroll:hover .chart-scroll-thumb { opacity: 0.7; }
+
+.chart-zoom-hint {
+  font-family: var(--ui);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  cursor: help;
+  white-space: nowrap;
+}
 
 .chart-zoom-reset {
   font-family: var(--ui);
