@@ -1406,6 +1406,35 @@ async def record_mainnet_algorithm(
     return "inserted"
 
 
+# States in which a published run of the mainnet code is still wanted. Shared
+# by the claim, the adoption preference, and the capture — they have to agree,
+# or the flow stalls at whichever one disagrees (it has, once already).
+MAINNET_UNMEASURED = ("pending", "requested", "measuring")
+
+
+async def claim_mainnet_measurement(
+    conn: aiosqlite.Connection, challenge: str, agent_id: str, *,
+    now_ts: str, stale_before: str,
+) -> bool:
+    """Reserve the measurement for exactly one agent. Returns whether we got it.
+
+    Without a claim, every agent polling for state would be handed the same
+    forced reset and they would all abandon their trajectories to benchmark
+    the same algorithm. `stale_before` re-arms a claim whose agent died mid-run
+    so one crash can't park the measurement forever."""
+    cursor = await conn.execute(
+        "UPDATE mainnet_baselines SET status = 'measuring', measured_by = ?, "
+        "benchmarked_at = ? "
+        "WHERE challenge = ? AND ("
+        "  status = 'requested'"
+        "  OR (status = 'measuring' AND (benchmarked_at IS NULL "
+        "                                OR benchmarked_at < ?))"
+        ")",
+        (f"agent:{agent_id}", now_ts, challenge, stale_before),
+    )
+    return cursor.rowcount > 0
+
+
 async def set_mainnet_baseline_score(
     conn: aiosqlite.Connection,
     challenge: str,

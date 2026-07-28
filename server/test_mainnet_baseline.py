@@ -432,6 +432,122 @@ async def test_baseline_registers_even_when_the_deposit_is_skipped():
     print("PASS test_baseline_registers_even_when_the_deposit_is_skipped")
 
 
+async def _agent_with_a_trajectory(db, server, name="a1", score=100.0):
+    """An agent mid-flight and improving — i.e. one that will never stagnate,
+    which is exactly the case the old design could not serve."""
+    from models import IterationCreate
+    async with db.connect() as conn:
+        await conn.execute(
+            "INSERT INTO agents (id, name, registered_at, last_heartbeat) "
+            "VALUES (?, ?, ?, ?)", (name, name, TS, TS))
+        await conn.commit()
+    req = IterationCreate(
+        agent_id=name, title="t", description="d", strategy_tag="x",
+        algorithm_code="// mine\n", score=score, feasible=True,
+        challenge=CHALLENGE)
+    await server.create_iteration(req, token_agent_id=name)
+    return name
+
+
+async def test_measurement_happens_without_waiting_for_stagnation():
+    """The whole point of the one-off job. A healthy swarm never stagnates, so
+    a measurement queued behind a stagnation reset never ran — the button
+    looked broken because, in practice, it was."""
+    db, server = _fresh()
+    await db.init_db()
+    await _seed(db, server)
+    from models import AdminMeasureMainnetBaseline
+
+    agent = await _agent_with_a_trajectory(db, server)
+    key = await _key(db)
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+
+    # The agent is NOT stagnating; it just published an improvement.
+    state = await server.get_state(agent_id=agent, challenge=CHALLENGE,
+                                   token_agent_id=agent)
+    reset = state.get("trajectory_reset") or {}
+    assert reset.get("type") == "adopted_inactive", reset
+    assert reset.get("reason") == "mainnet_baseline", reset
+    # needs_benchmark is what drives the agent's existing [SEED-BENCH] path,
+    # which benchmarks the adopted code unchanged — no agent-side change.
+    assert reset.get("needs_benchmark") is True, reset
+    assert state["best_algorithm_code"] == _CODE, "must hand over the mainnet code"
+
+    # The agent's own work was banked on the way past, not discarded.
+    async with db.connect() as conn:
+        pool = await db.get_inactive_with_deactivations(conn, CHALLENGE)
+    assert any("// mine" in (e["algorithm_code"] or "") for e in pool), pool
+    print("PASS test_measurement_happens_without_waiting_for_stagnation")
+
+
+async def test_only_one_agent_is_pulled_off_its_trajectory():
+    """Without a claim, every agent polling for state would be handed the same
+    forced reset and the whole swarm would drop what it was doing."""
+    db, server = _fresh()
+    await db.init_db()
+    await _seed(db, server)
+    from models import AdminMeasureMainnetBaseline
+
+    agents = [await _agent_with_a_trajectory(db, server, f"a{i}", 100.0 + i)
+              for i in range(4)]
+    key = await _key(db)
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+
+    forced = []
+    for a in agents:
+        st = await server.get_state(agent_id=a, challenge=CHALLENGE, token_agent_id=a)
+        if (st.get("trajectory_reset") or {}).get("reason") == "mainnet_baseline":
+            forced.append(a)
+    assert len(forced) == 1, f"exactly one agent should be claimed, got {forced}"
+    print("PASS test_only_one_agent_is_pulled_off_its_trajectory")
+
+
+async def test_a_dead_claimant_does_not_park_the_measurement():
+    db, server = _fresh()
+    await db.init_db()
+    await _seed(db, server)
+    from models import AdminMeasureMainnetBaseline
+
+    a1 = await _agent_with_a_trajectory(db, server, "a1")
+    a2 = await _agent_with_a_trajectory(db, server, "a2", 101.0)
+    key = await _key(db)
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+    await server.get_state(agent_id=a1, challenge=CHALLENGE, token_agent_id=a1)
+
+    # a1 claimed it and then died. Age the claim past its TTL.
+    async with db.connect() as conn:
+        await conn.execute(
+            "UPDATE mainnet_baselines SET benchmarked_at = '2000-01-01T00:00:00+00:00'")
+        # Put a fresh mainnet entry back — a1 consumed the first on adoption.
+        agent_id = await db.ensure_synthetic_agent(conn, "tig-foundation", TS)
+        await db.deposit_inactive(conn, agent_id, CHALLENGE, _CODE, None, TS)
+        await conn.commit()
+
+    st = await server.get_state(agent_id=a2, challenge=CHALLENGE, token_agent_id=a2)
+    assert (st.get("trajectory_reset") or {}).get("reason") == "mainnet_baseline", st
+    print("PASS test_a_dead_claimant_does_not_park_the_measurement")
+
+
+async def test_no_agent_is_disturbed_when_nothing_is_adoptable():
+    """A request with no matching pool entry must not reset agents forever."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminSeedFromMainnet, AdminMeasureMainnetBaseline
+    key = await _key(db)
+    # seed_pool only — nothing in the inactive pool to adopt.
+    await server.admin_seed_from_mainnet(AdminSeedFromMainnet(
+        admin_key=key, challenge=CHALLENGE, target="seed_pool"))
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+    a1 = await _agent_with_a_trajectory(db, server, "a1")
+    st = await server.get_state(agent_id=a1, challenge=CHALLENGE, token_agent_id=a1)
+    assert (st.get("trajectory_reset") or {}).get("reason") != "mainnet_baseline", st
+    print("PASS test_no_agent_is_disturbed_when_nothing_is_adoptable")
+
+
 async def main():
     await test_seeding_records_the_algorithm_without_measuring_it()
     await test_a_challenge_with_no_mainnet_algorithm_says_so()
@@ -449,6 +565,10 @@ async def main():
     await test_seeding_the_same_algorithm_twice_stays_idempotent()
     await test_the_host_cli_path_registers_the_baseline_too()
     await test_baseline_registers_even_when_the_deposit_is_skipped()
+    await test_measurement_happens_without_waiting_for_stagnation()
+    await test_only_one_agent_is_pulled_off_its_trajectory()
+    await test_a_dead_claimant_does_not_park_the_measurement()
+    await test_no_agent_is_disturbed_when_nothing_is_adoptable()
     print("\nAll mainnet-baseline tests passed.")
 
 

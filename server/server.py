@@ -1444,10 +1444,37 @@ async def _agent_state(
                 if traj_row and (traj_row["num_edits"] or 0) >= negative_limit:
                     negative_cull = True
 
-        if stagnated or negative_cull:
+        # ── … or measure the mainnet baseline, now rather than eventually ──
+        # The admin "Measure" button used to be a standing preference applied
+        # to the NEXT stagnation reset. On a healthy swarm — every agent
+        # improving, nothing stagnating — that reset may not arrive for hours,
+        # so the button appeared to do nothing. Claim it for exactly one agent
+        # and force the reset: that agent adopts the mainnet entry, benchmarks
+        # it unchanged through the existing needs_benchmark path, and its own
+        # best is deposited into the pool on the way past, so the work it
+        # abandons is banked rather than lost.
+        force_reason = None
+        if not (stagnated or negative_cull) and traj_best is not None:
+            if await _mainnet_measurement_claimable(conn, challenge):
+                claimed = await db.claim_mainnet_measurement(
+                    conn, challenge, agent_id, now_ts=now(),
+                    stale_before=await _measurement_stale_cutoff(),
+                )
+                # Commit before the reset machine runs: that UPDATE opened an
+                # implicit transaction, and maybe_reset_trajectory opens its
+                # own with BEGIN IMMEDIATE, which sqlite refuses to nest. The
+                # claim's WHERE clause is the mutex that makes two concurrent
+                # callers unable to both win, so it is safe standing alone —
+                # and if the reset then fails, the TTL re-arms it.
+                await conn.commit()
+                if claimed:
+                    force_reason = "mainnet_baseline"
+
+        if stagnated or negative_cull or force_reason:
             reset = await maybe_reset_trajectory(
                 conn, agent_id=agent_id, challenge=challenge,
                 direction=direction, cutoff_ts=cutoff_ts,
+                force_reason=force_reason,
                 stagnation_limit=stagnation_limit,
                 negative_trajectory_limit=negative_limit,
                 agent_tier=agent_tier, agent_role=agent_role,
@@ -1840,6 +1867,39 @@ class _IterationVerdict:
     delta_vs_trajectory_best_pct: float | None
 
 
+# How long a claimed-but-unfinished measurement is honoured before another
+# agent may take it. Longer than a slow C3 benchmark (a cold compile plus the
+# solve can run to tens of minutes), short enough that one crashed agent
+# doesn't park the measurement for the rest of the day.
+_MEASUREMENT_CLAIM_TTL_SECS = 3600
+
+
+async def _measurement_stale_cutoff() -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc)
+            - timedelta(seconds=_MEASUREMENT_CLAIM_TTL_SECS)).isoformat()
+
+
+async def _mainnet_measurement_claimable(conn, challenge: str) -> bool:
+    """Is a measurement outstanding AND actually performable right now?
+
+    The second half matters: forcing an agent off its trajectory is only
+    justified if there is an unscored, fingerprint-matching entry in the pool
+    for it to adopt. Without that check a stale request would reset an agent
+    for nothing, over and over."""
+    row = await db.get_mainnet_baseline(conn, challenge)
+    if not row or not row["code_fingerprint"]:
+        return False
+    if row["status"] not in ("requested", "measuring"):
+        return False
+    pool = await db.get_inactive_with_deactivations(conn, challenge)
+    return any(
+        e.get("score") is None
+        and db.code_fingerprint(e.get("algorithm_code") or "") == row["code_fingerprint"]
+        for e in pool
+    )
+
+
 async def _maybe_capture_mainnet_baseline(
     conn, challenge: str, req: IterationCreate, *, timestamp: str,
 ) -> bool:
@@ -1855,7 +1915,7 @@ async def _maybe_capture_mainnet_baseline(
     Infeasible runs are ignored — the bar has to be a score the algorithm can
     actually reach here."""
     row = await db.get_mainnet_baseline(conn, challenge)
-    if (not row or row["status"] not in ("pending", "requested")
+    if (not row or row["status"] not in db.MAINNET_UNMEASURED
             or not row["code_fingerprint"]):
         return False
     if not req.feasible:
@@ -3315,8 +3375,9 @@ async def admin_measure_mainnet_baseline(req: AdminMeasureMainnetBaseline):
         "status": "requested",
         "queued": bool(in_pool),
         "detail": (
-            "Queued — the next agent trajectory reset on this challenge will "
-            "benchmark it unchanged and publish the score."
+            "Claimed by the next agent to check in: it benchmarks the "
+            "algorithm unchanged and publishes the score, usually within an "
+            "iteration. Its own work is banked to the pool first."
             if in_pool else
             "Queued, but no mainnet entry is in the inactive pool for agents "
             "to adopt. Re-run “Seed from mainnet” with target “inactive” or "

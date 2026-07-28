@@ -87,7 +87,8 @@ async def _pick_inactive(conn, challenge: str, inactive_pool: list) -> dict:
     wasn't already spending.
     """
     row = await db.get_mainnet_baseline(conn, challenge)
-    if row and row["status"] == "requested" and row["code_fingerprint"]:
+    if (row and row["status"] in ("requested", "measuring")
+            and row["code_fingerprint"]):
         for entry in inactive_pool:
             # Unscored: a scored entry would inherit its score as the floor and
             # skip the benchmark, which is the whole point of adopting it here.
@@ -110,12 +111,20 @@ async def maybe_reset_trajectory(
     agent_role: str,
     seed_fn,
     timestamp: str,
+    force_reason: str | None = None,
 ) -> ResetOutcome | None:
     """Run the reset machine for (agent, challenge) if it is still stagnating.
 
     Returns None without side effects when the re-check under the write lock
     finds the reset already done (a concurrent call won the race) — callers
     should then re-read state and serve the post-reset view.
+
+    `force_reason` runs the machine regardless of stagnation, for a reset the
+    swarm needs rather than one the agent has earned — today only the mainnet
+    baseline measurement, which otherwise waits on a stagnation that a healthy
+    agent may never reach. The agent's current best is deposited into the
+    inactive pool by the normal path below before anything is adopted, so a
+    forced reset banks its work rather than discarding it.
 
     `seed_fn` must have server.seed_for_agent's signature:
     (conn, agent_id, challenge, tier, role, *, direction, cutoff_ts) →
@@ -145,12 +154,18 @@ async def maybe_reset_trajectory(
             if traj_row and (traj_row["num_edits"] or 0) >= negative_trajectory_limit:
                 negative_cull = True
 
+    if force_reason and traj_best is not None:
+        # A forced reset still needs something to deposit and something to
+        # adopt; with no trajectory best there is nothing to bank, and the
+        # fresh-start path would not benchmark anything unchanged.
+        stagnated = True
+
     if not (stagnated or negative_cull):
         # Lost the race: a concurrent call already reset (zeroing
         # runs_since_improvement) or cleared the trajectory best.
         await conn.rollback()
         return None
-    reset_reason = "stagnation" if stagnated else "negative_cull"
+    reset_reason = force_reason or ("stagnation" if stagnated else "negative_cull")
 
     # Deactivate the current trajectory.
     cur_traj_id = acs["current_trajectory_id"] if acs else None
