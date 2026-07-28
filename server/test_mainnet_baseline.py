@@ -620,6 +620,98 @@ async def test_no_agent_is_disturbed_when_nothing_is_adoptable():
     print("PASS test_no_agent_is_disturbed_when_nothing_is_adoptable")
 
 
+async def test_capture_survives_the_worktree_round_trip():
+    """The live failure. The agent adopted the mainnet seed, benchmarked it
+    unchanged at 202728, published — and the capture dropped it, leaving the
+    dashboard blank with the row stuck on 'measuring'.
+
+    The code does not survive as bytes: deposited here, written into a
+    worktree (challenge_files._safe_write runs sanitize_source, which rewrites
+    line endings AND confusable characters), read back, published. We do not
+    control that transformation and should not have to enumerate it — a
+    measurement the server explicitly commissioned must not hinge on a hash of
+    something that made a round trip through code we did not write.
+
+    So the difference here is deliberately one normalisation CANNOT undo."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminMeasureMainnetBaseline, IterationCreate
+    key = await _key(db)
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+
+    async with db.connect() as conn:
+        await db.claim_mainnet_measurement(
+            conn, CHALLENGE, "hide-and-seek", now_ts=TS,
+            stale_before="2000-01-01T00:00:00+00:00")
+        await conn.commit()
+        # A confusable the worktree writer rewrote on the way in: same
+        # algorithm, different bytes, and no line-ending rule recovers it.
+        round_tripped = _CODE.replace("/* mainnet */", "/* mainnet\u00a0*/")
+        assert db.code_fingerprint(round_tripped) != db.code_fingerprint(_CODE), (
+            "this test is only meaningful if the fingerprints genuinely differ")
+        req = IterationCreate(
+            agent_id="hide-and-seek", title="Baseline: adopted mainnet seed",
+            description="d", strategy_tag="seed_baseline",
+            algorithm_code=round_tripped, score=202728.0, feasible=True,
+            challenge=CHALLENGE)
+        captured = await server._maybe_capture_mainnet_baseline(
+            conn, CHALLENGE, req, timestamp=TS)
+        row = await db.get_mainnet_baseline(conn, CHALLENGE)
+    assert captured is True, (
+        "a commissioned measurement must not be lost to a byte difference")
+    assert row["score"] == 202728.0 and row["status"] == "ready", row
+    print("PASS test_capture_survives_the_worktree_round_trip")
+
+
+async def test_a_claim_does_not_capture_a_mutated_publish():
+    """The claimed path can't just accept the agent's next publish. If the
+    seed benchmark FAILS, run_loop proceeds to a normal iteration and publishes
+    a MUTATED algorithm — capturing that would put a fictional bar on the
+    dashboard. Only the seed_baseline tag, which run_loop emits solely for the
+    unchanged benchmark, counts."""
+    db, server = _fresh()
+    await db.init_db()
+    from models import AdminMeasureMainnetBaseline, IterationCreate
+    key = await _key(db)
+    await server.admin_measure_mainnet_baseline(
+        AdminMeasureMainnetBaseline(admin_key=key, challenge=CHALLENGE))
+
+    async with db.connect() as conn:
+        await db.claim_mainnet_measurement(
+            conn, CHALLENGE, "hide-and-seek", now_ts=TS,
+            stale_before="2000-01-01T00:00:00+00:00")
+        await conn.commit()
+        mutated = IterationCreate(
+            agent_id="hide-and-seek", title="my own edit", description="d",
+            strategy_tag="metaheuristic",
+            algorithm_code=_CODE + "// my mutation\n",
+            score=999999.0, feasible=True, challenge=CHALLENGE)
+        got = await server._maybe_capture_mainnet_baseline(
+            conn, CHALLENGE, mutated, timestamp=TS)
+        # ...and another agent's seed_baseline publish isn't ours either.
+        other = IterationCreate(
+            agent_id="someone-else", title="t", description="d",
+            strategy_tag="seed_baseline",
+            algorithm_code="// unrelated\n", score=5.0, feasible=True,
+            challenge=CHALLENGE)
+        got2 = await server._maybe_capture_mainnet_baseline(
+            conn, CHALLENGE, other, timestamp=TS)
+        row = await db.get_mainnet_baseline(conn, CHALLENGE)
+    assert got is False, "a mutated publish must not become the baseline"
+    assert got2 is False, "another agent's publish must not claim ours"
+    assert row["score"] is None, row
+    print("PASS test_a_claim_does_not_capture_a_mutated_publish")
+
+
+async def test_fingerprint_ignores_line_endings():
+    db, _ = _fresh()
+    crlf = _CODE.replace("\n", "\r\n")
+    assert db.code_fingerprint(_CODE) == db.code_fingerprint(crlf)
+    assert db.code_fingerprint(_CODE) != db.code_fingerprint(_CODE + "// x\n")
+    print("PASS test_fingerprint_ignores_line_endings")
+
+
 async def main():
     await test_seeding_records_the_algorithm_without_measuring_it()
     await test_a_challenge_with_no_mainnet_algorithm_says_so()
@@ -643,6 +735,9 @@ async def main():
     await test_only_one_agent_is_pulled_off_its_trajectory()
     await test_a_dead_claimant_does_not_park_the_measurement()
     await test_no_agent_is_disturbed_when_nothing_is_adoptable()
+    await test_capture_survives_the_worktree_round_trip()
+    await test_a_claim_does_not_capture_a_mutated_publish()
+    await test_fingerprint_ignores_line_endings()
     print("\nAll mainnet-baseline tests passed.")
 
 

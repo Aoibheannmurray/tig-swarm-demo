@@ -1928,7 +1928,27 @@ async def _maybe_capture_mainnet_baseline(
         return False
     if not req.feasible:
         return False
-    if db.code_fingerprint(req.algorithm_code or "") != row["code_fingerprint"]:
+
+    # Two ways to recognise the measurement.
+    #
+    # By CODE, for the organic case: any agent that happens to benchmark the
+    # mainnet algorithm unchanged, with no claim involved.
+    #
+    # By CLAIM, for the case we asked for. Byte-identity is a fragile key here
+    # — the code round-trips through an agent's worktree, and the write
+    # sanitises it — so a measurement we explicitly commissioned must not hinge
+    # on it. When this agent is the one we handed the algorithm to and it is
+    # publishing the unchanged-seed benchmark (`seed_baseline`, emitted only by
+    # run_loop's SEED-BENCH block, before any mutation), that IS the
+    # measurement. Observed live: the seed scored 202728, and the capture
+    # dropped it on a fingerprint mismatch.
+    by_code = db.code_fingerprint(req.algorithm_code or "") == row["code_fingerprint"]
+    by_claim = (
+        row["status"] == "measuring"
+        and row["measured_by"] == f"agent:{req.agent_id}"
+        and (req.strategy_tag or "") == "seed_baseline"
+    )
+    if not (by_code or by_claim):
         return False
     cfg = await db.get_challenge_config(conn, challenge)
     await db.set_mainnet_baseline_score(

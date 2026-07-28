@@ -1354,8 +1354,16 @@ def config_fingerprint(tracks: object, timeout: object) -> str:
 
 def code_fingerprint(algorithm_code: str) -> str:
     """Identity of an algorithm's source, so a score published for the
-    unmodified mainnet algorithm can be recognised wherever it comes from."""
-    return hashlib.sha256(algorithm_code.encode("utf-8")).hexdigest()
+    unmodified mainnet algorithm can be recognised wherever it comes from.
+
+    Line endings are normalised first. The code makes a round trip the server
+    does not control — deposited here, written to an agent's worktree (where
+    challenge_files._safe_write rewrites CRLF to LF), benchmarked, read back
+    and published — so raw bytes are not preserved end to end. A mainnet
+    algorithm arrives base64-decoded from GitHub and may well carry CRLF, in
+    which case a byte-exact hash can never match what comes back."""
+    normalised = algorithm_code.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 
 async def get_mainnet_baseline(
