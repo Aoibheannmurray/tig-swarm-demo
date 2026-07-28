@@ -64,8 +64,51 @@ def test_bare_numbers_inside_words_are_not_infra():
     print("PASS embedded numbers are not HTTP status codes")
 
 
+def test_compile_fix_reinserts_imports_the_model_drops():
+    """The fix loop used to make things WORSE.
+
+    Every other codegen path runs ensure_common_imports; the compile-fix path
+    did not. So a model asked to repair a borrow error returned a whole file
+    without `use serde_json::{Map, Value}` and the next build failed with
+    E0412 on the hyperparameters signature — a brand new error, inside the
+    code we were repairing. Both retries then chased the damage instead of the
+    original fault. Observed on knapsack: E0382 -> E0412 -> E0412 -> freeze.
+
+    Asserted at the source, because the repair has to happen between
+    parse_response and write — a fix applied anywhere later would already have
+    been validated and written."""
+    import inspect
+    import run_loop
+    src = inspect.getsource(run_loop._try_compile_fix)
+    assert "ensure_common_imports" in src, (
+        "the compile-fix path must re-insert dropped imports")
+    # Before validation: an import-less file can otherwise fail validation and
+    # abort the retry for a reason the model never had a chance to fix.
+    assert src.index("ensure_common_imports") < src.index("_validate_entry"), (
+        "imports must be repaired before the fix is validated")
+    assert src.index("ensure_common_imports") < src.index("files.write"), (
+        "imports must be repaired before the fix is written")
+    print("PASS test_compile_fix_reinserts_imports_the_model_drops")
+
+
+def test_the_exact_failure_from_the_log_is_repaired():
+    from challenge_files import ensure_common_imports, ensure_challenge_import
+    dropped = (
+        "pub fn solve_challenge(\n"
+        "    challenge: &Challenge,\n"
+        "    _hyperparameters: &Option<Map<String, Value>>,\n"
+        ") -> anyhow::Result<()> { Ok(()) }\n"
+    )
+    fixed = ensure_common_imports(ensure_challenge_import(dropped, "knapsack"))
+    assert "serde_json::Map" in fixed and "serde_json::Value" in fixed, fixed
+    assert "tig_challenges::knapsack" in fixed, fixed
+    print("PASS test_the_exact_failure_from_the_log_is_repaired")
+
+
 if __name__ == "__main__":
     test_compile_error_with_numeric_noise_gets_fixed()
     test_infra_errors_skip_the_fix()
     test_bare_numbers_inside_words_are_not_infra()
+    test_compile_fix_reinserts_imports_the_model_drops()
+    test_the_exact_failure_from_the_log_is_repaired()
     print("\nAll compile-fix routing tests passed.")
