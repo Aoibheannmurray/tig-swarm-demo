@@ -333,8 +333,10 @@ def ensure_challenge_import(code: str, challenge: str) -> str:
     `extern crate self as tig_challenges` makes it an alias of
     `crate::<challenge>::*`) and the TIG-docker slot (the baked tig-bench
     images), so algorithms move between the swarm and mainnet with no import
-    swapping. Legacy `use super::*;` (the old swarm-only anchor) is rewritten
-    in place, which migrates pre-parity trajectories as agents touch them. If
+    swapping. A TOP-LEVEL `use super::*;` (the old swarm-only anchor) is
+    rewritten in place. This is not dead compatibility code: it also catches
+    LLM output that reaches for the Rust-idiomatic import, and mainnet
+    algorithms are imported through the same normalisation. If
     no anchor is present at all (agents sometimes rewrite the import block and
     drop it), the import is inserted: worst case is an unused-import warning,
     never an error.
@@ -344,8 +346,17 @@ def ensure_challenge_import(code: str, challenge: str) -> str:
     anchor = f"use tig_challenges::{challenge}::*;"
     if anchor in code:
         return code
-    if "use super::*;" in code:
-        return code.replace("use super::*;", anchor, 1)
+    # TOP-LEVEL only. `use super::*;` is also the ordinary Rust idiom for an
+    # inner module pulling in its parent's scope (`mod hpf { use super::*; }`
+    # in the current knapsack mainnet winner, for one), and a bare substring
+    # replace rewrites the FIRST occurrence wherever it sits. Doing that to a
+    # nested one strips the module's access to its parent and drops the
+    # challenge glob into the wrong scope — the algorithm then fails to
+    # compile for a reason nothing in the diff explains. Only a column-0
+    # occurrence is the legacy swarm anchor this is meant to migrate.
+    _legacy_anchor = re.compile(r"^use super::\*;[ \t]*$", re.MULTILINE)
+    if _legacy_anchor.search(code):
+        return _legacy_anchor.sub(anchor, code, count=1)
     lines = code.splitlines(keepends=True)
     # Insert before the first top-level `use` (which sits after any leading
     # comments and `#![...]` inner attributes), else at the very top.
@@ -562,7 +573,7 @@ def validate_code(
     challenge = (config or {}).get("challenge")
     if challenge and not _is_declarations_only_entry(code):
         anchor = f"use tig_challenges::{challenge}::*;"
-        # Legacy `use super::*;` is accepted (pre-parity trajectories adopted
+        # A top-level `use super::*;` is accepted (LLM output reaches for it,
         # from the server) — ensure_challenge_import migrates it on the next
         # agent write; new code must carry the mainnet-form anchor.
         if anchor not in code and "use super::*;" not in code:

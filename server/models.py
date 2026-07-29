@@ -105,8 +105,10 @@ class IterationCreate(BaseModel):
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     estimated_cost: Optional[float] = None
-    # The publishing agent's role at iteration time: "explorer" or "exploiter"
-    # (None for legacy clients). Stored on the hypothesis row for attribution.
+    # The publishing agent's role at iteration time: "explorer" or "exploiter".
+    # Optional and still routinely absent — this is not a compatibility
+    # leftover, so the NULL handling downstream stays. Stored on the hypothesis
+    # row for attribution.
     role: Optional[str] = None
     # Winning hyperparameter config when this iteration was tuned (the `score`
     # is then the tuned score); None means the algorithm was scored at its
@@ -117,8 +119,10 @@ class IterationCreate(BaseModel):
     # The candidate's no-hyperparameters (default-config) score on the test
     # seed. Equals `score` for untuned iterations; for tuned ones it is the
     # pre-tuning score. The HPO gate's band compares default-vs-default, so the
-    # server stores this and serves it back via improvement_scores. None for
-    # legacy clients — the server falls back to `score`.
+    # server stores this and serves it back via improvement_scores. None
+    # whenever the client does not compute one; the server falls back to
+    # `score`, which is also correct for untuned iterations (the two are
+    # equal). An ongoing case, not a legacy one.
     default_score: Optional[float] = None
     # "mutation" (default) or "refactor". A refactor is a behavior-preserving
     # bloat reduction (docs/cleaner-agent-plan.md): the server swaps the
