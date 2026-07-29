@@ -169,9 +169,6 @@ def _match_brace(code: str, open_idx: int) -> int | None:
     return None
 
 
-import re  # noqa: E402  (kept near its sole user for the port's readability)
-
-
 def _strip_top_level_fn(code: str, name: str) -> str:
     """Remove a `fn <name>` / `pub fn <name>` definition (body + attached
     leading attribute/doc lines) from `code`."""
