@@ -43,7 +43,6 @@ from .http import (
     _MAINNET_API,
     _mainnet_get,
     classify_http_error,
-    looks_like_platform_error,
     post_json,
 )
 from .prompting import prompt, prompt_choice, prompt_int

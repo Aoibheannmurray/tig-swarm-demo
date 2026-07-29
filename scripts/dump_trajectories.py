@@ -24,20 +24,66 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 
 from swarm_client import resolve_server_url
 
+ROOT = Path(__file__).resolve().parent.parent
 SERVER = resolve_server_url("dump_trajectories.py")
+
+
+def _credentials() -> tuple[str, str]:
+    """Username + derived swarm password for the include_code gate.
+
+    `/api/trajectory_experiments?include_code=true` is 403 without them (see
+    `optional_swarm_password` in server/server.py) — and code evolution is the
+    whole point of this dump, so there is no useful uncredentialed mode.
+
+    fleet.config.json is the source of truth: its `swarm_password` is already
+    the per-contributor derived value the header wants, not the swarm's base
+    password (that one lives in swarm.admin.json and would be rejected).
+    """
+    user = os.environ.get("TIG_SWARM_USERNAME", "")
+    password = os.environ.get("TIG_SWARM_PASSWORD", "")
+    if user and password:
+        return user, password
+    cfg = ROOT / "fleet.config.json"
+    if cfg.exists():
+        try:
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            return data.get("username", ""), data.get("swarm_password", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+    return "", ""
 
 
 def fetch(path: str) -> dict:
     url = f"{SERVER}{path}"
-    with urllib.request.urlopen(url, timeout=60) as resp:
-        return json.load(resp)
+    user, password = _credentials()
+    headers = {}
+    if user and password:
+        headers["X-Username"] = user
+        headers["X-Swarm-Password"] = password
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            sys.exit(
+                "403 from the swarm server. This dump needs swarm credentials "
+                "to read algorithm code.\n"
+                "  Run it from a clone with a fleet.config.json, or set "
+                "TIG_SWARM_USERNAME and TIG_SWARM_PASSWORD\n"
+                "  (the derived password from fleet.config.json, not the base "
+                "one in swarm.admin.json)."
+            )
+        raise
 
 
 def fmt_score(score) -> str:

@@ -36,6 +36,22 @@ multi-agent fleet, benchmarking, and publishing results to the server.
 - `challenge_files.py`, `download_algorithm.py`, `init_fleet.py`,
   `sync_identity.py`, `build_ptx.py` — supporting helpers.
 
+### Operator tools (standalone — nothing imports these)
+
+Run by hand, not by the loop. They have no importers, so a "find unused
+modules" sweep will flag them; they are listed here so it doesn't.
+
+- `show_agent_session.py` — render a recorded Claude Code agentic session
+  (system prompt, per-iteration prompt, thinking, tool calls). See
+  `docs/AGENTIC_SESSIONS.md`.
+- `dump_trajectories.py` — dump trajectory code evolution with unified diffs
+  between consecutive iterations, for offline analysis by an LLM. Needs swarm
+  credentials: it requests `include_code=true`, which the server answers with
+  403 unless X-Username/X-Swarm-Password are present. It reads them from
+  `fleet.config.json` (whose `swarm_password` is the derived per-contributor
+  value — **not** the base password in `swarm.admin.json`), or from
+  `TIG_SWARM_USERNAME` / `TIG_SWARM_PASSWORD`.
+
 ## Benchmark backend (simple builds, wall-clock)
 
 `benchmark.py` compiles the swarm's own binaries (`tig_generator` /
