@@ -4,7 +4,10 @@ import gzip
 import hashlib
 import json
 import secrets
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import os
@@ -364,6 +367,59 @@ DEFAULT_CONFIG = {
 }
 
 
+# ── Schema versioning ────────────────────────────────────────────────
+#
+# Every schema change is a numbered `Migration`, applied once and recorded in
+# the `schema_version` table. Before this, init_db re-ran ~24 idempotent
+# statements on every boot: workable, but with no ordering guarantee, no record
+# of what had run, and no way to tell a fully-migrated DB from a half-migrated
+# one. Ordering is load-bearing here — the trajectory_bests rebuild below has to
+# run after the _add_column steps that create the columns it copies, or the
+# first boot after an upgrade silently drops them.
+#
+# Adopting a pre-versioning database is safe: every migration is individually
+# idempotent (that is exactly what made the old re-run-everything approach
+# work), so an unstamped DB simply runs them all once and is stamped to head.
+#
+# Adding a migration: append one entry with the next version number. Never
+# renumber, never edit a released migration in place — a deployed DB has
+# already recorded it as applied and will not run it again. (The numbers
+# below were assigned when this list was introduced, before any database
+# had recorded them, which is the only moment renumbering is free.)
+
+SCHEMA_VERSION_TABLE = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"""
+
+
+@dataclass(frozen=True)
+class Migration:
+    """One numbered schema step.
+
+    `own_connection` marks a migration that opens its own aiosqlite connection
+    (the table rebuild does — it wraps BEGIN/DROP TABLE and must not nest
+    inside init_db's transaction). The runner commits and hands it no db.
+    """
+
+    version: int
+    name: str
+    apply: Callable[..., Awaitable[None]]
+    own_connection: bool = False
+
+
+def _add_col_migration(version: int, table: str, column: str,
+                       typedef: str) -> Migration:
+    """Shorthand for the common case: one nullable/defaulted column."""
+    return Migration(
+        version, f"{table}.{column}",
+        lambda db, t=table, c=column, d=typedef: _add_column(db, t, c, d),
+    )
+
+
 async def _add_column(db, table: str, column: str, typedef: str) -> None:
     # Idempotent ALTER for legacy DBs that predate columns now in SCHEMA.
     # Only swallow the duplicate-column error — anything else (locked DB,
@@ -449,6 +505,190 @@ async def _column_is_notnull(db, table: str, column: str) -> bool:
     return False
 
 
+# The ordered migration list. Comments preserved from the inline statements
+# these replace — each explains why a column exists and how legacy rows read.
+MIGRATIONS: tuple[Migration, ...] = (
+    # Per-agent session token, generated at register. Used by every
+    # non-register participant-write endpoint instead of the swarm password
+    # (which is only consumed at register).
+    _add_col_migration(1, "agents", "token", "TEXT"),
+    # Contributor username stamped at register. Lets the dashboard group agents
+    # by owner. Derived from the X-Username header at register time.
+    _add_col_migration(2, "agents", "contributor_username", "TEXT"),
+    # Auto-classified model tier (frontier/standard), drives seeding. Pre-tier
+    # rows back-fill to 'standard'; read via COALESCE for safety.
+    _add_col_migration(3, "agents", "tier", "TEXT DEFAULT 'standard'"),
+    # Token accounting.
+    _add_col_migration(4, "experiments", "input_tokens", "INTEGER DEFAULT 0"),
+    _add_col_migration(5, "experiments", "output_tokens", "INTEGER DEFAULT 0"),
+    _add_col_migration(6, "experiments", "estimated_cost", "REAL DEFAULT 0.0"),
+    _add_col_migration(7, "agent_challenge_state", "total_input_tokens", "INTEGER DEFAULT 0"),
+    _add_col_migration(8, "agent_challenge_state", "total_output_tokens", "INTEGER DEFAULT 0"),
+    _add_col_migration(9, "agent_challenge_state", "total_estimated_cost", "REAL DEFAULT 0.0"),
+    # Set to 1 the first time an agent publishes a benchmarked iteration on a
+    # challenge. Stays 0 for an agent that never produced anything the
+    # benchmark could run — a quiet "never benchmarked" signal (no feed noise).
+    _add_col_migration(10, "agent_challenge_state", "ever_benchmarked", "INTEGER DEFAULT 0"),
+    # Inspiration-source trajectory capture (see schema comments). Rows from
+    # before this stay NULL; the inspiration matrix falls back to
+    # reconstruction for those and uses the column for everything after.
+    _add_col_migration(11, "experiments", "inspiration_source_trajectory_id", "TEXT"),
+    _add_col_migration(12, "agent_challenge_state", "pending_inspiration_source_trajectory", "TEXT"),
+    # Real experiment that earned a deposited best, carried through the
+    # inactive pool so adoption inherits true provenance (see deposit_inactive
+    # / the adoption branch in server.py). Older rows back-fill to NULL — their
+    # originating experiment_id was never stored.
+    _add_col_migration(13, "inactive_algorithms", "experiment_id", "TEXT"),
+    # Winning hyperparameter config (JSON) for a trajectory best tuned by the
+    # hyperparameter search. NULL for untuned bests. See
+    # docs/hyperparameter-search-plan.md.
+    _add_col_migration(14, "trajectory_bests", "hyperparameters", "TEXT"),
+    # The no-hyperparameters (default-config) score for this experiment. The
+    # HPO gate's band is default-vs-default, so improvement scores are read
+    # from here (COALESCE to `score` for untuned iterations).
+    _add_col_migration(15, "experiments", "default_score", "REAL"),
+    # Publishing agent's role ("explorer"/"exploiter") at iteration time, for
+    # attribution. NULL for clients that don't send it.
+    _add_col_migration(16, "hypotheses", "role", "TEXT"),
+    # Multi-file algorithm bundle: a JSON {relpath: content} map (keys relative
+    # to the algorithm dir, `mod.rs` is the entry). NULL for single-file rows,
+    # where `algorithm_code` is the whole algorithm. When set it is the source
+    # of truth; `algorithm_code` keeps the entry file for back-compat. Carried
+    # through every place a stored algorithm can be handed to another agent.
+    _add_col_migration(17, "experiments", "algorithm_files", "TEXT"),
+    _add_col_migration(18, "trajectory_bests", "algorithm_files", "TEXT"),
+    _add_col_migration(19, "seed_pool", "algorithm_files", "TEXT"),
+    _add_col_migration(20, "inactive_algorithms", "algorithm_files", "TEXT"),
+    # Per-iteration winning hyperparameter map (JSON) when this experiment was
+    # tuned, else NULL. Lets the HPO gate ask "has this trajectory tuned
+    # before?" (the first eligible candidate auto-fires; later ones respect the
+    # improvement band).
+    _add_col_migration(21, "experiments", "hyperparameters", "TEXT"),
+    # Seed-pool diversity moved from a per-(tag, source) UNIQUE index to
+    # code-similarity admission (server/seed_diversity.py). Drop the old unique
+    # index so multiple seeds can share a strategy_tag and admission is decided
+    # by similarity/LOC/cap, not first-feasible-per-tag.
+    Migration(
+        22, "drop idx_seed_pool_dedup",
+        lambda db: db.execute("DROP INDEX IF EXISTS idx_seed_pool_dedup"),
+    ),
+    # (The authored-seed dedup that used to sit here is NOT a migration — it is
+    # a recurring boot repair. See _collapse_duplicate_authored_seeds.)
+    # Offered-count for the third stagnation hint type, "failed_attempts"
+    # (mirrors tacit_knowledge_count / inspiration_count).
+    _add_col_migration(23, "agent_challenge_state", "failed_attempts_count", "INTEGER DEFAULT 0"),
+    # MUST stay after 14 and 18: the rebuild copies hyperparameters and
+    # algorithm_files, and would drop them if it ran first.
+    Migration(
+        24, "trajectory_bests.experiment_id nullable",
+        lambda: _relax_trajectory_bests_experiment_id(),
+        own_connection=True,
+    ),
+)
+
+# Columns asserted present after migrating. A half-applied schema otherwise
+# surfaces as a 500 on the first query that touches the missing column, long
+# after boot and far from the cause.
+_EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = tuple(
+    (m.name.split(".")[0], m.name.split(".")[1])
+    for m in MIGRATIONS if "." in m.name and not m.own_connection
+)
+
+
+def _validate_migrations() -> None:
+    """Numbering must be dense and strictly increasing from 1 — a gap or a
+    duplicate means a migration was renumbered or lost in a merge, and a
+    deployed DB would silently skip or re-run one."""
+    versions = [m.version for m in MIGRATIONS]
+    if versions != list(range(1, len(versions) + 1)):
+        raise ValueError(
+            f"MIGRATIONS must be numbered 1..N with no gaps; got {versions}"
+        )
+
+
+_validate_migrations()
+
+
+async def _apply_migrations(db) -> list[str]:
+    """Run every migration this DB has not recorded, in order. Returns the
+    names applied (empty on an up-to-date DB, which is the steady state)."""
+    await db.executescript(SCHEMA_VERSION_TABLE)
+    cursor = await db.execute("SELECT version FROM schema_version")
+    done = {row[0] for row in await cursor.fetchall()}
+    applied: list[str] = []
+    for m in MIGRATIONS:
+        if m.version in done or m.own_connection:
+            continue
+        await m.apply(db)
+        await db.execute(
+            "INSERT INTO schema_version (version, name, applied_at) "
+            "VALUES (?, ?, ?)",
+            (m.version, m.name, datetime.now(timezone.utc).isoformat()),
+        )
+        applied.append(f"{m.version}:{m.name}")
+    await db.commit()
+    return applied
+
+
+async def _apply_own_connection_migrations() -> None:
+    """Migrations that manage their own connection, run after init_db's block
+    has closed so they never nest inside its transaction."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript(SCHEMA_VERSION_TABLE)
+        cursor = await db.execute("SELECT version FROM schema_version")
+        done = {row[0] for row in await cursor.fetchall()}
+        for m in MIGRATIONS:
+            if not m.own_connection or m.version in done:
+                continue
+            await m.apply()
+            await db.execute(
+                "INSERT INTO schema_version (version, name, applied_at) "
+                "VALUES (?, ?, ?)",
+                (m.version, m.name, datetime.now(timezone.utc).isoformat()),
+            )
+            await db.commit()
+
+
+async def _collapse_duplicate_authored_seeds(db) -> None:
+    """Enforce one authored seed per (challenge, strategy_tag), every boot.
+
+    NOT a migration, deliberately. It began as a fix for the window where the
+    unique index was gone but /api/admin/seed_pool still assumed the DB deduped
+    — but because it ran on every boot it has been acting as a standing repair
+    ever since, and server/test_seed_pool_upsert.py depends on that: it inserts
+    duplicates into an already-migrated DB and expects the next init_db to
+    collapse them. Numbering it as a once-only migration would silently retire
+    a live safety net, so it stays a boot-time invariant.
+
+    Authored seeds are host-owned; the newest row wins. Harvested seeds may
+    legitimately share a tag (similarity admission) and are never touched.
+    """
+    await db.execute(
+        "DELETE FROM seed_pool WHERE source = 'authored' AND id NOT IN ("
+        "  SELECT MAX(id) FROM seed_pool WHERE source = 'authored' "
+        "  GROUP BY challenge, strategy_tag)"
+    )
+
+
+async def _verify_schema(db) -> None:
+    """Fail loudly on a half-migrated schema, at boot, naming the column."""
+    missing: list[str] = []
+    by_table: dict[str, set[str]] = {}
+    for table, column in _EXPECTED_COLUMNS:
+        if table not in by_table:
+            cursor = await db.execute(f"PRAGMA table_info({table})")
+            by_table[table] = {row[1] for row in await cursor.fetchall()}
+        if column not in by_table[table]:
+            missing.append(f"{table}.{column}")
+    if missing:
+        raise RuntimeError(
+            "schema is incomplete after migration — missing "
+            + ", ".join(missing)
+            + ". The database may be from a newer version, or a migration "
+            "failed partway. Refusing to serve on a half-applied schema."
+        )
+
+
 async def _relax_trajectory_bests_experiment_id() -> None:
     """One-time table rebuild dropping the NOT NULL on
     trajectory_bests.experiment_id, so an adopted floor with no known source
@@ -520,87 +760,18 @@ async def init_db() -> None:
         await db.executescript(SCHEMA_INDEXES)
         await db.commit()
 
-        # Per-agent session token, generated at register. Used by every
-        # non-register participant-write endpoint instead of the swarm
-        # password (which is only consumed at register).
-        await _add_column(db, "agents", "token", "TEXT")
-        # Contributor username stamped at register. Lets the dashboard
-        # group agents by owner. Derived from the X-Username header at
-        # register time; not modifiable after the fact.
-        await _add_column(db, "agents", "contributor_username", "TEXT")
-        # Auto-classified model tier (frontier/standard), drives seeding.
-        # Legacy rows back-fill to 'standard'; read via COALESCE for safety.
-        await _add_column(db, "agents", "tier", "TEXT DEFAULT 'standard'")
-        # Migrations for token tracking columns on existing databases.
-        await _add_column(db, "experiments", "input_tokens", "INTEGER DEFAULT 0")
-        await _add_column(db, "experiments", "output_tokens", "INTEGER DEFAULT 0")
-        await _add_column(db, "experiments", "estimated_cost", "REAL DEFAULT 0.0")
-        await _add_column(db, "agent_challenge_state", "total_input_tokens", "INTEGER DEFAULT 0")
-        await _add_column(db, "agent_challenge_state", "total_output_tokens", "INTEGER DEFAULT 0")
-        await _add_column(db, "agent_challenge_state", "total_estimated_cost", "REAL DEFAULT 0.0")
-        # Set to 1 the first time an agent publishes a benchmarked iteration on
-        # a challenge. Stays 0 for an agent that never produced anything the
-        # benchmark could run — a quiet "never benchmarked" signal (no feed
-        # noise). Surfaced in the dashboard/logs.
-        await _add_column(db, "agent_challenge_state", "ever_benchmarked", "INTEGER DEFAULT 0")
-        # Inspiration-source trajectory capture (see schema comments). Legacy
-        # rows stay NULL; the inspiration matrix falls back to reconstruction
-        # for those and uses this column for everything published afterwards.
-        await _add_column(db, "experiments", "inspiration_source_trajectory_id", "TEXT")
-        await _add_column(db, "agent_challenge_state", "pending_inspiration_source_trajectory", "TEXT")
-        # Real experiment that earned a deposited best, carried through the
-        # inactive pool so adoption inherits true provenance (see
-        # deposit_inactive / the adoption branch in server.py). Legacy rows
-        # back-fill to NULL — their originating experiment_id was never stored.
-        await _add_column(db, "inactive_algorithms", "experiment_id", "TEXT")
-        # Winning hyperparameter config (JSON) for a trajectory best that was
-        # tuned by the hyperparameter search. NULL for legacy rows and for
-        # bests scored at their in-code defaults. See
-        # docs/hyperparameter-search-plan.md.
-        await _add_column(db, "trajectory_bests", "hyperparameters", "TEXT")
-        # The no-hyperparameters (default-config) score for this experiment. The
-        # HPO gate's band is default-vs-default, so improvement scores are read
-        # from here (COALESCE to `score` for legacy rows / untuned iterations).
-        # See docs/hyperparameter-search-plan.md.
-        await _add_column(db, "experiments", "default_score", "REAL")
-        # Publishing agent's role ("explorer"/"exploiter") at iteration time, for
-        # attribution. NULL for legacy rows / clients that don't send it.
-        await _add_column(db, "hypotheses", "role", "TEXT")
-        # Multi-file algorithm bundle: a JSON {relpath: content} map (keys
-        # relative to the algorithm dir, `mod.rs` is the entry). NULL for
-        # single-file rows, where `algorithm_code` is the whole algorithm. When
-        # set it is the source of truth; `algorithm_code` keeps the entry file
-        # for back-compat. Carried through every place a stored algorithm can be
-        # handed to another agent (best, experiment, seed pool, inactive pool).
-        await _add_column(db, "experiments", "algorithm_files", "TEXT")
-        await _add_column(db, "trajectory_bests", "algorithm_files", "TEXT")
-        await _add_column(db, "seed_pool", "algorithm_files", "TEXT")
-        await _add_column(db, "inactive_algorithms", "algorithm_files", "TEXT")
-        # Per-iteration winning hyperparameter map (JSON) when this experiment
-        # was tuned, else NULL. Lets the HPO gate ask "has this trajectory tuned
-        # before?" (the first eligible candidate auto-fires; later ones respect
-        # the improvement band). See docs/hyperparameter-search-plan.md.
-        await _add_column(db, "experiments", "hyperparameters", "TEXT")
-        # Seed-pool diversity moved from a per-(tag, source) UNIQUE index to
-        # code-similarity admission (server/seed_diversity.py). Drop the old
-        # unique index so multiple seeds can share a strategy_tag and admission
-        # is decided by similarity/LOC/cap, not first-feasible-per-tag.
-        await db.execute("DROP INDEX IF EXISTS idx_seed_pool_dedup")
-        # Collapse AUTHORED duplicates that piled up in the window where the
-        # unique index was gone but /api/admin/seed_pool still assumed the DB
-        # deduped (every `setup.py create` re-run added a copy of each
-        # authored seed). Authored seeds are host-owned, one per
-        # (challenge, strategy_tag) — keep the newest row; harvested seeds
-        # are untouched. Idempotent, and upsert_authored_seed keeps it clean
-        # going forward.
-        await db.execute(
-            "DELETE FROM seed_pool WHERE source = 'authored' AND id NOT IN ("
-            "  SELECT MAX(id) FROM seed_pool WHERE source = 'authored' "
-            "  GROUP BY challenge, strategy_tag)"
-        )
-        # Offered-count for the third stagnation hint type, "failed_attempts"
-        # (mirrors tacit_knowledge_count / inspiration_count).
-        await _add_column(db, "agent_challenge_state", "failed_attempts_count", "INTEGER DEFAULT 0")
+        # Numbered, recorded schema steps (see MIGRATIONS). Replaces the
+        # ~24 statements that used to be re-run inline on every boot.
+        applied = await _apply_migrations(db)
+        if applied:
+            # One line, not 24: a fresh DB applies them all and the names add
+            # nothing. On an upgrade the range is the useful part.
+            print(f"init_db: applied {len(applied)} migration(s) "
+                  f"({applied[0]}..{applied[-1]})")
+        await _verify_schema(db)
+        # Boot-time invariants (not schema, not versioned) — see the docstring.
+        await _collapse_duplicate_authored_seeds(db)
+        await db.commit()
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -666,10 +837,9 @@ async def init_db() -> None:
             )
             await db.commit()
 
-    # Drop the legacy NOT NULL on trajectory_bests.experiment_id so an adopted
-    # floor with unknown provenance can store NULL instead of a fabricated id.
-    # Runs in its own connection after the schema pass above; idempotent.
-    await _relax_trajectory_bests_experiment_id()
+    # Migration 24 (trajectory_bests rebuild) opens its own connection, so it
+    # runs after the block above has closed — see Migration.own_connection.
+    await _apply_own_connection_migrations()
 
 
 @asynccontextmanager
