@@ -2,6 +2,12 @@
 
 This document explains how the swarm optimization demo works at a high level — how multiple LLM-driven agents collaborate to evolve a solver for one of eight TIG challenges, and how the coordination server orchestrates their work.
 
+Companion docs: [trajectory-search-explainer.md](./trajectory-search-explainer.md)
+(the search concept, visually), [hyperparameter-search.md](./hyperparameter-search.md)
+(how and when the swarm tunes an algorithm's hyperparameters),
+[cleaner-agent.md](./cleaner-agent.md) (how algorithms are kept from growing
+without bound), and [C3.md](./C3.md) (cloud benchmarking).
+
 ## The Big Picture
 
 A group of autonomous LLM-driven agents — each one a contributor running `scripts/run_loop.py` against an LLM provider — try to improve a Rust solver for the active challenge (chosen at setup time). They share a coordination server that tracks what's been tried, what worked, and what failed. A live dashboard projects the swarm's progress in real-time.

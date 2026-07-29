@@ -111,7 +111,7 @@ class IterationCreate(BaseModel):
     # is then the tuned score); None means the algorithm was scored at its
     # in-code defaults. When tuned this is a per-track map
     # {track_key: {param: value}} (a winner per track); see
-    # docs/hyperparameter-search-plan.md.
+    # docs/hyperparameter-search.md.
     hyperparameters: Optional[dict] = None
     # The candidate's no-hyperparameters (default-config) score on the test
     # seed. Equals `score` for untuned iterations; for tuned ones it is the
@@ -122,7 +122,7 @@ class IterationCreate(BaseModel):
     # equal). An ongoing case, not a legacy one.
     default_score: Optional[float] = None
     # "mutation" (default) or "refactor". A refactor is a behavior-preserving
-    # bloat reduction (docs/cleaner-agent-plan.md): the server swaps the
+    # bloat reduction (docs/cleaner-agent.md): the server swaps the
     # trajectory-best CODE for the leaner version but KEEPS the recorded best
     # score (no ratchet erosion), and counts it as neither an improvement nor
     # stagnation.

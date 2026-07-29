@@ -1147,7 +1147,7 @@ def build_search_replace_repair_prompt(
 # ── Hyperparameter extraction prompts (Phase 3) ────────────────────
 #
 # A separate LLM call, made only when a candidate passes the tuning gate (see
-# docs/hyperparameter-search-plan.md). It reads the *final, compiled* mutated
+# docs/hyperparameter-search.md). It reads the *final, compiled* mutated
 # algorithm (ALL its files) and (1) decides which constants become tunable
 # hyperparameters with a search range, (2) suggests a few concrete configs, and
 # (3) makes each chosen constant read from the `Map` argument with the in-code

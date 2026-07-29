@@ -513,7 +513,7 @@ _SR_SKIP_FALLBACK = 3
 _SR_PROMPT_CHAR_BUDGET = 600_000
 
 
-# ── Cleaner: deterministic bloat reduction (docs/cleaner-agent-plan.md) ──
+# ── Cleaner: deterministic bloat reduction (docs/cleaner-agent.md) ──
 #
 # When the trajectory best outgrows `cleaner_trigger_chars`, one iteration is
 # spent running the Tier-0 pre-pass (cleaner_prepass.py — duplicate-file merge
@@ -2230,7 +2230,7 @@ def main() -> int:
     # The hyperparameter-search gate's inputs (improvement history + parent
     # config) come from /api/state each iteration — keyed by trajectory_id, so
     # they survive restarts and adoption out of the inactive pool. See
-    # docs/hyperparameter-search-plan.md.
+    # docs/hyperparameter-search.md.
     iteration = 0
     consecutive_sr_skips = 0  # no-edit S/R skips in a row (see the fallback below)
     # Token-spending iterations in a row that ended without a successful
@@ -2473,7 +2473,7 @@ def main() -> int:
             print("  [FILES] Starting from stub — will ask LLM to write initial implementation")
 
         # ── Cleaner: spend this iteration on bloat reduction when the best
-        # has outgrown the trigger (docs/cleaner-agent-plan.md). Gated on:
+        # has outgrown the trigger (docs/cleaner-agent.md). Gated on:
         # size over trigger, cooldown elapsed (a failed clean must not retry
         # next iteration — nothing changed), and the trajectory not being one
         # failure away from a reset (the benchmark would be wasted).
