@@ -288,7 +288,14 @@ class FleetController:
                 # exits with an actionable message when a key is missing — a
                 # bare `except Exception` would let that kill this thread
                 # silently and leave the UI stuck on "starting".
-                self._on_status("error", {"error": f"{type(exc).__name__}: {exc}"})
+                detail = f"{type(exc).__name__}: {exc}"
+                # Into the LOG as well as the status. The log is where the user
+                # is looking during a launch — a status-only failure reads as
+                # the log simply stopping, which is why a launch that died on
+                # its first agent was reported as "hanging".
+                for line in str(detail).splitlines() or [detail]:
+                    self._on_output("fleet", f"  [fleet] LAUNCH FAILED: {line}")
+                self._on_status("error", {"error": detail})
 
         self._thread = threading.Thread(target=_target, daemon=True)
         self._thread.start()

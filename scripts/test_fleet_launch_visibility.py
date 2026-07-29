@@ -149,6 +149,138 @@ def test_no_key_error_is_actionable():
     check("run.py --ui" in msg, "and the UI route for people not in a terminal")
 
 
+def test_git_calls_cannot_hang_the_launch():
+    """A git that blocks — a stale index.lock, a credential prompt — used to
+    stop the launch forever with its output captured and nothing on screen."""
+    import subprocess as _sp
+    orig_run = run_fleet.subprocess.run
+    seen = {}
+
+    def fake_run(argv, *a, **k):
+        seen["timeout"] = k.get("timeout")
+        seen["env"] = k.get("env") or {}
+        raise _sp.TimeoutExpired(cmd=argv, timeout=k.get("timeout"))
+
+    try:
+        run_fleet.subprocess.run = fake_run
+        try:
+            run_fleet._git(["worktree", "add", "x"])
+            msg = ""
+        except RuntimeError as exc:
+            msg = str(exc)
+    finally:
+        run_fleet.subprocess.run = orig_run
+    check(seen.get("timeout") == run_fleet._GIT_TIMEOUT_SECS,
+          "git calls in the launch path are given a hard timeout")
+    check("index.lock" in msg and "credential" in msg,
+          "the timeout names the two usual causes")
+    check("worktree add" in msg, "and which git command was stuck")
+    # A prompt nobody can answer is the failure mode under the web companion,
+    # where there is no terminal at all.
+    check(seen.get("env", {}).get("GIT_TERMINAL_PROMPT") == "0",
+          "git is told never to prompt for credentials")
+
+
+def test_worktree_creation_announces_itself():
+    """The slowest step of a first launch. Silence here is indistinguishable
+    from a hang unless it says what it is doing."""
+    lines: list[str] = []
+    tmp = _isolated_root()
+    orig_root, orig_git, orig_exists, orig_refresh = (
+        run_fleet.ROOT, run_fleet._git, run_fleet._existing_worktree_paths,
+        run_fleet._refresh_worktree,
+    )
+    try:
+        run_fleet.ROOT = tmp
+        run_fleet.WORKTREES_DIR = tmp / "worktrees"
+        run_fleet._existing_worktree_paths = lambda: set()
+        run_fleet._refresh_worktree = lambda *a, **k: None
+        run_fleet._git = lambda args, **k: (
+            (tmp / "worktrees" / "vader").mkdir(parents=True, exist_ok=True)
+            if args[:2] == ["worktree", "add"] else "") or ""
+        run_fleet._ensure_worktree("vader", log=lines.append)
+    finally:
+        (run_fleet.ROOT, run_fleet._git, run_fleet._existing_worktree_paths,
+         run_fleet._refresh_worktree) = (
+            orig_root, orig_git, orig_exists, orig_refresh)
+        run_fleet.WORKTREES_DIR = orig_root / "worktrees"
+    blob = "\n".join(lines)
+    check("creating worktree" in blob, "worktree creation is announced")
+    check("vader" in blob, "and says which agent it is for")
+
+
+def test_compile_warning_sits_where_the_wait_is():
+    """The 'first run compiles' warning belonged on the spawn line, not on
+    'preparing' — compiling happens in the agent process, after the launcher
+    is done, so anyone stuck in worktree prep was told to wait for something
+    that hadn't started."""
+    import inspect
+    src = inspect.getsource(run_fleet.cmd_run)
+    prep = src[src.index("preparing {name}"):src.index("preparing {name}") + 300]
+    check("compiles" not in prep, "the preparing line no longer promises a compile")
+    spawn = src[src.index("spawned {name}"):src.index("spawned {name}") + 300]
+    check("compiles" in spawn, "the spawn line does, where the wait actually is")
+
+
+def test_agent_names_git_rejects_still_launch():
+    """Reported: an agent called "Darth Vader" stopped the launch dead.
+
+    Git refnames cannot contain spaces, so `git worktree add -b "fleet/Darth
+    Vader"` fails outright. Names are the contributor's to choose, so the
+    branch and directory get a slug instead of the name getting rejected."""
+    cases = {
+        "Darth Vader": "Darth-Vader",
+        "opus-007": "opus-007",          # already safe — unchanged
+        "  spaced  name  ": "spaced-name",
+        "a/b:c?d*e": "a-b-c-d-e",
+        "...": "agent",                   # refs can't be a bare dot sequence
+        "my.lock": "my",                  # nor end in .lock
+        "": "agent",
+    }
+    for name, want in cases.items():
+        got = run_fleet.slug_for_git(name)
+        check(got == want, f"slug({name!r}) == {want!r} (got {got!r})")
+
+    # The real contract: git itself must accept every slug as a branch name.
+    for name in list(cases) + ["fleet@{1}", "~^:?*[]", "trailing-dot."]:
+        ref = f"fleet/{run_fleet.slug_for_git(name)}"
+        ok = subprocess.run(["git", "check-ref-format", "--branch", ref],
+                            capture_output=True).returncode == 0
+        check(ok, f"git accepts the branch name derived from {name!r}")
+
+
+def test_slug_is_used_everywhere_a_name_becomes_a_path():
+    """A slug used for the branch but not the worktree dir (or vice versa)
+    would create the worktree and then fail to find it."""
+    import inspect
+    src = inspect.getsource(run_fleet)
+    # No raw `name` left in a path join or a ref string.
+    check("WORKTREES_DIR / name" not in src.replace("`str(WORKTREES_DIR / name)`", ""),
+          "no worktree path is built from the raw agent name")
+    check('f"fleet/{name}"' not in src,
+          "no branch name is built from the raw agent name")
+
+
+def test_names_that_collide_once_slugged_are_rejected():
+    """Slugging maps many names onto one path, so the duplicate-name check is
+    no longer enough: two agents that differ only by a space would quietly
+    share a worktree, an agent.config.json and a branch."""
+    import inspect
+    src = inspect.getsource(run_fleet._load_fleet)
+    check("slug_for_git(name)" in src and "collide on disk" in src,
+          "_load_fleet rejects names that collide after slugging")
+
+    # The guard has to fire on names that are individually legal and distinct.
+    collide = run_fleet.slug_for_git("Darth Vader") == run_fleet.slug_for_git("Darth-Vader")
+    check(collide, "the collision this guards against is real")
+    check(run_fleet.slug_for_git("opus 1") == run_fleet.slug_for_git("opus/1"),
+          "punctuation collides the same way")
+
+    # ...and must NOT fire on names that merely slug to themselves.
+    distinct = {run_fleet.slug_for_git(n) for n in ("opus-1", "opus-2", "fable")}
+    check(len(distinct) == 3, "ordinary distinct names do not collide")
+
+
 def test_fleet_log_flushes():
     """Piped/redirected launches block-buffer stdout; without an explicit
     flush the whole bootstrap is invisible until the buffer fills."""
@@ -164,6 +296,13 @@ if __name__ == "__main__":
     print("key resolution")
     test_missing_key_is_announced_before_it_blocks()
     test_no_key_error_is_actionable()
+    print("worktree preparation")
+    test_git_calls_cannot_hang_the_launch()
+    test_worktree_creation_announces_itself()
+    test_compile_warning_sits_where_the_wait_is()
+    test_agent_names_git_rejects_still_launch()
+    test_slug_is_used_everywhere_a_name_becomes_a_path()
+    test_names_that_collide_once_slugged_are_rejected()
     print("output plumbing")
     test_fleet_log_flushes()
     print()

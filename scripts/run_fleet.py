@@ -36,6 +36,7 @@ if sys.version_info < (3, 9):
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -137,10 +138,12 @@ _AGENT_CONFIG_KEYS = (
     # Hyperparameter-search knobs (host-tunable; see
     # docs/hyperparameter-search-plan.md). Set them once at the top level of
     # fleet.config.json and every agent inherits them as fleet-wide defaults.
+    # These hot-reload (_HOT_RELOAD_KEYS) — retune them on a running fleet.
     "hpo_min_improvements", "hpo_first_tune_improvements",
     "hpo_num_suggested_configs", "hpo_search_budget",
     "hpo_seed",
-    # Cleaner knobs (docs/cleaner-agent-plan.md) — same passthrough pattern.
+    # Cleaner knobs (docs/cleaner-agent-plan.md) — same passthrough pattern,
+    # also hot-reloadable.
     "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
     "cleaner_cooldown_iters",
     # Freeze guard: consecutive token-spending iterations without a successful
@@ -163,13 +166,40 @@ _FLEET_WIDE_DEFAULT_KEYS = (
     "c3_max_parallel_jobs",
     # C3 warm-image fast path — same fleet-wide inheritance.
     "c3_warm_images", "c3_warm_image", "tig_dockerhub",
+    # Tacit / failed-attempts write gates: a host turning agent writes off
+    # wants that fleet-wide, not retyped per agent.
+    "tacit_write", "failed_attempts_write",
 )
 
 # Fleet-entry fields the monitor loop re-syncs into a running worktree's
-# agent.config.json when they change. Only role and seeded_start are
-# hot-reloadable today — identity/provider/model are fixed for the life of
-# a process.
-_HOT_RELOAD_KEYS = ("role", "seeded_start")
+# agent.config.json when they change, so an edit to fleet.config.json (or the
+# hosted plan) takes effect on the agent's NEXT ITERATION without a restart.
+#
+# A key belongs here only if run_loop.py actually re-reads it every iteration:
+# `role`/`seeded_start` (re-read explicitly at the top of the loop) and
+# run_loop.LIVE_CONFIG_KEYS (the HPO / cleaner / freeze / warm-image knobs it
+# re-merges onto `config`). Identity, provider, model, api_base, compute and
+# hardware are read once at startup and stay fixed for the life of the process —
+# syncing them would log a change the agent never makes.
+# scripts/test_fleet_hot_reload.py asserts this list stays in step with
+# run_loop.LIVE_CONFIG_KEYS.
+_HOT_RELOAD_KEYS = (
+    "role", "seeded_start",
+    # Hyperparameter-search knobs (docs/hyperparameter-search-plan.md).
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
+    # Cleaner knobs (docs/cleaner-agent-plan.md).
+    "cleaner_trigger_chars", "cleaner_target_pct",
+    "cleaner_score_delta_pct", "cleaner_cooldown_iters",
+    # Freeze guard.
+    "no_benchmark_freeze_limit",
+    # C3 warm-image fast path (read per benchmark by c3_compute).
+    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
+    # Per-agent write gates for the tacit file and the failed-attempts archive
+    # (run_loop's tacit_write_enabled / failed_attempts_enabled read them off
+    # `config`, so they take effect on the next iteration like the rest).
+    "tacit_write", "failed_attempts_write",
+)
 
 _PROVIDER_TO_DEFAULT_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -333,6 +363,27 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
     if len(set(names)) != len(names):
         sys.exit("fleet.config.json has duplicate agent names.")
 
+    # Distinct names can still collide once slugged — "Darth Vader" and
+    # "Darth-Vader" are two agents by name and one worktree on disk. Left
+    # unchecked they share a directory, an agent.config.json and a git branch,
+    # with two loops writing all three. Caught here, while it is still a config
+    # typo rather than a corrupted run.
+    by_slug: dict[str, list[str]] = {}
+    for name in names:
+        by_slug.setdefault(slug_for_git(name), []).append(name)
+    collisions = {s: ns for s, ns in by_slug.items() if len(ns) > 1}
+    if collisions:
+        detail = "; ".join(
+            f"{' and '.join(repr(n) for n in ns)} -> worktrees/{slug}"
+            for slug, ns in sorted(collisions.items())
+        )
+        sys.exit(
+            "fleet.config.json has agent names that collide on disk: "
+            f"{detail}.\n"
+            "Agent names may differ only by characters git can't put in a "
+            "branch name (spaces, slashes, punctuation). Rename one."
+        )
+
     fleet_tacit = data.get("tacit_knowledge") or None
 
     # Server-hosted tacit knowledge (from the contributor console) materializes
@@ -357,29 +408,108 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
         for entry in agents:
             entry.setdefault("c3_api_key", fleet_c3_api_key)
 
-    # Fleet-wide hyperparameter-search defaults: a top-level key is inherited by
-    # every agent that doesn't set its own. setdefault keeps per-agent overrides.
+    _apply_fleet_wide_defaults(data, agents)
+
+    return server_url, username, swarm_password, agents, fleet_tacit
+
+
+def _apply_fleet_wide_defaults(data: dict, agents: list[dict]) -> None:
+    """Fleet-wide defaults: a top-level key is inherited by every agent that
+    doesn't set its own. setdefault keeps per-agent overrides winning.
+
+    Mutates the entries in `agents` in place. Used at launch AND by the
+    hot-reload monitor — most of these knobs are documented as "set once at the
+    top level", so a monitor that read only the per-agent entries would miss
+    exactly the way contributors are told to configure them."""
     for key in _FLEET_WIDE_DEFAULT_KEYS:
         if key in data:
             for entry in agents:
                 entry.setdefault(key, data[key])
 
-    return server_url, username, swarm_password, agents, fleet_tacit
+
+def _hot_reload_entries(data: dict) -> dict[str, dict]:
+    """name -> fleet entry, with fleet-wide top-level defaults folded in, for
+    the monitor's hot-reload sync. `data` is a whole fleet config: the local
+    fleet.config.json or a freshly-fetched hosted plan."""
+    agents = [
+        a for a in (data.get("agents") or [])
+        if isinstance(a, dict) and a.get("name")
+    ]
+    _apply_fleet_wide_defaults(data, agents)
+    return {a["name"]: a for a in agents}
 
 
 # ── Git worktree helpers ───────────────────────────────────────────
 
 
-def _git(args: list[str]) -> str:
-    result = subprocess.run(
-        ["git"] + args, cwd=ROOT, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-    )
+# Ceiling on any single git call in the launch path. Creating a worktree
+# writes a full checkout, so it gets real headroom — but not "forever": these
+# run with their output captured, so a git that blocks is a fleet that hangs
+# with nothing on screen.
+_GIT_TIMEOUT_SECS = 300
+
+
+def _git_env() -> dict:
+    """Environment for git calls made during launch.
+
+    GIT_TERMINAL_PROMPT=0 is the important one. A git subprocess that decides
+    to ask for credentials (a private submodule, an https remote whose helper
+    has expired) waits on a prompt nobody can see — output is captured, and
+    under the web companion there is no terminal at all. Off, it fails
+    immediately with a message we can show instead of hanging."""
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.setdefault("GCM_INTERACTIVE", "never")  # Git Credential Manager
+    return env
+
+
+def _run_git(args: list[str], *, cwd: Path, timeout: int) -> str:
+    try:
+        result = subprocess.run(
+            args, cwd=cwd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env=_git_env(), timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"{' '.join(args)} did not finish within {timeout}s.\n"
+            f"  Run it yourself in {cwd} to see what it's waiting on — a "
+            f"stale lock (.git/index.lock) and a credential prompt are the "
+            f"usual causes."
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(
-            f"git {' '.join(args)} failed:\n{result.stderr.strip()}"
+            f"{' '.join(args)} failed:\n{result.stderr.strip()}"
         )
     return result.stdout.strip()
+
+
+def _git(args: list[str], timeout: int = _GIT_TIMEOUT_SECS) -> str:
+    return _run_git(["git"] + args, cwd=ROOT, timeout=timeout)
+
+
+# Characters git refuses in a refname (git check-ref-format), plus the path
+# separators and shell-hostile ones we don't want in a worktree directory
+# either. A SPACE is the one that bites in practice: "Darth Vader" is a
+# perfectly reasonable agent name, and `git worktree add -b "fleet/Darth
+# Vader"` dies with "not a valid branch name" — which used to surface as a
+# launch that simply stopped after "preparing Darth Vader…".
+_REF_UNSAFE = re.compile(r"[\s~^:?*\[\]\\/@{}]+")
+
+
+def slug_for_git(name: str) -> str:
+    """A git-safe slug for an agent name, used for its branch and worktree dir.
+
+    The agent's real name is untouched everywhere a human sees it — the
+    leaderboard, the logs, agent.config.json. This is only the on-disk and
+    on-ref spelling, so someone can call an agent whatever they like without
+    having to know git's refname rules."""
+    slug = _REF_UNSAFE.sub("-", name.strip())
+    slug = re.sub(r"-{2,}", "-", slug).strip("-.")
+    # Refs can't end in .lock, be empty, or be a lone dot sequence.
+    while slug.lower().endswith(".lock"):
+        slug = slug[: -len(".lock")].strip("-.")
+    return slug or "agent"
 
 
 def _normalize_path(p: str | Path) -> str:
@@ -406,17 +536,9 @@ def _branch_exists(branch: str) -> bool:
     return bool(_git(["branch", "--list", branch]))
 
 
-def _git_in(path: Path, args: list[str]) -> str:
+def _git_in(path: Path, args: list[str], timeout: int = _GIT_TIMEOUT_SECS) -> str:
     """Run git inside a specific worktree (``_git`` is pinned to ROOT)."""
-    result = subprocess.run(
-        ["git", "-C", str(path)] + args, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"git -C {path} {' '.join(args)} failed:\n{result.stderr.strip()}"
-        )
-    return result.stdout.strip()
+    return _run_git(["git", "-C", str(path)] + args, cwd=ROOT, timeout=timeout)
 
 
 def _refresh_worktree(path: Path, name: str, log=print) -> None:
@@ -449,8 +571,9 @@ def _refresh_worktree(path: Path, name: str, log=print) -> None:
 
 
 def _ensure_worktree(name: str, log=print) -> Path:
-    path = WORKTREES_DIR / name
-    branch = f"fleet/{name}"
+    slug = slug_for_git(name)
+    path = WORKTREES_DIR / slug
+    branch = f"fleet/{slug}"
     known = _existing_worktree_paths()
 
     if path.exists() and _normalize_path(path) not in known:
@@ -460,6 +583,11 @@ def _ensure_worktree(name: str, log=print) -> Path:
 
     if not path.exists():
         WORKTREES_DIR.mkdir(exist_ok=True)
+        # The genuinely slow step on a first run: a full checkout per agent.
+        # Announced because it is where a launch sits longest, and a silent
+        # minute here is indistinguishable from a hang.
+        log(f"  [fleet] {name}: creating worktree at {path} "
+            f"(full checkout — slowest step of a first launch)")
         if _branch_exists(branch):
             _git(["worktree", "add", str(path), branch])
         else:
@@ -688,7 +816,7 @@ def cmd_list(agents: list[dict]) -> int:
     print(f"  {'name':20s}  {'worktree':10s}  {'agent_id':40s}  path")
     for agent in agents:
         name = agent["name"]
-        path = WORKTREES_DIR / name
+        path = WORKTREES_DIR / slug_for_git(name)
         present = "ok" if _normalize_path(path) in known else "missing"
         agent_id = "<unregistered>"
         wt_agent = path / "agent.config.json"
@@ -732,8 +860,9 @@ def _remove_cargo_volumes(agent_name: str) -> None:
 
 def _clean_one(name: str, docker_available: bool) -> None:
     """Remove a single agent's worktree, fleet branch, and cargo volumes."""
-    path = WORKTREES_DIR / name
-    branch = f"fleet/{name}"
+    slug = slug_for_git(name)
+    path = WORKTREES_DIR / slug
+    branch = f"fleet/{slug}"
     if path.exists():
         try:
             _git(["worktree", "remove", "--force", str(path)])
@@ -825,20 +954,15 @@ def _sync_hot_reload_to_worktrees(
     runtime defaults run_loop wrote) is preserved."""
     if entries is None:
         try:
-            fleet = _read_json(FLEET_CONFIG_PATH)
+            entries = _hot_reload_entries(_read_json(FLEET_CONFIG_PATH))
         except Exception:
             return
-        entries = {
-            a.get("name"): a
-            for a in (fleet.get("agents") or [])
-            if a.get("name")
-        }
     for agent in agents:
         name = agent.get("name")
         entry = entries.get(name)
         if not entry:
             continue
-        wt_cfg_path = WORKTREES_DIR / name / "agent.config.json"
+        wt_cfg_path = WORKTREES_DIR / slug_for_git(name) / "agent.config.json"
         try:
             current = _read_json(wt_cfg_path)
         except Exception:
@@ -1125,8 +1249,11 @@ def cmd_run(
 
     for i, agent in enumerate(agents):
         name = agent["name"]
-        _fleet_log(f"  [fleet] preparing {name}… (worktree + swarm state; first "
-                   f"run compiles, which can take a few minutes)")
+        # Says what THIS step does. The old wording promised "first run
+        # compiles, which can take a few minutes" — but compiling happens
+        # inside the agent process, well after this, so anyone stuck here was
+        # told to wait for something that had not started yet.
+        _fleet_log(f"  [fleet] preparing {name}… (git worktree + agent config)")
         path = _ensure_worktree(name, log=_fleet_log)
         _seed_worktree(path, agent, fleet_tacit, server_url, username, swarm_password)
 
@@ -1192,7 +1319,11 @@ def cmd_run(
         )
         t.start()
         procs.append((name, proc, t))
-        _fleet_log(f"  [fleet] spawned {name} (pid {proc.pid}) in {path}")
+        # Naming the compile here (rather than back at "preparing") puts the
+        # warning where the wait actually is: from this point the silence
+        # belongs to the agent's first cargo build, not to the launcher.
+        _fleet_log(f"  [fleet] spawned {name} (pid {proc.pid}) in {path} — its "
+                   f"first iteration compiles, which can take a few minutes")
         if on_status is not None:
             on_status("spawned", {"name": name, "pid": proc.pid})
 
@@ -1240,9 +1371,10 @@ def cmd_run(
     except Exception:
         server_sourced = False
 
-    # Re-sync hot-reloadable fields (role) into each running worktree's
-    # agent.config.json on a cadence, so a contributor can change an agent's
-    # role mid-run — by editing fleet.config.json locally, or in the hosted
+    # Re-sync hot-reloadable fields (_HOT_RELOAD_KEYS: role, seeded_start, and
+    # the HPO / cleaner / freeze / warm-image knobs) into each running
+    # worktree's agent.config.json on a cadence, so a contributor can retune a
+    # live fleet — by editing fleet.config.json locally, or in the hosted
     # console when server-sourced. run_loop.py re-reads agent.config.json every
     # iteration and picks the change up. The server is polled on a slower
     # cadence than the local file sync to keep request volume modest.
@@ -1259,10 +1391,7 @@ def cmd_run(
         if server_sourced and ticks % _SERVER_REFETCH_EVERY_S == 0:
             fresh = _fetch_server_config(server_url, username, swarm_password)
             if fresh and fresh.get("agents"):
-                server_entries = {
-                    a.get("name"): a
-                    for a in fresh["agents"] if a.get("name")
-                }
+                server_entries = _hot_reload_entries(fresh)
         if ticks % _SYNC_EVERY_S == 0:
             _sync_hot_reload_to_worktrees(agents, server_entries)
 
@@ -1292,7 +1421,7 @@ def _sync_tacit_back(agents: list[dict], fleet_tacit: str | None) -> None:
         name = agent.get("name")
         if not name:
             continue
-        wt_path = WORKTREES_DIR / name / "tacit_knowledge_personal.md"
+        wt_path = WORKTREES_DIR / slug_for_git(name) / "tacit_knowledge_personal.md"
         if not wt_path.exists():
             continue
         src_path, _ = _resolve_tacit_source(agent, fleet_tacit)
