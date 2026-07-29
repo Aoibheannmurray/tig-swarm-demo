@@ -581,6 +581,10 @@
           <button class="danger" onclick={() => pool("reset")}>Reset leaderboard</button>
         </div>
         <p class="lede" style="margin-top:10px">
+          <b>Clear inactive pool</b> empties the retired-trajectory pool for
+          this challenge, so stagnating agents fresh-start from the seed pool
+          or stub instead of adopting an old trajectory. Use it when the pool
+          has filled with dead ends you don't want revived.
           <b>Reset leaderboard</b> starts a new scoring era: scores published
           before the reset stop counting, so the next feasible run becomes the
           best even if it scores lower. Use it after changing something that
