@@ -3,7 +3,7 @@
 Run directly: `python scripts/test_search_replace.py` (no pytest in this repo).
 """
 
-from search_replace import parse_blocks, apply_blocks, Block
+from search_replace import parse_blocks, apply_blocks
 
 
 def _blk(file, search, replace):

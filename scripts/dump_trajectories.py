@@ -131,11 +131,11 @@ def main():
 
     lines = []
     lines.append(f"# Trajectory Code Evolution — {challenge}")
-    lines.append(f"")
+    lines.append("")
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"Challenge: {challenge}")
     lines.append(f"Trajectories: {len(trajectories)}")
-    lines.append(f"")
+    lines.append("")
 
     # Sort trajectories by their best score (descending)
     def traj_best_score(tid):
@@ -149,10 +149,10 @@ def main():
     sorted_tids = sorted(trajectories.keys(), key=traj_best_score, reverse=True)
 
     # Summary table
-    lines.append(f"## Summary")
-    lines.append(f"")
-    lines.append(f"| Trajectory | Status | Score | Edits | Improvements | Agents |")
-    lines.append(f"|------------|--------|-------|-------|--------------|--------|")
+    lines.append("## Summary")
+    lines.append("")
+    lines.append("| Trajectory | Status | Score | Edits | Improvements | Agents |")
+    lines.append("|------------|--------|-------|-------|--------------|--------|")
     for tid in sorted_tids:
         meta = meta_by_id.get(tid, {})
         exps = trajectories[tid]
@@ -165,7 +165,7 @@ def main():
             f"| {meta.get('num_improvements', sum(1 for e in exps if e.get('beats_trajectory_best')))} "
             f"| {', '.join(agents)} |"
         )
-    lines.append(f"")
+    lines.append("")
 
     # Per-trajectory code evolution
     for tid in sorted_tids:
@@ -175,20 +175,20 @@ def main():
         agents = sorted(set(e.get("agent_name", "?") for e in exps))
         score_hist = meta.get("score_history", [])
 
-        lines.append(f"---")
-        lines.append(f"")
+        lines.append("---")
+        lines.append("")
         lines.append(f"## Trajectory {tid[:8]} [{status.upper()}] — {len(exps)} iterations")
-        lines.append(f"")
+        lines.append("")
         lines.append(f"- **Agents:** {', '.join(agents)}")
         lines.append(f"- **Best score:** {fmt_score(meta.get('current_score'))}")
         lines.append(f"- **Momentum:** {meta.get('momentum', 0):.4f}")
         if score_hist:
             lines.append(f"- **Score progression:** {' → '.join(fmt_score(h['score']) for h in score_hist)}")
-        lines.append(f"")
+        lines.append("")
 
         if not exps:
-            lines.append(f"_No experiments recorded._")
-            lines.append(f"")
+            lines.append("_No experiments recorded._")
+            lines.append("")
             continue
 
         prev_code = ""
@@ -210,7 +210,7 @@ def main():
                 marker += " INFEASIBLE"
 
             lines.append(f"### Iteration {i}{marker}")
-            lines.append(f"")
+            lines.append("")
             lines.append(f"- **Score:** {fmt_score(score)}")
             lines.append(f"- **Agent:** {agent}")
             lines.append(f"- **Tag:** {tag}")
@@ -218,27 +218,27 @@ def main():
             if desc:
                 lines.append(f"- **Description:** {desc}")
             lines.append(f"- **Time:** {ts}")
-            lines.append(f"")
+            lines.append("")
 
             if i == 1:
-                lines.append(f"#### Initial code")
-                lines.append(f"")
-                lines.append(f"```rust")
+                lines.append("#### Initial code")
+                lines.append("")
+                lines.append("```rust")
                 lines.append(code)
-                lines.append(f"```")
+                lines.append("```")
             else:
                 diff = unified_diff(prev_code, code,
                                     f"iteration-{i-1}", f"iteration-{i}")
                 if diff.strip():
                     lines.append(f"#### Diff from iteration {i-1}")
-                    lines.append(f"")
-                    lines.append(f"```diff")
+                    lines.append("")
+                    lines.append("```diff")
                     lines.append(diff.rstrip())
-                    lines.append(f"```")
+                    lines.append("```")
                 else:
-                    lines.append(f"_No code change from previous iteration._")
+                    lines.append("_No code change from previous iteration._")
 
-            lines.append(f"")
+            lines.append("")
             prev_code = code
 
     report = "\n".join(lines)

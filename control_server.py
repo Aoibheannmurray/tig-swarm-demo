@@ -393,6 +393,16 @@ class RailwayLoginController:
     # grouped alphanumerics ("ABCD-1234"). Scraped loosely on lines that
     # mention "code"; the raw output is always returned as a fallback so an
     # unparsed format still leaves the UI usable.
+    # The pairing code is a hyphenated token ("brave-otter-lamp"). The bare
+    # pattern also matches `cli-login` inside the sign-in URL, so capture
+    # prefers the LABELLED form and otherwise refuses any line carrying a URL.
+    # The old guard was `"code" in line.lower()`, which tied capture to the
+    # CLI's exact wording — reword that notice and login hangs forever with no
+    # code ever surfaced. "Not inside a URL" is a structural property instead.
+    _CODE_LABELLED_RE = re.compile(
+        r"code\b[^A-Za-z0-9]*([A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,})+)",
+        re.IGNORECASE,
+    )
     _CODE_RE = re.compile(r"\b([A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,})+)\b")
     _URL_RE = re.compile(r"https://\S+")
     # The CLI colorizes when it sees a terminal (and it must see one — below);
@@ -473,8 +483,10 @@ class RailwayLoginController:
                         # the activation URL (https://railway.com/activate).
                         if m and "docs.railway" not in m.group(0):
                             self.url = m.group(0).rstrip(".,)…")
-                    if self.code is None and "code" in line.lower():
-                        m = self._CODE_RE.search(line)
+                    if self.code is None:
+                        m = self._CODE_LABELLED_RE.search(line)
+                        if m is None and "http" not in line:
+                            m = self._CODE_RE.search(line)
                         if m:
                             self.code = m.group(1)
             except OSError:
@@ -607,18 +619,18 @@ def _ensure_railway_on_path() -> bool:
 
 
 def _launch_argv(tool: str, *args: str) -> list[str]:
-    """argv for running `tool`, correct for Windows shims.
+    """argv for running `tool`, correct for Windows shims, after making sure a
+    freshly-installed CLI is visible on PATH.
 
-    npm installs console scripts as `railway.cmd` / `npm.cmd`. CreateProcess —
-    what subprocess.Popen uses — cannot execute a .cmd/.bat directly, so
-    Popen(["railway", ...]) fails on a perfectly good npm install. That is why
-    an npm-installed Railway CLI "didn't register". shutil.which honours
-    PATHEXT and finds the shim; we then run it through the command interpreter."""
+    The Windows-shim handling itself lives in hostadmin.tool_argv — it was
+    duplicated here and in hostadmin/railway.py, which is one copy too many for
+    a rule as easy to get subtly wrong (npm installs console scripts as
+    `railway.cmd`, and CreateProcess cannot execute a .cmd directly, so
+    Popen(["railway", ...]) fails on a perfectly good install). This wrapper
+    keeps the companion-only half: _ensure_on_path, so a CLI installed by the
+    UI moments ago is found without restarting the server."""
     _ensure_on_path(tool)
-    exe = shutil.which(tool)
-    if exe and os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
-        return [os.environ.get("COMSPEC", "cmd.exe"), "/c", exe, *args]
-    return [exe or tool, *args]
+    return hostadmin.tool_argv(tool, *args)
 
 
 class RailwayInstallController:

@@ -3,7 +3,7 @@
 
 No pytest in this repo — run directly:
 
-    python control_server_test.py
+    python test_control_server.py
 
 Uses Starlette's TestClient and redirects the fleet-config / tacit file paths to
 a temp dir so the real (gitignored) fleet.config.json / tacit_knowledge.md are
@@ -233,6 +233,35 @@ def main() -> int:
                   "pairing code scraped through ANSI color codes")
         finally:
             control_server.RailwayLoginController._spawn = orig_launch
+
+        # Capture must not depend on the CLI printing the literal word "code":
+        # a reworded notice used to leave `code` None forever, so the UI showed
+        # a login that never completed. It also must never mistake `cli-login`
+        # inside the sign-in URL for the pairing code — that hyphenated token
+        # is exactly what the loose pattern would otherwise grab first.
+        _C = control_server.RailwayLoginController
+
+        def _scrape(*lines):
+            code = None
+            for raw in lines:
+                line = _C._ANSI_RE.sub("", raw).replace("\r", "")
+                if code is None:
+                    m = _C._CODE_LABELLED_RE.search(line)
+                    if m is None and "http" not in line:
+                        m = _C._CODE_RE.search(line)
+                    if m:
+                        code = m.group(1)
+            return code
+
+        check(_scrape("  https://railway.com/cli-login?d=abc123\r\n") is None,
+              "a sign-in URL alone yields no pairing code")
+        check(_scrape("  https://railway.com/cli-login?d=abc123\r\n",
+                      "Your pairing phrase: brave-otter-lamp\r\n")
+              == "brave-otter-lamp",
+              "pairing code still scraped when the notice omits the word 'code'")
+        check(_scrape("Your pairing code is: \x1b[36mbrave-otter-lamp\x1b[0m\r\n")
+              == "brave-otter-lamp",
+              "labelled form still wins")
 
         print("tool discovery (Windows shims / late installs)")
         # An npm-installed CLI is `railway.cmd`, which CreateProcess cannot run

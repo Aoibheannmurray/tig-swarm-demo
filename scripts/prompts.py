@@ -1752,7 +1752,7 @@ def build_agentic_user_prompt(
                 if insp_kernel:
                     block += [
                         "",
-                        f"Peer CUDA kernels:",
+                        "Peer CUDA kernels:",
                         "```cuda",
                         insp_kernel,
                         "```",

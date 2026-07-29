@@ -17,12 +17,10 @@ import json
 import os
 import secrets
 import shutil
-import subprocess as sp
 import sys
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from .challenges_bridge import (
     _load_challenge_registry,
@@ -1195,7 +1193,6 @@ def run_create(args: argparse.Namespace | None = None) -> int:
             challenge_names,
             default=default_active,
         )
-    challenge_meta = challenge_set[active_challenge]
     print(f"  -> active = {active_challenge} (contributors auto-follow this)")
 
     if use_defaults:
@@ -1267,22 +1264,6 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     swarm_password = result["swarm_password"]
     config_ok = result["config_ok"]
     seeds_ok = result.get("seeds_ok", True)
-    repo_url = "<this-repo-url>"
-    try:
-        result = sp.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=3, cwd=str(ROOT),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            repo_url = result.stdout.strip()
-    except Exception:
-        pass
-    repo_dir_hint = (
-        Path(repo_url).stem.replace(".git", "")
-        if repo_url != "<this-repo-url>"
-        else "prometheus-early-beta"
-    )
-
     print("\n" + "=" * 48)
     if config_ok:
         print(f"{type_label} SWARM IS LIVE")
@@ -1440,7 +1421,7 @@ def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:
 
     path = ROOT / "fleet.config.json"
     if path.exists():
-        print(f"  fleet.config.json already present — leaving as-is")
+        print("  fleet.config.json already present — leaving as-is")
         return
     username = os.environ.get("USER") or os.environ.get("USERNAME") or "host"
     starter = {
@@ -1572,7 +1553,7 @@ def run_switch(challenge: str) -> int:
     print(f"\nActive challenge → {challenge} (broadcast to all contributors).")
     if prior_challenge and prior_challenge != challenge:
         print(f"  Prior trajectories on {prior_challenge} are preserved")
-        print(f"  server-side and resume on switch-back.")
+        print("  server-side and resume on switch-back.")
     print("  All contributors auto-follow on their next iteration —")
     print("  scripts/run_loop.py runs `setup.py sync` at the top of each loop.")
     return 0

@@ -34,17 +34,29 @@ _RAILWAY_INSTALL_HINT = (
 )
 
 
-def _railway_argv(*args: str) -> list[str]:
-    """argv for invoking the Railway CLI, correct for Windows shims.
+def tool_argv(tool: str, *args: str) -> list[str]:
+    """argv for invoking `tool`, correct for Windows shims.
 
-    npm installs the CLI as `railway.cmd`. CreateProcess — what subprocess uses
-    on Windows — cannot execute a .cmd/.bat directly, so `["railway", ...]`
-    fails against a perfectly good npm install. shutil.which honours PATHEXT and
-    finds the shim; we then run it through the command interpreter."""
-    exe = shutil.which("railway")
+    npm installs console scripts as `railway.cmd` / `npm.cmd`. CreateProcess —
+    what subprocess uses on Windows — cannot execute a .cmd/.bat directly, so
+    `["railway", ...]` fails against a perfectly good npm install. shutil.which
+    honours PATHEXT and finds the shim; we then run it through the command
+    interpreter.
+
+    Lives here rather than in control_server.py because control_server imports
+    hostadmin and not the reverse: setup.py runs inside swarm worktrees, where
+    importing the companion would drag in FastAPI. control_server's
+    `_launch_argv` wraps this to add its PATH augmentation for late installs.
+    """
+    exe = shutil.which(tool)
     if exe and os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
         return [os.environ.get("COMSPEC", "cmd.exe"), "/c", exe, *args]
-    return [exe or "railway", *args]
+    return [exe or tool, *args]
+
+
+def _railway_argv(*args: str) -> list[str]:
+    """`tool_argv` fixed to the Railway CLI."""
+    return tool_argv("railway", *args)
 
 
 # Substrings that mark a *transient* Railway failure — the GraphQL API

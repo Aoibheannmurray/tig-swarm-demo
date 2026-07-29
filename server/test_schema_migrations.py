@@ -199,7 +199,7 @@ def test_numbering_is_validated() -> None:
 
 def test_half_applied_schema_is_refused() -> None:
     print("schema verification")
-    with _TempDB() as path:
+    with _TempDB():
         asyncio.run(dbmod.init_db())
 
         async def verify_missing():
