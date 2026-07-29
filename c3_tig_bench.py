@@ -158,16 +158,21 @@ def run_one(cfg, track, nonce):
     print(f"[{done}] {label} {track} nonce={nonce} ok={row['ok']} "
           f"quality={quality} rt={row['runtime_secs']}s", file=sys.stderr, flush=True)
 
+def cfg_tracks(c):
+    # A sweep entry may pin its own "tracks" list (e.g. per-track
+    # hyperparameters); otherwise it runs on every --tracks entry.
+    return c.get("tracks") or args.tracks.split(",")
+
 jobs = [(c, t, n)
         for c in configs
-        for t in args.tracks.split(",")
+        for t in cfg_tracks(c)
         for n in range(args.start, args.start + args.nonces)]
 with ThreadPoolExecutor(max_workers=args.workers) as pool:
     list(pool.map(lambda j: run_one(*j), jobs))
 
 summary = {}
 for c in configs:
-    for t in args.tracks.split(","):
+    for t in cfg_tracks(c):
         sel = [r for r in rows if r["label"] == c["label"] and r["track"] == t]
         oks = [r["quality"] for r in sel if r["ok"]]
         summary[f"{c['label']}|{t}"] = {

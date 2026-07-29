@@ -60,16 +60,16 @@ from .railway import (
     _wait_for_server,
 )
 
-DEFAULT_INSTANCES_PER_TRACK = 2
+DEFAULT_INSTANCES_PER_TRACK = 5
 DEFAULT_TRACKS_PER_CHALLENGE = {
-    "satisfiability": {"n_vars=100000,ratio=4150": 2},
-    "vehicle_routing": {"n_nodes=600": 2},
-    "knapsack": {"n_items=1000,budget=10": 2},
-    "job_scheduling": {"n=50,s=flow_shop": 2},
-    "energy_arbitrage": {"s=baseline": 2},
-    "hypergraph": {"n_h_edges=10000": 2},
-    "neuralnet_optimizer": {"n_hidden=4": 2},
-    "vector_search": {"n_queries=7000": 2},
+    "satisfiability": {"n_vars=100000,ratio=4150": 5},
+    "vehicle_routing": {"n_nodes=600": 5},
+    "knapsack": {"n_items=1000,budget=10": 5},
+    "job_scheduling": {"n=50,s=flow_shop": 5},
+    "energy_arbitrage": {"s=baseline": 5},
+    "hypergraph": {"n_h_edges=10000": 5},
+    "neuralnet_optimizer": {"n_hidden=4": 5},
+    "vector_search": {"n_queries=7000": 5},
 }
 
 
