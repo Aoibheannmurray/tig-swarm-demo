@@ -8,7 +8,6 @@ Self-running: `python scripts/test_get_swarm.py`.
 """
 
 import importlib.util
-import sys
 import tempfile
 from pathlib import Path
 

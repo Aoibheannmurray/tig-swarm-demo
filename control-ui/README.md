@@ -45,4 +45,4 @@ Fast build (no type-check): `npm run build:fast`. Test: `npm test` (vitest).
 `control_server.py` wraps the *existing* orchestration cores rather than
 re-implementing them: `init_fleet.build_fleet_config` / `write_fleet_config`,
 `run_fleet.cmd_run` (stoppable + streamed), `setup.create_swarm` /
-`switch_challenge`. See `scripts/test_fleet_core.py` and `control_server_test.py`.
+`switch_challenge`. See `scripts/test_fleet_core.py` and `test_control_server.py`.

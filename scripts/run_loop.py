@@ -855,7 +855,7 @@ def _generate_code(
             print(f"  [LLM] Validation failed: {violation}")
             continue
 
-        print(f"  [LLM] Code validated OK")
+        print("  [LLM] Code validated OK")
         return (ensure_common_imports(parsed), parsed_kernel,
                 input_tokens, output_tokens)
 
@@ -1014,8 +1014,8 @@ def _benchmark_with_compile_fix(
         if is_infra:
             # One line only — the caller's "[BENCH] FAILED — build_err: …"
             # already shows the error head; printing it here too doubled it.
-            print(f"  [BENCH] Infrastructure error (not a code problem) — "
-                  f"skipping the LLM compile fix")
+            print("  [BENCH] Infrastructure error (not a code problem) — "
+                  "skipping the LLM compile fix")
             return None, build_err, code_changed, input_tokens, output_tokens
 
         if attempt >= max_retries:
@@ -1328,7 +1328,7 @@ def _maybe_tune_hyperparameters(
     tuned_score = tuned_bench.get("score")
     tuned_feasible = bool(tuned_bench.get("feasible", False))
     if tuned_score is None or not tuned_feasible:
-        print(f"  [HPO] tuned result infeasible/missing on the test seed "
+        print("  [HPO] tuned result infeasible/missing on the test seed "
               "— restoring, using default")
         files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
@@ -1416,7 +1416,7 @@ def _fix_runtime_errors(
         bench_result, build_err = run_benchmark(args, config, server)
 
         if bench_result is None:
-            print(f"  Runtime fix caused compile error — asking LLM to fix ...")
+            print("  Runtime fix caused compile error — asking LLM to fix ...")
             ok, it, ot = _try_compile_fix(
                 args, model, api_key, config,
                 files, build_err,
@@ -2422,7 +2422,7 @@ def main() -> int:
             files.write_files(best_file_map)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
             if files.is_gpu and not best_kernel:
-                print(f"  [FILES] No kernel code from server — using local kernels.cu")
+                print("  [FILES] No kernel code from server — using local kernels.cu")
 
         # Adopted an unbenchmarked seed (admin/mainnet seed deposited with no
         # score): benchmark it UNCHANGED first so the trajectory floor is the
@@ -2439,7 +2439,7 @@ def main() -> int:
             seed_bench, seed_err = run_benchmark(args, config, server)
             if seed_bench is None:
                 print(f"  [SEED-BENCH] FAILED — {seed_err[:300]}")
-                print(f"  [SEED-BENCH] Could not score the seed; proceeding to a normal iteration.")
+                print("  [SEED-BENCH] Could not score the seed; proceeding to a normal iteration.")
             else:
                 _print_bench_result(seed_bench)
                 seed_hyp = {
@@ -2566,7 +2566,7 @@ def main() -> int:
 
             if bench is None:
                 print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
-                print(f"  [BENCH] Restoring previous code and continuing")
+                print("  [BENCH] Restoring previous code and continuing")
                 if best_code:
                     files.write(best_code, best_kernel)
                 _note_bench_failure()
@@ -2652,7 +2652,7 @@ def main() -> int:
                     iter_output_tokens += gen_out
                     consecutive_sr_skips = 0
                 if not code:
-                    print(f"  [SKIP] No valid code produced — skipping to next iteration")
+                    print("  [SKIP] No valid code produced — skipping to next iteration")
                     _note_bench_failure()
                     continue
             else:
@@ -2694,7 +2694,7 @@ def main() -> int:
 
             if bench is None:
                 print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
-                print(f"  [BENCH] Restoring previous code and continuing")
+                print("  [BENCH] Restoring previous code and continuing")
                 if best_code:
                     files.write(best_code, best_kernel)
                 _note_bench_failure()
@@ -2714,7 +2714,7 @@ def main() -> int:
                 code_changed = code_changed or rt_changed
 
             if bench is None:
-                print(f"  [BENCH] Benchmark failed after runtime fix — skipping iteration")
+                print("  [BENCH] Benchmark failed after runtime fix — skipping iteration")
                 _note_bench_failure()
                 continue
 
@@ -2793,7 +2793,7 @@ def main() -> int:
                   f"est=unknown (no price entry for {model!r})")
         else:
             print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
-        print(f"  [PUBLISH] Publishing results to server…")
+        print("  [PUBLISH] Publishing results to server…")
         is_new_best = False
         try:
             result = publish_results(
@@ -2810,7 +2810,7 @@ def main() -> int:
             if is_new_best:
                 print("  [PUBLISH] ** NEW PERSONAL BEST! **")
             else:
-                print(f"  [PUBLISH] Recorded (not a new best)")
+                print("  [PUBLISH] Recorded (not a new best)")
         except Exception as e:
             # Surface the server's validation detail: a 422 body names the
             # exact field the schema rejected (e.g. "title too long"), which

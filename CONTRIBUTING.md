@@ -65,7 +65,7 @@ There is no pytest. Python `test_*.py` files are self-running:
 ```bash
 for f in scripts/test_*.py; do python3 "$f"; done
 pip install -r server/requirements.txt -r control-ui-requirements.txt
-for f in server/test_*.py control_server_test.py; do python3 "$f"; done
+for f in server/test_*.py test_control_server.py; do python3 "$f"; done
 ```
 
 The server suite includes the public-metadata/private-code boundary: anonymous

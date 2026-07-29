@@ -110,9 +110,10 @@ def test_concurrency_429_gives_up_after_budget():
     """A chip that never frees must surface a clear, actionable error once the
     wait budget is spent — not park forever and not fail instantly."""
     monkey = []
-    rec = _install_stubs(monkey, [(CONCURRENCY_429, 1)])  # always rejected
+    # Call for the side effect (installing the stubs); the recorder is unused
+    # here — this test asserts on the surfaced error, not on the calls made.
+    _install_stubs(monkey, [(CONCURRENCY_429, 1)])  # always rejected
     # Drive monotonic time forward so the deadline is crossed on the 2nd check.
-    clock = {"t": 0.0}
     ticks = iter([0.0, 0.0, cc._CONCURRENCY_MAX_WAIT_SECS + 1.0])
     monkey.append((cc.time, "monotonic", cc.time.monotonic))
     cc.time.monotonic = lambda: next(ticks, cc._CONCURRENCY_MAX_WAIT_SECS + 1.0)

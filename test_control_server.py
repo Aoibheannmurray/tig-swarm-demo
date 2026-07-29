@@ -3,7 +3,7 @@
 
 No pytest in this repo — run directly:
 
-    python control_server_test.py
+    python test_control_server.py
 
 Uses Starlette's TestClient and redirects the fleet-config / tacit file paths to
 a temp dir so the real (gitignored) fleet.config.json / tacit_knowledge.md are
