@@ -154,7 +154,7 @@ def main() -> int:
         tq = c.get("/local-api/tacit/questions").json()["questions"]
         # The guided form must ask what `python setup.py tacit` asks — same
         # objects, not a re-typed copy that can drift.
-        check(tq == control_server.setup_mod.TACIT_QUESTIONS and len(tq) > 0,
+        check(tq == control_server.hostadmin.TACIT_QUESTIONS and len(tq) > 0,
               "tacit questions served from the CLI wizard's own list")
         check(all(q.get("title") for q in tq), "every question has a title")
         rt = c.post("/local-api/tacit", json={"answers": [{"title": "Q", "body": "a lesson"}]})
