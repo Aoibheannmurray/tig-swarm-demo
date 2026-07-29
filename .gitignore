@@ -26,7 +26,11 @@ server/static/
 
 # Per-deploy / per-contributor state — never committed
 .swarm-cache.json
-swarm.admin.json
+# Globbed, not pinned to the exact name: these hold admin_key / swarm_password,
+# and the copies people actually make ("swarm.admin copy.json", a dated backup
+# before a `setup.py switch`) were landing outside an exact-match rule — one
+# `git add -A` from being committed credentials.
+swarm.admin*.json
 fleet.config.json
 .fleet-cache.json
 .companion-port.json
@@ -37,7 +41,7 @@ agent.config.json
 # Hosted runner (runner/) local state — never committed
 runner/data/
 runner/workspaces/
-swarm.config.json
+swarm.config*.json
 worktrees/
 CHALLENGE.md
 data/
