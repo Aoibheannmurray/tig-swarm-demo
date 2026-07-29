@@ -83,122 +83,27 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, OSError):
         pass
 
-# Fields on a fleet entry that are forwarded into the worktree's
-# agent.config.json. run_loop.py reads its provider/model/compute defaults
-# from there — no CLI flags needed on the subprocess.
-_AGENT_CONFIG_KEYS = (
-    "provider", "model", "api_base", "compute",
-    "c3_hardware", "c3_time", "c3_cloud_provider", "c3_no_build",
-    # Distributed C3 benchmarking (see c3_compute.py + c3_pool.py). The
-    # fleet-wide C3 concurrent-job cap: also the balanced shard count per
-    # benchmark. Best set once at the top level (all agents share ONE C3 key and
-    # thus one FCFS slot pool); a per-agent value still overrides the pool size.
-    "c3_max_parallel_jobs",
-    # C3 warm-image fast path (c3_compute._warm_c3_image): boolean opt-in,
-    # explicit image ref, and Docker Hub namespace override. Best set once at
-    # the top level; per-agent values still override.
-    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
-    # Per-agent C3 API key (raw value). Omit to inherit the top-level fleet
-    # `c3_api_key`, the C3_API_KEY env var, or the `c3 login` session — in that
-    # order. Lets each agent bill C3 to a different key without separate fleets.
-    "c3_api_key",
-    # Honor hand-set agent_id / agent_name in a fleet entry — useful if a user
-    # wants to point a new clone at an existing dashboard agent without
-    # re-registering. Normal flow: run_loop.py writes these after the first
-    # /api/agents/register call so restarts resume the same identity.
-    "agent_id", "agent_name",
-    "log_prompts",
-    # Opt-in stricter Rust prompt for smaller/cheaper models (prompts.py).
-    "detailed_prompts",
-    # Per-agent kill switch for tacit-knowledge writing (default True). Set
-    # false to stop this agent appending `- LLM:` lessons to its
-    # tacit_knowledge_personal.md (driver-side and in-band paths both gated).
-    "tacit_write",
-    # Per-agent opt-out for the server's failed-attempts archive (default
-    # True). Only matters when the host has enabled the swarm-wide
-    # `failed_attempts_archive` toggle; set false to stop this agent posting
-    # failure retrospectives/lessons to the server. Note: with the archive
-    # on, distilled lessons go to the DB ONLY — the local tacit file is no
-    # longer appended to (the DB is the source of truth).
-    "failed_attempts_write",
-    # Contributor-owned behavior role (explorer/exploiter). Materialized at
-    # spawn AND re-synced live by the monitor loop so editing it in
-    # fleet.config.json takes effect on the agent's next iteration.
-    "role",
-    # Contributor-owned seeding override (true/false; omit for auto). true:
-    # fresh trajectories start from working code (seed pool → best peer →
-    # stub); false: always the bare stub. Absent, the server decides by model
-    # tier/role (frontier explorers get the stub on CPU challenges, everyone
-    # else a seed). Hot-reloads like `role`.
-    "seeded_start",
-    # API-mode edit strategy for SINGLE-FILE algorithms: "full" (default,
-    # whole-file replacement) or "search_replace" (soft SEARCH/REPLACE blocks).
-    # Multi-file algorithms and exploiters always use search/replace regardless.
-    "edit_mode",
-    # Hyperparameter-search knobs (host-tunable; see
-    # docs/hyperparameter-search-plan.md). Set them once at the top level of
-    # fleet.config.json and every agent inherits them as fleet-wide defaults.
-    # These hot-reload (_HOT_RELOAD_KEYS) — retune them on a running fleet.
-    "hpo_min_improvements", "hpo_first_tune_improvements",
-    "hpo_num_suggested_configs", "hpo_search_budget",
-    "hpo_seed",
-    # Cleaner knobs (docs/cleaner-agent-plan.md) — same passthrough pattern,
-    # also hot-reloadable.
-    "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
-    "cleaner_cooldown_iters",
-    # Freeze guard: consecutive token-spending iterations without a successful
-    # benchmark before the agent exits (run_loop.py's
-    # _NO_BENCHMARK_FREEZE_LIMIT). Default 10; 0 disables.
-    "no_benchmark_freeze_limit",
-)
-
-# Top-level fleet keys that become fleet-wide defaults inherited by every agent
-# (via setdefault, so a per-agent override still wins).
-_FLEET_WIDE_DEFAULT_KEYS = (
-    "hpo_min_improvements", "hpo_first_tune_improvements",
-    "hpo_num_suggested_configs", "hpo_search_budget",
-    "hpo_seed",
-    "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
-    "cleaner_cooldown_iters",
-    "no_benchmark_freeze_limit",
-    # Distributed C3 benchmarking: set once at the top level and every agent
-    # inherits (per-agent entry still overrides via setdefault).
-    "c3_max_parallel_jobs",
-    # C3 warm-image fast path — same fleet-wide inheritance.
-    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
-    # Tacit / failed-attempts write gates: a host turning agent writes off
-    # wants that fleet-wide, not retyped per agent.
-    "tacit_write", "failed_attempts_write",
-)
-
-# Fleet-entry fields the monitor loop re-syncs into a running worktree's
-# agent.config.json when they change, so an edit to fleet.config.json (or the
-# hosted plan) takes effect on the agent's NEXT ITERATION without a restart.
+# The per-agent config knobs live in one registry — scripts/agent_config_keys.py
+# — which declares each knob once and derives these three lists from its flags.
+# They were four hand-synced tuples across this module and run_loop.py; keeping
+# them in step by hand is what failed in df13614 (documented hot-reload knobs
+# that needed a restart). Add a knob there, not here.
 #
-# A key belongs here only if run_loop.py actually re-reads it every iteration:
-# `role`/`seeded_start` (re-read explicitly at the top of the loop) and
-# run_loop.LIVE_CONFIG_KEYS (the HPO / cleaner / freeze / warm-image knobs it
-# re-merges onto `config`). Identity, provider, model, api_base, compute and
-# hardware are read once at startup and stay fixed for the life of the process —
-# syncing them would log a change the agent never makes.
-# scripts/test_fleet_hot_reload.py asserts this list stays in step with
-# run_loop.LIVE_CONFIG_KEYS.
-_HOT_RELOAD_KEYS = (
-    "role", "seeded_start",
-    # Hyperparameter-search knobs (docs/hyperparameter-search-plan.md).
-    "hpo_min_improvements", "hpo_first_tune_improvements",
-    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
-    # Cleaner knobs (docs/cleaner-agent-plan.md).
-    "cleaner_trigger_chars", "cleaner_target_pct",
-    "cleaner_score_delta_pct", "cleaner_cooldown_iters",
-    # Freeze guard.
-    "no_benchmark_freeze_limit",
-    # C3 warm-image fast path (read per benchmark by c3_compute).
-    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
-    # Per-agent write gates for the tacit file and the failed-attempts archive
-    # (run_loop's tacit_write_enabled / failed_attempts_enabled read them off
-    # `config`, so they take effect on the next iteration like the rest).
-    "tacit_write", "failed_attempts_write",
+#   _AGENT_CONFIG_KEYS       forwarded into the worktree's agent.config.json at
+#                            spawn, so run_loop reads its provider/model/compute
+#                            defaults from there with no CLI flags
+#   _FLEET_WIDE_DEFAULT_KEYS top-level fleet keys inherited by every agent via
+#                            setdefault, so a per-agent override still wins
+#   _HOT_RELOAD_KEYS         re-synced into a RUNNING worktree by the monitor,
+#                            so an edit to fleet.config.json (or the hosted
+#                            plan) lands on the agent's next iteration
+#
+# The aliases keep this module's existing (private) spelling; the registry is
+# the source of truth.
+from agent_config_keys import (
+    AGENT_CONFIG_KEYS as _AGENT_CONFIG_KEYS,
+    FLEET_WIDE_DEFAULT_KEYS as _FLEET_WIDE_DEFAULT_KEYS,
+    HOT_RELOAD_KEYS as _HOT_RELOAD_KEYS,
 )
 
 _PROVIDER_TO_DEFAULT_ENV = {

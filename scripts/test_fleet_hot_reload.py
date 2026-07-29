@@ -57,6 +57,15 @@ _STARTUP_ONLY_KEYS = (
 
 
 def test_key_lists_agree() -> None:
+    """These four relationships are now STRUCTURAL — all four lists are derived
+    from one registry (scripts/agent_config_keys.py), so they cannot disagree by
+    construction, and scripts/test_agent_config_keys.py covers the registry's
+    own invariants.
+
+    Kept anyway as a tripwire: it fails if anyone re-hardcodes one of the lists
+    back into run_fleet/run_loop and reintroduces the drift the registry exists
+    to prevent. It asserts the observable contract through the real modules,
+    which is exactly what a re-hardcoding would break."""
     print("key lists")
 
     missing = [k for k in run_loop.LIVE_CONFIG_KEYS

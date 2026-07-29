@@ -168,33 +168,12 @@ def _validate_entry(entry_code: str, config: dict, files) -> str | None:
 # into the worktree's agent.config.json live, and the next iteration picks them
 # up without a fleet restart.
 #
-# Adding a key here is only a quarter of the wiring. It must also be in three
-# lists in run_fleet, or it silently does nothing:
-#   _AGENT_CONFIG_KEYS       — or it never reaches the worktree at spawn
-#   _HOT_RELOAD_KEYS         — or it reaches the worktree, but only on restart
-#   _FLEET_WIDE_DEFAULT_KEYS — or a top-level fleet.config.json setting is
-#                              ignored and it has to be repeated per agent
-# scripts/test_fleet_hot_reload.py asserts all four stay in step, in both
-# directions. It is the only thing standing between a new knob and a config
-# field that reads as supported and quietly is not.
-#
-# Do NOT add keys that are read once at startup (provider, model, api_base,
-# compute, c3_hardware, c3_max_parallel_jobs, log_prompts, detailed_prompts).
-# Propagating those would rewrite the file and log a reassuring "changed" line
-# while the running process kept using its startup value — worse than the
-# honest "restart required", because it looks like it worked.
-LIVE_CONFIG_KEYS = (
-    "hpo_min_improvements", "hpo_first_tune_improvements",
-    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
-    "cleaner_trigger_chars", "cleaner_target_pct",
-    "cleaner_score_delta_pct", "cleaner_cooldown_iters",
-    "no_benchmark_freeze_limit",
-    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
-    # Per-agent write gates for the tacit file and the failed-attempts
-    # archive (tacit_write_enabled / failed_attempts_enabled read them
-    # off `config`).
-    "tacit_write", "failed_attempts_write",
-)
+# Declared in scripts/agent_config_keys.py, which is the single source of truth
+# for every per-agent knob. Adding one there with `live=True` wires all four
+# lists at once — this one plus run_fleet's three. It used to take four
+# hand-edits in two modules to add a knob, and getting the subset wrong failed
+# silently in both directions (see that module's header).
+from agent_config_keys import LIVE_CONFIG_KEYS
 
 
 def _normalize_role(value: object) -> str:
