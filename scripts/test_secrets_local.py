@@ -77,41 +77,39 @@ def test_status_reports_source_without_values():
     print("PASS test_status_reports_source_without_values")
 
 
-def test_legacy_alias_keeps_a_renamed_key_working():
-    """GEMINI_API_KEY replaced GOOGLE_API_KEY. Someone who set the old name
-    yesterday must not have their fleet die on the rename — but the canonical
-    name still wins wherever both are present in the same source."""
+def test_gemini_key_has_exactly_one_spelling():
+    """GEMINI_API_KEY is the only name for Gemini's key. The old
+    GOOGLE_API_KEY alias was removed deliberately: one provider, one variable,
+    so a key that "looks set" is always the key the fleet will actually use."""
     path = _isolate()
     for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         os.environ.pop(name, None)
 
     assert secrets_local.resolve("GEMINI_API_KEY") is None
 
-    # Legacy name alone, in the file: found under the canonical name, and
-    # reported as set so the setup UI doesn't ask for a key they already have.
+    # The old name is now just an unrelated variable — never consulted.
     secrets_local.store("GOOGLE_API_KEY", "legacy-file")
-    assert secrets_local.resolve("GEMINI_API_KEY") == "legacy-file"
-    assert secrets_local.status()["GEMINI_API_KEY"] == {"set": True, "source": "file"}
+    assert secrets_local.resolve("GEMINI_API_KEY") is None
+    assert "GEMINI_API_KEY" not in secrets_local.status()
 
-    # Both in the file -> canonical wins.
+    # The canonical name resolves from the file...
     secrets_local.store("GEMINI_API_KEY", "new-file")
     assert secrets_local.resolve("GEMINI_API_KEY") == "new-file"
+    assert secrets_local.status()["GEMINI_API_KEY"] == {"set": True, "source": "file"}
 
-    # env still beats the file, whichever spelling it uses (the module's
-    # documented precedence, unchanged by aliasing).
-    os.environ["GOOGLE_API_KEY"] = "legacy-env"
-    assert secrets_local.resolve("GEMINI_API_KEY") == "legacy-env"
-    # Both in the env -> canonical wins.
+    # ...and env still beats the file (the module's documented precedence).
     os.environ["GEMINI_API_KEY"] = "new-env"
     assert secrets_local.resolve("GEMINI_API_KEY") == "new-env"
 
-    # Aliasing is scoped: an unrelated key gains no fallbacks.
-    assert secrets_local.resolve("OPENAI_API_KEY") is None
+    # An exported GOOGLE_API_KEY does not stand in for it.
+    os.environ.pop("GEMINI_API_KEY")
+    os.environ["GOOGLE_API_KEY"] = "legacy-env"
+    assert secrets_local.resolve("GEMINI_API_KEY") == "new-file"  # falls to the file, not the alias
 
     for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         os.environ.pop(name, None)
     assert path.exists()
-    print("PASS test_legacy_alias_keeps_a_renamed_key_working")
+    print("PASS test_gemini_key_has_exactly_one_spelling")
 
 
 def test_corrupt_file_degrades_gracefully():
@@ -128,6 +126,6 @@ if __name__ == "__main__":
     test_blank_clears_entry()
     test_file_permissions_are_owner_only()
     test_status_reports_source_without_values()
-    test_legacy_alias_keeps_a_renamed_key_working()
+    test_gemini_key_has_exactly_one_spelling()
     test_corrupt_file_degrades_gracefully()
     print("ALL PASS")

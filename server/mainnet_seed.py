@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -168,9 +169,6 @@ def _match_brace(code: str, open_idx: int) -> int | None:
     return None
 
 
-import re  # noqa: E402  (kept near its sole user for the port's readability)
-
-
 def _strip_top_level_fn(code: str, name: str) -> str:
     """Remove a `fn <name>` / `pub fn <name>` definition (body + attached
     leading attribute/doc lines) from `code`."""
@@ -201,8 +199,17 @@ def _ensure_challenge_import(code: str, challenge: str) -> str:
     anchor = f"use tig_challenges::{challenge}::*;"
     if not code or anchor in code:
         return code
-    if "use super::*;" in code:
-        return code.replace("use super::*;", anchor, 1)
+    # TOP-LEVEL only. `use super::*;` is also the ordinary Rust idiom for an
+    # inner module pulling in its parent's scope (`mod hpf { use super::*; }`
+    # in the current knapsack mainnet winner, for one), and a bare substring
+    # replace rewrites the FIRST occurrence wherever it sits. Doing that to a
+    # nested one strips the module's access to its parent and drops the
+    # challenge glob into the wrong scope — the algorithm then fails to
+    # compile for a reason nothing in the diff explains. Only a column-0
+    # occurrence is the legacy swarm anchor this is meant to migrate.
+    _legacy_anchor = re.compile(r"^use super::\*;[ \t]*$", re.MULTILINE)
+    if _legacy_anchor.search(code):
+        return _legacy_anchor.sub(anchor, code, count=1)
     lines = code.splitlines(keepends=True)
     for idx, line in enumerate(lines):
         if line.lstrip().startswith("use "):

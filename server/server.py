@@ -2136,7 +2136,8 @@ async def _record_experiment(
          enc.algorithm_files_json, enc.hyperparameters_json,
          req.score,
          # default_score falls back to the published score for untuned
-         # iterations (where they are equal) and legacy clients that omit it.
+         # iterations, where the two are equal by definition. Not a
+         # compatibility shim: most iterations are untuned.
          req.default_score if req.default_score is not None else req.score,
          1 if req.feasible else 0, enc.challenge_metrics_json,
          req.notes, enc.solution_data_json, enc.track_scores_json,

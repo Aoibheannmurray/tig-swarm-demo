@@ -1150,8 +1150,9 @@ async def get_recent_improvement_scores(
 
     The scores are each improvement's *default* (no-hyperparameters) score, so the
     band is default-vs-default: an ancestor that tuned never raises the bar for its
-    descendants. Falls back to the published `score` for legacy rows where
-    `default_score` was never recorded (untuned rows, where the two are equal).
+    descendants. Falls back to the published `score` wherever `default_score`
+    is absent — the common ongoing case is an untuned row, where the two are
+    equal by definition.
     Note these default scores are not strictly monotonic (only the published
     scores are), but the band only needs the value from `min_improvements` ago.
     """
