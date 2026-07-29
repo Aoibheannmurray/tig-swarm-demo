@@ -24,19 +24,6 @@ ROOT = Path(__file__).resolve().parent.parent
 SECRETS_PATH = ROOT / "secrets.local.json"
 
 
-# Older names we still honour when the canonical one yields nothing, so a
-# rename can't silently kill a fleet that was working yesterday. Gemini's key
-# was `GOOGLE_API_KEY` until the provider was renamed to "Gemini API"; Google's
-# own SDKs accept either name, so `GEMINI_API_KEY` is canonical here.
-LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
-    "GEMINI_API_KEY": ("GOOGLE_API_KEY",),
-}
-
-
-def _names_for(name: str) -> tuple[str, ...]:
-    """`name` first, then any legacy spelling it replaced."""
-    return (name, *LEGACY_ALIASES.get(name, ()))
-
 
 def load_secrets() -> dict[str, str]:
     """The stored name→value map, or {} when the file is absent/unreadable.
@@ -58,20 +45,13 @@ def resolve(name: str) -> str | None:
     """The effective value for env-var `name`: a set process environment
     variable wins, then the stored file, else None.
 
-    Legacy aliases (see LEGACY_ALIASES) are searched WITHIN each source, not
-    after both: environment (canonical, then legacy), then file (canonical,
-    then legacy). That keeps the module's env-beats-file rule intact — an
-    exported key still overrides the file, whichever spelling it uses — while
-    the canonical name wins whenever both appear in the same source."""
-    for candidate in _names_for(name):
-        env = os.environ.get(candidate)
-        if env:
-            return env
+    Exactly one spelling per provider — Gemini is `GEMINI_API_KEY`. There is no
+    alias table: a variable named anything else is simply not this key."""
+    env = os.environ.get(name)
+    if env:
+        return env
     secrets = load_secrets()
-    for candidate in _names_for(name):
-        if secrets.get(candidate):
-            return secrets[candidate]
-    return None
+    return secrets.get(name) or None
 
 
 def store(name: str, value: str) -> None:
@@ -105,16 +85,10 @@ def status() -> dict[str, dict]:
     names = set(stored) | {
         n for n in os.environ if n.endswith("_API_KEY")
     }
-    # Report every canonical name whose legacy spelling is present, so the
-    # setup UI shows GEMINI_API_KEY as "set" for someone still on
-    # GOOGLE_API_KEY instead of prompting for a key they already have.
-    for canonical, aliases in LEGACY_ALIASES.items():
-        if any(a in stored or os.environ.get(a) for a in aliases):
-            names.add(canonical)
     out: dict[str, dict] = {}
     for name in sorted(names):
-        in_env = any(os.environ.get(n) for n in _names_for(name))
-        in_file = any(n in stored for n in _names_for(name))
+        in_env = bool(os.environ.get(name))
+        in_file = name in stored
         out[name] = {
             "set": in_env or in_file,
             "source": "env" if in_env else ("file" if in_file else "none"),

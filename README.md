@@ -173,7 +173,7 @@ To inspect recorded Claude Code agentic sessions and tool activity, see
 | --------------------- | -------------------------------------------------------------------------------- |
 | `anthropic`           | `ANTHROPIC_API_KEY`                                                              |
 | `openai`              | `OPENAI_API_KEY` (also `"api_base": "<url>"` for any OpenAI-compatible endpoint) |
-| `google`              | `GEMINI_API_KEY` (`GOOGLE_API_KEY` still accepted)                               |
+| `google`              | `GEMINI_API_KEY`                                                                 |
 | `venice`              | `VENICE_API_KEY` (OpenAI-compatible, base URL baked in)                          |
 | `openrouter`          | `OPENROUTER_API_KEY` (multi-model proxy; model IDs are `publisher/name`)         |
 | `claude-code`         | `claude` CLI login (no API key needed)                                           |
