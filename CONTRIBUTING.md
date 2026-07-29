@@ -5,6 +5,25 @@ working **on** the repo itself. If you just want to run agents and contribute
 solver improvements to a swarm, see [README.md](./README.md) — that needs no
 dev setup at all.
 
+## What to expect from maintenance
+
+This project is maintained on a best-effort basis, and the honest version of
+that is:
+
+- **Bug reports are welcome** and are what we prioritize. A report that
+  includes the failing command, its output, and your platform will get looked
+  at far sooner than "it doesn't work".
+- **Bug-fix PRs are very welcome.** Small, focused, with a self-running
+  `test_*.py` (or vitest case) alongside — those are easy to say yes to.
+- **Feature requests and large PRs will mostly not be taken.** Not because
+  they're bad ideas, but because we can't commit the review and maintenance
+  time. The GPLv3 license exists so you don't have to wait for us:
+  **fork and build.** We're happy to link notable forks from the README.
+- **No response-time commitment** on anything, including security reports
+  (see [SECURITY.md](./SECURITY.md) for how to file those privately).
+- Nothing here is a support channel for running your swarm; the README and
+  [docs/](./docs/) are the support.
+
 ## Repo layout
 
 | Path | What | Stack |
@@ -88,8 +107,8 @@ self-running `test_*.py` (or vitest case) alongside any behavior change.
   swarm sandbox anchors here).
 - `.dockerignore`, `.ignore`, `railway.toml` are root-pinned by their tools.
 - `setup.py` is a CLI, not packaging — never `pip install` it. It's a thin
-  dispatcher over the root-level `hostadmin/` package, and doubles as the
-  back-compat import surface (`import setup` still exposes every helper).
+  dispatcher over the root-level `hostadmin/` package. For programmatic use,
+  `import hostadmin` — its `__init__.py` re-exports the public surface.
 - `src/lib.rs`'s `extern crate self as tig_challenges;` is load-bearing: it
   lets one algorithm file compile both here and in the TIG-docker slot.
 - `control-ui/dist/` is committed on purpose (contributors run the companion
