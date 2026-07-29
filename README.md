@@ -27,8 +27,8 @@ the Railway CLI if it is not already available.
 Clone the repository, then start the setup UI:
 
 ```bash
-git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git
-cd tig-swarm-demo
+git clone https://github.com/tig-foundation/prometheus-early-beta.git
+cd prometheus-early-beta
 python3 run.py --ui
 ```
 
@@ -90,13 +90,13 @@ launch your fleet. You do not need to clone the repository manually.
 
 ```bash
 # macOS / Linux (needs Python 3 + git)
-curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py \
+curl -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py \
   | python3 - join "<your-join-link>" --ui
 ```
 
 ```powershell
 # Windows (PowerShell or cmd; try `py` if `python` isn't recognized)
-curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py | python - join "<your-join-link>" --ui
+curl.exe -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py | python - join "<your-join-link>" --ui
 ```
 
 ### Setup UI from an existing clone

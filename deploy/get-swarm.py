@@ -4,7 +4,7 @@
 Run straight from the web -- no manual git clone, no editing files:
 
   macOS / Linux:
-    curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py \
+    curl -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py \
       | python3 - join "<your-join-link>" --ui
 
   Windows (PowerShell or cmd; try `py` if `python` isn't recognized):
@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 
 REPO_URL = os.environ.get(
-    "TIG_SWARM_REPO", "https://github.com/Aoibheannmurray/tig-swarm-demo.git"
+    "TIG_SWARM_REPO", "https://github.com/tig-foundation/prometheus-early-beta.git"
 )
 
 
@@ -95,7 +95,7 @@ def ensure_checkout(branch: str = "") -> Path:
             "Could not fetch the swarm code:\n"
             "  %s\n\n"
             "Check your network, or clone manually:\n"
-            "    git clone %s && cd tig-swarm-demo && python3 run.py --ui"
+            "    git clone %s && cd prometheus-early-beta && python3 run.py --ui"
             % (result.stderr.strip(), REPO_URL)
         )
     return repo

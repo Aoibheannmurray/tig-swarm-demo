@@ -1,7 +1,12 @@
 # Server-first onboarding & runner tiers — design
 
-Status: **draft for review** · 2026-07-08
+Status: **implemented** · drafted 2026-07-08, P0–P5 shipped
 Companion to [ARCHITECTURE.md](./ARCHITECTURE.md) (how the system behaves today).
+
+This is the design record for the onboarding architecture, not a live plan —
+`§5`–`§8` are cited from the code that implements them (`runner/`,
+`server/server.py`, `hostadmin/contributors.py`, `control-ui/src/join/`), so the
+section numbering is load-bearing. `§12` is kept as the historical build order.
 
 ## 1. Summary
 
@@ -376,9 +381,10 @@ app is then "Tier 2 in a window", and nothing in this plan is thrown away.
    login` needed to obtain a key. Job submission and data transfer remain
    **CLI-only** (the dashboard explicitly excludes `c3 deploy` / `c3 data
    cp`), so the `c3` binary stays required wherever fleets execute — Tier-2
-   machines and the Tier-1 runner image alike. Still open: whether a Windows
-   `c3` binary exists (`install.sh` is sh-only) — affects Tier-2 Windows
-   guidance.
+   machines and the Tier-1 runner image alike. The Windows follow-up is also
+   resolved: `c3-windows-amd64.exe` / `c3-windows-arm64.exe` ship as direct
+   downloads, and [docs/C3.md](./C3.md) carries the PowerShell install that
+   replaces the sh-only `install.sh`.
 2. **`c3` CLI in the runner image** — redistribution/licensing and version
    pinning (`cthree.cloud/install.sh` at build vs vendored binary).
 3. ~~**Provider/tier defaults sharing**~~ **Resolved** (§6):

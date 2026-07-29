@@ -2,7 +2,7 @@
 name = "tig-challenges"
 version = "0.1.0"
 description = "Self-hostable swarm that runs AI coding agents in parallel to improve Rust solvers for TIG challenges"
-repository = "https://github.com/Aoibheannmurray/tig-swarm-demo"
+repository = "https://github.com/tig-foundation/prometheus-early-beta"
 readme = "README.md"
 license = "https://github.com/tig-foundation/tig-monorepo/tree/main/docs/agreements/end_user_license_agreement.pdf"
 edition = "2021"
