@@ -21,6 +21,11 @@ multi-agent fleet, benchmarking, and publishing results to the server.
   `benchmark.py` → `publish.py`. The core driver.
 - `run_fleet.py` — launches/manages N agents (one git worktree each) from
   `fleet.config.json`. The root `run.py` wraps this for contributors.
+- `agent_config_keys.py` — the single registry of per-agent config knobs.
+  Each knob is declared once with flags (`fleet_default`, `hot_reload`,
+  `live`); the key lists `run_fleet.py` and `run_loop.py` consume are derived
+  from it. **Add a knob there, not to the lists** — invalid flag combinations
+  are rejected at import.
 - `benchmark.py` — compiles + scores an algorithm (local Docker or C3 cloud).
   Run with `cwd` = the agent's worktree.
 - `publish.py` — posts score + hypothesis + heartbeat to the server.

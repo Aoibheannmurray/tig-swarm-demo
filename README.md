@@ -8,9 +8,19 @@ See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for internals.
 
 ## Status & support
 
-This project was built largely with Claude Code and is released as-is: no
-support is provided and things may break — use at your own risk. Issues are
-tracked but not triaged on any schedule; contributions are welcome via PR.
+This project was built largely with Claude Code and is released as-is: things
+may break — use at your own risk. What that means in practice:
+
+- **Bug reports welcome** — file an issue with the failing command, its
+  output, and your platform. We fix bugs on a best-effort basis, on no
+  schedule. Security problems go through [SECURITY.md](./SECURITY.md)
+  (privately), never a public issue.
+- **Building on it is the intended use.** Fork it, point it at your own
+  challenges, replace pieces — the swarm mechanics are GPLv3
+  ([license details](#license)). Small bug-fix PRs are welcome; large
+  features are better carried in your fork
+  (see [CONTRIBUTING.md](./CONTRIBUTING.md) for why, and for dev setup).
+- There is no support channel; the README and [docs/](./docs/) are the docs.
 
 ## Choose your role
 
@@ -140,6 +150,11 @@ After setup, you can change agents, providers, models, compute options, and
 other settings by editing your local `fleet.config.json`. Use
 [`fleet.config.example.json`](./fleet.config.example.json) as a reference. The
 setup UI can also make these changes for you.
+
+Many settings **hot-reload**: edit `fleet.config.json` while the fleet runs
+and the change lands on each agent's next iteration, no restart — `role`,
+`seeded_start`, the HPO and cleaner knobs, and the C3 warm-image settings.
+Provider, model, and compute are read at startup and need a fleet restart.
 
 ### Tacit knowledge
 
