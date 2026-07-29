@@ -1280,7 +1280,7 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     repo_dir_hint = (
         Path(repo_url).stem.replace(".git", "")
         if repo_url != "<this-repo-url>"
-        else "tig-swarm-demo"
+        else "prometheus-early-beta"
     )
 
     print("\n" + "=" * 48)

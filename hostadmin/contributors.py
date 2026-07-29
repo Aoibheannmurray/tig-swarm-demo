@@ -39,11 +39,12 @@ def _generate_invite_slug(taken: set[str]) -> str:
     return f"contrib-{random.randint(10000, 99999)}"
 
 
-# Where contributors' machines fetch the bootstrap + code from. TEMP: pinned
-# to this branch until it merges to main — then set _BOOTSTRAP_REF = "main".
-# Keep in sync with BOOTSTRAP_REF in control-ui/src/join/App.svelte.
-_BOOTSTRAP_REF = "server-onboarding"
-_RAW_BASE = "https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo"
+# Where contributors' machines fetch the bootstrap + code from: the public
+# repo's main branch. Set to a branch name to pin both the raw bootstrap URL
+# and the clone to it. Keep in sync with BOOTSTRAP_REF in
+# control-ui/src/join/App.svelte.
+_BOOTSTRAP_REF = "main"
+_RAW_BASE = "https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta"
 
 
 def build_join_command(join_link: str) -> str:
