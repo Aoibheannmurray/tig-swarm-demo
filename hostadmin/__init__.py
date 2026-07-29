@@ -59,6 +59,7 @@ from .railway import (
     RailwayError,
     _railway_check_auth,
     _railway_find_project,
+    tool_argv,
 )
 from .swarm import (
     DEFAULT_TRACKS_PER_CHALLENGE,
@@ -116,6 +117,7 @@ __all__ = [
     "post_json",
     # railway
     "RailwayError", "_railway_check_auth", "_railway_find_project",
+    "tool_argv",
     # swarm
     "DEFAULT_TRACKS_PER_CHALLENGE", "collect_per_challenge_configs",
     "create_swarm", "push_config_to_server", "read_authored_seeds",
