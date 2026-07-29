@@ -227,3 +227,16 @@ in the setup UI or export it as `C3_API_KEY`.
 
 See [C3 cloud compute](./docs/C3.md) for CLI installation, manual configuration,
 hardware options, and details of how remote benchmark jobs run.
+
+## License
+
+The swarm — orchestration (`scripts/`, `run.py`), coordination server
+(`server/`), web UIs (`dashboard/`, `control-ui/`), hosted runner (`runner/`),
+and host-admin CLI (`setup.py` / `hostadmin/`) — is free software under the
+**GNU GPLv3** ([LICENSE](./LICENSE)).
+
+The TIG challenge and solver code (`src/`, `initial_algorithms/`) is the example
+workload the swarm ships with; it derives from the
+[tig-monorepo](https://github.com/tig-foundation/tig-monorepo) and remains under
+the TIG Foundation's license agreements — see
+[LICENSE-TIG.md](./LICENSE-TIG.md).
