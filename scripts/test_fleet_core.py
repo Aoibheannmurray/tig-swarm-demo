@@ -24,9 +24,50 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "server"))
 
 import init_fleet
-import setup as setup_mod
+import hostadmin
 
 _failures = 0
+
+
+# The hostadmin submodules a stub may need to land in. `create_swarm` calls its
+# side-effect helpers as module globals, so patching the module that DEFINES a
+# helper is not always enough — a name imported into a second submodule is a
+# separate binding there, and that copy would still be the real thing.
+#
+# This used to be implicit: `setup.py` installed a module subclass whose
+# __setattr__ forwarded every write into each submodule holding that name, so
+# `setattr(setup, ...)` fanned out invisibly. Production code no longer carries
+# that machinery — the fan-out lives here, in the only place that wanted it.
+_PATCH_TARGETS = (
+    hostadmin.swarm, hostadmin.railway, hostadmin.config_io,
+    hostadmin.contributors, hostadmin.tacit, hostadmin.http,
+)
+
+
+def _patch_hostadmin(stubs: dict) -> dict[tuple, object]:
+    """Point `name` at `stub` in every submodule that binds it.
+
+    Returns the saved originals, keyed by (module, name), for _unpatch.
+    """
+    saved: dict[tuple, object] = {}
+    for name, fn in stubs.items():
+        hit = False
+        for mod in _PATCH_TARGETS:
+            if name in vars(mod):
+                saved[(mod, name)] = getattr(mod, name)
+                setattr(mod, name, fn)
+                hit = True
+        if not hit:
+            raise AssertionError(
+                f"stub {name!r} matches nothing in hostadmin — the helper was "
+                "renamed or moved, and this stub is now silently inert."
+            )
+    return saved
+
+
+def _unpatch_hostadmin(saved: dict[tuple, object]) -> None:
+    for (mod, name), original in saved.items():
+        setattr(mod, name, original)
 
 
 def check(cond: bool, label: str) -> None:
@@ -102,7 +143,7 @@ def test_provider_data() -> None:
 def test_switch_challenge_errors() -> None:
     print("switch_challenge error paths")
     try:
-        setup_mod.switch_challenge("definitely_not_a_challenge")
+        hostadmin.switch_challenge("definitely_not_a_challenge")
         check(False, "raises on unknown challenge")
     except ValueError as e:
         check("unknown challenge" in str(e), "raises on unknown challenge")
@@ -132,15 +173,13 @@ def test_create_swarm_stubbed() -> None:
         "_scaffold_fleet_config": lambda url, pw: calls.append("scaffold"),
         "read_swarm_cache": lambda: {},
     }
-    originals = {name: getattr(setup_mod, name) for name in stubs}
-    for name, fn in stubs.items():
-        setattr(setup_mod, name, fn)
+    saved = _patch_hostadmin(stubs)
     try:
-        active = next(iter(setup_mod.CPU_CHALLENGES))
-        challenges_cfg = setup_mod.collect_per_challenge_configs(
-            {}, use_defaults=True, challenge_set=setup_mod.CPU_CHALLENGES,
+        active = next(iter(hostadmin.CPU_CHALLENGES))
+        challenges_cfg = hostadmin.collect_per_challenge_configs(
+            {}, use_defaults=True, challenge_set=hostadmin.CPU_CHALLENGES,
         )
-        result = setup_mod.create_swarm({
+        result = hostadmin.create_swarm({
             "swarm_name": "unit-test-swarm",
             "swarm_type": "cpu",
             "active_challenge": active,
@@ -151,8 +190,7 @@ def test_create_swarm_stubbed() -> None:
             "seed_inactive_pool": True,
         }, progress_cb=progress.append)
     finally:
-        for name, fn in originals.items():
-            setattr(setup_mod, name, fn)
+        _unpatch_hostadmin(saved)
 
     check(result["server_url"] == "https://stub.up.railway.app", "returns server_url")
     check(result["config_ok"] is True, "config_ok True when push succeeds")

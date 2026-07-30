@@ -12,7 +12,6 @@ is what `server.py`'s `adopted_inactive` branch hands to a fresh agent.
 """
 
 import asyncio
-import json
 import os
 import sys
 import tempfile

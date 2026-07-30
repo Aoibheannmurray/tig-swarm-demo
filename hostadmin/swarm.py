@@ -17,12 +17,10 @@ import json
 import os
 import secrets
 import shutil
-import subprocess as sp
 import sys
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 from .challenges_bridge import (
     _load_challenge_registry,
@@ -43,7 +41,6 @@ from .http import (
     _MAINNET_API,
     _mainnet_get,
     classify_http_error,
-    looks_like_platform_error,
     post_json,
 )
 from .prompting import prompt, prompt_choice, prompt_int
@@ -60,17 +57,29 @@ from .railway import (
     _wait_for_server,
 )
 
-DEFAULT_INSTANCES_PER_TRACK = 2
-DEFAULT_TRACKS_PER_CHALLENGE = {
-    "satisfiability": {"n_vars=100000,ratio=4150": 2},
-    "vehicle_routing": {"n_nodes=600": 2},
-    "knapsack": {"n_items=1000,budget=10": 2},
-    "job_scheduling": {"n=50,s=flow_shop": 2},
-    "energy_arbitrage": {"s=baseline": 2},
-    "hypergraph": {"n_h_edges=10000": 2},
-    "neuralnet_optimizer": {"n_hidden=4": 2},
-    "vector_search": {"n_queries=7000": 2},
-}
+DEFAULT_INSTANCES_PER_TRACK = 5
+
+
+def default_tracks_per_challenge() -> dict[str, dict[str, int]]:
+    """Every track of every challenge at DEFAULT_INSTANCES_PER_TRACK.
+
+    Derived from the challenge registry, so it must stay behind a call:
+    building it at import time would load server/challenges.py, which a
+    trimmed clone / swarm worktree does not have (see test_hostadmin_surface).
+    """
+    return {
+        ch: {key: DEFAULT_INSTANCES_PER_TRACK for key in meta["track_keys"]}
+        for ch, meta in get_challenges().items()
+    }
+
+
+def __getattr__(name: str):
+    # PEP 562 — embedders (control_server's /local-api/challenges) read
+    # DEFAULT_TRACKS_PER_CHALLENGE as an attribute; keep that surface without
+    # paying the registry load at import time.
+    if name == "DEFAULT_TRACKS_PER_CHALLENGE":
+        return default_tracks_per_challenge()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _arg_value(args: argparse.Namespace | None, name: str):
@@ -673,20 +682,14 @@ def collect_per_challenge_configs(
         # challenge registry; not prompted in the wizard.
         timeout = ch_def.default_timeout
         if use_defaults:
-            default_tracks = DEFAULT_TRACKS_PER_CHALLENGE.get(ch)
-            if default_tracks:
-                for key, count in default_tracks.items():
-                    tracks[key] = count
-            else:
-                for key in meta["track_keys"]:
-                    tracks[key] = DEFAULT_INSTANCES_PER_TRACK
+            for key in meta["track_keys"]:
+                tracks[key] = DEFAULT_INSTANCES_PER_TRACK
         else:
             print(f"\n── {ch} ──")
-            ch_track_defaults = DEFAULT_TRACKS_PER_CHALLENGE.get(ch, {})
             for key in meta["track_keys"]:
                 tracks[key] = prompt_int(
                     f"  instances for {key}",
-                    ch_track_defaults.get(key, 0),
+                    DEFAULT_INSTANCES_PER_TRACK,
                     minimum=0,
                 )
         algo_data = initial_algorithms.get(ch, {})
@@ -1196,7 +1199,6 @@ def run_create(args: argparse.Namespace | None = None) -> int:
             challenge_names,
             default=default_active,
         )
-    challenge_meta = challenge_set[active_challenge]
     print(f"  -> active = {active_challenge} (contributors auto-follow this)")
 
     if use_defaults:
@@ -1268,22 +1270,6 @@ def run_create(args: argparse.Namespace | None = None) -> int:
     swarm_password = result["swarm_password"]
     config_ok = result["config_ok"]
     seeds_ok = result.get("seeds_ok", True)
-    repo_url = "<this-repo-url>"
-    try:
-        result = sp.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=3, cwd=str(ROOT),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            repo_url = result.stdout.strip()
-    except Exception:
-        pass
-    repo_dir_hint = (
-        Path(repo_url).stem.replace(".git", "")
-        if repo_url != "<this-repo-url>"
-        else "tig-swarm-demo"
-    )
-
     print("\n" + "=" * 48)
     if config_ok:
         print(f"{type_label} SWARM IS LIVE")
@@ -1441,7 +1427,7 @@ def _scaffold_fleet_config(server_url: str, swarm_password: str) -> None:
 
     path = ROOT / "fleet.config.json"
     if path.exists():
-        print(f"  fleet.config.json already present — leaving as-is")
+        print("  fleet.config.json already present — leaving as-is")
         return
     username = os.environ.get("USER") or os.environ.get("USERNAME") or "host"
     starter = {
@@ -1573,7 +1559,7 @@ def run_switch(challenge: str) -> int:
     print(f"\nActive challenge → {challenge} (broadcast to all contributors).")
     if prior_challenge and prior_challenge != challenge:
         print(f"  Prior trajectories on {prior_challenge} are preserved")
-        print(f"  server-side and resume on switch-back.")
+        print("  server-side and resume on switch-back.")
     print("  All contributors auto-follow on their next iteration —")
     print("  scripts/run_loop.py runs `setup.py sync` at the top of each loop.")
     return 0

@@ -7,10 +7,7 @@ import uuid
 # below drifts away from server/challenges.py. The Literal itself stays
 # static — Python's type checker needs concrete strings — but the assert
 # at the bottom of this file proves the union and the registry agree.
-from challenges import (
-    CHALLENGE_NAMES,
-    assert_literal_matches_registry,
-)
+from challenges import assert_literal_matches_registry
 
 
 def new_id() -> str:

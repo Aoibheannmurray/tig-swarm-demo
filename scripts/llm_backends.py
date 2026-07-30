@@ -96,8 +96,12 @@ _MODEL_MAX_TOKENS: list[tuple[str, int]] = [
 ]
 
 
+def _base_model_name(model: str) -> str:
+    return model.rsplit("/", 1)[-1]
+
+
 def _max_tokens_for_model(model: str) -> int:
-    m = model.lower()
+    m = _base_model_name(model).lower()
     for prefix, limit in _MODEL_MAX_TOKENS:
         if m.startswith(prefix):
             return limit
@@ -346,11 +350,41 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> tuple[
 
 def _needs_new_api(model: str) -> bool:
     """Models that require max_completion_tokens and developer role."""
-    if re.match(r"^o\d", model, re.IGNORECASE):
+    base_model = _base_model_name(model)
+    if re.match(r"^o\d", base_model, re.IGNORECASE):
         return True
-    if re.match(r"^gpt-5", model, re.IGNORECASE):
+    if re.match(r"^gpt-5", base_model, re.IGNORECASE):
         return True
     return False
+
+
+def _is_max_tokens_unsupported(error: str) -> bool:
+    return (
+        "Unsupported parameter" in error
+        and "'max_tokens'" in error
+        and "max_completion_tokens" in error
+    )
+
+
+def _openai_chat_body(
+    system: str,
+    prompt: str,
+    model: str,
+    token_param: str,
+    new_api: bool,
+) -> dict:
+    messages = (
+        [{"role": "developer", "content": system},
+         {"role": "user", "content": prompt}]
+        if new_api else
+        [{"role": "system", "content": system},
+         {"role": "user", "content": prompt}]
+    )
+    return {
+        "model": model,
+        "messages": messages,
+        token_param: _max_tokens_for_model(model),
+    }
 
 
 def call_openai(
@@ -367,26 +401,29 @@ def call_openai(
     )
     new_api = _needs_new_api(model)
     token_param = "max_completion_tokens" if new_api else "max_tokens"
-    messages = (
-        [{"role": "developer", "content": system},
-         {"role": "user", "content": prompt}]
-        if new_api else
-        [{"role": "system", "content": system},
-         {"role": "user", "content": prompt}]
-    )
-    data = _post_json(
-        chat_url,
-        {
-            "model": model,
-            "messages": messages,
-            token_param: _max_tokens_for_model(model),
-        },
-        # No key, no Authorization header: a self-hosted server that checks
-        # nothing would still see `Bearer ` and some reject the empty value
-        # outright. Same rule list_models applies.
-        {"Content-Type": "application/json",
-         **({"Authorization": f"Bearer {api_key}"} if api_key else {})},
-    )
+    # No key, no Authorization header: a self-hosted server that checks
+    # nothing would still see `Bearer ` and some reject the empty value
+    # outright. Same rule list_models applies.
+    headers = {"Content-Type": "application/json",
+               **({"Authorization": f"Bearer {api_key}"} if api_key else {})}
+    try:
+        data = _post_json(
+            chat_url,
+            _openai_chat_body(system, prompt, model, token_param, new_api),
+            headers,
+        )
+    except RuntimeError as e:
+        # Belt-and-braces behind the _base_model_name fix above: a gateway may
+        # route to a max_completion_tokens-only model under an id whose prefix
+        # we don't recognise. Retry once on the provider's own complaint
+        # rather than failing the iteration.
+        if token_param != "max_tokens" or not _is_max_tokens_unsupported(str(e)):
+            raise
+        data = _post_json(
+            chat_url,
+            _openai_chat_body(system, prompt, model, "max_completion_tokens", new_api),
+            headers,
+        )
     # OpenRouter (and some gateways) return provider/moderation errors in the
     # body with HTTP 200 rather than a 4xx/5xx, so _post_json doesn't raise.
     # Surface them as a real error instead of silently treating it as empty.
