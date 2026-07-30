@@ -32,7 +32,9 @@ def _with_listing(result):
     c3_compute._run_c3 = lambda *a, **k: result
 
 
-def test_picks_largest_available():
+def test_picks_largest_available_without_workload():
+    # With nothing to cost against (no instance count / timeout), the old
+    # ranking applies: the largest trustworthy box.
     orig = c3_compute._run_c3
     try:
         _with_listing(_listing(
@@ -43,7 +45,83 @@ def test_picks_largest_available():
     finally:
         c3_compute._run_c3 = orig
         c3_compute._hw_cache = None
-    print("PASS test_picks_largest_available")
+    print("PASS test_picks_largest_available_without_workload")
+
+
+_REAL_POOLS = (
+    _profile("cpu-d3-4vcpu-16gb", 4, "medium", True, 0.11),
+    _profile("cpu-e2-48vcpu-192gb", 48, "medium", True, 1.15),
+    _profile("cpu-d3-96vcpu-384gb", 96, "high", True, 2.28),
+)
+
+
+def test_small_benchmark_gets_a_small_box():
+    # THE core fix: 5 instances have no business on a 96-vCPU box — workers
+    # beyond the instance count idle cores at the big box's rate. The high
+    # availability tier of the big box doesn't outrank cost (tier is a
+    # reliability gate for LOW pools, not a ranking).
+    orig = c3_compute._run_c3
+    try:
+        _with_listing(_listing(*_REAL_POOLS))
+        got = c3_compute._best_cpu_hardware({}, {"timeout": 30}, 5)
+        assert got == "cpu-d3-4vcpu-16gb", got
+    finally:
+        c3_compute._run_c3 = orig
+        c3_compute._hw_cache = None
+    print("PASS test_small_benchmark_gets_a_small_box")
+
+
+def test_large_benchmark_still_gets_the_big_box():
+    # 1000 instances x 60s: the 96-vCPU box's wall-clock savings outweigh its
+    # rate, so scale-up still happens when the workload earns it.
+    orig = c3_compute._run_c3
+    try:
+        _with_listing(_listing(*_REAL_POOLS))
+        got = c3_compute._best_cpu_hardware({}, {"timeout": 60}, 1000)
+        assert got == "cpu-d3-96vcpu-384gb", got
+    finally:
+        c3_compute._run_c3 = orig
+        c3_compute._hw_cache = None
+    print("PASS test_large_benchmark_still_gets_the_big_box")
+
+
+def test_explicit_bench_workers_routes_to_cheapest_rate():
+    # A pinned bench_workers caps every profile's parallelism the same way,
+    # so the big boxes lose their only advantage and the cheapest rate wins
+    # even on a large benchmark.
+    orig = c3_compute._run_c3
+    try:
+        _with_listing(_listing(*_REAL_POOLS))
+        got = c3_compute._best_cpu_hardware(
+            {}, {"timeout": 60, "bench_workers": 4}, 1000)
+        assert got == "cpu-d3-4vcpu-16gb", got
+    finally:
+        c3_compute._run_c3 = orig
+        c3_compute._hw_cache = None
+    print("PASS test_explicit_bench_workers_routes_to_cheapest_rate")
+
+
+def test_low_tier_is_last_resort_even_when_cheapest():
+    # A LOW pool may simply never provision — a cheap box that never arrives
+    # costs more than any rate. But when low-tier is ALL that's listed, use it.
+    orig = c3_compute._run_c3
+    try:
+        _with_listing(_listing(
+            _profile("cpu-d3-4vcpu-16gb", 4, "low", True, 0.11),
+            _profile("cpu-e2-48vcpu-192gb", 48, "high", True, 1.15),
+        ))
+        got = c3_compute._best_cpu_hardware({}, {"timeout": 30}, 5)
+        assert got == "cpu-e2-48vcpu-192gb", got
+        c3_compute._hw_cache = None
+        _with_listing(_listing(
+            _profile("cpu-d3-4vcpu-16gb", 4, "low", True, 0.11),
+        ))
+        got = c3_compute._best_cpu_hardware({}, {"timeout": 30}, 5)
+        assert got == "cpu-d3-4vcpu-16gb", got
+    finally:
+        c3_compute._run_c3 = orig
+        c3_compute._hw_cache = None
+    print("PASS test_low_tier_is_last_resort_even_when_cheapest")
 
 
 def test_session_blocklist_skips_a_pool_that_misbehaved():
@@ -176,7 +254,11 @@ def test_result_is_cached():
 
 
 def _main():
-    test_picks_largest_available()
+    test_picks_largest_available_without_workload()
+    test_small_benchmark_gets_a_small_box()
+    test_large_benchmark_still_gets_the_big_box()
+    test_explicit_bench_workers_routes_to_cheapest_rate()
+    test_low_tier_is_last_resort_even_when_cheapest()
     test_session_blocklist_skips_a_pool_that_misbehaved()
     test_config_and_env_extend_blocklist()
     test_prefers_higher_availability_tier_over_size()

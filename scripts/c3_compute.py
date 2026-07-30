@@ -180,14 +180,16 @@ def _resolve_c3_hardware(config: dict, requested: str | None = None) -> str:
     return _DEFAULT_GPU_HARDWARE if _is_gpu_config(config) else _DEFAULT_CPU_HARDWARE
 
 
-# `auto` CPU hardware is upgraded to the best profile C3 can actually deliver
-# RIGHT NOW (largest available box — the per-vCPU rate is flat-to-cheaper on
-# the big profiles, and bench_workers scales the job's solver parallelism to
-# whatever machine it lands on). Cached briefly so a sharded benchmark's jobs
-# make one control-plane query, not one per shard.
+# `auto` CPU hardware resolves to the profile C3 can actually deliver RIGHT
+# NOW that this benchmark is cheapest on — a 5-instance run has no business on
+# a 96-vCPU box (bench_workers scales solver parallelism to the machine, but
+# workers beyond the instance count just idle cores at the big box's rate).
+# The LISTING is cached briefly so a sharded benchmark's jobs make one
+# control-plane query, not one per shard; the pick itself is recomputed per
+# benchmark because it depends on the workload.
 _AVAILABILITY_RANK = {"high": 3, "medium": 2, "low": 1}
 _HW_CACHE_TTL_SECS = 600
-_hw_cache: tuple[float, str] | None = None
+_hw_cache: tuple[float, list[dict]] | None = None
 # Profiles auto-selection must never pick, even when C3 lists them available.
 # Deliberately EMPTY: a hardcoded list goes stale in both directions — it keeps
 # avoiding pools C3 has since fixed, and says nothing about the one that breaks
@@ -229,47 +231,109 @@ def _hw_blocklist(cfg: dict | None) -> frozenset[str]:
     return _DEFAULT_HW_BLOCKLIST | extra
 
 
-def _best_cpu_hardware(env: dict, cfg: dict | None = None) -> str:
-    """The best CPU profile to deploy on right now: highest availability tier
-    first (LOW pools may simply never provision), then the most vCPUs, then
-    the cheaper rate — skipping blocklisted pools (see _hw_blocklist). Falls
-    back to _DEFAULT_CPU_HARDWARE whenever the control-plane query fails
-    (offline, stale CLI, no auth)."""
+def _list_cpu_profiles(env: dict) -> list[dict]:
+    """The control plane's currently-available CPU profiles as
+    ``{name, tier, vcpu, rate}`` dicts (tier = _AVAILABILITY_RANK value, rate
+    in GBP/hour, both 0 when unlisted). Cached for _HW_CACHE_TTL_SECS —
+    failures too, so a dead CLI is probed once per TTL, not once per
+    benchmark. Empty when the query fails (offline, stale CLI, no auth)."""
     global _hw_cache
     now = time.monotonic()
     if _hw_cache is not None and now - _hw_cache[0] < _HW_CACHE_TTL_SECS:
         return _hw_cache[1]
-    blocked = _hw_blocklist(cfg)
-    profile = _DEFAULT_CPU_HARDWARE
+    profiles: list[dict] = []
     result = _run_c3(["c3", "list", "-al", "--json"], env, ROOT, _C3_CLI_TIMEOUT_SECS)
     if result is not None and result.returncode == 0 and (result.stdout or "").strip():
         try:
             data = json.loads(result.stdout)
-            candidates = []
             for cls in data.get("hardware") or []:
                 for p in cls.get("profiles") or []:
                     if p.get("hardware_kind") != "cpu" or not p.get("available"):
                         continue
                     name = str(p.get("hardware_profile", ""))
-                    if not name or name in blocked:
+                    if not name:
                         continue
-                    candidates.append((
-                        _AVAILABILITY_RANK.get(
+                    profiles.append({
+                        "name": name,
+                        "tier": _AVAILABILITY_RANK.get(
                             str(p.get("availability_tier", "")).lower(), 0),
-                        int(p.get("vcpu") or 0),
-                        -float(p.get("rate_per_hour_gbp") or 0.0),
-                        name,
-                    ))
-            if candidates:
-                candidates.sort(reverse=True)
-                profile = candidates[0][3]
-                print(f"    [C3] auto hardware: {profile} "
-                      f"({candidates[0][1]} vCPU, tier rank {candidates[0][0]})")
+                        "vcpu": int(p.get("vcpu") or 0),
+                        "rate": float(p.get("rate_per_hour_gbp") or 0.0),
+                    })
         except (ValueError, KeyError, TypeError) as exc:
             print(f"    [C3] hardware listing unparseable ({exc}) — "
-                  f"using {profile}")
-    _hw_cache = (now, profile)
-    return profile
+                  f"using {_DEFAULT_CPU_HARDWARE}")
+            profiles = []
+    _hw_cache = (now, profiles)
+    return profiles
+
+
+def _best_cpu_hardware(env: dict, cfg: dict | None = None,
+                       total_instances: int | None = None) -> str:
+    """The CPU profile to deploy THIS benchmark on, sized to the workload.
+
+    Availability tier is a reliability gate, not a ranking: LOW pools may
+    simply never provision, so they're considered only when nothing better is
+    listed. Among the trustworthy pools the pick minimizes the estimated cost
+    of this benchmark — hourly rate × estimated job wall clock (shard fixed
+    cost + solving waves at `timeout` each) — with the wall clock itself
+    priced at the cheapest pool's rate, so a bigger box wins only when the
+    time it saves is worth what it bills. A 5-instance benchmark therefore
+    lands on a 4-vCPU box (workers beyond the instance count just idle cores
+    at the big box's rate); a 1000-instance benchmark still gets the 96-vCPU
+    one. An explicitly configured `bench_workers` caps every profile's
+    parallelism the same way, which collapses the big boxes' one advantage
+    and routes the pick to the cheapest rate.
+
+    When the workload can't be costed (no instance count, no per-instance
+    `timeout`, no listed rates) the old ranking applies — most vCPUs, then
+    cheaper rate. Blocklisted pools are skipped throughout (_hw_blocklist);
+    _DEFAULT_CPU_HARDWARE covers a failed control-plane query."""
+    cfg = cfg or {}
+    blocked = _hw_blocklist(cfg)
+    profiles = [p for p in _list_cpu_profiles(env) if p["name"] not in blocked]
+    if not profiles:
+        return _DEFAULT_CPU_HARDWARE
+    pool = [p for p in profiles
+            if p["tier"] >= _AVAILABILITY_RANK["medium"]] or profiles
+    try:
+        n = int(total_instances or 0)
+    except (TypeError, ValueError):
+        n = 0
+    try:
+        timeout = float(cfg.get("timeout") or 0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    rated = [p for p in pool if p["rate"] > 0]
+    if n > 0 and timeout > 0 and rated:
+        # Unrated pools get a flat per-vCPU estimate so a missing price reads
+        # as "typical", never as "free".
+        vcpu_rates = [p["rate"] / p["vcpu"] for p in rated if p["vcpu"] > 0]
+        per_vcpu = (sum(vcpu_rates) / len(vcpu_rates)) if vcpu_rates \
+            else max(p["rate"] for p in rated)
+        wall_rate = min(p["rate"] for p in rated)
+        fixed = _shard_fixed_secs(cfg)
+        scored = []
+        for p in pool:
+            workers = _profile_workers(p["vcpu"], cfg)
+            waves = math.ceil(n / workers)
+            wall = fixed + waves * timeout
+            rate = p["rate"] if p["rate"] > 0 \
+                else per_vcpu * (p["vcpu"] or _ASSUMED_SHARD_VCPUS)
+            job_cost = rate * wall / 3600.0
+            scored.append((job_cost + wall_rate * wall / 3600.0, wall,
+                           -p["tier"], -p["vcpu"], p["name"],
+                           (p, waves, job_cost)))
+        scored.sort(key=lambda s: s[:5])
+        p, waves, job_cost = scored[0][5]
+        print(f"    [C3] auto hardware: {p['name']} ({p['vcpu']} vCPU — "
+              f"{n} instance(s) in {waves} wave(s), ~£{job_cost:.3f}/job)")
+        return p["name"]
+    pool.sort(key=lambda p: (p["tier"], p["vcpu"], -p["rate"]), reverse=True)
+    best = pool[0]
+    print(f"    [C3] auto hardware: {best['name']} "
+          f"({best['vcpu']} vCPU, tier rank {best['tier']})")
+    return best["name"]
 
 
 def _docker_requires_accelerator(config: dict) -> str:
@@ -762,13 +826,11 @@ def _hardware_vcpus(hardware: str | None) -> int:
     return int(m.group(1)) if m else 0
 
 
-def _estimate_shard_workers(cfg: dict) -> int:
-    """Concurrent solvers ONE shard job will run, mirroring
-    benchmark.resolve_bench_workers' machine-scaled default (half the vCPUs ~=
-    the physical cores). Only used to size the shard plan, so an estimate is
-    fine. GPU jobs are one solver per job — sharding IS their parallelism."""
-    if _is_gpu_config(cfg):
-        return 1
+def _profile_workers(vcpu: int, cfg: dict) -> int:
+    """Concurrent solvers a CPU job would run on a box with ``vcpu`` vCPUs:
+    an explicitly configured bench_workers wins, else
+    benchmark.resolve_bench_workers' machine-scaled default (half the vCPUs
+    ~= the physical cores)."""
     for raw in (os.environ.get("TIG_BENCH_WORKERS"), cfg.get("bench_workers")):
         try:
             value = int(raw)
@@ -776,8 +838,16 @@ def _estimate_shard_workers(cfg: dict) -> int:
             continue
         if value > 0:
             return value
-    vcpus = _hardware_vcpus(cfg.get("c3_hardware")) or _ASSUMED_SHARD_VCPUS
-    return max(4, vcpus // 2)
+    return max(4, (vcpu or _ASSUMED_SHARD_VCPUS) // 2)
+
+
+def _estimate_shard_workers(cfg: dict) -> int:
+    """Concurrent solvers ONE shard job will run. Only used to size the shard
+    plan, so an estimate is fine. GPU jobs are one solver per job — sharding
+    IS their parallelism."""
+    if _is_gpu_config(cfg):
+        return 1
+    return _profile_workers(_hardware_vcpus(cfg.get("c3_hardware")), cfg)
 
 
 def _shard_fixed_secs(cfg: dict) -> float:
@@ -983,6 +1053,27 @@ _QUEUE_GRACE_SECS = 1200
 # Stable substring so callers can tell this apart from a job that ran and
 # failed. Survives the shard-error grouping in run_benchmark_c3.
 _NEVER_STARTED_MARKER = "never left the C3 queue"
+# C3's internal-error banner ("The job could not be completed. Contact C3
+# support with the error code below. Code: C3-JOB-…"). It shows up in the
+# job's LOGS while `c3 squeue` can go on reporting the job as RUNNING — the
+# job is dead but never reaches a terminal status, so without a log check
+# the swarm sits "watching" a corpse until the walltime-derived timeout,
+# holding its fleet-pool slot the whole time. _poll_c3_job samples the logs
+# for the banner every _SUPPORT_ERROR_POLL_EVERY polls (~1 minute).
+_SUPPORT_ERROR_MARKERS = ("could not be completed", "contact c3 support")
+_SUPPORT_CODE_RE = re.compile(r"\bcode:\s*(C3-[A-Z0-9-]+)", re.IGNORECASE)
+_SUPPORT_ERROR_POLL_EVERY = 4
+
+
+def _support_error_code(text: str) -> str | None:
+    """The support code out of a C3 internal-error banner in ``text``, or
+    None when no banner is present ("unknown" when the banner appears
+    without a parseable code)."""
+    low = (text or "").lower()
+    if not any(marker in low for marker in _SUPPORT_ERROR_MARKERS):
+        return None
+    m = _SUPPORT_CODE_RE.search(text)
+    return m.group(1) if m else "unknown"
 
 
 def _run_c3(
@@ -1003,6 +1094,9 @@ def _run_c3(
         )
     except subprocess.TimeoutExpired:
         print(f"    [C3] `{' '.join(cmd)}` timed out after {timeout_secs}s")
+        return None
+    except FileNotFoundError:
+        print(f"    [C3] `{cmd[0]}` not found on PATH")
         return None
 
 
@@ -1058,6 +1152,12 @@ def _poll_c3_job(
     burns the whole walltime-derived timeout on a machine it will never get.
     A job that hasn't reached RUNNING within the queue grace gives up as
     `never_started`, which the caller turns into "try different hardware".
+
+    Finally, a job can die on a C3-internal error ("Contact C3 support …
+    Code: C3-JOB-…") while squeue goes on reporting it RUNNING. That banner
+    only ever shows up in the job's logs, so they're sampled every few polls;
+    a hit returns `infra_error:<code>` and the caller cancels the job (C3
+    still counts it against the plan cap) and moves off the hardware.
     """
     wait_secs = timeout_secs if timeout_secs is not None else max(1800, walltime_secs + 2700)
     deadline = time.monotonic() + wait_secs
@@ -1099,6 +1199,13 @@ def _poll_c3_job(
                 return "unrecognised"
             if poll % 20 == 0:
                 print(f"    [C3] Still waiting on {job_id} (poll {poll + 1})...")
+        if poll % _SUPPORT_ERROR_POLL_EVERY == _SUPPORT_ERROR_POLL_EVERY - 1:
+            code = _support_error_code(_read_logs(job_id, env, cwd))
+            if code:
+                print(f"    [C3] {job_id} died with a C3 internal error "
+                      f"(support code {code}) — squeue still said "
+                      f"{status or 'unknown'}, but the job is gone")
+                return f"infra_error:{code}"
         poll += 1
         time.sleep(_POLL_INTERVAL_SECS)
     return "timeout"
@@ -1453,6 +1560,24 @@ def _run_one_c3_job_inner(
             f"pool accepted the job but never gave it a machine. Cancelled it "
             f"rather than waiting out the full timeout."
         )
+    if status.startswith("infra_error"):
+        code = status.partition(":")[2] or "unknown"
+        # C3 still lists the job as live, so it still holds a chip against
+        # the plan cap — cancel rather than trust C3 to reap it.
+        _cancel_c3_job(job_id, env, stage)
+        profile = str((cfg or {}).get("c3_hardware") or "?")
+        if (cfg or {}).get("c3_hardware_auto"):
+            _blocklist_profile_for_session(
+                profile, f"its job died with C3 internal error {code}")
+            hint = "the next benchmark will pick different hardware"
+        else:
+            hint = (f"c3_hardware is pinned to {profile} — try a different "
+                    f"profile, or switch this agent to local compute")
+        return None, (
+            f"[C3] job {job_id} died with a C3 internal error on {profile} "
+            f"(support code {code}, for C3 support) while C3 still reported "
+            f"it running. Cancelled it; {hint}."
+        )
     cancel_output = ""
     if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
         cancel_output = _cancel_c3_job(job_id, env, stage)
@@ -1614,15 +1739,19 @@ def _run_benchmark_c3(
     if auth_err:
         return None, auth_err
 
+    tracks = cfg.get("tracks") or {}
+    total_instances = sum(count for _, count in _instance_units(tracks))
+
     # Hardware: an explicit request pins the profile; `auto` resolves to the
-    # GPU default (l40) or, for CPU challenges, to the best CPU box C3 can
-    # deliver right now (largest available — see _best_cpu_hardware).
+    # GPU default (l40) or, for CPU challenges, to the cheapest available CPU
+    # box that fits THIS benchmark's workload — a 5-instance run gets a small
+    # box, not a 96-vCPU one (see _best_cpu_hardware).
     requested = _arg_value(args, "hardware")
     raw_hw = str(
         requested if requested is not None else cfg.get("c3_hardware", "")
     ).strip().lower()
     if raw_hw in _AUTO_HARDWARE_VALUES and not _is_gpu_config(cfg):
-        cfg["c3_hardware"] = _best_cpu_hardware(env, cfg)
+        cfg["c3_hardware"] = _best_cpu_hardware(env, cfg, total_instances)
         # Remembered so a pool that never provisions can be dropped from
         # future auto-picks. An explicitly pinned profile is the contributor's
         # decision and is never second-guessed.
@@ -1638,9 +1767,7 @@ def _run_benchmark_c3(
     # exactly. The plan cap is a CEILING, not a target: _worthwhile_shards
     # spends a slot only when the wall clock it saves beats the provisioning it
     # costs, so a small benchmark runs as one job instead of three.
-    tracks = cfg.get("tracks") or {}
     cap = _max_parallel(cfg)
-    total_instances = sum(count for _, count in _instance_units(tracks))
     num_shards = _worthwhile_shards(total_instances, cfg, cap)
     shards = _plan_shards(tracks, num_shards)
     if not shards:
