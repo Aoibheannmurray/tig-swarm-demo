@@ -1722,6 +1722,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             "hypothesis_recall_threshold": int(payload.get("hypothesis_recall_threshold", 3)),
             "seed_inactive_pool": bool(payload.get("seed_inactive_pool", False)),
             "seed_pool_mainnet": bool(payload.get("seed_pool_mainnet", False)),
+            "failed_attempts_archive": bool(payload.get("failed_attempts_archive", False)),
         }
         try:
             return deploy.start(params)

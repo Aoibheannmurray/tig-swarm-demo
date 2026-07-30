@@ -60,6 +60,7 @@
   let recallThreshold = $state(3);
   let seedInactive = $state(false);
   let seedPoolMainnet = $state(false);
+  let failedAttemptsArchive = $state(false);
   let useDefaults = $state(true);
   // Per-challenge {track_key: instances} edits for the customize view,
   // seeded from the server's track_defaults (same values the CLI wizard uses).
@@ -282,6 +283,7 @@
         hypothesis_recall_threshold: recallThreshold,
         seed_inactive_pool: seedInactive,
         seed_pool_mainnet: seedPoolMainnet,
+        failed_attempts_archive: failedAttemptsArchive,
       };
       if (workspace) payload.workspace = workspace;
       if (!useDefaults) {
@@ -499,6 +501,7 @@
   <div class="field">
     <label class="check"><input type="checkbox" bind:checked={seedInactive} /> Seed the inactive pool from the top TIG mainnet algorithm <span class="muted">(drawn on trajectory resets)</span></label>
     <label class="check"><input type="checkbox" bind:checked={seedPoolMainnet} /> Seed the initial pool from the top TIG mainnet algorithm <span class="muted">(fresh trajectories start from it)</span></label>
+    <label class="check"><input type="checkbox" bind:checked={failedAttemptsArchive} /> Store failed attempts in the server DB <span class="muted">(agents' failure retrospectives are archived per-agent and served back as a "you tried this before" stagnation hint; toggleable later in the Admin Console)</span></label>
   </div>
   <div class="field">
     <label class="check"><input type="checkbox" bind:checked={useDefaults} /> Use recommended benchmark instance counts for every challenge</label>
