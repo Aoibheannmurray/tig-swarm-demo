@@ -338,10 +338,17 @@
     }
   }
 
+  // The Admin Console exists in two places. This page is served by the local
+  // companion, whose /admin/ is the SUPERSET: the same console plus the
+  // /local-api-backed tools (re-seed authored pool), since the seed files
+  // live in this clone. The swarm server also serves it at <server>/admin/
+  // for admins away from this machine — offered as the secondary link.
   function adminConsoleUrl(): string {
-    // The Admin Console is served by the swarm's own server at /admin/.
+    return "/admin/";
+  }
+  function hostedConsoleUrl(): string {
     const base = ($deployStatus.result?.server_url || admin?.server_url || "").replace(/\/$/, "");
-    return base ? `${base}/admin/` : "/admin/";
+    return base ? `${base}/admin/` : "";
   }
 </script>
 
@@ -626,6 +633,15 @@
           </button>
         {/if}
       </div>
+      {#if hostedConsoleUrl()}
+        <div class="hint" style="text-align:right">
+          The console is also served at
+          <a href={hostedConsoleUrl()} target="_blank" rel="noreferrer">{hostedConsoleUrl()}</a>
+          for admin work away from this machine — everything works there
+          except re-seeding the authored pool, whose seed files live in this
+          clone.
+        </div>
+      {/if}
     {/if}
   </div>
 {/if}
@@ -736,6 +752,14 @@
         </button>
       {/if}
     </div>
+    {#if hostedConsoleUrl()}
+      <div class="hint" style="text-align:right">
+        The console is also served at
+        <a href={hostedConsoleUrl()} target="_blank" rel="noreferrer">{hostedConsoleUrl()}</a>
+        for admin work away from this machine — everything works there except
+        re-seeding the authored pool, whose seed files live in this clone.
+      </div>
+    {/if}
   </div>
 {/if}
 
