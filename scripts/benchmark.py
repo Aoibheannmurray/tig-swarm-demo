@@ -67,7 +67,6 @@ import hashlib
 import json
 import os
 import re
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -1509,10 +1508,11 @@ def main() -> int:
 
     challenge = cfg["challenge"]
     timeout = int(cfg.get("timeout", 30))
-    # Direction is no longer used by aggregation — every challenge's
-    # quality score is higher-is-better. Kept here for forward-compat
-    # with downstream callers that still read it.
-    _direction = cfg.get("scoring_direction", "max")  # noqa: F841
+    # No scoring_direction read here on purpose: `aggregate` is
+    # higher-is-better for every challenge (infeasible instances sink to
+    # INFEASIBLE_QUALITY), so there is nothing for a direction to switch.
+    # The synced value still rides along in the challenge config for the
+    # server, which stores it per challenge.
     tracks = cfg.get("tracks") or {}
     # Hyperparameter-search hooks, set by the agent loop and forwarded across
     # the Docker boundary by _reexec_in_docker:

@@ -26,8 +26,8 @@
   // restart. This editor says which of the two the contributor's edits need,
   // instead of leaving them to guess whether "Save" did anything.
   //
-  // Mirrors _HOT_RELOAD_KEYS in scripts/run_fleet.py (the enforcing list —
-  // drift here only mis-labels the hint, it can't break the fleet).
+  // Mirrors HOT_RELOAD_KEYS in scripts/agent_config_keys.py (the enforcing
+  // registry — drift here only mis-labels the hint, it can't break the fleet).
   const HOT_RELOAD_KEYS = new Set([
     "role", "seeded_start",
     "hpo_min_improvements", "hpo_first_tune_improvements",

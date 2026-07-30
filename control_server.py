@@ -70,7 +70,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
 import init_fleet
 import run_fleet
 import secrets_local
-import setup as setup_mod
+import hostadmin
 import ui_buildstamp
 
 UI_SRC_ROOT = ui_buildstamp.UI_SRC_ROOT
@@ -341,7 +341,7 @@ class DeployController:
 
         def _target() -> None:
             try:
-                res = setup_mod.create_swarm(params, progress_cb=progress)
+                res = hostadmin.create_swarm(params, progress_cb=progress)
                 self.result = res
                 self.state = "done"
                 self._hub.emit({"type": "deploy_status", "event": "done",
@@ -393,6 +393,16 @@ class RailwayLoginController:
     # grouped alphanumerics ("ABCD-1234"). Scraped loosely on lines that
     # mention "code"; the raw output is always returned as a fallback so an
     # unparsed format still leaves the UI usable.
+    # The pairing code is a hyphenated token ("brave-otter-lamp"). The bare
+    # pattern also matches `cli-login` inside the sign-in URL, so capture
+    # prefers the LABELLED form and otherwise refuses any line carrying a URL.
+    # The old guard was `"code" in line.lower()`, which tied capture to the
+    # CLI's exact wording — reword that notice and login hangs forever with no
+    # code ever surfaced. "Not inside a URL" is a structural property instead.
+    _CODE_LABELLED_RE = re.compile(
+        r"code\b[^A-Za-z0-9]*([A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,})+)",
+        re.IGNORECASE,
+    )
     _CODE_RE = re.compile(r"\b([A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,})+)\b")
     _URL_RE = re.compile(r"https://\S+")
     # The CLI colorizes when it sees a terminal (and it must see one — below);
@@ -473,8 +483,10 @@ class RailwayLoginController:
                         # the activation URL (https://railway.com/activate).
                         if m and "docs.railway" not in m.group(0):
                             self.url = m.group(0).rstrip(".,)…")
-                    if self.code is None and "code" in line.lower():
-                        m = self._CODE_RE.search(line)
+                    if self.code is None:
+                        m = self._CODE_LABELLED_RE.search(line)
+                        if m is None and "http" not in line:
+                            m = self._CODE_RE.search(line)
                         if m:
                             self.code = m.group(1)
             except OSError:
@@ -607,18 +619,18 @@ def _ensure_railway_on_path() -> bool:
 
 
 def _launch_argv(tool: str, *args: str) -> list[str]:
-    """argv for running `tool`, correct for Windows shims.
+    """argv for running `tool`, correct for Windows shims, after making sure a
+    freshly-installed CLI is visible on PATH.
 
-    npm installs console scripts as `railway.cmd` / `npm.cmd`. CreateProcess —
-    what subprocess.Popen uses — cannot execute a .cmd/.bat directly, so
-    Popen(["railway", ...]) fails on a perfectly good npm install. That is why
-    an npm-installed Railway CLI "didn't register". shutil.which honours
-    PATHEXT and finds the shim; we then run it through the command interpreter."""
+    The Windows-shim handling itself lives in hostadmin.tool_argv — it was
+    duplicated here and in hostadmin/railway.py, which is one copy too many for
+    a rule as easy to get subtly wrong (npm installs console scripts as
+    `railway.cmd`, and CreateProcess cannot execute a .cmd directly, so
+    Popen(["railway", ...]) fails on a perfectly good install). This wrapper
+    keeps the companion-only half: _ensure_on_path, so a CLI installed by the
+    UI moments ago is found without restarting the server."""
     _ensure_on_path(tool)
-    exe = shutil.which(tool)
-    if exe and os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
-        return [os.environ.get("COMSPEC", "cmd.exe"), "/c", exe, *args]
-    return [exe or tool, *args]
+    return hostadmin.tool_argv(tool, *args)
 
 
 class RailwayInstallController:
@@ -1304,13 +1316,13 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     # ── Environment / capabilities ──
     @app.get("/local-api/env")
     def env() -> dict:
-        admin = setup_mod.read_swarm_admin()
+        admin = hostadmin.read_swarm_admin()
         return {
             "mode": "local",
             "cwd": str(ROOT),
             "has_fleet_config": FLEET_CONFIG_PATH.exists(),
             "has_swarm_admin": bool(admin.get("admin_key")),
-            "server_url": admin.get("server_url") or setup_mod.resolve_server_url(),
+            "server_url": admin.get("server_url") or hostadmin.resolve_server_url(),
         }
 
     @app.get("/local-api/preflight")
@@ -1353,21 +1365,21 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         # DEFAULT_TRACKS_PER_CHALLENGE count where one exists, else 0.
         track_defaults = {
             ch: {
-                key: setup_mod.DEFAULT_TRACKS_PER_CHALLENGE.get(ch, {}).get(key, 0)
+                key: hostadmin.DEFAULT_TRACKS_PER_CHALLENGE.get(ch, {}).get(key, 0)
                 for key in meta["track_keys"]
             }
-            for ch, meta in setup_mod.CHALLENGES.items()
+            for ch, meta in hostadmin.CHALLENGES.items()
         }
         return {
-            "cpu": list(setup_mod.CPU_CHALLENGES.keys()),
-            "gpu": list(setup_mod.GPU_CHALLENGES.keys()),
-            "all": list(setup_mod.CHALLENGES.keys()),
+            "cpu": list(hostadmin.CPU_CHALLENGES.keys()),
+            "gpu": list(hostadmin.GPU_CHALLENGES.keys()),
+            "all": list(hostadmin.CHALLENGES.keys()),
             "track_defaults": track_defaults,
             # Per-challenge solver timeout `create` uses by default — powers
             # the host UI's per-challenge timeout field.
             "timeout_defaults": {
                 ch: meta.get("default_timeout", 30)
-                for ch, meta in setup_mod.CHALLENGES.items()
+                for ch, meta in hostadmin.CHALLENGES.items()
             },
         }
 
@@ -1440,7 +1452,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         """The prompts the CLI wizard asks (hostadmin/tacit.py), served so the
         setup app asks exactly the same ones — the guided form and
         `python setup.py tacit` must not drift into two different interviews."""
-        return {"questions": setup_mod.TACIT_QUESTIONS}
+        return {"questions": hostadmin.TACIT_QUESTIONS}
 
     @app.post("/local-api/tacit")
     async def set_tacit(payload: dict) -> dict:
@@ -1449,7 +1461,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         `payload`: either {"text": "..."} (a raw paste block) or
         {"answers": [{"title": "...", "body": "..."}, ...]} from the guided
         form. Composed the same way as setup.py's guided capture."""
-        threshold = setup_mod.read_swarm_admin().get("stagnation_threshold", 2)
+        threshold = hostadmin.read_swarm_admin().get("stagnation_threshold", 2)
         path = TACIT_PATH
         body = (payload.get("text") or "").strip()
         if not body and payload.get("answers"):
@@ -1462,7 +1474,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         if not body:
             return JSONResponse({"error": "no tacit content provided"}, status_code=400)
         if not path.exists():
-            path.write_text(setup_mod.tacit_header(threshold), encoding="utf-8")
+            path.write_text(hostadmin.tacit_header(threshold), encoding="utf-8")
         existing = path.read_text(encoding="utf-8")
         sep = "" if existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
         path.write_text(existing + sep + body + "\n", encoding="utf-8")
@@ -1506,7 +1518,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
             return {"available": False, "installed": False, "authed": False,
                     "message": "The Railway CLI isn't installed."}
         try:
-            user = setup_mod._railway_check_auth()
+            user = hostadmin._railway_check_auth()
             who = user.get("email") or user.get("name") or "unknown"
             workspaces = [
                 w["name"] for w in (user.get("workspaces") or []) if w.get("name")
@@ -1531,12 +1543,12 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         `exists: false` on any lookup failure: this gate must not block a
         legitimate create just because the Railway API blipped."""
         try:
-            project = setup_mod._railway_find_project(name, workspace)
+            project = hostadmin._railway_find_project(name, workspace)
         except (Exception, SystemExit):
             return {"exists": False, "checked": False}
         if not project:
             return {"exists": False, "checked": True}
-        admin = setup_mod.read_swarm_admin()
+        admin = hostadmin.read_swarm_admin()
         return {
             "exists": True,
             "checked": True,
@@ -1593,7 +1605,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     def swarm_admin() -> dict:
         """Host-only: the local admin creds so the UI can deep-link into the
         hosted Admin Console pre-filled."""
-        admin = setup_mod.read_swarm_admin()
+        admin = hostadmin.read_swarm_admin()
         return {
             "server_url": admin.get("server_url"),
             "admin_key": admin.get("admin_key"),
@@ -1607,7 +1619,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         Railway deploy via the /local-api/stream WebSocket (type deploy_log)."""
         swarm_type = payload.get("swarm_type", "cpu")
         challenge_set = (
-            setup_mod.GPU_CHALLENGES if swarm_type == "gpu" else setup_mod.CPU_CHALLENGES
+            hostadmin.GPU_CHALLENGES if swarm_type == "gpu" else hostadmin.CPU_CHALLENGES
         )
         active_challenge = payload.get("active_challenge") or next(iter(challenge_set))
         if active_challenge not in challenge_set:
@@ -1622,7 +1634,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         # with an actionable error instead.
         workspace = payload.get("workspace") or None
         try:
-            whoami = setup_mod._railway_check_auth()
+            whoami = hostadmin._railway_check_auth()
         except (Exception, SystemExit) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         ws_names = [
@@ -1641,8 +1653,8 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                 status_code=400,
             )
 
-        initial_algorithms = setup_mod.read_initial_algorithms()
-        challenges_cfg = setup_mod.collect_per_challenge_configs(
+        initial_algorithms = hostadmin.read_initial_algorithms()
+        challenges_cfg = hostadmin.collect_per_challenge_configs(
             initial_algorithms, use_defaults=True, challenge_set=challenge_set,
         )
         # Optional per-challenge instance overrides from the UI's "customize
@@ -1724,7 +1736,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     async def swarm_switch(payload: dict) -> dict:
         challenge = payload.get("challenge", "")
         try:
-            return setup_mod.switch_challenge(challenge)
+            return hostadmin.switch_challenge(challenge)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -1745,12 +1757,12 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         alongside the authored seeds available locally to (re)deposit. A
         challenge whose count is 0 but which has an authored seed is the
         "empty pool" the UI warns about."""
-        admin = setup_mod.read_swarm_admin()
+        admin = hostadmin.read_swarm_admin()
         server_url = admin.get("server_url")
         key = admin.get("admin_key")
         only = _swarm_challenges(admin)
         authored: dict[str, list[str]] = {}
-        for s in setup_mod.read_authored_seeds():
+        for s in hostadmin.read_authored_seeds():
             if only is not None and s["challenge"] not in only:
                 continue
             authored.setdefault(s["challenge"], []).append(s["strategy_tag"])
@@ -1758,7 +1770,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         if server_url and key:
             for ch in sorted(authored):
                 try:
-                    body = setup_mod.post_json(
+                    body = hostadmin.post_json(
                         f"{server_url.rstrip('/')}/api/admin/seeds",
                         {"admin_key": key, "challenge": ch}, timeout=10,
                     )
@@ -1780,7 +1792,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         with ``{"mainnet": true}`` ALSO deposits each challenge's top TIG
         mainnet algorithm (strategy_tag="mainnet"), so an existing swarm can
         gain a mainnet starting point without a full re-create."""
-        admin = setup_mod.read_swarm_admin()
+        admin = hostadmin.read_swarm_admin()
         server_url = admin.get("server_url")
         key = admin.get("admin_key")
         if not (server_url and key):
@@ -1790,7 +1802,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                 status_code=400,
             )
         only = _swarm_challenges(admin)
-        seeds = [s for s in setup_mod.read_authored_seeds()
+        seeds = [s for s in hostadmin.read_authored_seeds()
                  if only is None or s["challenge"] in only]
         want_mainnet = bool(payload.get("mainnet"))
         if not seeds and not want_mainnet:
@@ -1800,10 +1812,10 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                 status_code=400,
             )
         try:
-            failed = setup_mod.seed_pool_from_authored(server_url, key, seeds) if seeds else []
+            failed = hostadmin.seed_pool_from_authored(server_url, key, seeds) if seeds else []
             mainnet_failed = []
             if want_mainnet:
-                mainnet_failed = setup_mod.seed_pool_from_mainnet(
+                mainnet_failed = hostadmin.seed_pool_from_mainnet(
                     server_url, key, only or set())
             # Verify last, so mainnet deposits are covered too. `verified` is
             # False when the pool could not be read back at all — the UI must
@@ -1814,7 +1826,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                 if f"{ch}/mainnet" not in set(mainnet_failed)
             ]
             missing, verified = (
-                setup_mod.verify_seed_pool(server_url, key, to_verify)
+                hostadmin.verify_seed_pool(server_url, key, to_verify)
                 if to_verify else ([], True)
             )
         except Exception as exc:
@@ -1862,7 +1874,7 @@ def create_app(allow_remote: bool = False) -> FastAPI:
         base password from swarm.admin.json unless one is supplied. Backs the
         "Also run agents yourself" button on the host's done-screen, so a host
         can join their own swarm without a round-trip through a join link."""
-        admin = setup_mod.read_swarm_admin()
+        admin = hostadmin.read_swarm_admin()
         base = payload.get("swarm_password") or admin.get("swarm_password")
         server_url = payload.get("server_url") or admin.get("server_url")
         username = (payload.get("username") or "").strip()
@@ -1877,15 +1889,15 @@ def create_app(allow_remote: bool = False) -> FastAPI:
                 {"error": f"{username!r} is on the revoked list — pick a different name"},
                 status_code=400,
             )
-        derived = setup_mod.derive_password(username, base)
+        derived = hostadmin.derive_password(username, base)
         # Without this the invite is invisible to `setup.py list`, which
         # cross-checks issued names against the server's joined ones.
-        setup_mod.record_issued(admin, username)
+        hostadmin.record_issued(admin, username)
         return {"server_url": server_url, "username": username,
                 "swarm_password": derived,
                 # One-link form of the same credentials (fragment-encoded so
                 # they never reach server logs); None without a server_url.
-                "join_link": setup_mod.build_join_link(server_url, username, derived)}
+                "join_link": hostadmin.build_join_link(server_url, username, derived)}
 
     # ── Proxy /api/* to the swarm's hosted server ──
     #
@@ -1897,8 +1909,8 @@ def create_app(allow_remote: bool = False) -> FastAPI:
     # server-side). The target comes from swarm.admin.json / the local cache.
     @app.api_route("/api/{path:path}", methods=["GET", "POST"])
     async def proxy_api(path: str, request: Request) -> Response:
-        admin = setup_mod.read_swarm_admin()
-        base = admin.get("server_url") or setup_mod.resolve_server_url()
+        admin = hostadmin.read_swarm_admin()
+        base = admin.get("server_url") or hostadmin.resolve_server_url()
         if not base:
             return JSONResponse(
                 {"error": "no swarm server_url known locally — create/join a swarm first"},

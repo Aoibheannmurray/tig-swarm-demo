@@ -16,7 +16,7 @@
 
   // Public repo contributors clone to run a local fleet. Hosts running a
   // fork should update this to point at theirs.
-  const REPO_URL = "https://github.com/Aoibheannmurray/tig-swarm-demo";
+  const REPO_URL = "https://github.com/tig-foundation/prometheus-early-beta";
 
   const CREDS_KEY = "prom_join_creds";
 
@@ -72,11 +72,10 @@
   // scrubbed on load) so it can be baked into copy-paste commands. Raw base is
   // derived from REPO_URL so a fork's own bootstrap URL works.
   const RAW_BASE = REPO_URL.replace("github.com", "raw.githubusercontent.com");
-  // TEMP: the bootstrap + fleet code live on staging until it merges to
-  // main. When merged, set BOOTSTRAP_REF back to "main" (the branch-pinning
-  // below then falls away automatically) and drop the /staging raw URL in
-  // the README.
-  const BOOTSTRAP_REF: string = "staging";
+  // The public repo's main branch carries the bootstrap + fleet code, so the
+  // commands below need no branch pinning (set this to a branch name to pin
+  // both the clone and the raw bootstrap URL to it).
+  const BOOTSTRAP_REF: string = "main";
   const joinLink = () => buildJoinLink(serverUrl(), username, password);
 
   // ── Per-OS commands ──
@@ -110,8 +109,8 @@
       : `git clone -b ${BOOTSTRAP_REF} ${REPO_URL}.git`;
   const cloneCmd = () =>
     isWin
-      ? `${cloneArgs()}\ncd tig-swarm-demo`
-      : `${cloneArgs()} && cd tig-swarm-demo`;
+      ? `${cloneArgs()}\ncd prometheus-early-beta`
+      : `${cloneArgs()} && cd prometheus-early-beta`;
   const runJoinCmd = () => `${pyBin} run.py --join "${joinLink()}" --ui`;
 
   // How to get to a terminal in the first place — the step the page used to

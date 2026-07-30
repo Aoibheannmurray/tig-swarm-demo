@@ -39,11 +39,12 @@ def _generate_invite_slug(taken: set[str]) -> str:
     return f"contrib-{random.randint(10000, 99999)}"
 
 
-# Where contributors' machines fetch the bootstrap + code from. TEMP: pinned
-# to this branch until it merges to main — then set _BOOTSTRAP_REF = "main".
-# Keep in sync with BOOTSTRAP_REF in control-ui/src/join/App.svelte.
-_BOOTSTRAP_REF = "server-onboarding"
-_RAW_BASE = "https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo"
+# Where contributors' machines fetch the bootstrap + code from: the public
+# repo's main branch. Set to a branch name to pin both the raw bootstrap URL
+# and the clone to it. Keep in sync with BOOTSTRAP_REF in
+# control-ui/src/join/App.svelte.
+_BOOTSTRAP_REF = "main"
+_RAW_BASE = "https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta"
 
 
 def build_join_command(join_link: str) -> str:
@@ -149,7 +150,7 @@ def run_invite(username: str | None) -> int:
     join_link = build_join_link(server_url, username, derived)
     if join_link:
         print()
-        print(f"  Join link (share this one line):")
+        print("  Join link (share this one line):")
         print(f"    {join_link}")
         print()
         print("  It opens the swarm's join page, which hands them a one-paste")
@@ -268,7 +269,7 @@ def run_revoke(username: str) -> int:
     print(f"  Agents stopped: {result.get('agents_invalidated', 0)}")
     if runner_teardown is not None:
         print(f"  Hosted fleet:   {runner_teardown}")
-    print(f"  Future register attempts under this username will be rejected.")
+    print("  Future register attempts under this username will be rejected.")
     print()
     return 0
 
@@ -365,7 +366,7 @@ def run_list() -> int:
     if not rows:
         print()
         print("  No contributors registered yet.")
-        print(f"  Issue an invite with:  python setup.py invite [<username>]")
+        print("  Issue an invite with:  python setup.py invite [<username>]")
         print()
         return 0
 

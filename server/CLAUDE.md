@@ -25,6 +25,11 @@ deployment per swarm** — no multi-tenancy.
   BEGIN IMMEDIATE transaction on an injected conn; called from the
   /api/state agent view.
 - `db.py` — SQLite schema/access; config applied from env on first boot.
+  Schema changes are numbered `Migration`s recorded in the `schema_version`
+  table (see `MIGRATIONS`): append with the next number, **never renumber or
+  edit a released one** — deployed DBs record it as applied and won't re-run
+  it. Recurring boot-time invariants (e.g. the authored-seed dedup) are
+  deliberately *not* migrations; they run every boot.
 - `models.py` / `api_models.py` — internal and API data shapes.
 - `challenges.py`, `tiers.py`, `dedup.py`, `names.py`, `ws_events.py` — domain
   logic. `entrypoint.sh` — container start.

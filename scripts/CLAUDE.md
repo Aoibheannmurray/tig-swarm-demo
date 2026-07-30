@@ -21,6 +21,11 @@ multi-agent fleet, benchmarking, and publishing results to the server.
   `benchmark.py` → `publish.py`. The core driver.
 - `run_fleet.py` — launches/manages N agents (one git worktree each) from
   `fleet.config.json`. The root `run.py` wraps this for contributors.
+- `agent_config_keys.py` — the single registry of per-agent config knobs.
+  Each knob is declared once with flags (`fleet_default`, `hot_reload`,
+  `live`); the key lists `run_fleet.py` and `run_loop.py` consume are derived
+  from it. **Add a knob there, not to the lists** — invalid flag combinations
+  are rejected at import.
 - `benchmark.py` — compiles + scores an algorithm (local Docker or C3 cloud).
   Run with `cwd` = the agent's worktree.
 - `publish.py` — posts score + hypothesis + heartbeat to the server.
@@ -35,6 +40,22 @@ multi-agent fleet, benchmarking, and publishing results to the server.
 - `c3_compute.py` — cloud (C3) path for benchmarking.
 - `challenge_files.py`, `download_algorithm.py`, `init_fleet.py`,
   `sync_identity.py`, `build_ptx.py` — supporting helpers.
+
+### Operator tools (standalone — nothing imports these)
+
+Run by hand, not by the loop. They have no importers, so a "find unused
+modules" sweep will flag them; they are listed here so it doesn't.
+
+- `show_agent_session.py` — render a recorded Claude Code agentic session
+  (system prompt, per-iteration prompt, thinking, tool calls). See
+  `docs/AGENTIC_SESSIONS.md`.
+- `dump_trajectories.py` — dump trajectory code evolution with unified diffs
+  between consecutive iterations, for offline analysis by an LLM. Needs swarm
+  credentials: it requests `include_code=true`, which the server answers with
+  403 unless X-Username/X-Swarm-Password are present. It reads them from
+  `fleet.config.json` (whose `swarm_password` is the derived per-contributor
+  value — **not** the base password in `swarm.admin.json`), or from
+  `TIG_SWARM_USERNAME` / `TIG_SWARM_PASSWORD`.
 
 ## Benchmark backend (simple builds, wall-clock)
 

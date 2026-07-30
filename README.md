@@ -8,9 +8,19 @@ See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for internals.
 
 ## Status & support
 
-This project was built largely with Claude Code and is released as-is: no
-support is provided and things may break — use at your own risk. Issues are
-tracked but not triaged on any schedule; contributions are welcome via PR.
+This project was built largely with Claude Code and is released as-is: things
+may break — use at your own risk. What that means in practice:
+
+- **Bug reports welcome** — file an issue with the failing command, its
+  output, and your platform. We fix bugs on a best-effort basis, on no
+  schedule. Security problems go through [SECURITY.md](./SECURITY.md)
+  (privately), never a public issue.
+- **Building on it is the intended use.** Fork it, point it at your own
+  challenges, replace pieces — the swarm mechanics are GPLv3
+  ([license details](#license)). Small bug-fix PRs are welcome; large
+  features are better carried in your fork
+  (see [CONTRIBUTING.md](./CONTRIBUTING.md) for why, and for dev setup).
+- There is no support channel; the README and [docs/](./docs/) are the docs.
 
 ## Choose your role
 
@@ -27,8 +37,8 @@ the Railway CLI if it is not already available.
 Clone the repository, then start the setup UI:
 
 ```bash
-git clone https://github.com/Aoibheannmurray/tig-swarm-demo.git
-cd tig-swarm-demo
+git clone https://github.com/tig-foundation/prometheus-early-beta.git
+cd prometheus-early-beta
 python3 run.py --ui
 ```
 
@@ -90,13 +100,13 @@ launch your fleet. You do not need to clone the repository manually.
 
 ```bash
 # macOS / Linux (needs Python 3 + git)
-curl -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py \
+curl -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py \
   | python3 - join "<your-join-link>" --ui
 ```
 
 ```powershell
 # Windows (PowerShell or cmd; try `py` if `python` isn't recognized)
-curl.exe -fsSL https://raw.githubusercontent.com/Aoibheannmurray/tig-swarm-demo/main/deploy/get-swarm.py | python - join "<your-join-link>" --ui
+curl.exe -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py | python - join "<your-join-link>" --ui
 ```
 
 ### Setup UI from an existing clone
@@ -140,6 +150,11 @@ After setup, you can change agents, providers, models, compute options, and
 other settings by editing your local `fleet.config.json`. Use
 [`fleet.config.example.json`](./fleet.config.example.json) as a reference. The
 setup UI can also make these changes for you.
+
+Many settings **hot-reload**: edit `fleet.config.json` while the fleet runs
+and the change lands on each agent's next iteration, no restart — `role`,
+`seeded_start`, the HPO and cleaner knobs, and the C3 warm-image settings.
+Provider, model, and compute are read at startup and need a fleet restart.
 
 ### Tacit knowledge
 
@@ -227,3 +242,16 @@ in the setup UI or export it as `C3_API_KEY`.
 
 See [C3 cloud compute](./docs/C3.md) for CLI installation, manual configuration,
 hardware options, and details of how remote benchmark jobs run.
+
+## License
+
+The swarm — orchestration (`scripts/`, `run.py`), coordination server
+(`server/`), web UIs (`dashboard/`, `control-ui/`), hosted runner (`runner/`),
+and host-admin CLI (`setup.py` / `hostadmin/`) — is free software under the
+**GNU GPLv3** ([LICENSE](./LICENSE)).
+
+The TIG challenge and solver code (`src/`, `initial_algorithms/`) is the example
+workload the swarm ships with; it derives from the
+[tig-monorepo](https://github.com/tig-foundation/tig-monorepo) and remains under
+the TIG Foundation's license agreements — see
+[LICENSE-TIG.md](./LICENSE-TIG.md).

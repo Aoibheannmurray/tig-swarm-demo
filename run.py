@@ -37,7 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 import init_fleet
 import run_fleet
-import setup as setup_mod
+import hostadmin
 
 
 def _ensure_ui_deps() -> None:
@@ -311,12 +311,12 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
         src, _ = run_fleet._resolve_tacit_source(agent, fleet_tacit)
         by_source.setdefault(src, []).append(agent.get("name", "?"))
 
-    stagnation_threshold = setup_mod.read_swarm_admin().get(
+    stagnation_threshold = hostadmin.read_swarm_admin().get(
         "stagnation_threshold", 2,
     )
 
     any_existing = any(
-        setup_mod._has_user_content(p) for p in by_source.keys()
+        hostadmin._has_user_content(p) for p in by_source.keys()
     )
 
     if any_existing:
@@ -341,7 +341,7 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
         if not tk_path.exists():
             tk_path.parent.mkdir(parents=True, exist_ok=True)
             tk_path.write_text(
-                setup_mod.tacit_header(stagnation_threshold)
+                hostadmin.tacit_header(stagnation_threshold)
                 + "- (replace this with your own hint, or run setup again)\n",
                 encoding="utf-8",
             )
@@ -351,7 +351,7 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
                 shown = tk_path
             print(f"  created {shown} (gitignored)")
 
-        setup_mod.gather_tacit_knowledge(
+        hostadmin.gather_tacit_knowledge(
             tk_path, stagnation_threshold, append=True,
         )
 

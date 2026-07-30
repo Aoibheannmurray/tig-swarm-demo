@@ -54,11 +54,10 @@ hints/inspiration across the swarm.
   and `railway.toml` at root.
 - `setup.py` is the host-admin CLI, **not** Python packaging — don't `pip
   install` it. It runs as `python setup.py <subcommand>` and is called by
-  subprocess from `scripts/run_loop.py` / `scripts/run_fleet.py`. Its
-  implementation lives in the root-level `hostadmin/` package; `setup.py`
-  stays the import surface (`import setup` re-exports every helper, and
-  `setattr(setup, name, stub)` forwards into `hostadmin/` — tests rely on
-  this), so keep both at root: swarm agents run `python setup.py sync`
+  subprocess from `scripts/run_loop.py` / `scripts/run_fleet.py`. It is a
+  CLI **only**: embedders (`run.py`, `control_server.py`, tests) `import
+  hostadmin`, whose `__init__.py` re-exports the public surface explicitly
+  (`__all__`). Keep both at root: swarm agents run `python setup.py sync`
   inside git worktrees, where root-level tracked files are always present.
 - `src/lib.rs`'s `extern crate self as tig_challenges;` is **load-bearing**, not
   cruft: it lets algorithms import `tig_challenges::<ch>::*` so one file compiles

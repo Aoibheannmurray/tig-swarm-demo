@@ -168,33 +168,12 @@ def _validate_entry(entry_code: str, config: dict, files) -> str | None:
 # into the worktree's agent.config.json live, and the next iteration picks them
 # up without a fleet restart.
 #
-# Adding a key here is only a quarter of the wiring. It must also be in three
-# lists in run_fleet, or it silently does nothing:
-#   _AGENT_CONFIG_KEYS       — or it never reaches the worktree at spawn
-#   _HOT_RELOAD_KEYS         — or it reaches the worktree, but only on restart
-#   _FLEET_WIDE_DEFAULT_KEYS — or a top-level fleet.config.json setting is
-#                              ignored and it has to be repeated per agent
-# scripts/test_fleet_hot_reload.py asserts all four stay in step, in both
-# directions. It is the only thing standing between a new knob and a config
-# field that reads as supported and quietly is not.
-#
-# Do NOT add keys that are read once at startup (provider, model, api_base,
-# compute, c3_hardware, c3_max_parallel_jobs, log_prompts, detailed_prompts).
-# Propagating those would rewrite the file and log a reassuring "changed" line
-# while the running process kept using its startup value — worse than the
-# honest "restart required", because it looks like it worked.
-LIVE_CONFIG_KEYS = (
-    "hpo_min_improvements", "hpo_first_tune_improvements",
-    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
-    "cleaner_trigger_chars", "cleaner_target_pct",
-    "cleaner_score_delta_pct", "cleaner_cooldown_iters",
-    "no_benchmark_freeze_limit",
-    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
-    # Per-agent write gates for the tacit file and the failed-attempts
-    # archive (tacit_write_enabled / failed_attempts_enabled read them
-    # off `config`).
-    "tacit_write", "failed_attempts_write",
-)
+# Declared in scripts/agent_config_keys.py, which is the single source of truth
+# for every per-agent knob. Adding one there with `live=True` wires all four
+# lists at once — this one plus run_fleet's three. It used to take four
+# hand-edits in two modules to add a knob, and getting the subset wrong failed
+# silently in both directions (see that module's header).
+from agent_config_keys import LIVE_CONFIG_KEYS
 
 
 def _normalize_role(value: object) -> str:
@@ -876,7 +855,7 @@ def _generate_code(
             print(f"  [LLM] Validation failed: {violation}")
             continue
 
-        print(f"  [LLM] Code validated OK")
+        print("  [LLM] Code validated OK")
         return (ensure_common_imports(parsed), parsed_kernel,
                 input_tokens, output_tokens)
 
@@ -1041,8 +1020,8 @@ def _benchmark_with_compile_fix(
         if is_infra:
             # One line only — the caller's "[BENCH] FAILED — build_err: …"
             # already shows the error head; printing it here too doubled it.
-            print(f"  [BENCH] Infrastructure error (not a code problem) — "
-                  f"skipping the LLM compile fix")
+            print("  [BENCH] Infrastructure error (not a code problem) — "
+                  "skipping the LLM compile fix")
             return None, build_err, code_changed, input_tokens, output_tokens
 
         if attempt >= max_retries:
@@ -1355,7 +1334,7 @@ def _maybe_tune_hyperparameters(
     tuned_score = tuned_bench.get("score")
     tuned_feasible = bool(tuned_bench.get("feasible", False))
     if tuned_score is None or not tuned_feasible:
-        print(f"  [HPO] tuned result infeasible/missing on the test seed "
+        print("  [HPO] tuned result infeasible/missing on the test seed "
               "— restoring, using default")
         files.write_files(original_map)
         return default_bench, None, in_tok, out_tok
@@ -1443,7 +1422,7 @@ def _fix_runtime_errors(
         bench_result, build_err = run_benchmark(args, config, server)
 
         if bench_result is None:
-            print(f"  Runtime fix caused compile error — asking LLM to fix ...")
+            print("  Runtime fix caused compile error — asking LLM to fix ...")
             ok, it, ot = _try_compile_fix(
                 args, model, api_key, config,
                 files, build_err,
@@ -2449,7 +2428,7 @@ def main() -> int:
             files.write_files(best_file_map)
             print(f"  [FILES] {files.describe_write(best_code, best_kernel)}")
             if files.is_gpu and not best_kernel:
-                print(f"  [FILES] No kernel code from server — using local kernels.cu")
+                print("  [FILES] No kernel code from server — using local kernels.cu")
 
         # Adopted an unbenchmarked seed (admin/mainnet seed deposited with no
         # score): benchmark it UNCHANGED first so the trajectory floor is the
@@ -2466,7 +2445,7 @@ def main() -> int:
             seed_bench, seed_err = run_benchmark(args, config, server)
             if seed_bench is None:
                 print(f"  [SEED-BENCH] FAILED — {seed_err[:300]}")
-                print(f"  [SEED-BENCH] Could not score the seed; proceeding to a normal iteration.")
+                print("  [SEED-BENCH] Could not score the seed; proceeding to a normal iteration.")
             else:
                 _print_bench_result(seed_bench)
                 seed_hyp = {
@@ -2593,7 +2572,7 @@ def main() -> int:
 
             if bench is None:
                 print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
-                print(f"  [BENCH] Restoring previous code and continuing")
+                print("  [BENCH] Restoring previous code and continuing")
                 if best_code:
                     files.write(best_code, best_kernel)
                 _note_bench_failure()
@@ -2679,7 +2658,7 @@ def main() -> int:
                     iter_output_tokens += gen_out
                     consecutive_sr_skips = 0
                 if not code:
-                    print(f"  [SKIP] No valid code produced — skipping to next iteration")
+                    print("  [SKIP] No valid code produced — skipping to next iteration")
                     _note_bench_failure()
                     continue
             else:
@@ -2721,7 +2700,7 @@ def main() -> int:
 
             if bench is None:
                 print(f"  [BENCH] FAILED — build_err: {build_err[:300]}")
-                print(f"  [BENCH] Restoring previous code and continuing")
+                print("  [BENCH] Restoring previous code and continuing")
                 if best_code:
                     files.write(best_code, best_kernel)
                 _note_bench_failure()
@@ -2741,7 +2720,7 @@ def main() -> int:
                 code_changed = code_changed or rt_changed
 
             if bench is None:
-                print(f"  [BENCH] Benchmark failed after runtime fix — skipping iteration")
+                print("  [BENCH] Benchmark failed after runtime fix — skipping iteration")
                 _note_bench_failure()
                 continue
 
@@ -2820,7 +2799,7 @@ def main() -> int:
                   f"est=unknown (no price entry for {model!r})")
         else:
             print(f"  [TOKENS] in={iter_input_tokens:,}  out={iter_output_tokens:,}  est=${iter_cost:.4f}")
-        print(f"  [PUBLISH] Publishing results to server…")
+        print("  [PUBLISH] Publishing results to server…")
         is_new_best = False
         try:
             result = publish_results(
@@ -2837,7 +2816,7 @@ def main() -> int:
             if is_new_best:
                 print("  [PUBLISH] ** NEW PERSONAL BEST! **")
             else:
-                print(f"  [PUBLISH] Recorded (not a new best)")
+                print("  [PUBLISH] Recorded (not a new best)")
         except Exception as e:
             # Surface the server's validation detail: a 422 body names the
             # exact field the schema rejected (e.g. "title too long"), which

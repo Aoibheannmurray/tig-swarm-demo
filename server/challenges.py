@@ -16,7 +16,7 @@ not a quietly-broken endpoint at runtime.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 
@@ -36,6 +36,11 @@ class ChallengeDef:
     is_gpu: bool = False
 
 
+# `default_timeout` values are calibrated against the current mainnet winner
+# per challenge, run at the hyperparameters mainnet benchmarkers actually use
+# (max over all five tracks, ~1.5-2x headroom). CPU challenges timed natively
+# on an 8-core host, GPU challenges on a C3 L40 via the mainnet harness.
+# Measurement data: reports/timeout_calibration_2026-07-29.md.
 CHALLENGES: dict[str, ChallengeDef] = {
     "satisfiability": ChallengeDef(
         name="satisfiability",
@@ -51,7 +56,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=300,
+        default_timeout=420,  # sat_imp_v4: max 408s (n_vars=10000)
     ),
     "vehicle_routing": ChallengeDef(
         name="vehicle_routing",
@@ -68,7 +73,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "constraint_relaxation", "decomposition", "hybrid",
             "data_structure", "other",
         ),
-        default_timeout=260,
+        default_timeout=200,  # hgs_advance: max 136s (n_nodes=1000)
     ),
     "knapsack": ChallengeDef(
         name="knapsack",
@@ -84,7 +89,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "dp", "branch_and_bound", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
+        default_timeout=30,  # superfast_knap_v1: max 15.6s (n_items=5000,budget=25)
     ),
     "job_scheduling": ChallengeDef(
         name="job_scheduling",
@@ -101,7 +106,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "constraint_relaxation", "decomposition", "hybrid",
             "data_structure", "other",
         ),
-        default_timeout=260,
+        default_timeout=90,  # adaptive_js_v9: max 57s (s=job_shop)
     ),
     "energy_arbitrage": ChallengeDef(
         name="energy_arbitrage",
@@ -117,6 +122,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "dp", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
+        default_timeout=45,  # titan_v6: max 21s (s=capstone)
     ),
     "hypergraph": ChallengeDef(
         name="hypergraph",
@@ -132,7 +138,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
+        default_timeout=180,  # sigma_freud_v8: max 137s (n_h_edges=100000)
         is_gpu=True,
     ),
     "neuralnet_optimizer": ChallengeDef(
@@ -150,7 +156,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "lookahead", "second_order", "kernel_optimization", "hyperparameters",
             "code_optimization", "hybrid", "other",
         ),
-        default_timeout=120,
+        default_timeout=90,  # prometheus_aidda: max 46s (n_hidden=18)
         is_gpu=True,
     ),
     "vector_search": ChallengeDef(
@@ -167,7 +173,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
+        default_timeout=30,  # there_v10: max 0.7s/nonce; floor for GPU warmup
         is_gpu=True,
     ),
 }

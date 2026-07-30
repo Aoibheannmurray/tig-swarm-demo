@@ -50,39 +50,19 @@ from __future__ import annotations
 
 import argparse
 import sys
-import types
 
 # hostadmin/ sits next to this file at the repo root, so it exists in every
 # git worktree the swarm spawns (`python setup.py sync` runs inside them) and
 # resolves via sys.path[0] whether this file is run as a script or imported
 # with the root on sys.path.
-from hostadmin import challenges_bridge as _challenges_bridge
-from hostadmin import config_io as _config_io
-from hostadmin import contributors as _contributors
-from hostadmin import http as _http
-from hostadmin import prompting as _prompting
-from hostadmin import railway as _railway
-from hostadmin import swarm as _swarm
-from hostadmin import tacit as _tacit
-
+#
+# Only the command entry points are imported here — this file dispatches, it
+# does not re-export. Embedders import `hostadmin` directly.
 from hostadmin.challenges_bridge import get_challenges
 from hostadmin.contributors import run_invite, run_list, run_revoke, run_set_runner
 from hostadmin.railway import RailwayError
 from hostadmin.swarm import run_create, run_create_runner, run_switch, run_sync
 from hostadmin.tacit import run_tacit
-
-# Attribute delegation order for the back-compat surface below. swarm first:
-# it re-imports most cross-module helpers, so it holds the broadest namespace.
-_COMPAT_MODULES = (
-    _swarm,
-    _railway,
-    _tacit,
-    _contributors,
-    _config_io,
-    _challenges_bridge,
-    _http,
-    _prompting,
-)
 
 
 # ── Entrypoint ──────────────────────────────────────────────────────
@@ -276,46 +256,15 @@ def main() -> int:
     return 1
 
 
-# ── Back-compat import surface ───────────────────────────────────────
+# `setup.py` is the CLI, and only the CLI. Embedders (run.py,
+# control_server.py, the tests) `import hostadmin` and get an explicit,
+# greppable re-export surface — see hostadmin/__init__.py.
 #
-# `setup` used to be a single 2,500-line module holding every helper. After
-# the split into hostadmin/, this module class keeps two contracts alive
-# without any caller changing:
-#
-#   * Attribute lookup — `setup.read_swarm_admin`, `setup.create_swarm`,
-#     `setup._railway_run`, … resolve from whichever hostadmin submodule now
-#     defines them, and the lazy names (`setup.CHALLENGES` /
-#     `CPU_CHALLENGES` / `GPU_CHALLENGES` / `_CHALLENGE_REGISTRY`, used by
-#     control_server.py and tests) resolve through
-#     hostadmin.challenges_bridge's PEP 562 loader, preserving the clean
-#     degradation when server/ is absent from a trimmed clone.
-#
-#   * setattr patching — scripts/test_fleet_core.py monkeypatches
-#     side-effect helpers via `setattr(setup, name, stub)` and expects
-#     `setup.create_swarm` to see the stubs. A write here is forwarded into
-#     every hostadmin submodule whose namespace holds that name, so the
-#     late-bound lookups inside hostadmin (e.g. create_swarm calling
-#     `_railway_provision`) see it too.
-
-
-class _SetupModule(types.ModuleType):
-    def __getattr__(self, name: str):
-        for mod in _COMPAT_MODULES:
-            try:
-                return getattr(mod, name)
-            except AttributeError:
-                continue
-        raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
-
-    def __setattr__(self, name: str, value) -> None:
-        super().__setattr__(name, value)
-        for mod in _COMPAT_MODULES:
-            if name in vars(mod):
-                setattr(mod, name, value)
-
-
-sys.modules[__name__].__class__ = _SetupModule
-
+# This used to be a `types.ModuleType` subclass whose __getattr__ searched
+# every hostadmin submodule and whose __setattr__ forwarded writes back into
+# them, so that `setattr(setup, name, stub)` in one test fanned out invisibly.
+# That gave `import setup` attribute semantics unlike any other module here,
+# to serve a need only a test had. The fan-out now lives in that test.
 
 if __name__ == "__main__":
     sys.exit(main())
