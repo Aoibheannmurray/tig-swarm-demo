@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { localApi } from "../lib/api";
-  import { ensureStream } from "../lib/stream";
+  import { ensureStream, fleetStatus } from "../lib/stream";
 
   // Direct editor for the actual fleet.config.json — shows the current values
   // and saves them verbatim (preserving fields like api_base / detailed_prompts
@@ -16,6 +16,66 @@
     onStarted = () => {},
   }: { onBack?: () => void; onStarted?: () => void } = $props();
   let config: any = $state(null);
+
+  // ── Running fleet: hot reload vs restart ──
+  //
+  // A RUNNING fleet re-syncs the keys below from fleet.config.json into each
+  // agent's worktree every ~5s; agents apply them on their next iteration —
+  // so those edits only need "Save". Everything else (provider, model,
+  // compute, the agent list itself…) is read once at launch and needs a
+  // restart. This editor says which of the two the contributor's edits need,
+  // instead of leaving them to guess whether "Save" did anything.
+  //
+  // Mirrors _HOT_RELOAD_KEYS in scripts/run_fleet.py (the enforcing list —
+  // drift here only mis-labels the hint, it can't break the fleet).
+  const HOT_RELOAD_KEYS = new Set([
+    "role", "seeded_start",
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
+    "cleaner_trigger_chars", "cleaner_target_pct",
+    "cleaner_score_delta_pct", "cleaner_cooldown_iters",
+    "no_benchmark_freeze_limit",
+    "c3_warm_images", "c3_warm_image", "tig_dockerhub",
+    "tacit_write", "failed_attempts_write",
+  ]);
+  const running = $derived($fleetStatus.running);
+  // The config as this editor found it — the best local proxy for what the
+  // running fleet launched with. Reset only when a fleet (re)starts from
+  // here, NOT on save: a restart-needing edit stays flagged across saves.
+  let baseline: any = $state(null);
+
+  function diffRestartKeys(before: any, after: any): string[] {
+    const out: string[] = [];
+    for (const k of ["server_url", "username", "swarm_password"]) {
+      if ((before?.[k] ?? "") !== (after?.[k] ?? "")) out.push(k);
+    }
+    const b = before?.agents ?? [];
+    const a = after?.agents ?? [];
+    if (b.length !== a.length) {
+      out.push("agents added/removed");
+      return out;
+    }
+    a.forEach((agent: any, i: number) => {
+      const prev = b[i] ?? {};
+      for (const k of new Set([...Object.keys(prev), ...Object.keys(agent)])) {
+        if (HOT_RELOAD_KEYS.has(k)) continue;
+        if (JSON.stringify(prev[k]) !== JSON.stringify(agent[k])) {
+          out.push(`${agent.name || `agent ${i + 1}`}: ${k}`);
+        }
+      }
+    });
+    return out;
+  }
+  // Edits the running fleet cannot pick up live (empty when stopped: the next
+  // start reads everything fresh anyway).
+  const restartChanges = $derived.by(() => {
+    if (!running || baseline === null || config === null) return [];
+    let current = config;
+    if (rawMode) {
+      try { current = JSON.parse(rawText); } catch { return []; }
+    }
+    return diffRestartKeys(baseline, current);
+  });
   let providers: any[] = $state([]);
   let c3hw: any[] = $state([]);
   let rawMode = $state(false);
@@ -185,6 +245,7 @@
       const fc = await localApi.getFleetConfig();
       // Deep clone so edits don't mutate anything until Save.
       config = fc.exists && fc.config ? structuredClone(fc.config) : blankConfig();
+      baseline = fc.exists && fc.config ? structuredClone(fc.config) : blankConfig();
       // Warm the model dropdowns for the providers already in use.
       for (const a of config.agents ?? []) loadModels(setupKeyOf(a), a);
     } catch (e: any) {
@@ -249,6 +310,36 @@
     try {
       ensureStream();
       await localApi.fleetStart();
+      baseline = $state.snapshot(config); // the fleet now runs THIS config
+      onStarted();
+    } catch (e: any) {
+      error = e.message;
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Stop → start, for edits a running fleet can't hot-reload. Agents don't
+  // die instantly and FleetController.start refuses while the previous
+  // fleet's thread is still winding down, so a lone start() here would 409 —
+  // retry it for a bounded while instead of bouncing that message to the user.
+  async function saveAndRestart() {
+    await save();
+    if (!saved) return;
+    busy = true; error = "";
+    try {
+      ensureStream();
+      await localApi.fleetStop();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await localApi.fleetStart();
+          break;
+        } catch (e: any) {
+          if (attempt >= 30 || !/shutting down/i.test(e.message ?? "")) throw e;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+      baseline = $state.snapshot(config);
       onStarted();
     } catch (e: any) {
       error = e.message;
@@ -266,10 +357,47 @@
       {rawMode ? "Form view" : "Raw JSON"}
     </button>
   </div>
-  <p class="lede">Editing <code>fleet.config.json</code> directly. Changes take effect on the next fleet start.</p>
+  <p class="lede">
+    Editing <code>fleet.config.json</code> directly.
+    {#if running}
+      The fleet is <b>running</b> — hot-reloadable knobs apply to it within
+      seconds of saving; everything else needs a restart.
+    {:else}
+      Changes take effect on the next fleet start.
+    {/if}
+  </p>
+  <details class="applies">
+    <summary>ⓘ Which changes need a fleet restart?</summary>
+    <p>
+      <b>Save is enough</b> (a running fleet picks these up within seconds;
+      each agent applies them on its next iteration): role, starting point
+      (seed/stub), the HPO and cleaner knobs, the benchmark freeze limit,
+      the warm-image settings, and the tacit / failed-attempts write gates.
+      API keys are separate from the config and always apply immediately.
+    </p>
+    <p>
+      <b>Restart needed</b> (read once at fleet launch): provider, model,
+      compute (local/C3), C3 hardware, API endpoint and key env var, the
+      server/login details, and adding, removing or renaming agents. Use
+      <i>Save &amp; restart fleet</i> below — or Stop, then Start on the
+      fleet page.
+    </p>
+  </details>
 
   {#if error}<div class="banner err">{error}</div>{/if}
-  {#if saved}<div class="banner ok">Saved fleet.config.json.</div>{/if}
+  {#if saved}
+    <div class="banner ok">
+      Saved fleet.config.json.
+      {#if running}
+        {#if restartChanges.length}
+          The running fleet keeps its old {restartChanges.join(", ")} until
+          you restart it.
+        {:else}
+          The running fleet will pick the changes up within seconds.
+        {/if}
+      {/if}
+    </div>
+  {/if}
 
   {#if config === null}
     <p class="muted">Loading…</p>
@@ -406,16 +534,35 @@
     {/if}
   {/if}
 
+  {#if running && restartChanges.length}
+    <p class="restart-hint">
+      Needs a restart to apply: {restartChanges.join(", ")}.
+    </p>
+  {/if}
   <div class="actions">
     <button onclick={onBack}>← Back to fleet</button>
     <div class="spacer"></div>
-    <button disabled={busy || config === null} onclick={save}>{busy ? "Saving…" : "Save configuration"}</button>
-    <!-- The usual reason to edit the config is to change how the fleet runs,
-         so save-and-run is the primary action, not a second trip via the
-         fleet page. -->
-    <button class="primary" disabled={busy || config === null} onclick={saveAndStart}>
-      {busy ? "Working…" : "Save & start fleet ▶"}
-    </button>
+    {#if running}
+      <!-- Primary follows the edits: hot-reloadable-only → Save (the fleet
+           keeps running and picks them up); anything else → the restart that
+           those edits actually require. -->
+      <button class={restartChanges.length ? "" : "primary"}
+        disabled={busy || config === null} onclick={save}>
+        {busy ? "Saving…" : "Save — fleet keeps running"}
+      </button>
+      <button class={restartChanges.length ? "primary" : ""}
+        disabled={busy || config === null} onclick={saveAndRestart}>
+        {busy ? "Working…" : "Save & restart fleet ↻"}
+      </button>
+    {:else}
+      <button disabled={busy || config === null} onclick={save}>{busy ? "Saving…" : "Save configuration"}</button>
+      <!-- The usual reason to edit the config is to change how the fleet runs,
+           so save-and-run is the primary action, not a second trip via the
+           fleet page. -->
+      <button class="primary" disabled={busy || config === null} onclick={saveAndStart}>
+        {busy ? "Working…" : "Save & start fleet ▶"}
+      </button>
+    {/if}
   </div>
 </div>
 
@@ -431,5 +578,11 @@
   .endpoint { margin: 2px 0 0; font-size: 12px; }
   .linky { background: none; border: 0; padding: 2px 0 0; font-size: 12px;
            color: var(--ink-mid); text-decoration: underline; cursor: pointer; }
+  .applies { margin: 0 0 14px; font-size: 13px; color: var(--ink-mid); }
+  .applies summary { cursor: pointer; color: var(--ink-dim); font-size: 12.5px;
+                     user-select: none; }
+  .applies p { margin: 8px 0 0; line-height: 1.5; }
+  .restart-hint { margin: 0 0 8px; font-size: 12.5px; color: var(--ink-mid);
+                  text-align: right; }
   .raw { width: 100%; min-height: 360px; font-family: var(--mono); font-size: 12.5px; }
 </style>
