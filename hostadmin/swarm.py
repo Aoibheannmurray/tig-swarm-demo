@@ -808,9 +808,9 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
     stagnation_threshold = params["stagnation_threshold"]
     stagnation_limit = params["stagnation_limit"]
     hypothesis_recall_threshold = params["hypothesis_recall_threshold"]
-    # Failed-attempts archive (0/1). Defaults off for callers that don't
-    # set it (e.g. the control-ui host companion) — toggleable later from
-    # the Admin Console's Settings tab.
+    # Failed-attempts archive (0/1). Both the CLI wizard and the control-ui
+    # create form ask; defaults off for callers that don't set it —
+    # toggleable later from the Admin Console's Settings tab.
     failed_attempts_archive = 1 if params.get("failed_attempts_archive") else 0
     # HPO knobs default in for other callers (e.g. the control-ui companion)
     # that don't set them explicitly.

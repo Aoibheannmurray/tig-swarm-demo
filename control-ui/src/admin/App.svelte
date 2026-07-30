@@ -179,11 +179,12 @@
   // Re-deposits the host's AUTHORED seeds from the local clone's
   // initial_algorithms/<challenge>/seeds/ — an idempotent upsert only the
   // companion can perform, because those files live in the host's clone, not
-  // on the swarm server. So this card exists only when /local-api answers:
-  // served at the companion's /admin/ it does; opened hosted (?server=…) it
-  // doesn't, and the probe failing hides the card (the server-side "Seed from
-  // mainnet" above remains the tool there).
-  let localSeed: any = $state(null); // /local-api/swarm/seed_status, or null
+  // on the swarm server. The card always renders so a host looking for it
+  // finds an explanation rather than nothing; the controls themselves need
+  // /local-api to answer (served at the companion's /admin/ it does; opened
+  // hosted via ?server=… it doesn't) AND the companion to hold this swarm's
+  // admin credentials. undefined = probe not run yet, null = probe failed.
+  let localSeed: any = $state(undefined);
   let reseedMainnet = $state(false);
   let reseeding = $state(false);
   let reseedMsg = $state("");
@@ -620,18 +621,16 @@
         {#if poolMsg}<div class="banner ok" style="margin-top:14px">{poolMsg}</div>{/if}
       </div>
 
-      {#if localSeed?.configured}
-        <div class="card">
-          <h2>Re-seed authored pool</h2>
-          <p class="lede">
-            Re-deposits this clone's authored starter algorithms
-            (<code>initial_algorithms/&lt;challenge&gt;/seeds/</code>) into the
-            swarm's seed pool for every configured challenge — an idempotent
-            upsert, safe to press twice; an edited seed file replaces the pool
-            copy. Reach for it after a server DB reset, which empties the pool.
-            Shown only when this console is served by the local companion: the
-            seed files live in the host's clone, not on the swarm server.
-          </p>
+      <div class="card">
+        <h2>Re-seed authored pool</h2>
+        <p class="lede">
+          Re-deposits the host clone's authored starter algorithms
+          (<code>initial_algorithms/&lt;challenge&gt;/seeds/</code>) into the
+          swarm's seed pool for every configured challenge — an idempotent
+          upsert, safe to press twice; an edited seed file replaces the pool
+          copy. Reach for it after a server DB reset, which empties the pool.
+        </p>
+        {#if localSeed?.configured}
           {#if (localSeed.empty ?? []).length}
             <div class="banner warn">
               ⚠ Empty seed pool for {localSeed.empty.join(", ")} — agents fall
@@ -647,8 +646,29 @@
             </button>
           </div>
           {#if reseedMsg}<div class="banner ok" style="margin-top:14px">{reseedMsg}</div>{/if}
-        </div>
-      {/if}
+        {:else if localSeed === undefined}
+          <p class="lede muted">Checking for the local companion…</p>
+        {:else if localSeed === null}
+          <div class="banner warn">
+            Not available from here: the seed files live in the host's clone,
+            so re-seeding runs through the local companion — and this console
+            isn't being served by one (no <code>/local-api</code>). Open the
+            Admin Console from the companion on the host machine
+            (<code>python3 run.py --ui</code> →
+            <code>http://127.0.0.1:8787/admin/</code>), or use its Host page.
+            If you <i>are</i> on the companion, it predates the re-seed
+            endpoint — update the clone and restart it.
+          </div>
+        {:else}
+          <div class="banner warn">
+            The local companion answered, but it has no admin credentials for
+            a swarm (<code>swarm.admin.json</code> with a server URL and admin
+            key). Re-seeding runs from the machine that created the swarm —
+            that companion's clone holds both the credentials and the seed
+            files.
+          </div>
+        {/if}
+      </div>
 
       <div class="card">
         <div class="rowhead">
