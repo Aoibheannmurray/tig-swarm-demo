@@ -1053,6 +1053,14 @@ _QUEUE_GRACE_SECS = 1200
 # Stable substring so callers can tell this apart from a job that ran and
 # failed. Survives the shard-error grouping in run_benchmark_c3.
 _NEVER_STARTED_MARKER = "never left the C3 queue"
+# Stamped into every error whose cause is C3/pool infrastructure rather than
+# the algorithm. run_loop._benchmark_with_compile_fix routes on it: an error
+# carrying this marker must never spend an LLM "compile fix" on code that was
+# never the problem (seen live: a pool killed a job before benchmark.py wrote
+# a byte, the profile was correctly blocklisted — and the LLM was then asked
+# to "fix" the working algorithm). Keep it on the error's FIRST line: the
+# shard-error grouping keys on the body after line one.
+C3_INFRA_MARKER = "[C3 infra]"
 # C3's internal-error banner ("The job could not be completed. Contact C3
 # support with the error code below. Code: C3-JOB-…"). It shows up in the
 # job's LOGS while `c3 squeue` can go on reporting the job as RUNNING — the
@@ -1556,9 +1564,9 @@ def _run_one_c3_job_inner(
             _blocklist_profile_for_session(
                 profile, "it accepted a job and never ran it")
         return None, (
-            f"[C3] job {job_id} {_NEVER_STARTED_MARKER} on {profile} — the "
-            f"pool accepted the job but never gave it a machine. Cancelled it "
-            f"rather than waiting out the full timeout."
+            f"{C3_INFRA_MARKER} job {job_id} {_NEVER_STARTED_MARKER} on "
+            f"{profile} — the pool accepted the job but never gave it a "
+            f"machine. Cancelled it rather than waiting out the full timeout."
         )
     if status.startswith("infra_error"):
         code = status.partition(":")[2] or "unknown"
@@ -1574,9 +1582,9 @@ def _run_one_c3_job_inner(
             hint = (f"c3_hardware is pinned to {profile} — try a different "
                     f"profile, or switch this agent to local compute")
         return None, (
-            f"[C3] job {job_id} died with a C3 internal error on {profile} "
-            f"(support code {code}, for C3 support) while C3 still reported "
-            f"it running. Cancelled it; {hint}."
+            f"{C3_INFRA_MARKER} job {job_id} died with a C3 internal error "
+            f"on {profile} (support code {code}, for C3 support) while C3 "
+            f"still reported it running. Cancelled it; {hint}."
         )
     cancel_output = ""
     if status == "timeout" and _arg_value(args, "c3_cancel_on_timeout", False):
@@ -1593,8 +1601,8 @@ def _run_one_c3_job_inner(
         # (a cargo error would be sitting in bench_stderr). This is the shape
         # the old hardcoded blocklist existed for: a profile whose jobs die on
         # an internal C3 error, where even a trivial `nproc` job fails.
-        if (status == "failed" and not bench_stderr
-                and (cfg or {}).get("c3_hardware_auto")):
+        died_before_bench = status == "failed" and not bench_stderr
+        if died_before_bench and (cfg or {}).get("c3_hardware_auto"):
             _blocklist_profile_for_session(
                 str(cfg.get("c3_hardware") or "?"),
                 "its job died before the benchmark produced any output")
@@ -1614,7 +1622,16 @@ def _run_one_c3_job_inner(
             )
             if part
         )
-        return None, f"job {job_id} {status}\n{details}"
+        # Inline on the head line, not a line of its own: the shard-error
+        # grouping splits head from body at the first newline, and a
+        # prepended line would put the per-shard job ID into the body and
+        # break the dedup.
+        infra_note = (
+            f" — {C3_INFRA_MARKER} died before the benchmark produced any "
+            f"output (a C3/pool problem, not the algorithm)"
+            if died_before_bench else ""
+        )
+        return None, f"job {job_id} {status}{infra_note}\n{details}"
 
     bench, perr = _load_benchmark_json(stage)
     if bench is None:

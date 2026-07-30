@@ -57,6 +57,44 @@ def test_infra_errors_skip_the_fix():
     print("PASS infrastructure errors skip the LLM fix")
 
 
+def test_c3_infra_marker_skips_the_fix():
+    """The live misroute: a pool killed the job before benchmark.py wrote a
+    byte, the profile was correctly blocklisted — and the LLM was then asked
+    to 'fix' an algorithm that was never the problem. c3_compute now stamps
+    C3_INFRA_MARKER on every error it KNOWS is pool trouble."""
+    import c3_compute
+
+    # The two modules route on the same literal — pin them together.
+    src = open(run_loop.__file__, encoding="utf-8").read()
+    assert f'"{c3_compute.C3_INFRA_MARKER}"' in src, (
+        "run_loop's infra_markers no longer contain c3_compute.C3_INFRA_MARKER")
+
+    # Job died before the benchmark ran (empty bench stderr), single job…
+    assert not _route(
+        "job job_1784290854753_abc failed — [C3 infra] died before the "
+        "benchmark produced any output (a C3/pool problem, not the "
+        "algorithm)\nsome runner log noise")
+    # …and the same head line after run_benchmark_c3's shard grouping.
+    assert not _route(
+        "[C3] 1/1 shard job(s) failed:\n"
+        "  shard(s) 1: job job_1 failed — [C3 infra] died before the "
+        "benchmark produced any output (a C3/pool problem, not the "
+        "algorithm)\n  runner log noise")
+    # Queue-stall and internal-error shapes carry the same marker.
+    assert not _route(
+        "[C3 infra] job job_2 never left the C3 queue on cpu-d3-4vcpu-16gb — "
+        "the pool accepted the job but never gave it a machine.")
+    assert not _route(
+        "[C3 infra] job job_3 died with a C3 internal error on "
+        "cpu-d3-4vcpu-16gb (support code C3-JOB-531022R88XJW, for C3 "
+        "support) while C3 still reported it running.")
+    # But a job that failed WITH cargo output is still a code problem.
+    assert _route(
+        "job job_4 failed\n   Compiling tig-challenges v0.1.0 (/app)\n"
+        "error[E0425]: cannot find type `Value` in this scope")
+    print("PASS C3 infra-marked errors skip the LLM fix")
+
+
 def test_bare_numbers_inside_words_are_not_infra():
     # No rustc markers, but "50000"/"14013" must not read as HTTP 500/401.
     err = "job completed but benchmark.json was not found\nn_h_edges=50000 seed=14013"
@@ -108,6 +146,7 @@ def test_the_exact_failure_from_the_log_is_repaired():
 if __name__ == "__main__":
     test_compile_error_with_numeric_noise_gets_fixed()
     test_infra_errors_skip_the_fix()
+    test_c3_infra_marker_skips_the_fix()
     test_bare_numbers_inside_words_are_not_infra()
     test_compile_fix_reinserts_imports_the_model_drops()
     test_the_exact_failure_from_the_log_is_repaired()

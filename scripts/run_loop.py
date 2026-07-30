@@ -1027,7 +1027,13 @@ def _benchmark_with_compile_fix(
                          # account problem, not a Rust problem — without this
                          # every shard's 402 spent an LLM "compile fix" on
                          # code that compiles fine.
-                         "INSUFFICIENT_CREDITS"]
+                         "INSUFFICIENT_CREDITS",
+                         # c3_compute.C3_INFRA_MARKER — stamped on every error
+                         # it KNOWS is pool/machine trouble (job died before
+                         # the benchmark wrote a byte, never left the queue,
+                         # C3 internal error). Those used to fall through to
+                         # the LLM fix, which then "repaired" working code.
+                         "[C3 infra]"]
         is_infra = not is_code_error and (
             any(m in build_err for m in infra_markers)
             or re.search(r"\b(401|403|500)\b", build_err)

@@ -173,10 +173,15 @@ and must never cost a profile its place, or a few bad edits would blocklist
 the whole account). Both require the profile to have been auto-selected; a
 pinned `c3_hardware` is the contributor's call and is never second-guessed. A
 standing per-fleet list still lives in `c3_hardware_blocklist` /
-`TIG_C3_HW_BLOCKLIST`. Separately, `_note_c3_outcome` counts consecutive failed C3
-benchmarks and after `_C3_TROUBLE_STREAK` (3) prints how to switch the agent
-to local compute — printed, never folded into the error string, which feeds
-the compile-fix router and the LLM prompt. See
+`TIG_C3_HW_BLOCKLIST`. Every error c3_compute KNOWS is pool/machine trouble
+(died before the benchmark wrote a byte, never left the queue, C3 internal
+error) is stamped with `C3_INFRA_MARKER` on its first line, and
+`run_loop._benchmark_with_compile_fix` routes on it — without the stamp these
+fell through to the LLM compile fix, which then "repaired" working code
+(`scripts/test_compile_fix_routing.py`). Separately, `_note_c3_outcome`
+counts consecutive failed C3 benchmarks and after `_C3_TROUBLE_STREAK` (3)
+prints how to switch the agent to local compute — printed, never folded into
+the error string, which feeds the compile-fix router and the LLM prompt. See
 `scripts/test_c3_queue_stall.py`.
 
 **Rust toolchain & lint policy.** `rust-toolchain.toml` is the single source
