@@ -368,20 +368,34 @@
   </p>
   <details class="applies">
     <summary>ⓘ Which changes need a fleet restart?</summary>
-    <p>
-      <b>Save is enough</b> (a running fleet picks these up within seconds;
-      each agent applies them on its next iteration): role, starting point
-      (seed/stub), the HPO and cleaner knobs, the benchmark freeze limit,
-      the warm-image settings, and the tacit / failed-attempts write gates.
-      API keys are separate from the config and always apply immediately.
-    </p>
-    <p>
-      <b>Restart needed</b> (read once at fleet launch): provider, model,
-      compute (local/C3), C3 hardware, API endpoint and key env var, the
-      server/login details, and adding, removing or renaming agents. Use
-      <i>Save &amp; restart fleet</i> below — or Stop, then Start on the
-      fleet page.
-    </p>
+    {#if rawMode}
+      <!-- The advanced hot-reload keys only exist in this raw view, so this
+           is the one place that lists them. Mirrors HOT_RELOAD_KEYS above. -->
+      <p>
+        <b>Save is enough</b> — a running fleet picks these keys up within
+        seconds: <code>role</code>, <code>seeded_start</code>, the
+        <code>hpo_*</code> and <code>cleaner_*</code> knobs,
+        <code>no_benchmark_freeze_limit</code>, <code>c3_warm_images</code>,
+        <code>c3_warm_image</code>, <code>tig_dockerhub</code>,
+        <code>tacit_write</code> and <code>failed_attempts_write</code>.
+      </p>
+      <p>
+        <b>Every other key needs a restart</b> — use
+        <i>Save &amp; restart fleet</i> below.
+      </p>
+    {:else}
+      <p>
+        <b>Save is enough</b> for <i>Role</i> and <i>Starting point</i> — a
+        running fleet picks them up within seconds. API keys apply
+        immediately too (they're stored outside the config).
+      </p>
+      <p>
+        <b>Everything else here needs a restart</b>: server &amp; login,
+        provider, model, compute, C3 hardware, API endpoint and key env
+        var, and adding, removing or renaming agents. Use
+        <i>Save &amp; restart fleet</i> below.
+      </p>
+    {/if}
   </details>
 
   {#if error}<div class="banner err">{error}</div>{/if}
