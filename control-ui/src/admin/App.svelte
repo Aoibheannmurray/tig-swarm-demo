@@ -650,14 +650,12 @@
           <p class="lede muted">Checking for the local companion…</p>
         {:else if localSeed === null}
           <div class="banner warn">
-            Not available from here: the seed files live in the host's clone,
-            so re-seeding runs through the local companion — and this console
-            isn't being served by one (no <code>/local-api</code>). Open the
-            Admin Console from the companion on the host machine
-            (<code>python3 run.py --ui</code> →
-            <code>http://127.0.0.1:8787/admin/</code>), or use its Host page.
-            If you <i>are</i> on the companion, it predates the re-seed
-            endpoint — update the clone and restart it.
+            Re-seeding never works from this hosted console — the seed files
+            live in the host's clone, not on the swarm server. On the host
+            machine, run <code>python3 run.py --ui</code> and use the
+            <b>Host page</b> (its swarm card has the same seed-pool tools), or
+            the local Admin Console at
+            <code>http://127.0.0.1:8787/admin/</code> where this card works.
           </div>
         {:else}
           <div class="banner warn">
