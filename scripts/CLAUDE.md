@@ -117,18 +117,26 @@ jobs are one solver each, so sharding *is* their parallelism and they still
 fan out. Missing cost inputs (no `timeout`, `c3_shard_fixed_secs: 0`) fall back
 to using the whole cap.
 
-**Big CPU machines (auto).** With `c3_hardware` unset/`auto`, each CPU
-benchmark queries the C3 control plane and deploys on the best CPU profile
-actually available right now — highest availability tier, then most vCPUs
-(`_best_cpu_hardware`, cached ~10 min; falls back to `cpu-d3-4vcpu-16gb`
-offline). Inside the job, `bench_workers` (config, or env
-`TIG_BENCH_WORKERS`) sets concurrent solver processes; its default
-`max(4, cpu_count // 2)` rides whatever machine the job landed on (≈ physical
-cores — solvers are single-threaded + timeout-bounded, so oversubscribing SMT
-threads lowers scores). Set `c3_hardware` + `bench_workers` explicitly to pin
-hardware and contention instead. GPUs: one job = one GPU regardless of
-profile; parallelism comes from sharding (default `l40` — cheapest, highest
-availability).
+**Workload-sized CPU machines (auto).** With `c3_hardware` unset/`auto`, each
+CPU benchmark queries the C3 control plane and picks the available profile
+this benchmark is cheapest on (`_best_cpu_hardware`; the listing is cached
+~10 min, the pick is per-benchmark; falls back to `cpu-d3-4vcpu-16gb`
+offline). Availability tier is a reliability gate, not a ranking — LOW pools
+(which may never provision) are last-resort only. Among the rest the pick
+minimizes hourly rate × estimated job wall clock (shard fixed cost + solving
+waves at `timeout` each), with saved wall clock priced at the cheapest pool's
+rate — so a 5-instance benchmark lands on a 4-vCPU box instead of idling 91
+cores of a 96-vCPU one, while a 1000-instance benchmark still gets the big
+box. No instance count / `timeout` / rates → the old most-vCPUs ranking.
+Inside the job, `bench_workers` (config, or env `TIG_BENCH_WORKERS`) sets
+concurrent solver processes; its default `max(4, cpu_count // 2)` rides
+whatever machine the job landed on (≈ physical cores — solvers are
+single-threaded + timeout-bounded, so oversubscribing SMT threads lowers
+scores). An explicit `bench_workers` also feeds the sizing: it caps every
+profile's usable parallelism, so the pick collapses to the cheapest rate. Set
+`c3_hardware` + `bench_workers` explicitly to pin hardware and contention
+instead. GPUs: one job = one GPU regardless of profile; parallelism comes
+from sharding (default `l40` — cheapest, highest availability).
 
 **Pools that accept a job and never run it.** "Available" in the control-plane
 listing is not a promise of a machine: a pool can take the deploy and park the
@@ -141,6 +149,19 @@ now returns `never_started`: the job is cancelled (queued still means a chip
 held) and, if the profile was auto-selected, added to a **session** blocklist
 (`_session_hw_blocklist`) so the next benchmark picks a different box rather
 than re-picking the dead one all run.
+
+**Jobs C3 kills but keeps reporting as running.** A job can die on a
+C3-internal error ("The job could not be completed. Contact C3 support with
+the error code below. Code: C3-JOB-…") while `c3 squeue` goes on reporting it
+RUNNING — no terminal status ever arrives, so polling alone would watch the
+corpse until the walltime-derived timeout with the swarm convinced the job is
+fine. The banner only ever appears in the job's **logs**, so `_poll_c3_job`
+samples `c3 logs` every few polls (~1 min) for it (`_support_error_code`). A
+hit returns `infra_error:<code>`: the job is cancelled (C3 still counts it
+against the plan cap), an auto-selected profile is session-blocklisted so the
+next benchmark tries different hardware, and the error names the support code.
+If C3 stays broken, the `_note_c3_outcome` failure streak (below) prints the
+switch-to-local-compute advice.
 
 Nothing ships blocklisted (`_DEFAULT_HW_BLOCKLIST` is empty): a hardcoded list
 goes stale in both directions — it keeps avoiding pools C3 has fixed and knows
