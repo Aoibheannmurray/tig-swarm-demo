@@ -2,10 +2,10 @@
 blank_issues_enabled: true
 contact_links:
   - name: Feature ideas & building on this project
-    url: https://github.com/tig-foundation/prometheus-early-beta/blob/main/CONTRIBUTING.md#what-to-expect-from-maintenance
+    url: https://github.com/tig-foundation/prometheus-swarm/blob/main/CONTRIBUTING.md#what-to-expect-from-maintenance
     about: >
       Features and large changes are best carried in a fork — the code is
       GPLv3 precisely so you don't need to wait for us. Read this first.
   - name: Security vulnerabilities (private)
-    url: https://github.com/tig-foundation/prometheus-early-beta/security/advisories/new
+    url: https://github.com/tig-foundation/prometheus-swarm/security/advisories/new
     about: Never open a public issue for a security problem — report it here.

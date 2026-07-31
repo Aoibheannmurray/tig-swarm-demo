@@ -15,7 +15,7 @@
 
   // Public repo contributors clone to run a local fleet. Hosts running a
   // fork should update this to point at theirs.
-  const REPO_URL = "https://github.com/tig-foundation/prometheus-early-beta";
+  const REPO_URL = "https://github.com/tig-foundation/prometheus-swarm";
 
   const CREDS_KEY = "prom_join_creds";
 
@@ -108,8 +108,8 @@
       : `git clone -b ${BOOTSTRAP_REF} ${REPO_URL}.git`;
   const cloneCmd = () =>
     isWin
-      ? `${cloneArgs()}\ncd prometheus-early-beta`
-      : `${cloneArgs()} && cd prometheus-early-beta`;
+      ? `${cloneArgs()}\ncd prometheus-swarm`
+      : `${cloneArgs()} && cd prometheus-swarm`;
   const runJoinCmd = () => `${pyBin} run.py --join "${joinLink()}" --ui`;
 
   // How to get to a terminal in the first place — the step the page used to
