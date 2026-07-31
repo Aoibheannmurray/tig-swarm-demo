@@ -22,14 +22,14 @@ def tacit_header(stagnation_threshold: int = 2) -> str:
     host, POSTed at `setup.py create` time)."""
     return (
     "# Personal tacit knowledge\n\n"
-    "Private local-agent notes; never uploaded or shared across the swarm.\n\n"
-    "Shared fleet-wide by default unless a per-agent `tacit_knowledge`\n"
-    "path is set in `fleet.config.json`.\n\n"
-    f"Used when stagnating (`my_runs_since_improvement >= {stagnation_threshold}`),\n"
-    "where the server randomly selects between this file and `inspiration_code`\n"
-    "for the next hint.\n\n"
-    "Agents append distilled lessons before trajectory resets as `- LLM:`\n"
-    "entries focused on generalized failure patterns and ineffective strategies.\n\n"
+    "Private strategy notes for your local agents; never uploaded. All\n"
+    "agents in the fleet share this file unless a per-agent\n"
+    "`tacit_knowledge` path is set in `fleet.config.json`.\n\n"
+    "Shown to an agent as extra hints when it stagnates\n"
+    f"(`my_runs_since_improvement >= {stagnation_threshold}`).\n\n"
+    "Agents may also append their own `- LLM:` lessons here before a\n"
+    "trajectory reset. They won't if `tacit_write` is off or the swarm's\n"
+    "failed-attempts archive is on (lessons then go to the server instead).\n\n"
     "## Strategies\n\n"
     )
 
@@ -39,45 +39,29 @@ def tacit_header(stagnation_threshold: int = 2) -> str:
 
 TACIT_QUESTIONS = [
     {
-        "title": "When standard approaches stop working, what do you reach for first?",
+        "title": "What do you try when the standard approaches stop working?",
         "hint": (
-            "Think of the moves you make AFTER the obvious ones don't work."
+            "The things you try after the obvious ones fail."
         ),
     },
     {
-        "title": "What signals tell you a line of inquiry is promising vs a dead end?",
+        "title": "What rules of thumb have you picked up that aren't written down?",
         "hint": (
-            "How do you decide whether to push harder or back out?\n"
-            "Example: \"if the first 100 iterations don't beat random restart,\n"
-            "the parameterisation is wrong — abandon and retune\"."
+            "The practical know-how you'd give a new student."
         ),
     },
     {
-        "title": "What rules of thumb have you picked up that aren't in the textbooks?",
+        "title": "What looks promising on paper but underperforms in practice?",
         "hint": (
-            "Practical know-how — the things you'd tell your new PhD student\n"
-            "on day one to guide them."
+            "Things that sound good in talks or papers but lose to simpler\n"
+            "approaches when you actually run them."
         ),
     },
     {
-        "title": "What pattern-recognition cues do you trust? \"When I see X, I try Y.\"",
+        "title": "Anything else worth writing down?",
         "hint": (
-            "Diagnostic intuitions — what input or intermediate signal triggers\n"
-            "which strategy in your head?"
-        ),
-    },
-    {
-        "title": "What looks promising on paper but consistently underperforms in practice?",
-        "hint": (
-            "Tempting dead ends — things that sound good in talks or papers\n"
-            "but lose to simpler approaches when you actually run them."
-        ),
-    },
-    {
-        "title": "Anything else worth knowing — judgment calls, instincts, field experiences.",
-        "hint": (
-            "Free-form catch-all for the stuff that didn't fit above.\n"
-            "Skip if you've already covered everything that comes to mind."
+            "Judgment calls, instincts, anything that didn't fit above.\n"
+            "Skip if you've already covered everything."
         ),
     },
 ]
@@ -113,10 +97,9 @@ def _guided_tacit_capture() -> str:
     print("  Tacit knowledge — guided capture".center(72))
     print(bar)
     print(
-        "\n  Tacit knowledge is the practical, hard-won expertise you've built\n"
-        "  through years of practice — the strategies, heuristics, and judgment\n"
-        "  calls you reach for instinctively but rarely write down. Your local\n"
-        "  agent will consult these notes whenever it stagnates.\n"
+        "\n  Tacit knowledge is the practical know-how you rarely write down:\n"
+        "  the strategies and judgment calls you reach for instinctively.\n"
+        "  Your local agents read these notes whenever they stagnate.\n"
         f"\n  {len(TACIT_QUESTIONS)} short prompts follow. Press Enter on an empty\n"
         "  answer to skip any one of them; finish a multi-line answer with a\n"
         "  single `.` on its own line.\n"
@@ -252,7 +235,7 @@ def gather_tacit_knowledge(
     appropriate menu.
 
     Create flow (no real content yet):
-      1. Guided capture — answer six short prompts (recommended).
+      1. Guided capture — answer a few short prompts (recommended).
       2. Paste a single block — power-user escape hatch.
       3. Skip — don't add any tacit knowledge yet.
 

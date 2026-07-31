@@ -116,16 +116,25 @@
   function setupKeyOf(agent: any): string {
     const wire = agent?.provider ?? "";
     const base = (agent?.api_base ?? "").trim();
-    const exact = providers.find(
-      (p) => p.wire_provider === wire && (p.api_base ?? "") === base,
-    );
-    if (exact) return exact.key;
-    // An `openai` entry with an endpoint we don't publish is a custom one.
+    const custom = providers.find((p) => p.needs_api_base && p.wire_provider === wire);
     if (base) {
-      const custom = providers.find((p) => p.needs_api_base && p.wire_provider === wire);
-      if (custom) return custom.key;
+      // A published vendor endpoint (OpenRouter, DeepSeek) wins; any other
+      // URL on this wire is a custom/self-hosted one.
+      const exact = providers.find(
+        (p) => !p.needs_api_base && p.wire_provider === wire && (p.api_base ?? "") === base,
+      );
+      return exact ? exact.key : custom ? custom.key : (providers.find((p) => p.key === wire)?.key ?? wire);
     }
-    return providers.find((p) => p.key === wire)?.key ?? wire;
+    // No URL typed yet. A custom entry still CARRIES an api_base key —
+    // setProvider seeds it as "" — which is what separates "custom, URL not
+    // filled in yet" from a plain vendor entry (no api_base key at all).
+    // Without this, the empty base exact-matched plain `openai`, the
+    // dropdown snapped back, and the endpoint box could never appear.
+    if (custom && agent && "api_base" in agent) return custom.key;
+    const plain = providers.find(
+      (p) => !p.needs_api_base && p.wire_provider === wire && !(p.api_base ?? ""),
+    );
+    return plain?.key ?? providers.find((p) => p.key === wire)?.key ?? wire;
   }
   function providerOf(agent: any): any {
     return providers.find((p) => p.key === setupKeyOf(agent));
