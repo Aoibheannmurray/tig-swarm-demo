@@ -367,7 +367,7 @@
       await hostedApi.updateSwarmConfig(
         adminKey, { challenges: { [trackChallenge]: { tracks, timeout } } });
       config = await hostedApi.swarmConfig();
-      trackMsg = `Benchmark settings saved for ${trackChallenge} — applies to the next benchmark each agent runs.`;
+      trackMsg = `Benchmark settings saved for ${trackChallenge}. Applies to the next benchmark each agent runs.`;
     } catch (e: any) { error = e.message; }
   }
 
@@ -616,7 +616,7 @@
           <button onclick={() => pool("clear")}>Clear inactive pool</button>
           <button class="danger" onclick={() => pool("reset")}>Reset leaderboard</button>
         </div>
-        <details class="info" style="margin-top:10px">
+        <details class="info">
           <summary>ⓘ What clear and reset do</summary>
           <p>
             <b>Clear inactive pool</b> empties the retired-trajectory pool
@@ -635,8 +635,8 @@
       <div class="card">
         <h2>Re-seed authored pool</h2>
         <p class="lede">
-          Puts this clone's authored starter seeds back into the swarm's
-          seed pool. Use it after a server DB reset, which empties the pool.
+          Puts the initial algorithms back into the swarm's seed pool.
+          Use it after a server DB reset, which empties the pool.
         </p>
         <details class="info">
           <summary>ⓘ Details</summary>
@@ -718,31 +718,30 @@
       <div class="card">
         <h2>Swarm settings</h2>
         <p class="lede">
-          Stagnation and trajectory knobs. Hot-editable: contributors read
-          them from the swarm config on every iteration, so changes apply
-          without restarting anything.
+          Stagnation and trajectory knobs. Agents pick changes up on their
+          next iteration, no restart needed.
         </p>
+        <details class="info">
+          <summary>ⓘ What each knob does</summary>
+          <p>
+            {#each SWARM_KNOBS as k}<b>{k.label}</b>: {k.hint}. {/each}
+            <b>Failed-attempts archive</b>: stores agents' failure
+            retrospectives in the server DB and serves them back as a
+            stagnation hint. Each agent only ever sees its own; contributors
+            can opt an agent out with
+            <code>failed_attempts_write: false</code>.
+          </p>
+        </details>
         {#each SWARM_KNOBS as k}
           <div class="row knobrow" style="align-items:center">
-            <div style="flex:1">
-              <div>{k.label} <span class="mono muted">({k.key})</span></div>
-              <div class="hint" style="margin-top:2px">{k.hint}</div>
-            </div>
+            <div style="flex:1">{k.label} <span class="mono muted">({k.key})</span></div>
             <div class="field" style="margin-bottom:0;max-width:130px">
               <input type="number" min="0" aria-label={k.label} bind:value={knobDraft[k.key]} />
             </div>
           </div>
         {/each}
         <div class="row knobrow" style="align-items:center">
-          <div style="flex:1">
-            <div>Failed-attempts archive <span class="mono muted">(failed_attempts_archive)</span></div>
-            <div class="hint" style="margin-top:2px">
-              store agents' failure retrospectives + distilled lessons in the
-              server DB and offer them back as a third stagnation hint — each
-              agent only ever sees its own. Off by default; contributors can
-              opt individual agents out with failed_attempts_write: false.
-            </div>
-          </div>
+          <div style="flex:1">Failed-attempts archive <span class="mono muted">(failed_attempts_archive)</span></div>
           <div class="field" style="margin-bottom:0">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
               <input type="checkbox" aria-label="Failed-attempts archive" bind:checked={archiveDraft} />
@@ -757,16 +756,16 @@
       <div class="card">
         <h2>HPO settings</h2>
         <p class="lede">
-          Hyperparameter-optimization gate and search knobs — when trajectories
-          earn a tune and how much budget each tune spends. Hot-editable like
-          the swarm settings.
+          When trajectories earn a hyperparameter tune and what each tune
+          spends. Applied like the swarm settings above.
         </p>
+        <details class="info">
+          <summary>ⓘ What each knob does</summary>
+          <p>{#each HPO_KNOBS as k}<b>{k.label}</b>: {k.hint}. {/each}</p>
+        </details>
         {#each HPO_KNOBS as k}
           <div class="row knobrow" style="align-items:center">
-            <div style="flex:1">
-              <div>{k.label} <span class="mono muted">({k.key})</span></div>
-              <div class="hint" style="margin-top:2px">{k.hint}</div>
-            </div>
+            <div style="flex:1">{k.label} <span class="mono muted">({k.key})</span></div>
             <div class="field" style="margin-bottom:0;max-width:130px">
               <input type="number" min="0" aria-label={k.label} bind:value={knobDraft[k.key]} />
             </div>
@@ -786,7 +785,7 @@
   .knobrow { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
   .invite-item { border: 1px solid var(--border-subtle); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
   .invite-item summary { cursor: pointer; }
-  .info { margin: -6px 0 14px; font-size: 12.5px; color: var(--ink-mid); }
+  .info { margin: 10px 0 14px; font-size: 12.5px; color: var(--ink-mid); }
   .info summary { cursor: pointer; color: var(--ink-dim); user-select: none; }
   .info p { margin: 6px 0 0; line-height: 1.5; }
   .rowhead h2 { margin: 0; }
