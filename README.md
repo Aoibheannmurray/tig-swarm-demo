@@ -1,22 +1,28 @@
-# Prometheus TIG Swarm
+# Prometheus Swarm
 
-Multiple LLM agents optimize TIG challenge solvers in Rust, coordinated by a server and live dashboard.
+Prometheus Swarm runs a swarm of LLM agents that optimize solvers for a
+challenge. A coordination server tracks scores, passes hints and inspiration
+between agents, and serves a live dashboard. The current examples are the
+[TIG](https://tig.foundation) challenges: agents write Rust solvers for
+problems like vehicle routing, knapsack, and hypergraph partitioning.
 
-Each contributor runs `python3 run.py`, which spawns one or more agents — each calling an LLM (Anthropic, OpenAI, Google, OpenRouter, DeepSeek, Venice, a custom endpoint, or your local `claude` / `codex` CLI) in a loop and contributing to the swarm.
+Each contributor runs one or more agents in a loop and contributes to the
+swarm. Agents build on their own best code, study each other's work when they
+get stuck, and publish every score to a shared leaderboard.
 
 See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for internals.
 
 ## Status & support
 
-This project was built largely with Claude Code and is released as-is: things
-may break — use at your own risk. What that means in practice:
+This project was built largely with Claude Code and is released as-is. Things
+may break; use at your own risk. In practice:
 
-- **Bug reports welcome** — file an issue with the failing command, its
+- **Bug reports welcome.** File an issue with the failing command, its
   output, and your platform. We fix bugs on a best-effort basis, on no
   schedule. Security problems go through [SECURITY.md](./SECURITY.md)
   (privately), never a public issue.
 - **Building on it is the intended use.** Fork it, point it at your own
-  challenges, replace pieces — the swarm mechanics are GPLv3
+  challenges, replace pieces. The swarm mechanics are GPLv3
   ([license details](#license)). Small bug-fix PRs are welcome; large
   features are better carried in your fork
   (see [CONTRIBUTING.md](./CONTRIBUTING.md) for why, and for dev setup).
@@ -42,42 +48,35 @@ cd prometheus-early-beta
 python3 run.py --ui
 ```
 
-Choose **Host → Create a swarm**. The companion UI guides Railway
-login and provisioning, challenge selection, seed setup, and contributor
-invites. The UI runs locally; keep its terminal open while using it.
+Choose **Host → Create a swarm**. The UI guides Railway login and
+provisioning, challenge selection, seed setup, and contributor invites. It
+runs locally; keep its terminal open while using it.
 
-Once the swarm is live, day-to-day host controls move to the **Admin
-Console** (sign in with the admin key from setup): invites and revocation,
-challenge switching, broadcasts, benchmark instances/timeout, pool seeding
-and resets, and the swarm-tuning knobs — each setting is explained next to
-its control, and edits apply to the running swarm without restarts. Open it
-from the companion (it serves the console at `/admin/`; this local copy can
-also re-seed the authored pool), or from anywhere at
-`<your-server-url>/admin/`. See
-[ARCHITECTURE.md](./docs/ARCHITECTURE.md#host-controls-the-admin-console).
+Once the swarm is live, day-to-day controls move to the **Admin Console**:
+invites and revocation, challenge switching, broadcasts, benchmark settings,
+seed-pool tools, and the tuning knobs. Each setting is explained next to its
+control, and changes apply to the running swarm without restarts. Open it
+from the companion at `/admin/`, or from any machine at
+`<your-server-url>/admin/` with the admin key.
+[ARCHITECTURE.md](./docs/ARCHITECTURE.md#host-controls-the-admin-console)
+has the full tour.
 
 ### Optional: host-admin terminal commands
 
-The setup UI is the recommended path. These equivalent commands are available
-for hosts who prefer to manage the swarm directly from the cloned repository:
+The setup UI is the recommended path. The same operations are available as
+commands for hosts who prefer the terminal:
 
 ```bash
 railway login
-python3 setup.py create              # deploys a Railway swarm, scaffolds fleet.config.json
+python3 setup.py create                # deploy a swarm, scaffold fleet.config.json
 python3 setup.py switch hypergraph     # change the active challenge later
-```
-
-Manage contributors from the same clone:
-
-```bash
-python3 setup.py invite [<username>]   # issue per-contributor credentials (username +
-                                       # derived swarm_password; random slug if omitted)
-python3 setup.py revoke <username>     # block future registers, stop their running agents
+python3 setup.py invite [<username>]   # issue per-contributor credentials
+python3 setup.py revoke <username>     # block a contributor, stop their agents
 python3 setup.py list                  # contributors: agents, activity, revoked state
 ```
 
 There is also an optional hosted fleet runner (`setup.py create-runner` /
-`set-runner`) that runs contributor fleets in the cloud — see
+`set-runner`) that runs contributor fleets in the cloud. See
 [runner/README.md](./runner/README.md).
 
 `setup.py` is host-only. Contributors use the same local UI or run
@@ -92,7 +91,7 @@ Requirements:
 
 - Python 3
 - Git (each agent runs in its own git worktree)
-- **Compute — choose one:**
+- **Compute (choose one):**
   - **Docker installed and running** for local benchmarking (`"compute": "local"`): use [Docker Desktop](https://docs.docker.com/desktop/) on macOS or Windows (Windows also requires WSL 2), or [Docker Engine](https://docs.docker.com/engine/install/) or Docker Desktop on Linux.
   - A [C3 account](https://cthree.cloud/) for cloud-based compute. C3 runs benchmarks remotely, so Docker is not required.
 - Either an API key for your chosen provider, or a logged-in `claude` / `codex` CLI
@@ -107,42 +106,47 @@ Requirements:
 
 ### Join with a link (easiest)
 
-If your host sent you a **join link** (`https://<swarm>/join#u=…&p=…`), open it
-in a browser and run the command it provides. The setup app will open, where
-you can choose your models and compute option, add any required API keys, and
-launch your fleet. You do not need to clone the repository manually.
+If your host sent you a **join link** (`https://<swarm>/join#u=…&p=…`), open
+it in a browser. It checks your invite and hands you the exact commands for
+your machine. They boil down to: clone the repository, then run the join
+command.
 
 ```bash
-# macOS / Linux (needs Python 3 + git)
-curl -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py \
-  | python3 - join "<your-join-link>" --ui
+# macOS / Linux
+git clone https://github.com/tig-foundation/prometheus-early-beta.git && cd prometheus-early-beta
+python3 run.py --join "<your-join-link>" --ui
 ```
 
 ```powershell
-# Windows (PowerShell or cmd; `py` avoids the Microsoft Store `python` alias)
-curl.exe -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py | py - join "<your-join-link>" --ui
+# Windows PowerShell (`py` avoids the Microsoft Store `python` alias)
+git clone https://github.com/tig-foundation/prometheus-early-beta.git
+cd prometheus-early-beta
+py run.py --join "<your-join-link>" --ui
 ```
+
+The setup app opens in your browser with your credentials filled in. Pick
+your models and compute, add any required API keys, and launch your fleet.
 
 ### Setup UI from an existing clone
 
-If you have already cloned the repository manually, run:
+If you already have a clone and no join link handy, run:
 
 ```bash
 python3 run.py --ui
 ```
 
-This opens the local web companion. It walks you through fleet setup, then lets
-you launch the fleet and edit it later—adding agents or changing settings and
-providers.
+This opens the local web companion. It walks you through fleet setup, then
+lets you launch the fleet and edit it later: adding agents, changing settings
+and providers.
 
 ### Optional: terminal-only setup
 
-The setup UI is the recommended path. From an existing clone, `python3 run.py`
-runs the setup wizard entirely in the terminal. On subsequent runs it launches
-the saved fleet, with optional update prompts that you can skip with Enter.
+From an existing clone, `python3 run.py` runs the setup wizard entirely in
+the terminal. On subsequent runs it launches the saved fleet, with optional
+update prompts that you can skip with Enter.
 
-Export your keys before launching — your provider key (skip if you use a
-`claude` / `codex` CLI login), plus `C3_API_KEY` only if using C3 compute:
+Export your keys before launching: your provider key (skip if you use a
+`claude` / `codex` CLI login), plus `C3_API_KEY` only if using C3 compute.
 
 ```bash
 # macOS / Linux
@@ -166,17 +170,20 @@ other settings by editing your local `fleet.config.json`. Use
 setup UI can also make these changes for you.
 
 Many settings **hot-reload**: edit `fleet.config.json` while the fleet runs
-and the change lands on each agent's next iteration, no restart — `role`,
-`seeded_start`, the HPO and cleaner knobs, and the C3 warm-image settings.
+and the change lands on each agent's next iteration with no restart (`role`,
+`seeded_start`, the HPO and cleaner knobs, and the C3 warm-image settings).
 Provider, model, and compute are read at startup and need a fleet restart.
 
 ### Tacit knowledge
 
-`tacit_knowledge.md` is a local file containing your domain tacit knowledge, i.e: strategies to use when one gets stuck. It is shown to your agents when they stagnate. It's gitignored and remains local. All your agents share it by default, so insights accumulate across the whole fleet.
+`tacit_knowledge.md` is a local file containing your domain tacit knowledge,
+i.e. strategies to use when one gets stuck. It is shown to your agents when
+they stagnate. It's gitignored and remains local. All your agents share it by
+default, so insights accumulate across the whole fleet.
 
-Agents can also optionally **write back to it**: when one has been failing for a stretch and is about to start over from scratch, it adds a one-line `- LLM:` "what didn't work" note — so future attempts can avoid the same dead end.
-
-To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`, or run `python3 setup.py tacit` directly. More detail can be found in [ARCHITECTURE.md](./docs/ARCHITECTURE.md#tacit-knowledge).
+To add your own hints, accept the `Add tacit knowledge?` prompt in `run.py`,
+or run `python3 setup.py tacit` directly. More detail can be found in
+[ARCHITECTURE.md](./docs/ARCHITECTURE.md#tacit-knowledge).
 
 ### Optional: manual power-user commands
 
@@ -209,18 +216,18 @@ To inspect recorded Claude Code agentic sessions and tool activity, see
 | `claude-code`         | `claude` CLI login (no API key needed)                                           |
 | `claude-code-agentic` | `claude` CLI login                                                               |
 | `codex-agentic`       | `codex login`                                                                    |
-| `custom`              | Setup-only name for your own OpenAI-compatible endpoint — see below              |
+| `custom`              | Setup-only name for your own OpenAI-compatible endpoint (see below)              |
 
 Picking **Custom / local LLM** in setup asks for the endpoint URL, the model id
 it serves, and the name of the variable holding its key, then writes them as a
 `provider: "openai"` agent with an explicit `api_base`. A key is optional when
-the endpoint is on your own machine or local network — llama.cpp, vLLM, Ollama
+the endpoint is on your own machine or local network; llama.cpp, vLLM, Ollama
 and LM Studio check none by default. Benchmarking is independent of this, so a
 local model can still use C3 cloud compute.
 
 
 
-`claude-code` is single-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree. More capable per iteration but burn ~5–20× tokens; subscription-only.
+`claude-code` is single-shot: the CLI returns a code blob each iteration. The `-agentic` providers run a tooled headless agent in a sandboxed git worktree. More capable per iteration but they burn roughly 5-20x the tokens; subscription-only.
 
 ## Interpreting the score
 
@@ -233,7 +240,7 @@ Each iteration prints a `[BENCH]` line: the aggregate `Score`, `Feasible`, and a
         Track n_items=6000,budget=200: 46800
 ```
 
-The aggregate is a **shifted geometric mean** across tracks, and a failed or infeasible track is assigned a large fixed penalty. Because of that penalty, **a single bad track can drag the whole aggregate negative** even when the other tracks scored well. 
+The aggregate is a **shifted geometric mean** across tracks, and a failed or infeasible track is assigned a large fixed penalty. Because of that penalty, **a single bad track can drag the whole aggregate negative** even when the other tracks scored well.
 
 ## Local files
 
@@ -246,7 +253,7 @@ Swarm state lives on the server. Local files only tell this clone how to connect
 | `tacit_knowledge.md`  | Your private hint file (gitignored).           |
 | `secrets.local.json`  | Provider API keys saved via the UI (gitignored). |
 | `.swarm-cache.json`   | Auto-refreshed mirror of `/api/swarm_config`.  |
-| `swarm.admin.json`    | Host-only — admin key + swarm tuning.          |
+| `swarm.admin.json`    | Host-only: admin key + swarm tuning.           |
 
 
 ## Remote benchmarking with C3
@@ -261,11 +268,12 @@ hardware options, and details of how remote benchmark jobs run.
 
 ## License
 
-The swarm harness — orchestration (`scripts/`, `run.py`), coordination server
-(`server/`), web UIs (`dashboard/`, `control-ui/`), hosted runner (`runner/`),
-and host-admin CLI (`setup.py` / `hostadmin/`) — is free software under the
-**GNU GPLv3** ([LICENSE](./LICENSE)). The harness is challenge-agnostic: it can
-be applied to any set of challenges you define.
+The swarm harness is free software under the **GNU GPLv3**
+([LICENSE](./LICENSE)): the orchestration (`scripts/`, `run.py`), the
+coordination server (`server/`), the web UIs (`dashboard/`, `control-ui/`),
+the hosted runner (`runner/`), and the host-admin CLI (`setup.py` /
+`hostadmin/`). The harness is challenge-agnostic: it can be applied to any
+set of challenges you define.
 
 The TIG challenge code (`src/`, plus the TIG-derived starting code in
 `initial_algorithms/`) is the example workload the swarm ships with; it derives
