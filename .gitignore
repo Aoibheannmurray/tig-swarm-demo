@@ -19,9 +19,6 @@ c3-artifacts/
 # error and staged nothing. C3 stages jobs in a tempdir (c3_compute.py), so the
 # only place a stray `job_<id>/` lands is a manual `c3 pull` at the repo root.
 /job_*/
-fly.toml
-Procfile
-runtime.txt
 server/static/
 
 # Per-deploy / per-contributor state — never committed
@@ -57,21 +54,10 @@ tig-monorepo/
 prompts_log/
 feedback/
 
-# Local planning/scratch docs, not part of the shared repo
-multi_agent_docker_plan.md
-DASHBOARD_PLAN.md
-SANDBOX_SPEC.md
-
-# Staging area for files pending deletion — never committed
-will_remove_later/
-
-# Local-only artifacts (old exports, backups, reports) — never committed
-local/
+# Local-only artifacts (backups, C3 env) — never committed
 .c3.env
 *.bak
 *.bak.*
-invites*.csv
-agent_activity.csv
 # c3_tig_bench.py's default --out lives here (reports/tig_bench.json), and a
 # GPU verify run is ~200 KB of raw per-nonce results. Machine-specific
 # measurements, not shared state.
@@ -81,5 +67,3 @@ reports/
 # into worktrees (.swarm/sandbox-settings.json), so nothing here is shared.
 .claude/settings.json
 .claude/settings.local.json
-# Local archive of retired internal planning docs
-.claude/plans/
