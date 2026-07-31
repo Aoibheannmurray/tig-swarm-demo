@@ -1,6 +1,5 @@
-"""Railway CLI helpers — provisioning, deploys, and RailwayError.
-
-Moved verbatim from the root setup.py ("Railway CLI helpers" section)."""
+"""Railway CLI helpers — provisioning, deploys, volume checks, and
+RailwayError. Originally moved here from the root setup.py."""
 
 from __future__ import annotations
 

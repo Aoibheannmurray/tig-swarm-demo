@@ -20,7 +20,7 @@ trajectory views. Plain TypeScript + d3, built by Vite. No framework.
 - `lib/` — shared helpers every page uses (`bootstrap`, `websocket`, `format`,
   `colors`, `replay`, `swarmConfig`, …).
 - `panels/` — the UI panels (`chart`, `leaderboard`, `feed`, `stats`,
-  `diversity`, `challenge-selector`).
+  `diversity`, `challenge-selector`) plus the shared `agentProgressStore`.
 - `challenges/` — per-challenge view logic, one file each, dispatched via
   `registry.ts`.
 - `types.ts` — shared types; `style.css`.

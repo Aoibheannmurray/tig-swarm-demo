@@ -56,8 +56,8 @@ export function baselineRank(
   return ahead + 1;
 }
 
-// How many agents have cleared the bar — the headline the leaderboard shows
-// under the ghost row ("2 of 9 agents have beaten mainnet").
+// How many agents have cleared the bar — the ghost row's hover tooltip
+// ("2 of 9 agents have beaten mainnet").
 export function countBeating(
   entries: LeaderboardEntry[],
   baselineScore: number,

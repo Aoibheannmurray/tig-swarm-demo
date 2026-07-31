@@ -243,12 +243,12 @@ CREATE TABLE IF NOT EXISTS seed_pool (
     created_at TEXT NOT NULL
 );
 
--- Server-stored per-contributor fleet config + tacit knowledge (P1 of
--- docs/server-first-onboarding-plan.md). `config_json` is the sanitized
+-- Server-stored per-contributor fleet config + tacit knowledge.
+-- `config_json` is the sanitized
 -- fleet plan the hosted contributor console edits — the same agents-array
 -- shape as fleet.config.json, secrets hard-rejected at the API layer.
 -- `tacit_text` is the contributor's hosted tacit-knowledge notes. The
--- local runner fetches both in --join mode (P2).
+-- local runner fetches both in --join mode.
 -- The TIG mainnet algorithm's score ON THIS SWARM'S OWN INSTANCES, so the
 -- dashboard can show members the bar they are trying to clear. One row per
 -- challenge: the top-adoption mainnet algorithm, benchmarked unchanged.
@@ -2264,7 +2264,7 @@ async def get_trajectory_score_history(
     return steps
 
 
-# ── Contributor configs (server-first onboarding P1) ──
+# ── Contributor configs (hosted-console storage) ──
 
 
 async def get_contributor_config(

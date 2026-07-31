@@ -7,8 +7,7 @@
   // validate them against /api/contributor/me, and hand over ONE per-OS
   // command. This page is deliberately just the doorway — everything after
   // (fleet config, API keys, launch) happens in the LOCAL setup app the
-  // command opens, so keys and config never touch the host's server. See
-  // docs/server-first-onboarding-plan.md §5.
+  // command opens, so keys and config never touch the host's server.
   import { onMount } from "svelte";
   import Masthead from "../components/Masthead.svelte";
   import CopyCommand from "../components/CopyCommand.svelte";

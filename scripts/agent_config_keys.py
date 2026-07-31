@@ -72,18 +72,26 @@ KNOBS: tuple[Knob, ...] = (
     Knob("c3_time"),
     Knob("c3_cloud_provider"),
     Knob("c3_no_build"),
+    # Full-source-path image overrides (run_loop reads them as c3_image /
+    # c3_cpu_image / c3_gpu_image); moot on the default warm-image path.
+    Knob("c3_image"),
+    Knob("c3_cpu_image"),
+    Knob("c3_gpu_image"),
     Knob(
         "c3_max_parallel_jobs",
         fleet_default=True,
-        doc="Fleet-wide C3 concurrent-job cap, and the balanced shard count "
-            "per benchmark. Best set once at the top level — all agents share "
+        doc="Fleet-wide C3 concurrent-job cap; also the CEILING on how many "
+            "balanced shards a benchmark may fan out to (c3_compute."
+            "_worthwhile_shards decides how much of it to spend). Best set "
+            "once at the top level — all agents share "
             "ONE C3 key and thus one FCFS slot pool. Startup-only: the pool is "
             "sized when the fleet launches (and overwritten from the live C3 "
             "subscription), so re-syncing it mid-run would not resize it.",
     ),
     # ── C3 warm-image fast path: read per benchmark, so fully live ──
     Knob("c3_warm_images", fleet_default=True, hot_reload=True, live=True,
-         doc="Boolean opt-in to the warm-image path (c3_compute._warm_c3_image)."),
+         doc="Warm-image path toggle (c3_compute._warm_c3_image). Defaults "
+             "ON; set false to opt out to the full-source path."),
     Knob("c3_warm_image", fleet_default=True, hot_reload=True, live=True,
          doc="Explicit warm image ref, pinning an exact tag."),
     Knob("tig_dockerhub", fleet_default=True, hot_reload=True, live=True,

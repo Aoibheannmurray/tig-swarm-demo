@@ -28,10 +28,11 @@ on:
       - "Cargo.lock"
       - "requirements.txt"
       - "Dockerfile.warm"
-      # The bake is compiler- and RUSTFLAGS-specific: cargo fingerprints both,
-      # so a change to either invalidates the baked target. Without these
-      # paths, bumping Rust would silently turn every C3 job back into a cold
-      # 10-20 minute compile.
+      # The bake is compiler-specific: cargo fingerprints the rustc version,
+      # so bumping Rust invalidates the baked target — without this path a
+      # bump would silently turn every C3 job back into a cold 10-20 minute
+      # compile. .cargo/config.toml rides along so lint-cap changes republish
+      # too (jobs also receive it via the runtime overlay).
       - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/workflows/build-warm-images.yml"

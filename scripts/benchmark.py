@@ -26,6 +26,8 @@ algorithm for that challenge:
     - knapsack: greedy by value-density (`compute_greedy_baseline`).
     - job_scheduling: SOTA dispatching rules (`compute_sota_baseline`).
     - energy_arbitrage: max(greedy, conservative) (`compute_baseline`).
+    - hypergraph / neuralnet_optimizer / vector_search (GPU): each
+      challenge's own baseline in src/<challenge>/ (see _AGG_EXTRAS).
 
 Higher quality is always better. Aggregation is two-step:
 

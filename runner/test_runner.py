@@ -1,4 +1,4 @@
-"""Tests for the hosted runner (server-first onboarding P3).
+"""Tests for the hosted runner.
 
 Hermetic: RUNNER_SECRET_KEY + RUNNER_DATA_DIR point at temp values before the
 runner modules load, and the supervisor is driven with a fake launcher, so no

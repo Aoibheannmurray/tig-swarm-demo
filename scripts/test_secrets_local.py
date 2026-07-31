@@ -1,4 +1,4 @@
-"""Tests for the local secret store (server-first onboarding P2).
+"""Tests for the local secret store.
 
 secrets_local.py backs `python run.py --join` — API keys stored in a
 gitignored 0600 file so contributors never `export`. Env vars always win.

@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Single contributor entry point for the TIG swarm demo.
 
-One command per session (use `python` instead of `python3` on Windows):
+One command per session (use `py` instead of `python3` on Windows):
 
     python3 run.py
+    python3 run.py --join <invite-link>   # prefill credentials from an invite
+    python3 run.py --ui                   # open the web companion instead
 
 Phases (each only runs when it has something to do):
 
-  1. Preflight     - check `docker` is on PATH when any agent benchmarks
-                     locally (compute "local" or omitted).
-  2. Init wizard   - if fleet.config.json is missing.
-  3. Tacit prompt  - ask whether to add/edit tacit knowledge (default No,
-                     append-mode so existing notes are preserved).
+  1. Init wizard   - if fleet.config.json is missing; when it exists (and
+                     stdin is a TTY) offers to update it.
+  2. Preflight     - check `docker` is on PATH when any agent benchmarks
+                     locally (compute "local" or omitted), plus the NVIDIA
+                     Container Toolkit for GPU challenges.
+  3. Tacit prompt  - offer to add/edit tacit knowledge (skipped when stdin
+                     isn't a TTY; append-mode so existing notes are
+                     preserved; a first run goes straight to the wizard).
   4. Launch fleet  - same logic as `python3 scripts/run_fleet.py`.
   5. Sync-back     - on shutdown, any `- LLM:` notes appended by the agent
                      are copied from the worktree back to the source file.

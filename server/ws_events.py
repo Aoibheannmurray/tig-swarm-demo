@@ -11,10 +11,10 @@ This file is the single source of truth for what the server sends. Every
 broadcast goes through `WSEvent` so type errors fail at import time, not
 at runtime in some panel that silently dropped a missing field.
 
-The TS counterpart (`dashboard/src/types.ts`) is hand-mirrored. Run
+The TS counterpart (`dashboard/src/types.ts`) is hand-mirrored — when you
+change an event here, update types.ts to match. Run
 ``python -m server.ws_events --dump-schema`` to dump every event's
-JSON schema; CI hashes the output so any change here without a matching
-edit to ``types.ts`` shows up as a drift.
+JSON schema for comparison.
 """
 
 from __future__ import annotations

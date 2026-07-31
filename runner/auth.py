@@ -1,4 +1,4 @@
-"""Authentication for the hosted runner (P3).
+"""Authentication for the hosted runner.
 
 The runner is a separate service and deliberately does NOT hold the swarm's
 base password. It authenticates a contributor by forwarding their credentials

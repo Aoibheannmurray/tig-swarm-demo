@@ -1,4 +1,4 @@
-"""Tests for --join mode config wiring (server-first onboarding P2).
+"""Tests for --join mode config wiring.
 
 Covers run.py's join-link parsing and run_fleet's server-config
 resolution/cache, without spinning up a real server (the HTTP fetch is

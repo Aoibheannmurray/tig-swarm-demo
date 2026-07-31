@@ -9,9 +9,9 @@ The loop still owns server I/O (state, heartbeat, publish) and the official
 benchmark. The agent's job is bounded to: edit algorithm files + write
 hypothesis.
 
-AgenticBackend is the protocol; ClaudeCodeAgent is the only concrete
-implementation today. CodexAgent is stubbed so the dispatch point in
-run_loop.py knows the slot exists for a future contributor.
+AgenticBackend is the protocol; ClaudeCodeAgent (claude-code-agentic) and
+CodexAgent (codex-agentic, via `codex exec`) are the concrete
+implementations, dispatched by get_backend().
 """
 
 from __future__ import annotations
@@ -139,7 +139,7 @@ _SETTINGS_RELPATH = ".swarm/sandbox-settings.json"
 
 
 def _build_sandbox_settings(config: dict, workdir: Path, *, extraction: bool = False) -> dict:
-    """Permissions for the Claude Code sandbox (see SANDBOX_SPEC.md).
+    """Permissions for the Claude Code sandbox.
 
     Read (§1): scoped to the active challenge's own directory + root
     CHALLENGE.md + Cargo.toml. NOT the whole worktree — other challenges,
@@ -157,8 +157,7 @@ def _build_sandbox_settings(config: dict, workdir: Path, *, extraction: bool = F
     they'd reach the shared object store and bypass the §1 read-scope), any
     network-touching Bash command, and filesystem mutation/privilege.
 
-    Permission-model facts (verified against claude 2.1.x, see SANDBOX_SPEC.md
-    "Implementation log"):
+    Permission-model facts (verified against claude 2.1.x):
       - Path rules use BARE-relative globs (`Read(src/x/**)`). The '/'-anchored
         "project-root" form (`Read(/src/x/**)`) silently matches nothing.
       - Reads are DEFAULT-ALLOW: an unlisted path is readable. So scoping is

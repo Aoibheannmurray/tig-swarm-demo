@@ -77,7 +77,7 @@ A population of AI agents each maintain an independent solution trajectory, impr
 │   Selection rule (per reset event):                                                      │
 │                                                                                          │
 │        if pool empty  OR  T^1.5 < P:                                                     │
-│             FRESH START   → load swarm's initial algorithm                               │
+│             FRESH START   → seed pool / peer / stub chain                                │
 │        else:                                                                             │
 │             ADOPT          → uniform random from pool, entry removed                     │
 │                                                                                          │
@@ -98,10 +98,10 @@ A population of AI agents each maintain an independent solution trajectory, impr
 | Threshold | Trigger | Mechanism | Purpose |
 |-----------|---------|-----------|---------|
 | **T₁** (hypothesis recall) | `runs_since_improvement ≥ recall_threshold` | Server surfaces failed hypotheses tried on this exact program | Prevent repeating known failures |
-| **T₂** (cross-pollination) | `runs_since_improvement ≥ stagnation_threshold` | 50/50: read tacit knowledge OR study another agent's code | Inject new ideas from outside the trajectory |
+| **T₂** (cross-pollination) | `runs_since_improvement ≥ stagnation_threshold` | Random hint: read tacit knowledge, study another agent's code, or (when the failed-attempts archive is on) recall archived failures | Inject new ideas from outside the trajectory |
 | **T₃** (trajectory reset) | `runs_since_improvement ≥ stagnation_limit` | Deposit code in pool, adopt new starting point | Escape dead-end trajectories entirely |
 
-Each threshold is progressively more disruptive: first "remember what failed," then "look outside for ideas," then "abandon this line and start fresh."
+The reset (T₃) is the most disruptive and fires last. T₁ and T₂ are independently configured — at the default knobs cross-pollination (threshold 2) actually kicks in before hypothesis recall (threshold 3).
 
 ## Benchmark & Evaluation
 
@@ -115,10 +115,10 @@ Each threshold is progressively more disruptive: first "remember what failed," t
 │   ┌──────────┐         ┌─────────────────────────────────────────────────────────┐       │
 │   │  Solver  │────────►│  Run across all tracks (in parallel across CPU cores)    │       │
 │   │  binary  │         │                                                         │       │
-│   └──────────┘         │  Track 1 (n=50, FLOW_SHOP)        ──► 20 instances      │       │
-│                        │  Track 2 (n=100, JOB_SHOP)        ──► 20 instances      │       │
-│                        │  Track 3 (n=200, FJSP_MEDIUM)     ──► 20 instances      │       │
-│                        │  Track 4 (n=500, FJSP_HIGH)       ──► 20 instances      │       │
+│                        │  Track 1 (n=50, s=flow_shop)      ──► 5 instances        │       │
+│                        │  Track 2 (n=50, s=job_shop)       ──► 5 instances        │       │
+│                        │  Track 3 (n=50, s=fjsp_medium)    ──► 5 instances        │       │
+│                        │  Track 4 (n=50, s=fjsp_high)      ──► 5 instances        │       │
 │                        │           ...                                            │       │
 │                        └──────────────────────┬──────────────────────────────────┘       │
 │                                               │                                          │
@@ -132,7 +132,7 @@ Each threshold is progressively more disruptive: first "remember what failed," t
 │                        │                                                         │       │
 │                        │  (clamped to ±10,000,000)                                │       │
 │                        │                                                         │       │
-│                        │  Infeasible / timeout with no saved solution → −1,000,000│       │
+│                        │  Infeasible / timeout, no saved solution → −10,000,000   │       │
 │                        └──────────────────────┬──────────────────────────────────┘       │
 │                                               │                                          │
 │                                               ▼                                          │

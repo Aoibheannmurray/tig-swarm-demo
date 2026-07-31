@@ -1,4 +1,4 @@
-"""Tests for GET /api/contributor/me (P0 of the server-first onboarding plan).
+"""Tests for GET /api/contributor/me (the invite-validation endpoint).
 
 The endpoint validates a contributor credential pair (the same
 X-Username / X-Swarm-Password headers that gate agent registration) and

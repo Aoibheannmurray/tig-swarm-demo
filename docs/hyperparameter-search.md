@@ -2,7 +2,7 @@
 
 How the swarm tunes an algorithm's hyperparameters, and when it decides to.
 Code: `scripts/hpo.py` (the search), the gate in `scripts/run_loop.py`
-(`_should_tune_hyperparameters` / `_maybe_tune_hyperparameters`), storage in
+(`_hpo_gate_open` / `_maybe_tune_hyperparameters`), storage in
 `server/db.py` (`improvement_scores`, `trajectory_has_tuned`).
 
 This replaces an internal planning doc that older comments cited as

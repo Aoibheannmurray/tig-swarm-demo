@@ -80,7 +80,7 @@ SWARM_DEFAULTS: dict[str, int] = {
     "seed_max_loc": 200,
     # Hyperparameter-optimization gate + search. The contributor's driver reads
     # these from the pushed swarm config (see scripts/run_loop.py _hpo_gate_open
-    # / _maybe_run_hpo). first_tune_improvements: per-trajectory improvements a
+    # / _maybe_tune_hyperparameters). first_tune_improvements: per-trajectory improvements a
     # trajectory needs before its FIRST tune (the band check is waived that
     # once). min_improvements: improvements needed for later tunes; also sets
     # the tune-band width. search_budget (N): configs evaluated per tune
@@ -436,9 +436,10 @@ async def verify_swarm_password(
     x_username: str | None = Header(default=None, alias="X-Username"),
     x_swarm_password: str | None = Header(default=None, alias="X-Swarm-Password"),
 ) -> str:
-    """Gates /api/agents/register (the join endpoint). Returns the
-    contributor's username so the handler can stamp it on the new agent.
-    Subsequent writes use the per-agent token (see verify_agent_token).
+    """Gates /api/agents/register (the join endpoint) and the
+    /api/contributor/* endpoints. Returns the contributor's username so the
+    handler can stamp it on the new agent. Subsequent agent writes use the
+    per-agent token (see verify_agent_token).
     """
     if not x_username or not x_swarm_password:
         raise HTTPException(
@@ -953,8 +954,7 @@ async def contributor_me(
 ):
     """Validate a contributor credential pair and describe the swarm.
 
-    The first `/api/contributor/*` endpoint (see
-    docs/server-first-onboarding-plan.md): the hosted /join page calls it to
+    The first `/api/contributor/*` endpoint: the hosted /join page calls it to
     turn a pasted/clicked invite into "✓ valid invite for <name> — this swarm
     is optimizing <challenge>". Auth (and its rate limiting) is exactly the
     register path's verify_swarm_password, so a revoked or mistyped invite
@@ -972,17 +972,18 @@ async def contributor_me(
     }
 
 
-# ── Contributor fleet config (server-first onboarding P1) ──
+# ── Contributor fleet config (hosted console storage) ──
 #
 # The hosted contributor console authors a fleet plan here; the local runner
-# fetches it in --join mode (P2). Stored configs are sanitized fleet.config
+# fetches it in --join mode. Stored configs are sanitized fleet.config
 # material: whitelisted keys only, raw secrets hard-rejected — LLM keys are
 # referenced by env-var NAME (`api_key_env`), never by value.
 
 # Per-agent keys a stored config may carry. Mirrors the fleet-entry fields
-# scripts/run_fleet.py materializes into worktrees (_AGENT_CONFIG_KEYS + the
-# entry's `name`), MINUS anything secret or locally-owned: `c3_api_key` (raw
-# secret), `agent_id`/`agent_name` (runner-persisted identity).
+# scripts/run_fleet.py materializes into worktrees (AGENT_CONFIG_KEYS in
+# scripts/agent_config_keys.py + the entry's `name`), MINUS anything secret
+# or locally-owned: `c3_api_key` (raw secret), `agent_id`/`agent_name`
+# (runner-persisted identity).
 _CONTRIB_AGENT_KEYS = frozenset({
     "name", "provider", "model", "api_base", "api_key_env",
     "compute", "hardware", "c3_hardware", "c3_time", "c3_cloud_provider",
@@ -1297,8 +1298,9 @@ async def get_state(
     first run). When stagnating past the `hypothesis_recall_threshold`,
     prior failed hypotheses for the current program are included with a
     directive to try something different. When stagnating past
-    `stagnation_threshold`, a stagnation_hint field (50/50 "tacit_knowledge"
-    or "inspiration") and inspiration_code are included — both filtered by
+    `stagnation_threshold`, a stagnation_hint field ("tacit_knowledge" or
+    "inspiration", plus "failed_attempts" when the archive is on — picked
+    uniformly) and inspiration_code are included — both filtered by
     the same challenge so per-challenge state stays disjoint. For GPU
     challenges, kernel code fields are included; for CPU challenges they
     are omitted.

@@ -25,10 +25,11 @@ varies by design:
 - **CPU challenges** ship the bare `unimplemented!()` placeholder. Handed to
   **frontier-tier explorer** agents, which are expected to bootstrap a
   complete algorithm from scratch — the swarm's historical default.
-- **GPU challenges** ship a real working implementation, because
-  bootstrapping a *compiling* CUDA kernel from a bare placeholder is too hard
-  even for frontier models (see `seed_for_agent` — on GPU challenges every
-  agent starts from working code).
+- **GPU challenges** also ship TIG's bare template as the stub; the working
+  CUDA implementations live under `seeds/`. Bootstrapping a *compiling*
+  kernel from the bare placeholder is too hard even for frontier models, so
+  the server hands GPU agents a seed instead (see `seed_for_agent` — on GPU
+  challenges every agent starts from working code drawn from the seed pool).
 
 A host can replace any challenge's slot with stronger code before
 `setup.py create` — by editing it, or by staging a mainnet algorithm with
@@ -38,9 +39,10 @@ plus optional `*.cu` / sibling modules, filenames preserved.
 
 ## Seeds — `<challenge>/seeds/<strategy_tag>.rs` (+ optional `.cu`)
 
-Complete, **feasible** simple algorithms. `setup.py create` loads every file
-under a `seeds/` directory into the server's seed pool (`read_authored_seeds` →
-`POST /api/admin/seed_pool`). The server hands a seed (instead of the stub) to
+Complete, **feasible** simple algorithms. `setup.py create` loads every
+`*.rs` file under a `seeds/` directory (each with its optional same-stem
+`.cu`) into the server's seed pool (`read_authored_seeds` →
+`POST /api/admin/seed_pool`); other file types are ignored. The server hands a seed (instead of the stub) to
 **standard-tier agents and to any exploiter**, so a weaker model refines working
 code rather than failing to bootstrap one.
 

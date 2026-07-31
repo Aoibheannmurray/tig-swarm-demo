@@ -2,7 +2,7 @@
 
 Multiple LLM agents optimize TIG challenge solvers in Rust, coordinated by a server and live dashboard.
 
-Each contributor runs `python3 run.py`, which spawns one or more agents — each calling an LLM (Anthropic, OpenAI, Google, OpenRouter, Venice, or your local `claude` / `codex` CLI) in a loop and contributing to the swarm.
+Each contributor runs `python3 run.py`, which spawns one or more agents — each calling an LLM (Anthropic, OpenAI, Google, OpenRouter, DeepSeek, Venice, a custom endpoint, or your local `claude` / `codex` CLI) in a loop and contributing to the swarm.
 
 See [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for internals.
 
@@ -42,16 +42,18 @@ cd prometheus-early-beta
 python3 run.py --ui
 ```
 
-Choose **Host → Create & manage a swarm**. The companion UI guides Railway
+Choose **Host → Create a swarm**. The companion UI guides Railway
 login and provisioning, challenge selection, seed setup, and contributor
 invites. The UI runs locally; keep its terminal open while using it.
 
-Once the swarm is live, day-to-day host controls move to the hosted **Admin
-Console** at `<your-server-url>/admin/` (sign in with the admin key from
-setup): invites and revocation, challenge switching, benchmark
-instances/timeout, pool seeding and resets, and the swarm-tuning knobs — each
-setting is explained inline next to its control, and edits apply to the
-running swarm without restarts. See
+Once the swarm is live, day-to-day host controls move to the **Admin
+Console** (sign in with the admin key from setup): invites and revocation,
+challenge switching, broadcasts, benchmark instances/timeout, pool seeding
+and resets, and the swarm-tuning knobs — each setting is explained next to
+its control, and edits apply to the running swarm without restarts. Open it
+from the companion (it serves the console at `/admin/`; this local copy can
+also re-seed the authored pool), or from anywhere at
+`<your-server-url>/admin/`. See
 [ARCHITECTURE.md](./docs/ARCHITECTURE.md#host-controls-the-admin-console).
 
 ### Optional: host-admin terminal commands
@@ -73,6 +75,10 @@ python3 setup.py invite [<username>]   # issue per-contributor credentials (user
 python3 setup.py revoke <username>     # block future registers, stop their running agents
 python3 setup.py list                  # contributors: agents, activity, revoked state
 ```
+
+There is also an optional hosted fleet runner (`setup.py create-runner` /
+`set-runner`) that runs contributor fleets in the cloud — see
+[runner/README.md](./runner/README.md).
 
 `setup.py` is host-only. Contributors use the same local UI or run
 `python3 run.py` for terminal setup.
@@ -113,8 +119,8 @@ curl -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-bet
 ```
 
 ```powershell
-# Windows (PowerShell or cmd; try `py` if `python` isn't recognized)
-curl.exe -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py | python - join "<your-join-link>" --ui
+# Windows (PowerShell or cmd; `py` avoids the Microsoft Store `python` alias)
+curl.exe -fsSL https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta/main/deploy/get-swarm.py | py - join "<your-join-link>" --ui
 ```
 
 ### Setup UI from an existing clone
@@ -199,6 +205,7 @@ To inspect recorded Claude Code agentic sessions and tool activity, see
 | `google`              | `GEMINI_API_KEY`                                                                 |
 | `venice`              | `VENICE_API_KEY` (OpenAI-compatible, base URL baked in)                          |
 | `openrouter`          | `OPENROUTER_API_KEY` (multi-model proxy; model IDs are `publisher/name`)         |
+| `deepseek`            | `DEEPSEEK_API_KEY` (OpenAI-compatible, base URL baked in)                        |
 | `claude-code`         | `claude` CLI login (no API key needed)                                           |
 | `claude-code-agentic` | `claude` CLI login                                                               |
 | `codex-agentic`       | `codex login`                                                                    |
@@ -221,9 +228,9 @@ Each iteration prints a `[BENCH]` line: the aggregate `Score`, `Feasible`, and a
 
 ```
 [BENCH] Score: -199814  Feasible: False
-        Track 0: 52000
-        Track 1: -1000000  (below baseline)
-        Track 2: 46800
+        Track n_items=1000,budget=10: 52000
+        Track n_items=2000,budget=25: -10000000  (infeasible)
+        Track n_items=6000,budget=200: 46800
 ```
 
 The aggregate is a **shifted geometric mean** across tracks, and a failed or infeasible track is assigned a large fixed penalty. Because of that penalty, **a single bad track can drag the whole aggregate negative** even when the other tracks scored well. 
@@ -233,12 +240,13 @@ The aggregate is a **shifted geometric mean** across tracks, and a failed or inf
 Swarm state lives on the server. Local files only tell this clone how to connect and run:
 
 
-| file                 | purpose                                       |
-| -------------------- | --------------------------------------------- |
-| `fleet.config.json`  | Your fleet's agents (user-edited).            |
-| `tacit_knowledge.md` | Your private hint file (gitignored).          |
-| `.swarm-cache.json`  | Auto-refreshed mirror of `/api/swarm_config`. |
-| `swarm.admin.json`   | Host-only — admin key + swarm tuning.         |
+| file                  | purpose                                        |
+| --------------------- | ---------------------------------------------- |
+| `fleet.config.json`   | Your fleet's agents (user-edited).             |
+| `tacit_knowledge.md`  | Your private hint file (gitignored).           |
+| `secrets.local.json`  | Provider API keys saved via the UI (gitignored). |
+| `.swarm-cache.json`   | Auto-refreshed mirror of `/api/swarm_config`.  |
+| `swarm.admin.json`    | Host-only — admin key + swarm tuning.          |
 
 
 ## Remote benchmarking with C3

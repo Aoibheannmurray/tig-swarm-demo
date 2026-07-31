@@ -4,13 +4,19 @@
 A small FastAPI app that a host or contributor runs on their own machine to
 drive the setup/fleet operations that a remote browser tab physically can't:
 Railway provisioning (host) and spawning the local agent fleet (contributor).
-It serves the `control-ui/` Svelte bundle and exposes a thin `/local-api/*`
+It serves the `control-ui/` Svelte bundle and exposes a `/local-api/*`
 surface that wraps the *existing* orchestration functions — it never
-re-implements them:
+re-implements them. The cores:
 
   - init_fleet.build_fleet_config / write_fleet_config   (contributor config)
   - run_fleet.cmd_run (foreground, stoppable, streamed)  (contributor fleet)
-  - setup.create_swarm / switch_challenge                (host provisioning)
+  - hostadmin.create_swarm / switch_challenge            (host provisioning)
+
+plus the supporting surface those flows need: CLI installers (Railway,
+Docker, c3) with device-code Railway login, the local secret store
+(secrets.local.json), invite derivation, tacit-knowledge capture, seed-pool
+status/re-seed, and an `/api/*` reverse proxy so the Admin Console served
+at `/admin/` can reach the swarm.
 
 Launch it directly (`python control_server.py`) or via `python run.py --ui`.
 The CLI wizards (`python run.py`, `python setup.py …`) keep working unchanged;
@@ -312,8 +318,8 @@ class FleetController:
 
 
 class DeployController:
-    """Runs setup.create_swarm in a worker thread, streaming Railway progress
-    to the EventHub. One deploy at a time."""
+    """Runs hostadmin.create_swarm in a worker thread, streaming Railway
+    progress to the EventHub. One deploy at a time."""
 
     def __init__(self, hub: EventHub) -> None:
         self._hub = hub
@@ -359,7 +365,7 @@ class DeployController:
                       f"  it up (Ctrl-C to stop).\n",
                       flush=True)
             except (Exception, SystemExit) as exc:
-                # SystemExit too: setup's CLI-oriented helpers may still exit
+                # SystemExit too: hostadmin's CLI-oriented helpers may still exit
                 # instead of raising — a bare `except Exception` would let that
                 # kill the worker thread silently and leave state "running"
                 # forever.
@@ -1615,8 +1621,10 @@ def create_app(allow_remote: bool = False) -> FastAPI:
 
     @app.post("/local-api/swarm/create")
     async def swarm_create(payload: dict) -> dict:
-        """Provision a swarm. Builds challenges_cfg (defaults) then streams the
-        Railway deploy via the /local-api/stream WebSocket (type deploy_log)."""
+        """Provision a swarm. Builds challenges_cfg from the defaults, applies
+        the UI's optional per-challenge tracks/timeout overrides and the
+        failed-attempts-archive choice, then streams the Railway deploy via
+        the /local-api/stream WebSocket (type deploy_log)."""
         swarm_type = payload.get("swarm_type", "cpu")
         challenge_set = (
             hostadmin.GPU_CHALLENGES if swarm_type == "gpu" else hostadmin.CPU_CHALLENGES

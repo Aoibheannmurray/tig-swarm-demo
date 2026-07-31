@@ -1,7 +1,8 @@
 """Swarm coordination server communication.
 
-HTTP helpers and all API calls: agent registration, state polling,
-heartbeats, chat messages, and result publishing.
+HTTP helpers and all API calls: agent registration, token validation,
+state polling, heartbeats, chat messages, result publishing, and
+failure-record posts.
 """
 
 from __future__ import annotations

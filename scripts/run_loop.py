@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Standalone swarm optimization loop — no agent required.
+"""One agent's swarm optimization loop.
 
 Handles server communication, prompt construction, LLM-based code mutation,
-benchmarking, and result publishing.  Works with any LLM provider (Anthropic,
-OpenAI, Google) or any OpenAI-compatible endpoint via --api-base.
+benchmarking, and result publishing. Providers: anthropic, openai, google,
+openrouter, venice, any OpenAI-compatible endpoint via --api-base, plus the
+sandboxed agentic backends (claude-code-agentic, codex-agentic — see
+agentic_backends.py) and single-shot claude-code.
 
 Usage:
     python setup.py
@@ -16,7 +18,7 @@ Usage:
     python scripts/run_loop.py --provider google --model gemini-2.5-pro
     python scripts/run_loop.py --provider openai --api-base https://api.together.xyz
     python scripts/run_loop.py --provider anthropic --compute c3 --hardware auto
-    python scripts/run_loop.py --provider anthropic --compute c3 --env rust:1-bookworm
+    python scripts/run_loop.py --provider anthropic --compute c3 --hardware cpu-d3-4vcpu-16gb
     python scripts/run_loop.py --provider claude-code --model claude-opus-4-7
 
     # Resume a specific previous agent
@@ -882,7 +884,7 @@ def _print_bench_result(bench: dict, indent: str = "  ") -> None:
     A failed/infeasible track injects a large fixed penalty into a shifted
     geometric mean, so one bad track can drag the aggregate negative. Tracks
     below baseline are flagged inline; what a negative aggregate means is
-    documented once in README.md ("Reading the score") rather than reprinted
+    documented once in README.md ("Interpreting the score") rather than reprinted
     every iteration. ASCII-only on purpose so the line itself can't trip a
     non-UTF-8 Windows console.
     """
@@ -1859,8 +1861,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--hardware",
         help=(
-            "C3 hardware for --compute c3. Use 'auto' to choose "
-            "cpu-d3-4vcpu-16gb for CPU challenges and l40 for GPU "
+            "C3 hardware for --compute c3. 'auto' picks the cheapest "
+            "available CPU profile for the workload per benchmark "
+            "(cpu-d3-4vcpu-16gb offline fallback) and l40 for GPU "
             "challenges (default: auto)."
         ),
     )
@@ -1882,10 +1885,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--c3-max-parallel-jobs", type=int,
         help=(
-            "Fleet-wide C3 concurrent-job cap (default 3, the basic C3 plan cap). "
-            "Also the number of balanced shards each benchmark fans out to. All "
-            "agents sharing one C3 key draw from this pool FCFS; extra shards "
-            "queue and run as slots free up."
+            "Fleet-wide C3 concurrent-job cap (default 3, the basic C3 plan cap), "
+            "and the ceiling on how many balanced shards a benchmark fans out to "
+            "(the cost model may use fewer). All agents sharing one C3 key draw "
+            "from this pool FCFS; extra shards queue and run as slots free up."
         ),
     )
     p.add_argument(
@@ -1902,9 +1905,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--agentic-timeout", type=int, default=1800,
         help=(
-            "Wall-clock timeout in seconds for one agentic iteration "
-            "(claude-code-agentic only). Default 1800 (30 min). The claude "
-            "CLI has no --max-turns flag, so this is the only ceiling."
+            "Wall-clock timeout in seconds for one agentic iteration (any "
+            "agentic backend; also caps the HPO extraction pass). Default "
+            "1800 (30 min)."
         ),
     )
     p.add_argument("--agent-id", help="Resume with an existing agent ID")
@@ -2016,10 +2019,15 @@ def main() -> int:
     args.compute = args.compute or agent_config.get("compute") or "local"
     args.hardware = args.hardware or agent_config.get("c3_hardware") or agent_config.get("hardware") or "auto"
     args.c3_time = args.c3_time or agent_config.get("c3_time") or "02:00:00"
-    args.c3_provider = args.c3_provider or agent_config.get("c3_provider")
+    # `c3_cloud_provider` is the registered knob name (agent_config_keys.py,
+    # what run_fleet forwards from fleet.config.json); `c3_provider` kept for
+    # hand-edited agent.config.json files.
+    args.c3_provider = (args.c3_provider or agent_config.get("c3_provider")
+                        or agent_config.get("c3_cloud_provider"))
     # Distributed C3 benchmarking (default-on when compute=c3). CLI flag wins,
     # else per-agent agent.config.json, else default (3 = the basic C3 plan cap).
-    # This is both the fleet-wide FCFS pool size and the balanced shard count.
+    # This is the fleet-wide FCFS pool size and the shard-count CEILING
+    # (c3_compute._worthwhile_shards decides how much of it to spend).
     if args.c3_max_parallel_jobs is None:
         args.c3_max_parallel_jobs = agent_config.get("c3_max_parallel_jobs", 3)
     # Per-agent C3 key from agent.config.json (forwarded by run_fleet from the
