@@ -155,13 +155,15 @@ export class LeaderboardPanel implements Panel {
     );
     const total = this.currentEntries.length;
     const scoreText = formatScore(b.score);
-    const adoption = b.adoption_pct !== null
-      ? ` · ${b.adoption_pct.toFixed(1)}% adoption` : "";
+    // Column-for-column the same spans as a real agent row (rank, name,
+    // model, 3 stats, 2 scores, 4 stats): the rows are flex with a
+    // flexible name, so a missing fixed-width span widens the name and
+    // shoves the score cells out from under their headers.
     row.innerHTML = `
       <span class="lb-rank lb-mainnet-mark">◆</span>
       <span class="lb-name">
         <span class="lb-mainnet-title">TIG MAINNET</span>
-        <span class="lb-mainnet-sub">${escapeHTML(b.algorithm ?? "")}${adoption}</span>
+        <span class="lb-mainnet-sub">${escapeHTML(b.algorithm ?? "")}</span>
       </span>
       <span class="lb-model"></span>
       <span class="lb-col-sm"></span>
@@ -169,6 +171,7 @@ export class LeaderboardPanel implements Panel {
       <span class="lb-col-sm"></span>
       <span class="lb-score">${scoreKey === "current_score" ? scoreText : ""}</span>
       <span class="lb-score">${scoreKey === "best_ever_score" ? scoreText : ""}</span>
+      <span class="lb-col-sm"></span>
       <span class="lb-col-sm"></span>
       <span class="lb-col-sm"></span>
       <span class="lb-col-sm"></span>
