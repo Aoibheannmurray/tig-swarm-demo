@@ -784,12 +784,21 @@ def _ensure_db_on_volume(swarm_name: str, server_url: str, emit) -> None:
     guard must never fail a create."""
     emit("  verifying the database landed on the /data volume…")
     verdict: bool | None = None
+    nones = 0
     deadline = time.time() + 60
     while time.time() < deadline:
         verdict = _railway_db_on_volume(swarm_name)
         if verdict:
             emit("  ✓ swarm.db is on the persistent volume")
             return
+        if verdict is None:
+            # Missing CLI / API blip won't cure itself mid-loop; two
+            # consecutive inconclusive reads end the wait early.
+            nones += 1
+            if nones >= 2:
+                break
+        else:
+            nones = 0
         time.sleep(10)
     if verdict is None:
         emit(

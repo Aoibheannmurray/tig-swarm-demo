@@ -161,6 +161,7 @@ def test_create_swarm_stubbed() -> None:
         "_railway_add_volume": lambda name, mount: calls.append("volume"),
         "_railway_up": lambda name: calls.append("up"),
         "_railway_domain": lambda name: "https://stub.up.railway.app",
+        "_railway_db_on_volume": lambda name: True,
         "_wait_for_server": lambda url: True,
         "push_config_to_server": lambda url, key, cfg: True,
         "read_initial_algorithms": lambda: {},

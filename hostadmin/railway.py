@@ -415,9 +415,14 @@ def _railway_add_volume(service: str, mount_path: str) -> None:
 def _railway_volume_state(service: str, mount_path: str) -> dict | None:
     """The volume node attached to `service` at `mount_path`, or None.
 
-    Read-only; returns None on any CLI/parse failure as well, so callers
-    must treat None as "couldn't confirm", not "no volume"."""
-    result = _railway_run("volume", "list", "--json", check=False, retries=2)
+    Read-only; returns None on any CLI/parse failure as well — including a
+    missing `railway` binary, since this powers a best-effort verification
+    that must never crash its caller — so callers must treat None as
+    "couldn't confirm", not "no volume"."""
+    try:
+        result = _railway_run("volume", "list", "--json", check=False, retries=2)
+    except RailwayError:
+        return None
     if result.returncode != 0:
         return None
     try:
@@ -443,10 +448,13 @@ def _railway_db_on_volume(service: str, mount_path: str = "/data") -> bool | Non
     vol = _railway_volume_state(service, mount_path)
     if not vol or not vol.get("id"):
         return None
-    result = _railway_run(
-        "volume", "files", "-v", str(vol["id"]), "list", "--json", "/",
-        check=False, retries=2,
-    )
+    try:
+        result = _railway_run(
+            "volume", "files", "-v", str(vol["id"]), "list", "--json", "/",
+            check=False, retries=2,
+        )
+    except RailwayError:
+        return None
     if result.returncode != 0:
         return None
     # The CLI prints a "> Select a volume …" line before the JSON body.
