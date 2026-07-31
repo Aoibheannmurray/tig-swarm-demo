@@ -1,6 +1,8 @@
 import { getAgentColor } from "../../lib/colors";
 import type { Panel, WSMessage } from "../../types";
 import { getViewedChallenge } from "../../lib/viewedChallenge";
+import { getDashboardUrls } from "../../lib/bootstrap";
+import { heatmapCorner, heatmapShortName, ThrottledRefresh } from "../../lib/heatmap";
 
 interface InspirationData {
   agents: { agent_id: string; agent_name: string }[];
@@ -10,10 +12,8 @@ interface InspirationData {
 export class InspirationMatrixPanel implements Panel {
   private inner!: HTMLElement;
   private apiUrl = "";
-  private throttleTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastFetch = 0;
+  private throttle = new ThrottledRefresh(() => this.fetchAndRender());
   private renderedChallenge = "";
-  private static THROTTLE_MS = 30_000;
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -24,22 +24,7 @@ export class InspirationMatrixPanel implements Panel {
     `;
     this.inner = document.getElementById("inspiration-grid")!;
 
-    const params = new URLSearchParams(window.location.search);
-    const explicit = params.get("api");
-    if (explicit) {
-      this.apiUrl = explicit;
-    } else {
-      const ws = params.get("ws") || "";
-      if (ws) {
-        this.apiUrl = ws
-          .replace("ws://", "http://")
-          .replace("wss://", "https://")
-          .replace("/ws/dashboard", "");
-      } else {
-        const proto = window.location.protocol;
-        this.apiUrl = `${proto}//${window.location.host}`;
-      }
-    }
+    this.apiUrl = getDashboardUrls().apiUrl;
 
     this.fetchAndRender();
   }
@@ -49,11 +34,8 @@ export class InspirationMatrixPanel implements Panel {
     // this, a timer queued just before the switch fires after the switch and
     // triggers a redundant fetch (it self-corrects via the getViewedChallenge
     // check inside fetchAndRender, but the round-trip is still wasted).
-    if (this.throttleTimer) {
-      clearTimeout(this.throttleTimer);
-      this.throttleTimer = null;
-    }
-    this.lastFetch = 0;
+    this.throttle.cancel();
+    this.throttle.forceNext();
     this.fetchAndRender();
   }
 
@@ -64,20 +46,11 @@ export class InspirationMatrixPanel implements Panel {
       return;
     }
     if (msg.type !== "leaderboard_update") return;
-
-    const elapsed = Date.now() - this.lastFetch;
-    if (elapsed >= InspirationMatrixPanel.THROTTLE_MS) {
-      this.fetchAndRender();
-    } else if (!this.throttleTimer) {
-      this.throttleTimer = setTimeout(() => {
-        this.throttleTimer = null;
-        this.fetchAndRender();
-      }, InspirationMatrixPanel.THROTTLE_MS - elapsed);
-    }
+    this.throttle.request();
   }
 
   private async fetchAndRender() {
-    this.lastFetch = Date.now();
+    this.throttle.markRun();
     const ch = getViewedChallenge();
     try {
       const res = await fetch(
@@ -111,12 +84,12 @@ export class InspirationMatrixPanel implements Panel {
     grid.style.gridTemplateColumns = `56px repeat(${n}, 1fr)`;
     grid.style.gridTemplateRows = `20px repeat(${n}, 1fr)`;
 
-    grid.appendChild(this.corner());
+    grid.appendChild(heatmapCorner());
     for (let j = 0; j < n; j++) {
       const hdr = document.createElement("div");
       hdr.className = "dv-col-hdr";
       hdr.style.color = getAgentColor(agents[j].agent_id);
-      hdr.textContent = this.shortName(agents[j].agent_name);
+      hdr.textContent = heatmapShortName(agents[j].agent_name);
       hdr.title = `${agents[j].agent_name} (source trajectory)`;
       grid.appendChild(hdr);
     }
@@ -125,7 +98,7 @@ export class InspirationMatrixPanel implements Panel {
       const rh = document.createElement("div");
       rh.className = "dv-row-hdr";
       rh.style.color = getAgentColor(agents[i].agent_id);
-      rh.textContent = this.shortName(agents[i].agent_name);
+      rh.textContent = heatmapShortName(agents[i].agent_name);
       rh.title = `${agents[i].agent_name} (receiver trajectory)`;
       grid.appendChild(rh);
 
@@ -146,25 +119,6 @@ export class InspirationMatrixPanel implements Panel {
 
     this.inner.innerHTML = "";
     this.inner.appendChild(grid);
-  }
-
-  private corner(): HTMLElement {
-    const el = document.createElement("div");
-    el.className = "dv-corner";
-    return el;
-  }
-
-  private shortName(name: string): string {
-    if (name.length <= 12) return name;
-    const dot = " · ";
-    const idx = name.indexOf(dot);
-    if (idx < 0 || idx >= 10) return name.slice(0, 11) + "…";
-    const head = name.slice(0, idx);
-    const tail = name.slice(idx + dot.length);
-    const tailBudget = Math.max(1, 12 - head.length - dot.length);
-    return tail.length <= tailBudget
-      ? `${head}${dot}${tail}`
-      : `${head}${dot}${tail.slice(0, tailBudget)}…`;
   }
 
   private cellColor(val: number, maxVal: number): string {

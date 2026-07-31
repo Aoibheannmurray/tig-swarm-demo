@@ -14,7 +14,10 @@ export class SwarmWebSocket {
   }
 
   onMessage(handler: MessageHandler) {
-    this.handlers.push(handler);
+    // Idempotent: registering the same handler twice would dispatch every
+    // message to it twice (double state mutations). Each page registers once
+    // today, but guard so a future double-call can't silently duplicate.
+    if (!this.handlers.includes(handler)) this.handlers.push(handler);
   }
 
   connect() {

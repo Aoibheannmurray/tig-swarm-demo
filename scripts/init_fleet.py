@@ -49,6 +49,11 @@ EXAMPLE_PATH = ROOT / "fleet.config.example.json"
 sys.path.insert(0, str(ROOT / "server"))
 import tiers  # noqa: E402
 
+# Flat scripts/ import (see scripts/CLAUDE.md) — one definition of "is this
+# endpoint on my own machine?", shared with run_fleet/run_loop so the wizard's
+# advice and the launcher's key handling can't disagree.
+from llm_backends import is_local_api_base  # noqa: E402
+
 # Windows console crashes on the box-drawing characters / checkmark glyphs this
 # wizard prints when the active code page isn't UTF-8 ("UnicodeEncodeError:
 # 'charmap' codec can't encode …"). Force the stream to UTF-8 with replacement
@@ -69,78 +74,155 @@ _OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # as provider `openai` with an explicit api_base.
 _DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 
+# `custom` is not a vendor — it is "whatever OpenAI-compatible endpoint you
+# point me at": a local llama.cpp / vLLM / Ollama / LM Studio server, or a
+# private gateway. Nothing about it can be defaulted, so the contributor
+# supplies all three moving parts (model id, api_base, key env var) and
+# build_fleet_config writes them through as provider `openai` — the same remap
+# OpenRouter and DeepSeek get, just with a URL we don't know in advance.
+_CUSTOM_API_KEY_ENV = "CUSTOM_LLM_API_KEY"
+
+# Providers whose endpoint URL the contributor supplies. Surfaced by
+# get_providers() as `needs_api_base` so the setup UI knows to ask for one
+# rather than hardcoding a provider key.
+NEEDS_API_BASE = frozenset({"custom"})
+
+# Setup-level provider key → what actually lands in fleet.config.json.
+# OpenRouter / DeepSeek / a custom endpoint are all OpenAI-compatible, so they
+# are written as provider `openai` plus an api_base; only the fixed-endpoint
+# ones can name the URL here (custom's comes from the contributor).
+#
+# Surfaced through get_providers() as `wire_provider` / `api_base` because the
+# setup keys are NOT valid config values: run_fleet exits with "unknown
+# provider 'deepseek'" if one is written straight into fleet.config.json. Any
+# UI that edits the config directly has to apply this same mapping — and
+# recognise it in reverse to tell which vendor an `openai` entry really is.
+_WIRE_REMAP: dict[str, tuple[str, str | None]] = {
+    "openrouter": ("openai", _OPENROUTER_API_BASE),
+    "deepseek": ("openai", _DEEPSEEK_API_BASE),
+    "custom": ("openai", None),
+}
+
+
+def resolve_wire_provider(key: str) -> tuple[str, str | None]:
+    """(provider, api_base) as written into fleet.config.json for a setup-level
+    provider key. Unmapped keys pass through unchanged with no api_base."""
+    return _WIRE_REMAP.get(key, (key, None))
+
+
+def wire_providers() -> frozenset[str]:
+    """Every provider value that may legally appear in fleet.config.json."""
+    return frozenset(resolve_wire_provider(p[0])[0] for p in PROVIDERS)
+
 # Keep in sync with DEFAULT_MODELS in scripts/llm_backends.py and the
 # provider list in scripts/run_loop.py. Tuple: (label, default_model,
-# api_key_env or None, short_name_stub, supports_c3, blurb).
-PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str]] = [
+# api_key_env or None, short_name_stub, supports_c3, blurb, popular_models).
+#
+# Labels and blurbs are UI copy — they render in the setup app's provider
+# dropdown, so they name ONE thing ("Claude API", not "Anthropic (Claude
+# API)") and the OpenAI-compatible/api_base plumbing stays in the docs.
+#
+# The Claude CLI rows lead with `opus` / `sonnet` / `haiku`: `claude --model`
+# documents these as "an alias for the latest model", so they follow each new
+# release without anyone editing this table — the closest thing to a live
+# catalog that CLI offers (it has no `models list` command, unlike Codex's
+# `codex debug models`). The dated ids stay below them for pinning a version.
+#
+# `popular_models` is a short, hand-kept shortlist (default first) shown as the
+# "Recommended" group in the setup app's model dropdown. It is NOT the full
+# catalog: the UI fetches that live from the provider (llm_backends.list_models
+# via /local-api/models). The shortlist is what we can offer before a key is
+# saved or when a catalog fetch fails. Codex's installed CLI exposes a live
+# catalog; Claude CLI providers still rely entirely on this shortlist.
+PROVIDERS: list[tuple[str, str, str, str | None, str, bool, str, list[str]]] = [
     ("anthropic",
-     "Anthropic (Claude API)",
-     "claude-opus-4-7",
+     "Claude API",
+     "claude-opus-4-8",
      "ANTHROPIC_API_KEY",
      "claude",
      True,
-     "Claude via Anthropic's API. Needs ANTHROPIC_API_KEY."),
+     "Claude, called directly over Anthropic's API.",
+     ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]),
     ("openai",
-     "OpenAI (GPT API)",
+     "OpenAI API",
      "gpt-5",
      "OPENAI_API_KEY",
      "gpt",
      True,
-     "GPT via OpenAI's API. Needs OPENAI_API_KEY."),
+     "GPT, called directly over OpenAI's API.",
+     ["gpt-5", "gpt-5-mini", "o3"]),
     ("google",
-     "Google (Gemini API)",
+     "Gemini API",
      "gemini-2.5-pro",
-     "GOOGLE_API_KEY",
+     "GEMINI_API_KEY",
      "gemini",
      True,
-     "Gemini via Google's API. Needs GOOGLE_API_KEY."),
+     "Gemini, called directly over Google's API.",
+     ["gemini-2.5-pro", "gemini-2.5-flash"]),
     ("venice",
-     "Venice.ai (OpenAI-compatible)",
+     "Venice.ai",
      "zai-org-glm-5",
      "VENICE_API_KEY",
      "venice",
      True,
-     "Venice.ai — OpenAI-compatible. Needs VENICE_API_KEY."),
+     "Private, uncensored inference over an OpenAI-compatible API.",
+     ["zai-org-glm-5", "qwen3-235b", "deepseek-r1-671b"]),
     ("openrouter",
-     "OpenRouter (multi-model proxy, OpenAI-compatible)",
-     "qwen/qwen-2.5-coder-32b-instruct",
+     "OpenRouter",
+     "qwen/qwen3-coder",
      "OPENROUTER_API_KEY",
      "openrouter",
      True,
-     "OpenRouter — gateway to many providers under one key. Written to the "
-     "config as an OpenAI-compatible endpoint (provider `openai` + api_base). "
-     "Use publisher/model strings like `qwen/qwen-2.5-coder-32b-instruct` "
-     "or `meta-llama/llama-3.1-70b-instruct`. Needs OPENROUTER_API_KEY."),
+     "One key, many providers. Models are `publisher/model` strings.",
+     ["qwen/qwen3-coder", "anthropic/claude-opus-4.8",
+      "deepseek/deepseek-chat", "moonshotai/kimi-k2"]),
     ("deepseek",
-     "DeepSeek (OpenAI-compatible)",
+     "DeepSeek",
      "deepseek-v4-pro",
      "DEEPSEEK_API_KEY",
      "deepseek",
      True,
-     "DeepSeek — OpenAI-compatible. Written to the config as provider `openai` "
-     "+ api_base. Use model ids like `deepseek-v4-pro`, `deepseek-chat` or "
-     "`deepseek-reasoner`. Needs DEEPSEEK_API_KEY."),
+     "DeepSeek's own API — strong models at a low price.",
+     ["deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"]),
     ("claude-code",
-     "Claude CLI — single-shot mode",
-     "claude-opus-4-7",
+     "Claude CLI",
+     "claude-opus-4-8",
      None,
      "claude-cli",
      True,
-     "Uses the `claude` CLI's own login. No API key needed."),
+     "Uses the `claude` CLI's own login. No API key needed.",
+     ["opus", "sonnet", "haiku",
+      "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]),
     ("claude-code-agentic",
-     "Claude CLI — agentic (tooled, sandboxed)",
-     "claude-opus-4-7",
+     "Claude CLI (agentic)",
+     "claude-opus-4-8",
      None,
      "claude-agentic",
      True,
-     "Agentic Claude CLI — more capable, 5-20x more tokens. Subscription only."),
+     "Tooled, sandboxed Claude CLI — more capable, 5-20x more tokens.",
+     ["opus", "sonnet",
+      "claude-opus-4-8", "claude-sonnet-5"]),
     ("codex-agentic",
-     "Codex CLI — agentic",
-     "",
+     "Codex CLI (agentic)",
+     "gpt-5.6-sol",
      None,
      "codex-agentic",
      True,
-     "Agentic Codex CLI — uses `codex login`. Subscription only."),
+     "Agentic Codex CLI — uses `codex login`. Subscription only.",
+     ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+      "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]),
+    # Last on purpose: it's the escape hatch, not a recommendation. No default
+    # model and no shortlist — only the contributor's own server knows what it
+    # serves, and the UI lists it live from api_base/v1/models.
+    ("custom",
+     "Custom / local LLM",
+     "",
+     _CUSTOM_API_KEY_ENV,
+     "local-llm",
+     True,
+     "Your own OpenAI-compatible endpoint — llama.cpp, vLLM, Ollama, "
+     "LM Studio, or a private gateway.",
+     []),
 ]
 
 
@@ -378,16 +460,25 @@ def _select_provider() -> tuple[str, str, str | None, str, bool]:
 # ── Compute backend selection ─────────────────────────────────────
 
 
-# C3 GPU profiles offered in the wizard. The C3 backend forwards `--hardware`
-# verbatim (run_loop.py / c3_compute.py accept any profile its CLI knows), so
-# this is just the common shortlist with `l40` as the default to match the
-# run_loop.py / c3_compute.py default.
+# C3 hardware choices offered in the wizard. The C3 backend forwards explicit
+# profile picks verbatim, while `auto` chooses CPU hardware for CPU challenges
+# and GPU hardware for GPU challenges at benchmark time.
 _C3_HARDWARE_CHOICES = [
+    ("auto", "Auto (CPU challenges: cpu-d3-4vcpu-16gb; GPU challenges: NVIDIA L40)"),
+    ("cpu-d3-4vcpu-16gb", "CPU: AMD EPYC Genoa 4 vCPU / 16 GiB"),
+    ("cpu-e2-4vcpu-16gb", "CPU: Intel Ice Lake 4 vCPU / 16 GiB"),
+    ("cpu-n1-4vcpu-4gb", "CPU: Hyperstack N1 4 vCPU / 4 GiB"),
+    ("cpu-n1-16vcpu-32gb", "CPU: Hyperstack N1 16 vCPU / 32 GiB"),
+    ("cpu-e2-48vcpu-192gb", "CPU: Intel Ice Lake 48 vCPU / 192 GiB"),
+    ("cpu-d3-96vcpu-384gb", "CPU: AMD EPYC Genoa 96 vCPU / 384 GiB"),
     ("l40", "NVIDIA L40"),
     ("h100", "NVIDIA H100"),
 ]
 
 _C3_INSTALL_URL = "https://cthree.cloud/install.sh"
+
+# Hardware keys accepted by build_fleet_config() — the choice keys above.
+_C3_HARDWARE_KEYS = {key for key, _ in _C3_HARDWARE_CHOICES}
 
 
 def _select_compute(supports_c3: bool) -> tuple[str, str | None]:
@@ -407,7 +498,7 @@ def _select_compute(supports_c3: bool) -> tuple[str, str | None]:
         "Where should each benchmark run?",
         [
             ("c3",
-             "C3 cloud GPU — runs benchmarks on a remote GPU "
+             "C3 cloud hardware — runs benchmarks remotely "
              "(needs the c3 CLI + an API key)"),
             ("local",
              "Local Docker — runs benchmarks on this machine"),
@@ -430,9 +521,7 @@ def _select_compute(supports_c3: bool) -> tuple[str, str | None]:
             "handles the key."
         )
 
-    hardware = _prompt_choice(
-        "Which C3 GPU profile?", _C3_HARDWARE_CHOICES, default_idx=0,
-    )
+    hardware = _prompt_choice("Which C3 hardware?", _C3_HARDWARE_CHOICES, default_idx=0)
     return "c3", hardware
 
 
@@ -504,6 +593,8 @@ def _build_agent(
     compute: str,
     hardware: str | None,
     api_base: str | None = None,
+    role: str | None = None,
+    seeded_start: bool | None = None,
 ) -> dict:
     entry: dict = {
         "name": name,
@@ -525,9 +616,191 @@ def _build_agent(
     # says nothing about capability. Frontier models are left without the flag
     # (they don't need the verbosity). Contributors can override either way by
     # editing the flag in fleet.config.json.
-    if tiers.classify_tier(provider, model) == "standard":
+    tier = tiers.classify_tier(provider, model)
+    if tier == "standard":
         entry["detailed_prompts"] = True
+    # Default role from tier: frontier → explorer (ambitious rewrites, fills the
+    # seed pool), standard → exploiter (localized search/replace edits + HPO).
+    # An explicit setup pick wins; either way role stays contributor-owned and
+    # hot-reloads via fleet.config.json.
+    entry["role"] = role if role in ("explorer", "exploiter") else tiers.role_for_tier(tier)
+    # Optional seeding override from setup: True = fresh trajectories start
+    # from working code (server seed pool → best peer → stub fallback),
+    # False = always the bare stub. Omitted = the server's tier/role/GPU
+    # auto policy decides.
+    if seeded_start is not None:
+        entry["seeded_start"] = bool(seeded_start)
     return entry
+
+
+# ── Non-interactive cores (shared by the wizard and the control-ui) ──
+#
+# The interactive wizard (`run_wizard`) collects answers via input() prompts;
+# the local companion UI collects the same answers over HTTP. Both funnel into
+# these pure functions so the config-shaping logic (provider remap, tier-based
+# role / detailed_prompts, C3 handling) lives in exactly one place.
+
+
+def get_providers() -> list[dict]:
+    """The provider table as JSON-serializable data (for the local-api / UI)."""
+    return [
+        {
+            "key": p[0],
+            "label": p[1],
+            "default_model": p[2],
+            "api_key_env": p[3],
+            "name_stub": p[4],
+            "supports_c3": p[5],
+            "blurb": p[6],
+            # The UI asks for an endpoint URL (and lists models from it)
+            # instead of showing a vendor's catalog.
+            "needs_api_base": p[0] in NEEDS_API_BASE,
+            # What this choice becomes in fleet.config.json. A UI that edits
+            # the config directly must write these — not `key` — or the fleet
+            # dies at launch with "unknown provider"; reading them backwards is
+            # also how it tells a DeepSeek agent from a plain OpenAI one.
+            "wire_provider": resolve_wire_provider(p[0])[0],
+            "api_base": resolve_wire_provider(p[0])[1],
+            # Shortlist for the UI's "Recommended" group. The full catalog is
+            # fetched live per provider (see /local-api/models).
+            "popular_models": list(p[7]),
+        }
+        for p in PROVIDERS
+    ]
+
+
+def get_c3_hardware_choices() -> list[dict]:
+    """C3 hardware options as JSON-serializable data (for the local-api / UI)."""
+    return [{"key": key, "label": label} for key, label in _C3_HARDWARE_CHOICES]
+
+
+def build_fleet_config(params: dict) -> dict:
+    """Build a fleet.config.json dict from a params mapping — no I/O, no prompts.
+
+    Shared by the interactive wizard and the local companion UI. Applies the
+    same OpenRouter/DeepSeek → `openai` + api_base remap and the same tier-based
+    role / detailed_prompts defaults (`_build_agent`) as the wizard, so the two
+    entry points can never drift.
+
+    `params` keys: server_url, username, swarm_password (all required);
+    provider (a key from get_providers, may be openrouter/deepseek); model
+    (optional — falls back to the provider default); either `names` (explicit
+    list) or `count` + optional `prefix`; compute (local|c3); hardware
+    (optional C3 profile); c3_api_key (optional, stored only for C3);
+    api_base + api_key_env (required / optional respectively for the `custom`
+    provider, ignored otherwise)."""
+    server_url = (params.get("server_url") or "").strip()
+    username = (params.get("username") or "").strip()
+    swarm_password = (params.get("swarm_password") or "").strip()
+    if not (server_url and username and swarm_password):
+        raise ValueError("server_url, username and swarm_password are all required")
+
+    provider = params.get("provider") or "claude-code"
+    spec = next((p for p in PROVIDERS if p[0] == provider), None)
+    if spec is None:
+        raise ValueError(f"unknown provider: {provider!r}")
+    default_model, api_key_env, supports_c3 = spec[2], spec[3], spec[5]
+
+    # OpenRouter / DeepSeek are OpenAI-compatible: written as provider `openai`
+    # with an explicit api_base (see _WIRE_REMAP, which the config editor reads
+    # through get_providers() so both paths write the same shape).
+    is_custom = provider == "custom"
+    provider, api_base = resolve_wire_provider(provider)
+    if is_custom:
+        # Same remap, but every part comes from the contributor: we have no
+        # endpoint to default to, and the key env var is theirs to name (their
+        # server may want a token, a placeholder, or nothing at all).
+        api_base = (params.get("api_base") or "").strip()
+        if not api_base:
+            raise ValueError(
+                "api_base is required for a custom provider — the URL of your "
+                "OpenAI-compatible endpoint, e.g. http://127.0.0.1:8000/v1"
+            )
+        if not re.match(r"https?://", api_base, re.IGNORECASE):
+            raise ValueError(
+                f"api_base must be an http:// or https:// URL, got {api_base!r}"
+            )
+        api_key_env = (params.get("api_key_env") or "").strip() or _CUSTOM_API_KEY_ENV
+
+    model = (params.get("model") or "").strip() or (default_model or "")
+    if is_custom and not model:
+        raise ValueError(
+            "model is required for a custom provider — the id your endpoint "
+            "serves, e.g. Qwen3-Coder-Next-Q8_0"
+        )
+
+    names = params.get("names")
+    if names:
+        names = [str(n).strip() for n in names if str(n).strip()]
+        if not names:
+            raise ValueError("names, if given, must be non-empty")
+    else:
+        count = int(params.get("count") or 1)
+        if count < 1:
+            raise ValueError("count must be >= 1")
+        prefix = (params.get("prefix") or "").strip()
+        names = (
+            [f"{prefix}-{i}" for i in range(1, count + 1)]
+            if prefix
+            else _generate_agent_names(count)
+        )
+
+    # C3 by default: it needs no local Docker or Rust toolchain, which is the
+    # smoothest path for a new contributor (the setup UI defaults the same way).
+    # Only affects configs created here — a fleet.config.json with no `compute`
+    # field still falls back to local at runtime, so existing fleets don't move.
+    compute = params.get("compute") or "c3"
+    if not supports_c3:
+        compute = "local"
+    if compute not in ("local", "c3"):
+        raise ValueError(f"unknown compute backend: {compute!r}")
+    hardware = params.get("hardware") if compute == "c3" else None
+    if compute == "c3" and hardware and hardware not in _C3_HARDWARE_KEYS:
+        raise ValueError(f"unknown C3 hardware: {hardware!r}")
+
+    # Optional behavior picks from setup. `role`: explorer/exploiter (empty or
+    # "auto" = tier default). `seeded_start`: "seed"/"stub"/bool (empty or
+    # "auto" = server policy). Both stay hot-editable in fleet.config.json.
+    role = (str(params.get("role") or "")).strip().lower() or None
+    if role in ("", "auto"):
+        role = None
+    if role is not None and role not in ("explorer", "exploiter"):
+        raise ValueError(f"unknown role: {role!r} (explorer or exploiter)")
+    raw_seed = params.get("seeded_start")
+    if isinstance(raw_seed, bool):
+        seeded_start = raw_seed
+    else:
+        seed_text = str(raw_seed or "").strip().lower()
+        if seed_text in ("", "auto"):
+            seeded_start = None
+        elif seed_text in ("seed", "true"):
+            seeded_start = True
+        elif seed_text in ("stub", "false"):
+            seeded_start = False
+        else:
+            raise ValueError(f"unknown seeded_start: {raw_seed!r} (seed, stub, or auto)")
+
+    config: dict = {
+        "server_url": server_url,
+        "username": username,
+        "swarm_password": swarm_password,
+    }
+    c3_api_key = (params.get("c3_api_key") or "").strip() or None
+    if compute == "c3" and c3_api_key:
+        config["c3_api_key"] = c3_api_key
+    config["agents"] = [
+        _build_agent(name, provider, model, api_key_env, compute, hardware,
+                     api_base=api_base, role=role, seeded_start=seeded_start)
+        for name in names
+    ]
+    return config
+
+
+def write_fleet_config(config: dict, path: Path | None = None) -> Path:
+    """Serialize a fleet config dict to disk (default: root fleet.config.json)."""
+    dest = path or FLEET_CONFIG_PATH
+    dest.write_text(json.dumps(config, indent=2) + "\n")
+    return dest
 
 
 def run_wizard(force: bool = False) -> int:
@@ -564,21 +837,27 @@ def run_wizard(force: bool = False) -> int:
     print("\nLLM provider")
     print("─" * 40)
     print("Which LLM should your agents call?")
+    # Keep the raw provider key (openrouter/deepseek included) — build_fleet_config
+    # does the OpenAI-compatible remap, so it lives in exactly one place.
     provider, default_model, api_key_env, name_stub, supports_c3 = _select_provider()
 
-    # OpenRouter and DeepSeek are OpenAI-compatible: write them as provider
-    # `openai` with an explicit api_base so they route through the OpenAI client
-    # against the right gateway (api_key_env stays the provider's own env var).
-    api_base: str | None = None
-    if provider == "openrouter":
-        provider = "openai"
-        api_base = _OPENROUTER_API_BASE
-    elif provider == "deepseek":
-        provider = "openai"
-        api_base = _DEEPSEEK_API_BASE
+    # A custom endpoint has nothing to default: ask for the URL first, since
+    # it's what makes the model id meaningful.
+    api_base = None
+    if provider == "custom":
+        print()
+        print("  Your endpoint must speak the OpenAI chat-completions API.")
+        api_base = _prompt("api_base", default="http://127.0.0.1:8000/v1")
+        api_key_env = _prompt(
+            "env var holding its API key (any name; leave the default if "
+            "your server checks no key)",
+            default=_CUSTOM_API_KEY_ENV,
+        )
 
     if default_model:
         model = _prompt("model (press Enter for default)", default=default_model)
+    elif provider == "custom":
+        model = _prompt("model (the id your endpoint serves)")
     else:
         model = _prompt("model", allow_empty=True)
 
@@ -612,20 +891,36 @@ def run_wizard(force: bool = False) -> int:
         else None
     )
 
-    config: dict = {
+    # Behavior picks. Both are hot-editable in fleet.config.json afterward
+    # (`role` / `seeded_start`); "auto" defers to tier/server defaults.
+    print()
+    role = _prompt_choice("Agent role?", [
+        ("auto", "auto — pick by model tier (recommended)"),
+        ("explorer", "explorer — writes novel, ambitious algorithms"),
+        ("exploiter", "exploiter — small focused edits to working code"),
+    ], default_idx=0)
+    seeding = _prompt_choice("Starting point for fresh trajectories?", [
+        ("auto", "auto — server decides (recommended)"),
+        ("seed", "seed — start from working code"),
+        ("stub", "stub — start from scratch"),
+    ], default_idx=0)
+
+    config = build_fleet_config({
         "server_url": server_url,
         "username": username,
         "swarm_password": swarm_password,
-    }
-    if c3_api_key:
-        config["c3_api_key"] = c3_api_key
-    config["agents"] = [
-        _build_agent(name, provider, model, api_key_env, compute, hardware,
-                     api_base=api_base)
-        for name in names
-    ]
-
-    FLEET_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+        "provider": provider,   # raw key; remap happens inside build_fleet_config
+        "model": model,
+        "api_base": api_base,
+        "api_key_env": api_key_env if provider == "custom" else None,
+        "names": names,
+        "compute": compute,
+        "hardware": hardware,
+        "c3_api_key": c3_api_key,
+        "role": role,
+        "seeded_start": seeding,
+    })
+    write_fleet_config(config)
 
     names_str = ", ".join(a["name"] for a in config["agents"])
     compute_desc = f"c3/{hardware}" if compute == "c3" else compute
@@ -644,7 +939,10 @@ def run_wizard(force: bool = False) -> int:
         print(
             f"  reminder: run `c3 login`, or {setline} before launching"
         )
-    if api_key_env and not os.environ.get(api_key_env, "").strip():
+    # A self-hosted endpoint usually authenticates nothing, so telling its
+    # owner to export a key would be inventing a requirement they don't have.
+    if (api_key_env and not os.environ.get(api_key_env, "").strip()
+            and not is_local_api_base(api_base)):
         # Windows `cmd`/PowerShell don't understand `export`; print the
         # platform-correct set-the-env-var command so it can be pasted as-is.
         if os.name == "nt":

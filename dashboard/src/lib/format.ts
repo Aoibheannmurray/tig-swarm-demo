@@ -35,6 +35,22 @@ export function shortenModel(model: string | null | undefined): string {
   return parts.length ? parts[parts.length - 1] : trimmed;
 }
 
+// Escape a string for safe interpolation into an HTML template — both text
+// and quoted-attribute contexts (hence " and ' are covered too). Every panel
+// that builds markup via innerHTML from agent-supplied values (names, chat
+// content, hypothesis titles, broadcast text) MUST route those values through
+// this. Agent-supplied strings are attacker-controlled: any contributor can
+// name an agent or post a message, so an un-escaped sink is stored XSS.
+export function escapeHTML(s: string | null | undefined): string {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export function formatScore(score: number | null | undefined): string {
   if (score == null || Number.isNaN(score)) return "—";
   const abs = Math.abs(score);

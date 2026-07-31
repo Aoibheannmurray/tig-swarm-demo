@@ -3,14 +3,19 @@
   "username": "paste-your-username-from-the-host",
   "swarm_password": "paste-your-password-the-host-shared",
   "c3_api_key": "paste-your-c3-api-key-here",
+  "hpo_min_improvements": 4,
+  "hpo_first_tune_improvements": 10,
+  "hpo_num_suggested_configs": 5,
+  "hpo_search_budget": 13,
+  "c3_max_parallel_jobs": 3,
   "agents": [
     {
       "name": "my-claude-agent",
       "provider": "anthropic",
-      "model": "claude-opus-4-7",
+      "model": "claude-opus-4-8",
       "api_key_env": "ANTHROPIC_API_KEY",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto"
     },
     {
       "name": "my-gpt-agent",
@@ -18,14 +23,15 @@
       "model": "gpt-5",
       "api_key_env": "OPENAI_API_KEY",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto"
     },
     {
       "name": "mr-claude-agentic",
       "provider": "claude-code-agentic",
-      "model": "claude-opus-4-7",
+      "model": "claude-opus-4-8",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto",
+      "tacit_write": false
     },
     {
       "name": "ms-openrouter",
@@ -34,7 +40,7 @@
       "api_key_env": "OPENROUTER_API_KEY",
       "api_base": "https://openrouter.ai/api/v1",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto"
     },
     {
       "name": "my-deepseek-bot",
@@ -43,7 +49,16 @@
       "api_key_env": "DEEPSEEK_API_KEY",
       "api_base": "https://api.deepseek.com/v1",
       "compute": "c3",
-      "hardware": "l40"
+      "hardware": "auto"
+    },
+    {
+      "name": "my-local-llm",
+      "provider": "openai",
+      "model": "Qwen3-Coder-Next-Q8_0",
+      "api_key_env": "CUSTOM_LLM_API_KEY",
+      "api_base": "http://127.0.0.1:8000/v1",
+      "compute": "local",
+      "role": "explorer"
     }
   ]
 }

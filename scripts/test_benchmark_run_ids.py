@@ -45,16 +45,16 @@ def test_env_override_wins():
 
 def test_username_and_agent_id_compose():
     with tempfile.TemporaryDirectory() as tmp:
-        _with_root(tmp, **{"agent.config.json": {"username": "aoibheann", "agent_id": "69e67db9ffb3"}})
-        assert benchmark._resolve_user_id() == "aoibheann (agent 69e67db9ffb3)"
+        _with_root(tmp, **{"agent.config.json": {"username": "contributor", "agent_id": "69e67db9ffb3"}})
+        assert benchmark._resolve_user_id() == "contributor (agent 69e67db9ffb3)"
     print("PASS test_username_and_agent_id_compose")
 
 
 def test_username_only_falls_back_to_fleet_config():
     with tempfile.TemporaryDirectory() as tmp:
         # No agent.config.json → username comes from fleet.config.json, no agent id.
-        _with_root(tmp, **{"fleet.config.json": {"username": "aoibheann"}})
-        assert benchmark._resolve_user_id() == "aoibheann"
+        _with_root(tmp, **{"fleet.config.json": {"username": "contributor"}})
+        assert benchmark._resolve_user_id() == "contributor"
     print("PASS test_username_only_falls_back_to_fleet_config")
 
 
@@ -100,6 +100,40 @@ def test_c3_runner_exports_precomposed_user_id():
     print("PASS test_c3_runner_exports_precomposed_user_id")
 
 
+def test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge():
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp)
+        c3_compute._write_c3_project(
+            stage,
+            {"challenge": "knapsack", "c3_hardware": "auto"},
+            "https://example.invalid",
+            "00:10:00",
+            "rust:1-bookworm",
+        )
+        c3_yaml = (stage / ".c3").read_text()
+        assert 'hardware: "cpu-d3-4vcpu-16gb"' in c3_yaml
+        assert 'requires_accelerator: "none"' in c3_yaml
+        assert "\ngpu:" not in c3_yaml
+    print("PASS test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge")
+
+
+def test_c3_project_uses_gpu_hardware_for_auto_gpu_challenge():
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp)
+        c3_compute._write_c3_project(
+            stage,
+            {"challenge": "hypergraph", "is_gpu": True, "c3_hardware": "auto"},
+            "https://example.invalid",
+            "00:10:00",
+            "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04",
+        )
+        c3_yaml = (stage / ".c3").read_text()
+        assert 'hardware: "l40"' in c3_yaml
+        assert 'requires_accelerator: "cuda"' in c3_yaml
+        assert "\ngpu:" not in c3_yaml
+    print("PASS test_c3_project_uses_gpu_hardware_for_auto_gpu_challenge")
+
+
 def _main():
     test_env_override_wins()
     test_username_and_agent_id_compose()
@@ -108,6 +142,8 @@ def _main():
     test_unknown_when_no_identity()
     test_benchmark_id_is_fresh_10_char_hex()
     test_c3_runner_exports_precomposed_user_id()
+    test_c3_project_uses_cpu_hardware_for_auto_cpu_challenge()
+    test_c3_project_uses_gpu_hardware_for_auto_gpu_challenge()
     print("\nAll benchmark run-id tests passed.")
 
 

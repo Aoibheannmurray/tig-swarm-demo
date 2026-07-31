@@ -23,6 +23,7 @@ import type { Panel, WSMessage } from "../types";
 import { liveSwitchToActive, shouldShowLiveButton } from "../lib/panelLive";
 import { getAgentColor } from "../lib/colors";
 import { formatScore } from "../lib/format";
+import { getDashboardUrls } from "../lib/bootstrap";
 import type { Challenge } from "./registry";
 
 export interface DisplayHistoryEntry<TInstances> {
@@ -225,7 +226,7 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       this.applyHistoryEntry();
     });
 
-    this.apiUrl = resolveApiUrl();
+    this.apiUrl = getDashboardUrls().apiUrl;
 
     this.rotationTimer = setInterval(() => {
       // Skip rotation while the tab is hidden so we're not redrawing SVG
@@ -518,18 +519,4 @@ export abstract class DisplayPanelBase<TInstances extends Record<string, any>>
       this.flashNewBest(entry.agent_id ? getAgentColor(entry.agent_id) : undefined);
     }
   }
-}
-
-function resolveApiUrl(): string {
-  const params = new URLSearchParams(window.location.search);
-  const explicit = params.get("api");
-  if (explicit) return explicit;
-  const ws = params.get("ws") || "";
-  if (ws) {
-    return ws
-      .replace("ws://", "http://")
-      .replace("wss://", "https://")
-      .replace("/ws/dashboard", "");
-  }
-  return `${window.location.protocol}//${window.location.host}`;
 }

@@ -1,25 +1,48 @@
 # initial_algorithms/
 
-Per-challenge starting code broadcast to agents on a fresh trajectory. There are
-two kinds of file here — **stubs** and **seeds** — and they feed two different
-agent paths (see `server/tiers.py`, `server/server.py::seed_for_agent`).
+> **Licensing:** the GPU `stub/` slots derive from TIG's algorithm template and
+> fall under the TIG Game Code EULA v2.0; a mainnet algorithm staged into a
+> `stub/` slot is under the TIG Innovator Outbound Game License v2; everything
+> else here (all `seeds/`, the CPU stubs) was authored in this repo and is
+> GPLv3 — see [docs/LICENSE-TIG.md](../docs/LICENSE-TIG.md).
 
-## Stubs — `initial_algorithms/<challenge>.rs` (+ optional `.cu`)
+Per-challenge starting code broadcast to agents on a fresh trajectory. One
+directory per challenge, two slots that feed different agent paths (see
+`server/tiers.py`, `server/server.py::seed_for_agent`):
 
-The bare `unimplemented!()` starting point. Handed to **frontier-tier explorer**
-agents, which are expected to bootstrap a complete algorithm from scratch. This
-is the swarm's historical default and is broadcast verbatim at `setup.py create`
-(see `read_initial_algorithms`).
+```
+initial_algorithms/<challenge>/
+  stub/                         # the starting-code slot: mod.rs [+ kernels.cu]
+  seeds/<strategy_tag>.rs (.cu) # authored seed pool entries
+```
 
-`energy_arbitrage/` additionally ships a full **multi-file initial** algorithm
-(`mod.rs` + `track_*.rs`) rather than a single stub — that whole directory is the
-energy_arbitrage starting implementation.
+## Stub — `<challenge>/stub/` (`mod.rs` [+ `*.cu`, + sibling modules])
 
-## Seeds — `initial_algorithms/<challenge>/seeds/<strategy_tag>.rs` (+ optional `.cu`)
+The challenge's starting code — what the server broadcasts on iteration 1 and
+on fresh-start trajectory resets (`read_initial_algorithms`). Its sophistication
+varies by design:
 
-Complete, **feasible** simple algorithms. `setup.py create` loads every file
-under a `seeds/` directory into the server's seed pool (`read_authored_seeds` →
-`POST /api/admin/seed_pool`). The server hands a seed (instead of the stub) to
+- **CPU challenges** ship the bare `unimplemented!()` placeholder. Handed to
+  **frontier-tier explorer** agents, which are expected to bootstrap a
+  complete algorithm from scratch — the swarm's historical default.
+- **GPU challenges** also ship TIG's bare template as the stub; the working
+  CUDA implementations live under `seeds/`. Bootstrapping a *compiling*
+  kernel from the bare placeholder is too hard even for frontier models, so
+  the server hands GPU agents a seed instead (see `seed_for_agent` — on GPU
+  challenges every agent starts from working code drawn from the seed pool).
+
+A host can replace any challenge's slot with stronger code before
+`setup.py create` — by editing it, or by staging a mainnet algorithm with
+`scripts/download_algorithm.py` (which replaces ONLY `stub/`; `seeds/` is
+never touched). Single- and multi-file algorithms land the same way: `mod.rs`
+plus optional `*.cu` / sibling modules, filenames preserved.
+
+## Seeds — `<challenge>/seeds/<strategy_tag>.rs` (+ optional `.cu`)
+
+Complete, **feasible** simple algorithms. `setup.py create` loads every
+`*.rs` file under a `seeds/` directory (each with its optional same-stem
+`.cu`) into the server's seed pool (`read_authored_seeds` →
+`POST /api/admin/seed_pool`); other file types are ignored. The server hands a seed (instead of the stub) to
 **standard-tier agents and to any exploiter**, so a weaker model refines working
 code rather than failing to bootstrap one.
 

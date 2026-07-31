@@ -5,6 +5,9 @@ pub struct ScenarioConfig {
     pub product_mix_ratio: f32,
 }
 
+// Variant names mirror the upstream track-config identifiers (FLOW_SHOP, …)
+// rather than Rust naming conventions, so the wire format stays greppable.
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scenario {
     FLOW_SHOP,

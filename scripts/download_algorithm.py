@@ -6,10 +6,10 @@ CLI:
     python3 scripts/download_algorithm.py <challenge> <algorithm> [--force] [--ref BRANCH]
 
 The upstream layout is `tig-algorithms/src/{challenge}/{algorithm}` on the
-branch named `{challenge}/{algorithm}` (override with `--ref`). If the
-fetched algorithm is a single `mod.rs` (+ optional `*.cu`) we drop it into
-`initial_algorithms/{challenge}.rs` (+ `{challenge}.cu`); otherwise we
-materialize the directory under `initial_algorithms/{challenge}/`.
+branch named `{challenge}/{algorithm}` (override with `--ref`). The fetched
+bundle (single- or multi-file, names preserved) replaces the challenge's
+starting-code slot `initial_algorithms/{challenge}/stub/` (with `--force`);
+the authored `seeds/` pool is never touched.
 
 Importable: `download_algorithm(challenge, algorithm, *, force, ref=None)`.
 """
@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import re
 import shutil
 import sys
 import urllib.error
@@ -97,100 +96,41 @@ def _decode_blob(blob: object) -> str:
     raise DownloadError(f"unsupported blob encoding: {encoding!r}")
 
 
-# ── Cleaning ──────────────────────────────────────────────────────────
-
-
-def _clean_rust(challenge: str, code: str) -> str:
-    """Replace `use tig_challenges::{challenge}::...;` imports with the
-    in-tree equivalents. Leaves everything else (seeded_hasher, HashMap,
-    custom imports) untouched — those are rare and risky to rewrite."""
-    pattern = re.compile(
-        rf"^\s*use\s+tig_challenges::{re.escape(challenge)}::[^;]*;\s*$",
-        re.MULTILINE,
-    )
-    return pattern.sub("use super::*;", code)
-
-
-def _clean_cuda(challenge: str, code: str) -> str:
-    pattern = re.compile(
-        rf"^\s*use\s+tig_challenges::{re.escape(challenge)}::[^;]*;\s*$",
-        re.MULTILINE,
-    )
-    return pattern.sub(f"use crate::{challenge}::*;", code)
-
-
-def _clean(rel_path: str, challenge: str, content: str) -> str:
-    if rel_path.endswith(".rs"):
-        return _clean_rust(challenge, content)
-    if rel_path.endswith(".cu"):
-        return _clean_cuda(challenge, content)
-    return content
-
-
 # ── Staging ───────────────────────────────────────────────────────────
 
 
-def _is_simple_layout(files: dict[str, str]) -> bool:
-    """True iff the upstream bundle is just `mod.rs` (+ at most one `*.cu`)."""
-    rs_files = [p for p in files if p.endswith(".rs")]
-    cu_files = [p for p in files if p.endswith(".cu")]
-    other = [p for p in files if not (p.endswith(".rs") or p.endswith(".cu"))]
-    if other:
-        return False
-    if rs_files != ["mod.rs"]:
-        return False
-    return len(cu_files) <= 1
-
-
 def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
-    """Drop the cleaned files into initial_algorithms/. Returns the staged
-    path (file or directory)."""
-    INITIAL_DIR.mkdir(parents=True, exist_ok=True)
+    """Drop the fetched files into ``initial_algorithms/<challenge>/stub/``
+    — the challenge's starting-code slot (filenames preserved; single- and
+    multi-file bundles land the same way).
+
+    Only that directory is managed: the authored seed pool (``seeds/``) is
+    never touched — the pre-restructure staging rmtree'd the whole challenge
+    directory and could silently delete ``seeds/``. Flat pre-restructure
+    artifacts (``<challenge>.rs`` / ``.cu``) are cleaned up on ``--force`` so
+    a stale copy can't shadow ``stub/`` for legacy readers. Returns the
+    staged directory."""
+    if "mod.rs" not in files:
+        raise DownloadError("upstream algorithm has no mod.rs; refusing to seed")
+    stub_dir = INITIAL_DIR / challenge / "stub"
     legacy_rs = INITIAL_DIR / f"{challenge}.rs"
     legacy_cu = INITIAL_DIR / f"{challenge}.cu"
-    bundle_dir = INITIAL_DIR / challenge
-
-    cleaned = {p: _clean(p, challenge, c) for p, c in files.items()}
-
-    if _is_simple_layout(cleaned):
-        target = legacy_rs
-        cu_target = legacy_cu if any(p.endswith(".cu") for p in cleaned) else None
-        existing = [p for p in (target, cu_target, bundle_dir) if p and p.exists()]
-        if existing and not force:
-            raise DownloadError(
-                f"refusing to overwrite {[str(p.relative_to(ROOT)) for p in existing]}; pass --force"
-            )
-        # Clean stale directory if we're switching from multi-file to single-file.
-        if bundle_dir.exists():
-            shutil.rmtree(bundle_dir)
-        target.write_text(cleaned["mod.rs"], encoding="utf-8")
-        if cu_target is not None:
-            cu_path = next(p for p in cleaned if p.endswith(".cu"))
-            cu_target.write_text(cleaned[cu_path], encoding="utf-8")
-        elif legacy_cu.exists() and force:
-            legacy_cu.unlink()
-        return target
-
-    # Multi-file directory layout.
-    if "mod.rs" not in cleaned:
-        raise DownloadError("upstream algorithm has no mod.rs; refusing to seed")
-    existing = [p for p in (legacy_rs, legacy_cu, bundle_dir) if p.exists()]
+    existing = [p for p in (stub_dir, legacy_rs, legacy_cu) if p.exists()]
     if existing and not force:
         raise DownloadError(
             f"refusing to overwrite {[str(p.relative_to(ROOT)) for p in existing]}; pass --force"
         )
-    if bundle_dir.exists():
-        shutil.rmtree(bundle_dir)
-    if legacy_rs.exists():
-        legacy_rs.unlink()
-    if legacy_cu.exists():
-        legacy_cu.unlink()
-    bundle_dir.mkdir(parents=True)
-    for rel, body in cleaned.items():
-        out = bundle_dir / rel
+    if stub_dir.exists():
+        shutil.rmtree(stub_dir)
+    for legacy in (legacy_rs, legacy_cu):
+        if legacy.exists():
+            legacy.unlink()
+    stub_dir.mkdir(parents=True)
+    for rel, body in files.items():
+        out = stub_dir / rel
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(body, encoding="utf-8")
-    return bundle_dir
+    return stub_dir
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -199,9 +139,10 @@ def _stage(challenge: str, files: dict[str, str], force: bool) -> Path:
 def fetch_algorithm(
     challenge: str, algorithm: str, *, ref: str | None = None,
 ) -> dict[str, str]:
-    """Fetch + clean an algorithm from upstream. Returns
-    ``{relative_path: cleaned_content}``. Does NOT write to disk — use
-    ``download_algorithm`` for that.
+    """Fetch an algorithm from upstream. Returns ``{relative_path: content}``
+    (mainnet code is used verbatim — the swarm's algorithm format IS the
+    mainnet format). Does NOT write to disk — use ``download_algorithm``
+    for that.
 
     Separated from ``download_algorithm`` so callers that want to inspect
     or transmit the source without persisting it locally (e.g. the swarm's
@@ -214,20 +155,18 @@ def fetch_algorithm(
     files = _walk_contents(challenge, algorithm, branch)
     if not files:
         raise DownloadError(f"upstream returned no files for {challenge}/{algorithm}")
-    return {p: _clean(p, challenge, c) for p, c in files.items()}
+    return files
 
 
 def download_algorithm(
     challenge: str, algorithm: str, *, force: bool, ref: str | None = None,
 ) -> Path:
-    """Fetch + clean + stage. Returns the path written under initial_algorithms/."""
-    cleaned = fetch_algorithm(challenge, algorithm, ref=ref)
-    # _stage re-cleans internally; passing pre-cleaned content is idempotent
-    # because the regexes only rewrite `use tig_challenges::...` lines that
-    # the fetch pass has already replaced with `use super::*;`.
-    staged = _stage(challenge, cleaned, force)
+    """Fetch + stage (mainnet code is used verbatim). Returns the path
+    written under initial_algorithms/."""
+    files = fetch_algorithm(challenge, algorithm, ref=ref)
+    staged = _stage(challenge, files, force)
     rel = staged.relative_to(ROOT)
-    print(f"    staged {len(cleaned)} file(s) -> {rel}")
+    print(f"    staged {len(files)} file(s) -> {rel}")
     return staged
 
 

@@ -1,13 +1,19 @@
 import json
 import asyncio
-import hashlib
+import contextvars
+import functools
 import logging
+import os
 import random
+import re
 import secrets
+import sqlite3
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -15,20 +21,27 @@ from pathlib import Path
 from models import (
     RegisterRequest, HeartbeatRequest, RenameRequest,
     IterationCreate, AdminBroadcast, AdminAuth, AdminResetChallenge,
-    AdminRevoke, AdminSeedInactive, AdminSeedPool,
+    AdminRevoke, AdminSeedInactive, AdminSeedPool, AdminSeedFromMainnet,
+    AdminClearInactive,
+    AdminMeasureMainnetBaseline,
+    AdminSeedsQuery,
+    ContributorConfigPut, MAX_CONTRIB_CONFIG_LEN,
+    FailureRecordCreate,
     MessageCreate,
     SwarmConfigUpdate,
     AgentResponse,
     IterationResponse, new_id, improvement_pct,
 )
-from names import generate_agent_name, load_used_names
+from names import generate_agent_name, load_used_names, reserve_name
 from dedup import fingerprint
 import db
 import tiers
+import seed_diversity
 import ws_events
 import api_models
 import challenges
 from challenges import DEFAULT_CHALLENGE
+from trajectory_reset import maybe_reset_trajectory
 
 logger = logging.getLogger("swarm")
 
@@ -41,10 +54,60 @@ logger = logging.getLogger("swarm")
 # is missing or unparseable. Add new tunables here so call sites stay
 # consistent — never inline an `int(config.get(KEY, "N"))` again.
 SWARM_DEFAULTS: dict[str, int] = {
-    "inactive_minutes": 20,
+    # 60, not 20: agentic / C3-benchmark iterations legitimately run 45+ min
+    # of wall-clock per cycle. A shorter window lets the periodic_stats sweep
+    # reap an actively-working agent's trajectory mid-iteration, so every
+    # publish lands on a fresh trajectory and trivially "beats" an empty best.
+    "inactive_minutes": 60,
     "stagnation_threshold": 2,
-    "stagnation_limit": 5,
+    "stagnation_limit": 4,
+    # Kill-switch for trajectories that never turn positive: when > 0, a
+    # trajectory whose best is still not better than 0 (= the baseline)
+    # after this many edits is reset on the next state poll, exactly like a
+    # stagnation_limit trip. Catches lines stagnation_limit can't: small
+    # improvements below zero reset runs_since_improvement every time, yet
+    # the pool refuses negative deposits, so such a line can grind forever
+    # and never yield anything adoptable. 0 (default) disables. Leave it
+    # disabled on challenges whose feasible scores are inherently negative
+    # (e.g. neuralnet_optimizer) — there "positive" is unreachable and this
+    # would cull every trajectory.
+    "negative_trajectory_limit": 0,
     "hypothesis_recall_threshold": 3,
+    # Seed-pool diversity (server-side; see server/seed_diversity.py).
+    # K: max seeds kept per challenge. max_loc: simplicity ceiling — algorithms
+    # above this many source lines are never harvested as seeds.
+    "seed_pool_size": 10,
+    "seed_max_loc": 200,
+    # Hyperparameter-optimization gate + search. The contributor's driver reads
+    # these from the pushed swarm config (see scripts/run_loop.py _hpo_gate_open
+    # / _maybe_tune_hyperparameters). first_tune_improvements: per-trajectory improvements a
+    # trajectory needs before its FIRST tune (the band check is waived that
+    # once). min_improvements: improvements needed for later tunes; also sets
+    # the tune-band width. search_budget (N): configs evaluated per tune
+    # (default {} + suggested + random). num_suggested_configs: max
+    # LLM-suggested configs folded into N.
+    "hpo_first_tune_improvements": 10,
+    "hpo_min_improvements": 4,
+    "hpo_search_budget": 13,
+    "hpo_num_suggested_configs": 5,
+    # Failed-attempts archive: when 1, LLM-authored failure retrospectives /
+    # tacit lessons are stored in `failure_records` and "failed_attempts"
+    # joins the stagnation-hint rotation (served per-agent only — an agent
+    # is shown its OWN dead ends, framed as material for a modified retry,
+    # never as prohibitions). 0 (default) = off: posts are no-op'd and the
+    # hint is never offered.
+    "failed_attempts_archive": 0,
+    # Retention: newest N LLM records kept per (agent, challenge).
+    "failure_records_max_per_agent": 40,
+    # How many records (of each kind) ride along when the hint fires.
+    "failed_attempts_hint_records": 3,
+}
+
+# Float-valued swarm tunables (swarm_setting only returns ints).
+SWARM_FLOAT_DEFAULTS: dict[str, float] = {
+    # Novelty gate: a candidate seed is admitted only if its similarity to every
+    # existing seed is below this. Higher => more permissive (more seeds).
+    "seed_similarity_threshold": 0.6,
 }
 
 
@@ -55,6 +118,17 @@ def swarm_setting(config: dict, key: str) -> int:
         return default
     try:
         return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def swarm_setting_float(config: dict, key: str) -> float:
+    default = SWARM_FLOAT_DEFAULTS[key]
+    raw = config.get(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
     except (TypeError, ValueError):
         return default
 
@@ -90,9 +164,16 @@ async def get_active_challenge() -> str:
 
 
 async def resolve_challenge(challenge: str | None) -> str:
-    """Pick the challenge a request applies to. Explicit value wins; otherwise
-    fall back to the swarm's active challenge."""
+    """Pick the challenge a request applies to. An explicit value wins but
+    must name a known challenge — 400 otherwise, so garbage query params
+    can't grow the per-challenge config cache or seed junk
+    agent_challenge_state rows. Falls back to the swarm's active challenge
+    when none is provided."""
     if challenge:
+        if not challenges.is_known_challenge(challenge):
+            raise HTTPException(
+                status_code=400, detail=f"Unknown challenge {challenge!r}",
+            )
         return challenge
     return await get_active_challenge()
 
@@ -146,10 +227,18 @@ async def load_initial_algorithm(challenge: str) -> tuple[str, str]:
     )
 
 
+# The JSON codecs for the `algorithm_files` column live in db.py (they're
+# shared with trajectory_reset.py). Private aliases kept — call sites
+# throughout this module and the self-running tests use server._files_json /
+# server._row_files.
+_files_json = db.files_json
+_row_files = db.row_files
+
+
 async def seed_for_agent(
     conn, agent_id: str, challenge: str, tier: str, role: str,
-    *, direction: str, cutoff_ts: str,
-) -> tuple[str, str, str]:
+    *, direction: str, cutoff_ts: str, seeded: bool | None = None,
+) -> tuple[str, str, dict | None, str]:
     """Pick the starting code for an agent on a fresh trajectory.
 
     On CPU challenges frontier explorers keep the bare stub (they bootstrap),
@@ -160,26 +249,34 @@ async def seed_for_agent(
     working-code path is a fallback chain:
       seed pool (diverse per-agent assignment) → best active peer → stub.
 
-    Returns (algorithm_code, kernel_code, start) where `start` is one of
-    'seed' | 'peer' | 'stub' for the dashboard.
+    `seeded` is the contributor-owned per-agent override (`seeded_start` in
+    fleet.config.json, reported on each /api/state poll like `role`): True
+    forces the working-code chain, False forces the stub, None (absent)
+    keeps the tier/role/GPU policy above.
+
+    Returns (algorithm_code, kernel_code, algorithm_files, start) where
+    `algorithm_files` is the multi-file map (or None for single-file) and
+    `start` is one of 'seed' | 'peer' | 'stub' for the dashboard.
     """
     # For now, GPU challenges seed every model regardless of tier/role —
     # frontier models rarely produce a compiling kernel from the bare stub, so
     # handing them a working seed gets the whole fleet off the ground faster.
     ch_def = challenges.CHALLENGES.get(challenge)
     is_gpu = ch_def.is_gpu if ch_def else False
-    needs_seed = is_gpu or (tier == "standard") or (role == "exploiter")
+    if seeded is None:
+        needs_seed = is_gpu or (tier == "standard") or (role == "exploiter")
+    else:
+        needs_seed = seeded
     if not needs_seed:
         code, kernel = await load_initial_algorithm(challenge)
-        return code, kernel, "stub"
+        return code, kernel, None, "stub"
 
     seeds = await db.list_seeds(conn, challenge)
     if seeds:
-        # Deterministic per-agent assignment spreads the population across the
-        # available seeds (and is stable across this agent's resets).
-        idx = int(hashlib.sha1(agent_id.encode()).hexdigest(), 16) % len(seeds)
-        s = seeds[idx]
-        return s["algorithm_code"], s.get("kernel_code") or "", "seed"
+        # Random per-trajectory draw: each fresh start re-rolls the launch point
+        # so the population spreads across the (small, curated) seed pool.
+        s = random.choice(seeds)
+        return s["algorithm_code"], s.get("kernel_code") or "", _row_files(s), "seed"
 
     # Empty seed pool → adopt the best active peer's current algorithm so the
     # agent exploits a real working lineage instead of idling on the stub.
@@ -192,11 +289,11 @@ async def seed_for_agent(
     )
     if peers:
         best = peers[0]
-        return best["algorithm_code"], best.get("kernel_code") or "", "peer"
+        return best["algorithm_code"], best.get("kernel_code") or "", _row_files(best), "peer"
 
     # True cold start: no seeds and no feasible peers yet.
     code, kernel = await load_initial_algorithm(challenge)
-    return code, kernel, "stub"
+    return code, kernel, None, "stub"
 
 
 async def get_direction(challenge: str | None = None) -> str:
@@ -238,6 +335,43 @@ def get_num_instances_for(cfg: dict, solution_data=None) -> int:
         return 1
 
 
+async def _mainnet_baseline_view(conn, challenge: str, direction: str) -> dict | None:
+    """The mainnet bar for this challenge, as the dashboard needs it.
+
+    Returns None when the swarm has never been told which mainnet algorithm it
+    is measured against — the panels then render nothing rather than an empty
+    frame. Otherwise always carries `status`, so the UI can distinguish "not
+    measured yet" from "no mainnet algorithm exists for this challenge" from a
+    real score.
+
+    `stale` is the honest part: a score only means something against the
+    instance set that produced it, so if the host has edited this challenge's
+    tracks or timeout since, we say so instead of comparing a number against a
+    different problem."""
+    row = await db.get_mainnet_baseline(conn, challenge)
+    if row is None:
+        return None
+    cfg = await db.get_challenge_config(conn, challenge)
+    current_fp = db.config_fingerprint(
+        json.loads(cfg["tracks"]) if cfg and cfg.get("tracks") else None,
+        cfg.get("timeout") if cfg else None,
+    )
+    stale = bool(
+        row["config_fingerprint"] and row["config_fingerprint"] != current_fp
+    )
+    return {
+        "algorithm": row["algo_name"] or None,
+        "adoption_pct": row["adoption_pct"],
+        "score": row["score"] if row["status"] == "ready" else None,
+        "feasible": bool(row["feasible"]),
+        "status": row["status"],
+        "measured_by": row["measured_by"],
+        "benchmarked_at": row["benchmarked_at"],
+        "stale": stale,
+        "direction": direction,
+    }
+
+
 async def get_baseline_score(conn, challenge: str) -> float | None:
     """The baseline is the score of the very first feasible experiment
     published to the DB for this challenge. Scores are already per-instance
@@ -259,8 +393,17 @@ async def get_baseline_score(conn, challenge: str) -> float | None:
 async def verify_admin(req: AdminAuth) -> None:
     config = await get_config_cached()
     expected = config.get("admin_key")
-    if not expected or req.admin_key != expected:
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+    supplied = req.admin_key or ""
+    ip = _client_ip.get()
+    # Constant-time compare (encode to bytes so a non-ASCII input can't raise
+    # inside compare_digest) FIRST — a correct key always succeeds and is never
+    # throttled. Only wrong keys count toward the per-IP brute-force limit.
+    if expected and secrets.compare_digest(supplied.encode(), expected.encode()):
+        _clear_auth_failure(f"admin:{ip}")
+        return
+    if _note_auth_failure(f"admin:{ip}") > _AUTH_FAIL_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many attempts; slow down")
+    raise HTTPException(status_code=403, detail="Invalid admin key")
 
 
 def _derive_user_password(username: str, base_password: str) -> str:
@@ -293,9 +436,10 @@ async def verify_swarm_password(
     x_username: str | None = Header(default=None, alias="X-Username"),
     x_swarm_password: str | None = Header(default=None, alias="X-Swarm-Password"),
 ) -> str:
-    """Gates /api/agents/register (the join endpoint). Returns the
-    contributor's username so the handler can stamp it on the new agent.
-    Subsequent writes use the per-agent token (see verify_agent_token).
+    """Gates /api/agents/register (the join endpoint) and the
+    /api/contributor/* endpoints. Returns the contributor's username so the
+    handler can stamp it on the new agent. Subsequent agent writes use the
+    per-agent token (see verify_agent_token).
     """
     if not x_username or not x_swarm_password:
         raise HTTPException(
@@ -307,33 +451,94 @@ async def verify_swarm_password(
     if not base:
         raise HTTPException(status_code=403, detail="Swarm not configured")
     expected = _derive_user_password(x_username, base)
-    if not secrets.compare_digest(x_swarm_password, expected):
+    # Per-IP throttle on wrong passwords. Safe for fleets: every legitimate
+    # agent presents the correct derived password, so it passes here and is
+    # never throttled even when a whole fleet registers from one IP at once.
+    ip = _client_ip.get()
+    if not secrets.compare_digest(x_swarm_password.encode(), expected.encode()):
+        if _note_auth_failure(f"swarm:{ip}") > _AUTH_FAIL_LIMIT:
+            raise HTTPException(status_code=429, detail="Too many attempts; slow down")
         raise HTTPException(status_code=403, detail="Invalid credentials")
+    _clear_auth_failure(f"swarm:{ip}")
     if x_username in _revoked_usernames(config):
         raise HTTPException(status_code=403, detail="Contributor has been revoked")
     return x_username
+
+
+async def optional_swarm_password(
+    x_username: str | None = Header(default=None, alias="X-Username"),
+    x_swarm_password: str | None = Header(default=None, alias="X-Swarm-Password"),
+) -> bool:
+    """Like verify_swarm_password, but for endpoints that must stay publicly
+    reachable (the dashboard) while gating specific code-bearing fields to
+    contributors who present valid swarm credentials. Returns whether the
+    caller is credentialed instead of raising on failure/absence — but still
+    throttles wrong-password attempts (shares the same `swarm:{ip}` bucket
+    as verify_swarm_password) so this can't be used as an unthrottled side
+    channel to brute-force the swarm password.
+    """
+    if not x_username or not x_swarm_password:
+        return False
+    config = await get_config_cached()
+    base = config.get("swarm_password")
+    if not base:
+        return False
+    expected = _derive_user_password(x_username, base)
+    ip = _client_ip.get()
+    if not secrets.compare_digest(x_swarm_password.encode(), expected.encode()):
+        if _note_auth_failure(f"swarm:{ip}") > _AUTH_FAIL_LIMIT:
+            raise HTTPException(status_code=429, detail="Too many attempts; slow down")
+        return False
+    _clear_auth_failure(f"swarm:{ip}")
+    if x_username in _revoked_usernames(config):
+        return False
+    return True
+
+
+async def _agent_id_for_token(token: str) -> str | None:
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT id FROM agents WHERE token = ?", (token,),
+        )
+        row = await cursor.fetchone()
+    return row["id"] if row else None
 
 
 async def verify_agent_token(
     x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
 ) -> str:
     """Look up the agent by token. Returns the agent_id so downstream
-    handlers can use it; raises 403 if the token is missing or unknown.
+    handlers can check it against the agent the request claims to act as;
+    raises 403 if the token is missing or unknown.
 
-    Issued at /api/agents/register and stored on the agents row. Tokens
-    are not revocable today — deleting the agents row is the only way to
-    invalidate one.
-    """
+    Issued at /api/agents/register and stored on the agents row. Revoking a
+    contributor clears the token (see /api/admin/revoke)."""
     if not x_agent_token:
         raise HTTPException(status_code=403, detail="Missing agent token")
-    async with db.connect() as conn:
-        cursor = await conn.execute(
-            "SELECT id FROM agents WHERE token = ?", (x_agent_token,),
-        )
-        row = await cursor.fetchone()
-    if not row:
+    agent_id = await _agent_id_for_token(x_agent_token)
+    if agent_id is None:
         raise HTTPException(status_code=403, detail="Invalid agent token")
-    return row["id"]
+    return agent_id
+
+
+async def optional_agent_token(
+    x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
+) -> str | None:
+    """Like verify_agent_token, but for endpoints that are public without an
+    agent_id (GET /api/state): a missing or unknown token resolves to None
+    instead of 403. The handler enforces the token↔agent match only when the
+    request names an agent."""
+    if not x_agent_token:
+        return None
+    return await _agent_id_for_token(x_agent_token)
+
+
+def require_token_matches(token_agent_id: str | None, agent_id: str | None) -> None:
+    """403 unless the token resolved to exactly the agent the request acts as."""
+    if token_agent_id is None or token_agent_id != agent_id:
+        raise HTTPException(
+            status_code=403, detail="Agent token does not match agent_id",
+        )
 
 
 async def get_agent_name(conn, agent_id: str) -> str:
@@ -351,6 +556,11 @@ async def get_agent_name(conn, agent_id: str) -> str:
 # for a healthy connection but short enough that a stuck one doesn't dam
 # the event stream during a busy publish burst.
 _WS_SEND_TIMEOUT_S = 2.0
+
+# How many recent trajectory improvement scores to return in /api/state for the
+# hyperparameter-search gate. Must comfortably exceed any host-set
+# hpo_min_improvements (the band floor is result[-min_improvements]).
+_IMPROVEMENT_HISTORY_LIMIT = 16
 
 
 class ConnectionManager:
@@ -371,21 +581,27 @@ class ConnectionManager:
         if not self.connections:
             return
         payload = event.model_dump(mode="json")
+        # Snapshot the list: concurrent broadcasts/connects mutate it while
+        # we await, so sends and pruning must both work off this copy.
+        targets = list(self.connections)
         # Per-send timeout: a TimeoutError from wait_for is captured by
         # return_exceptions=True alongside any other send failure, so the
-        # below filter prunes hung subscribers exactly the same way it
-        # prunes ones that closed cleanly.
+        # below pruning drops hung subscribers exactly the same way it
+        # drops ones that closed cleanly.
         results = await asyncio.gather(
             *(
                 asyncio.wait_for(ws.send_json(payload), timeout=_WS_SEND_TIMEOUT_S)
-                for ws in self.connections
+                for ws in targets
             ),
             return_exceptions=True,
         )
-        self.connections = [
-            ws for ws, result in zip(self.connections, results)
-            if not isinstance(result, BaseException)
-        ]
+        # Remove failed sockets from the LIVE list individually — rebuilding
+        # self.connections from the snapshot would evict subscribers that
+        # connected mid-broadcast. disconnect() tolerates sockets a
+        # concurrent broadcast already removed.
+        for ws, result in zip(targets, results):
+            if isinstance(result, BaseException):
+                self.disconnect(ws)
 
 
 manager = ConnectionManager()
@@ -413,6 +629,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Client IP for the current request, captured by middleware so the auth helpers
+# (verify_admin / verify_swarm_password) can throttle failed attempts per source
+# without threading Request through every endpoint. X-Forwarded-For is only
+# honored when TRUSTED_PROXY=1 says a reverse proxy fronts the server and owns
+# the header (Railway always does — server/entrypoint.sh sets the var). Without
+# a proxy the header is client-controlled, so trusting it would let an attacker
+# pick a fresh throttle bucket per request; use the socket peer instead.
+_client_ip: contextvars.ContextVar[str] = contextvars.ContextVar("client_ip", default="")
+
+_TRUST_PROXY = os.environ.get("TRUSTED_PROXY", "") == "1"
+
+
+@app.middleware("http")
+async def _capture_client_ip(request: Request, call_next):
+    peer = request.client.host if request.client else ""
+    ip = peer
+    if _TRUST_PROXY:
+        xff = request.headers.get("x-forwarded-for")
+        ip = (xff.split(",")[0].strip() if xff else "") or peer
+    _client_ip.set(ip)
+    return await call_next(request)
+
+
+# ── Brute-force throttle on failed auth (defense-in-depth) ──
+#
+# admin_key and the base swarm_password are 128-bit secrets (secrets.token_urlsafe(16)),
+# so online brute force is already infeasible; this bounds it further and slows
+# credential stuffing. It is DoS-safe BY CONSTRUCTION: a request bearing the
+# CORRECT secret always passes (the constant-time compare runs first and returns
+# before any throttle check), so a flood of wrong guesses — even sharing the
+# legitimate user's proxy IP — can never lock the real admin/contributor out.
+_AUTH_FAIL_WINDOW_S = 60.0
+_AUTH_FAIL_LIMIT = 20
+_auth_failures: dict[str, list[float]] = {}
+
+
+def _note_auth_failure(key: str) -> int:
+    """Record a failed attempt for `key` (e.g. "admin:1.2.3.4") and return the
+    number of failures still inside the sliding window."""
+    mono = time.monotonic()
+    recent = [t for t in _auth_failures.get(key, []) if mono - t < _AUTH_FAIL_WINDOW_S]
+    recent.append(mono)
+    _auth_failures[key] = recent
+    # Opportunistic cleanup so the map can't grow unbounded across many source IPs.
+    if len(_auth_failures) > 2048:
+        for k in [k for k, v in _auth_failures.items()
+                  if all(mono - t >= _AUTH_FAIL_WINDOW_S for t in v)]:
+            _auth_failures.pop(k, None)
+    return len(recent)
+
+
+def _clear_auth_failure(key: str) -> None:
+    _auth_failures.pop(key, None)
+
+
 # Static dashboard mounted after all routes (see bottom of file)
 
 
@@ -420,10 +691,104 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def inactive_cutoff() -> str:
-    cfg = _config_cache or {}
+async def inactive_cutoff() -> str:
+    # Await the config rather than peeking at _config_cache directly: the
+    # cache may be cold (first periodic_stats sweep after boot, or right
+    # after an admin invalidation), and a cold read would silently fall back
+    # to the default inactive_minutes instead of the host-tuned value.
+    cfg = await get_config_cached()
     minutes = swarm_setting(cfg, "inactive_minutes")
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+# ── Shared per-challenge stats helpers ──
+#
+# Used by BOTH the periodic_stats broadcast and the /api/state views so the
+# dashboard's counters and the state endpoint can never drift apart.
+
+
+async def _challenge_counters(
+    conn, cutoff_ts: str, challenge: str | None = None,
+) -> dict[str, dict]:
+    """Per-challenge dashboard counters, batched.
+
+    Batched per-challenge counters. Previously the periodic_stats loop fired
+    5 separate COUNT queries per challenge (active, exp, hyp, traj,
+    agents_in_challenge) — at 8 challenges that's 40 roundtrips every 10s.
+    At scale (~80 agents, 4-hour test) those queries also start touching
+    more rows. Collapsing into 5 grouped queries (one per category, GROUP BY
+    challenge) keeps total roundtrips constant regardless of how many
+    challenges are configured.
+
+    Pass `challenge` to restrict all 5 queries to one challenge (the
+    /api/state views). Challenges with no rows anywhere are absent from the
+    result — callers .get() with zero defaults.
+    """
+    ch_and = " AND challenge = ?" if challenge else ""
+    ch_where = " WHERE challenge = ?" if challenge else ""
+    ch_params: tuple = (challenge,) if challenge else ()
+
+    async def _by_ch(sql: str, params: tuple) -> dict[str, int]:
+        cur = await conn.execute(sql, params)
+        return {r["challenge"]: r["c"] for r in await cur.fetchall()}
+
+    active_by_ch = await _by_ch(
+        "SELECT challenge, COUNT(*) as c FROM agent_challenge_state "
+        f"WHERE last_active_at >= ?{ch_and} GROUP BY challenge",
+        (cutoff_ts, *ch_params),
+    )
+    exp_by_ch = await _by_ch(
+        f"SELECT challenge, COUNT(*) as c FROM experiments{ch_where} GROUP BY challenge",
+        ch_params,
+    )
+    hyp_by_ch = await _by_ch(
+        f"SELECT challenge, COUNT(*) as c FROM hypotheses{ch_where} GROUP BY challenge",
+        ch_params,
+    )
+    traj_by_ch = await _by_ch(
+        f"SELECT challenge, COUNT(*) as c FROM trajectories{ch_where} GROUP BY challenge",
+        ch_params,
+    )
+    # Distinct-agents-who-published per challenge — same source
+    # of truth as db.get_challenge_total_agents (experiments table).
+    agents_in_ch = await _by_ch(
+        "SELECT challenge, COUNT(DISTINCT agent_id) as c "
+        f"FROM experiments{ch_where} GROUP BY challenge",
+        ch_params,
+    )
+
+    return {
+        ch: {
+            "active_agents": active_by_ch.get(ch, 0),
+            "total_experiments": exp_by_ch.get(ch, 0),
+            "hypotheses_count": hyp_by_ch.get(ch, 0),
+            "total_trajectories": traj_by_ch.get(ch, 0),
+            "total_agents_in_challenge": agents_in_ch.get(ch, 0),
+        }
+        for ch in (
+            set(active_by_ch) | set(exp_by_ch) | set(hyp_by_ch)
+            | set(traj_by_ch) | set(agents_in_ch)
+        )
+    }
+
+
+async def _challenge_best_stats(
+    conn, challenge: str, direction: str, challenge_cfg: dict,
+) -> tuple[dict | None, float | None, int, float]:
+    """Global best + baseline for a challenge, with the derived
+    num_instances / improvement_pct the dashboard shows. Returns
+    (best_row, baseline, num_instances, improvement_pct)."""
+    best = await db.get_global_best(conn, challenge, direction=direction)
+    baseline = await get_baseline_score(conn, challenge)
+    best_solution_data = best["solution_data"] if best else None
+    num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
+    best_score = best["score"] if best else None
+    imp = (
+        improvement_pct(baseline, best_score, direction)
+        if baseline is not None and best_score is not None
+        else 0
+    )
+    return best, baseline, num_instances, imp
 
 
 # ── Periodic stats ──
@@ -432,7 +797,7 @@ async def periodic_stats():
     while True:
         await asyncio.sleep(10)
         try:
-            cutoff_ts = inactive_cutoff()
+            cutoff_ts = await inactive_cutoff()
             active_challenge = await get_active_challenge()
             async with db.connect() as conn:
                 # Free up trajectories held by agents that have gone silent
@@ -448,63 +813,26 @@ async def periodic_stats():
                 await conn.commit()
                 total_agents = await db.get_agent_count(conn, active_only=False)
 
-                # Batched per-challenge counters. Previously this loop fired
-                # 5 separate COUNT queries per challenge (active, exp, hyp,
-                # traj, agents_in_challenge) — at 8 challenges that's 40
-                # roundtrips every 10s. At scale (~80 agents, 4-hour test)
-                # those queries also start touching more rows. Collapsing
-                # into 5 grouped queries (one per category, GROUP BY
-                # challenge) keeps total roundtrips constant regardless of
-                # how many challenges are configured.
-                cur = await conn.execute(
-                    "SELECT challenge, COUNT(*) as c FROM agent_challenge_state "
-                    "WHERE last_active_at >= ? GROUP BY challenge",
-                    (cutoff_ts,),
-                )
-                active_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
-                cur = await conn.execute(
-                    "SELECT challenge, COUNT(*) as c FROM experiments GROUP BY challenge",
-                )
-                exp_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
-                cur = await conn.execute(
-                    "SELECT challenge, COUNT(*) as c FROM hypotheses GROUP BY challenge",
-                )
-                hyp_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
-                cur = await conn.execute(
-                    "SELECT challenge, COUNT(*) as c FROM trajectories GROUP BY challenge",
-                )
-                traj_by_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
-                # Distinct-agents-who-published per challenge — same source
-                # of truth as get_challenge_total_agents (experiments table).
-                cur = await conn.execute(
-                    "SELECT challenge, COUNT(DISTINCT agent_id) as c FROM experiments GROUP BY challenge",
-                )
-                agents_in_ch = {r["challenge"]: r["c"] for r in await cur.fetchall()}
+                counters = await _challenge_counters(conn, cutoff_ts)
 
                 per_challenge: dict[str, dict] = {}
                 for ch in challenges.CHALLENGE_NAMES:
                     direction = await get_direction(ch)
                     cfg = await get_challenge_config_cached(ch)
-                    best = await db.get_global_best(conn, ch, direction=direction)
-                    baseline = await get_baseline_score(conn, ch)
-                    best_solution_data = best["solution_data"] if best else None
-                    num_instances = get_num_instances_for(cfg, best_solution_data)
-                    best_score = best["score"] if best else None
-                    imp = (
-                        improvement_pct(baseline, best_score, direction)
-                        if baseline is not None and best_score is not None
-                        else 0
+                    best, baseline, num_instances, imp = (
+                        await _challenge_best_stats(conn, ch, direction, cfg)
                     )
+                    c = counters.get(ch, {})
                     per_challenge[ch] = {
-                        "active_agents": active_by_ch.get(ch, 0),
-                        "best_score": best_score,
+                        "active_agents": c.get("active_agents", 0),
+                        "best_score": best["score"] if best else None,
                         "baseline_score": baseline,
                         "num_instances": num_instances,
                         "improvement_pct": imp,
-                        "total_experiments": exp_by_ch.get(ch, 0),
-                        "hypotheses_count": hyp_by_ch.get(ch, 0),
-                        "total_trajectories": traj_by_ch.get(ch, 0),
-                        "total_agents_in_challenge": agents_in_ch.get(ch, 0),
+                        "total_experiments": c.get("total_experiments", 0),
+                        "hypotheses_count": c.get("hypotheses_count", 0),
+                        "total_trajectories": c.get("total_trajectories", 0),
+                        "total_agents_in_challenge": c.get("total_agents_in_challenge", 0),
                     }
 
             # `per_challenge` is the source of truth; the dashboard slices
@@ -529,22 +857,7 @@ async def register_agent(
     agent_id = new_id()
     agent_token = secrets.token_urlsafe(24)
     timestamp = now()
-    # Honour the contributor's chosen name when supplied AND not already
-    # taken; fall back to the server's auto-generator otherwise. We can't
-    # rely on the UNIQUE constraint to handle collisions because we want to
-    # transparently degrade to a generated name rather than 409 the wizard.
-    agent_name: str | None = None
     requested = (req.agent_name or "").strip()
-    if requested:
-        async with db.connect() as conn:
-            cur = await conn.execute(
-                "SELECT 1 FROM agents WHERE name = ?", (requested,),
-            )
-            taken = await cur.fetchone()
-        if not taken:
-            agent_name = requested
-    if agent_name is None:
-        agent_name = generate_agent_name()
     llm_type = (req.llm_type or "").strip() or None
     # Auto-classify the model tier (frontier/standard) at register. Prefer the
     # structured provider/model when supplied; otherwise parse the llm_type
@@ -554,12 +867,40 @@ async def register_agent(
     else:
         tier = tiers.classify_tier_from_label(llm_type)
 
-    async with db.connect() as conn:
-        await conn.execute(
+    def _insert_agent(conn, name):
+        return conn.execute(
             "INSERT INTO agents (id, name, registered_at, last_heartbeat, status, llm_type, token, contributor_username, tier) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, agent_name, timestamp, timestamp, "idle", llm_type, agent_token, contributor_username, tier),
+            (agent_id, name, timestamp, timestamp, "idle", llm_type, agent_token, contributor_username, tier),
         )
+
+    async with db.connect() as conn:
+        # Honour the contributor's chosen name when supplied AND not already
+        # taken; fall back to the server's auto-generator otherwise (degrade
+        # transparently rather than 409 the wizard). Check + INSERT run in ONE
+        # immediate transaction so two concurrent registrations of the same
+        # name can't both pass the check and then race the UNIQUE(name)
+        # constraint into an unhandled 500.
+        await conn.execute("BEGIN IMMEDIATE")
+        agent_name: str | None = None
+        if requested:
+            cur = await conn.execute(
+                "SELECT 1 FROM agents WHERE name = ?", (requested,),
+            )
+            if await cur.fetchone() is None:
+                agent_name = requested
+        if agent_name is None:
+            agent_name = generate_agent_name()
+        try:
+            await _insert_agent(conn, agent_name)
+        except sqlite3.IntegrityError:
+            # Lost a cross-process race, or the generator replayed a name
+            # taken after boot — fall back to a fresh generated name.
+            agent_name = generate_agent_name()
+            await _insert_agent(conn, agent_name)
+        # Keep the in-process generator's used-set in sync with names accepted
+        # after boot, so generate_agent_name can never replay them.
+        reserve_name(agent_name)
         config = await db.get_config(conn)
         # Persist a join event so the dashboard's live feed can replay it
         # on reload via /api/messages. The `challenge` column is NOT NULL,
@@ -607,16 +948,249 @@ async def register_agent(
     )
 
 
-@app.post("/api/agents/{agent_id}/rename", dependencies=[Depends(verify_agent_token)])
-async def rename_agent(agent_id: str, req: RenameRequest):
+@app.get("/api/contributor/me")
+async def contributor_me(
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """Validate a contributor credential pair and describe the swarm.
+
+    The first `/api/contributor/*` endpoint: the hosted /join page calls it to
+    turn a pasted/clicked invite into "✓ valid invite for <name> — this swarm
+    is optimizing <challenge>". Auth (and its rate limiting) is exactly the
+    register path's verify_swarm_password, so a revoked or mistyped invite
+    fails here the same way registration would.
+    """
+    config = await get_config_cached()
+    return {
+        "username": contributor_username,
+        "swarm_name": config.get("swarm_name") or "",
+        "swarm_type": config.get("swarm_type", "cpu"),
+        "active_challenge": config.get("active_challenge") or DEFAULT_CHALLENGE,
+        # Public URL of the hosted fleet runner, when the host deployed one —
+        # lets the join page offer the zero-install "run in the cloud" tier.
+        "runner_url": config.get("runner_url") or "",
+    }
+
+
+# ── Contributor fleet config (hosted console storage) ──
+#
+# The hosted contributor console authors a fleet plan here; the local runner
+# fetches it in --join mode. Stored configs are sanitized fleet.config
+# material: whitelisted keys only, raw secrets hard-rejected — LLM keys are
+# referenced by env-var NAME (`api_key_env`), never by value.
+
+# Per-agent keys a stored config may carry. Mirrors the fleet-entry fields
+# scripts/run_fleet.py materializes into worktrees (AGENT_CONFIG_KEYS in
+# scripts/agent_config_keys.py + the entry's `name`), MINUS anything secret
+# or locally-owned: `c3_api_key` (raw secret), `agent_id`/`agent_name`
+# (runner-persisted identity).
+_CONTRIB_AGENT_KEYS = frozenset({
+    "name", "provider", "model", "api_base", "api_key_env",
+    "compute", "hardware", "c3_hardware", "c3_time", "c3_cloud_provider",
+    "c3_no_build", "c3_max_parallel_jobs",
+    "log_prompts", "detailed_prompts", "tacit_write", "failed_attempts_write",
+    "role", "edit_mode",
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
+    "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
+    "cleaner_cooldown_iters",
+    "no_benchmark_freeze_limit",
+})
+# Top-level keys: the agents array + the fleet-wide default knobs run_fleet
+# inherits into every agent. Credentials (server_url/username/swarm_password)
+# are deliberately absent — the runner already has them; storing them here
+# would just duplicate secrets.
+_CONTRIB_TOP_KEYS = frozenset({
+    "agents",
+    "hpo_min_improvements", "hpo_first_tune_improvements",
+    "hpo_num_suggested_configs", "hpo_search_budget", "hpo_seed",
+    "cleaner_trigger_chars", "cleaner_target_pct", "cleaner_score_delta_pct",
+    "cleaner_cooldown_iters",
+    "no_benchmark_freeze_limit",
+    "c3_max_parallel_jobs",
+})
+_CONTRIB_MAX_AGENTS = 32
+# Agent names become worktree directory names and git branch segments on the
+# runner — restrict hard rather than sanitize.
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# `api_key_env` must be an environment-variable NAME. A pasted raw key
+# ("sk-…") fails this shape check, which is the point.
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,63}$")
+
+
+def _validate_contributor_config(config: dict) -> None:
+    """Raise HTTPException(422) unless `config` is a storable fleet plan."""
+    def bad(msg: str):
+        raise HTTPException(status_code=422, detail=msg)
+
+    if not isinstance(config, dict):
+        bad("config must be an object")
+    unknown = set(config) - _CONTRIB_TOP_KEYS
+    if unknown:
+        bad(f"unknown top-level keys: {sorted(unknown)} — secrets and "
+            "credentials must not be stored in the hosted config")
+    agents = config.get("agents")
+    if not isinstance(agents, list) or not agents:
+        bad("config.agents must be a non-empty array")
+    if len(agents) > _CONTRIB_MAX_AGENTS:
+        bad(f"too many agents (max {_CONTRIB_MAX_AGENTS})")
+    seen_names: set[str] = set()
+    for i, agent in enumerate(agents):
+        if not isinstance(agent, dict):
+            bad(f"agents[{i}] must be an object")
+        unknown = set(agent) - _CONTRIB_AGENT_KEYS
+        if unknown:
+            bad(f"agents[{i}] has unsupported keys: {sorted(unknown)} — "
+                "raw secrets (c3_api_key, …) are not storable; LLM keys are "
+                "referenced by env-var name via api_key_env")
+        name = agent.get("name")
+        if not isinstance(name, str) or not _AGENT_NAME_RE.match(name):
+            bad(f"agents[{i}].name must match {_AGENT_NAME_RE.pattern} "
+                "(it becomes a worktree directory / git branch on the runner)")
+        if name in seen_names:
+            bad(f"duplicate agent name {name!r}")
+        seen_names.add(name)
+        env_name = agent.get("api_key_env")
+        if env_name is not None and (
+            not isinstance(env_name, str) or not _ENV_NAME_RE.match(env_name)
+        ):
+            bad(f"agents[{i}].api_key_env must be an environment-variable "
+                "NAME like OPENROUTER_API_KEY — never paste the key itself")
+        for key, value in agent.items():
+            if isinstance(value, str):
+                if len(value) > 200:
+                    bad(f"agents[{i}].{key} is too long")
+            elif not isinstance(value, (int, float, bool, type(None))):
+                bad(f"agents[{i}].{key} must be a JSON scalar")
+    for key, value in config.items():
+        if key == "agents":
+            continue
+        if isinstance(value, str):
+            if len(value) > 200:
+                bad(f"{key} is too long")
+        elif not isinstance(value, (int, float, bool, type(None))):
+            bad(f"{key} must be a JSON scalar")
+
+
+@app.get("/api/contributor/config")
+async def get_contributor_config(
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """The caller's stored fleet plan; 404 before the first save (the console
+    offers a starter config on 404 rather than treating it as an error)."""
+    async with db.connect() as conn:
+        row = await db.get_contributor_config(conn, contributor_username)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No stored config yet")
+    try:
+        config = json.loads(row["config_json"]) if row["config_json"] else None
+    except (ValueError, TypeError):
+        config = None
+    return {
+        "config": config,
+        "tacit": row["tacit_text"] or "",
+        "updated_at": row["updated_at"],
+    }
+
+
+@app.put("/api/contributor/config")
+async def put_contributor_config(
+    req: ContributorConfigPut,
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """Save the caller's fleet plan and/or tacit notes. Partial-update: a
+    body with only `config` keeps the stored tacit text, and vice versa."""
+    if req.config is None and req.tacit is None:
+        raise HTTPException(status_code=422, detail="Provide config and/or tacit")
+    config_json: str | None = None
+    if req.config is not None:
+        _validate_contributor_config(req.config)
+        config_json = json.dumps(req.config)
+        if len(config_json) > MAX_CONTRIB_CONFIG_LEN:
+            raise HTTPException(status_code=422, detail="config too large")
+    timestamp = now()
+    async with db.connect() as conn:
+        existing = await db.get_contributor_config(conn, contributor_username)
+        await db.set_contributor_config(
+            conn, contributor_username,
+            config_json=config_json if req.config is not None
+                else (existing or {}).get("config_json"),
+            tacit_text=req.tacit if req.tacit is not None
+                else (existing or {}).get("tacit_text"),
+            updated_at=timestamp,
+        )
+        await conn.commit()
+    return {"saved": True, "updated_at": timestamp}
+
+
+@app.get("/api/contributor/agents")
+async def contributor_agents(
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """The caller's registered agents — the console's "my agents" strip.
+    Same activity window as the dashboard's counters."""
+    cutoff = await inactive_cutoff()
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT name, llm_type, status, last_heartbeat, tier "
+            "FROM agents WHERE contributor_username = ? ORDER BY name",
+            (contributor_username,),
+        )
+        rows = [dict(r) for r in await cursor.fetchall()]
+    for r in rows:
+        r["active"] = bool(r["last_heartbeat"] and r["last_heartbeat"] >= cutoff)
+    return {"agents": rows}
+
+
+@app.get("/api/contributor/agent_defaults")
+async def contributor_agent_defaults(
+    provider: str | None = None,
+    model: str | None = None,
+    contributor_username: str = Depends(verify_swarm_password),
+):
+    """Tier-derived defaults for a provider/model pick — the same rules the
+    local wizard applies (scripts/init_fleet.py:_build_agent), computed from
+    server/tiers.py so the console can't drift from registration-time
+    classification."""
+    tier = tiers.classify_tier(provider, model)
+    return {
+        "tier": tier,
+        "role": tiers.role_for_tier(tier),
+        "detailed_prompts": tier == "standard",
+    }
+
+
+# The provider catalog the console's agent editor offers. Duplicated from
+# scripts/init_fleet.py (the server image is self-contained and cannot import
+# scripts/) — scripts/test_provider_catalog_parity.py asserts the two stay
+# identical.
+_PROVIDERS_PATH = Path(__file__).parent / "providers.json"
+
+
+@app.get("/api/providers")
+async def list_providers():
+    try:
+        return {"providers": json.loads(_PROVIDERS_PATH.read_text())}
+    except (OSError, ValueError):
+        return {"providers": []}
+
+
+@app.post("/api/agents/{agent_id}/rename")
+async def rename_agent(
+    agent_id: str,
+    req: RenameRequest,
+    token_agent_id: str = Depends(verify_agent_token),
+):
     """Update an existing agent's display name. `agents.name` is the
     single source of truth for an agent's name — leaderboard, messages
     GET, and every event broadcast resolve through it — so this is the
     only operation that affects what the dashboard shows for `agent_id`.
 
-    Returns 404 if the agent doesn't exist, 409 if `agent_name` collides
-    with another agent, 400 if blank. Idempotent when the new name
-    equals the current one (no broadcast in that case)."""
+    Returns 403 if the caller's token doesn't resolve to `agent_id`, 404
+    if the agent doesn't exist, 409 if `agent_name` collides with another
+    agent, 400 if blank. Idempotent when the new name equals the current
+    one (no broadcast in that case)."""
+    require_token_matches(token_agent_id, agent_id)
     requested = (req.agent_name or "").strip()
     if not requested:
         raise HTTPException(status_code=400, detail="agent_name must be non-empty")
@@ -649,6 +1223,10 @@ async def rename_agent(agent_id: str, req: RenameRequest):
         )
         await conn.commit()
 
+    # Keep the name generator's used-set in sync so it never replays a
+    # custom name adopted after boot.
+    reserve_name(requested)
+
     await manager.broadcast(ws_events.AgentRenamed(
         agent_id=agent_id,
         old_name=old_name,
@@ -658,8 +1236,13 @@ async def rename_agent(agent_id: str, req: RenameRequest):
     return {"agent_id": agent_id, "agent_name": requested}
 
 
-@app.post("/api/agents/{agent_id}/heartbeat", dependencies=[Depends(verify_agent_token)])
-async def heartbeat(agent_id: str, req: HeartbeatRequest):
+@app.post("/api/agents/{agent_id}/heartbeat")
+async def heartbeat(
+    agent_id: str,
+    req: HeartbeatRequest,
+    token_agent_id: str = Depends(verify_agent_token),
+):
+    require_token_matches(token_agent_id, agent_id)
     timestamp = now()
     async with db.connect() as conn:
         await conn.execute(
@@ -698,386 +1281,494 @@ async def get_state(
     agent_id: str | None = None,
     challenge: str | None = None,
     role: str | None = None,
+    seeded_start: str | None = None,
+    token_agent_id: str | None = Depends(optional_agent_token),
+    credentialed: bool = Depends(optional_swarm_password),
 ):
     """Return current swarm state for the given challenge.
+
+    When `agent_id` is supplied, the caller's X-Agent-Token must resolve to
+    that agent (403 otherwise): the agent view mutates state (heartbeat
+    bump, trajectory resets that consume inactive-pool seeds, hint
+    counters) and returns the agent's private code. The dashboard view
+    (no `agent_id`) is public and side-effect-free.
 
     When `agent_id` is supplied, the agent receives its own current best
     code for the requested challenge (or the per-challenge initial seed on
     first run). When stagnating past the `hypothesis_recall_threshold`,
     prior failed hypotheses for the current program are included with a
     directive to try something different. When stagnating past
-    `stagnation_threshold`, a stagnation_hint field (50/50 "tacit_knowledge"
-    or "inspiration") and inspiration_code are included — both filtered by
+    `stagnation_threshold`, a stagnation_hint field ("tacit_knowledge" or
+    "inspiration", plus "failed_attempts" when the archive is on — picked
+    uniformly) and inspiration_code are included — both filtered by
     the same challenge so per-challenge state stays disjoint. For GPU
     challenges, kernel code fields are included; for CPU challenges they
     are omitted.
 
     When `agent_id` is omitted, returns a global dashboard view (filtered
-    by the requested or active challenge).
+    by the requested or active challenge). That view is public and
+    side-effect-free, but the code-bearing fields (`best_algorithm_code`,
+    `best_algorithm_files`, `best_kernel_code`) are only populated when the
+    caller presents valid X-Username/X-Swarm-Password headers — anonymous
+    callers get every other field with those three set to null, so the
+    leaderboard/chart/stats views keep working unauthenticated.
 
     `challenge` defaults to the swarm's `active_challenge` when omitted.
     """
-    config = await get_config_cached()
+    if agent_id is not None:
+        require_token_matches(token_agent_id, agent_id)
     challenge = await resolve_challenge(challenge)
+    if agent_id is not None:
+        return await _agent_state(agent_id, challenge, role, seeded_start)
+    return await _dashboard_state(challenge, credentialed)
+
+
+async def _ensure_current_program_id(
+    conn, agent_id: str, challenge: str, acs: dict | None,
+) -> tuple[str, bool]:
+    """Return the agent's current program id for this challenge, minting and
+    persisting a fresh one when the acs row has none. The second element is
+    True when a new id was written (callers running outside a transaction
+    commit then). Shared by the agent state view and create_iteration."""
+    current_program_id = (acs or {}).get("current_program_id")
+    if current_program_id:
+        return current_program_id, False
+    current_program_id = new_id()
+    await db.update_agent_challenge_state(
+        conn, agent_id, challenge,
+        set_fields={"current_program_id": current_program_id},
+    )
+    return current_program_id, True
+
+
+async def _recent_hypotheses(
+    conn, challenge: str, limit: int, before: str | None = None,
+) -> list[dict]:
+    """Newest-first hypotheses for a challenge, joined to the proposing
+    agent's current name. Shared by GET /api/hypotheses and the dashboard
+    state view's `recent_hypotheses` block (which previously duplicated
+    this query). `before` is an optional created_at cursor: only rows
+    strictly older than it are returned."""
+    where = "h.challenge = ?"
+    params: list = [challenge]
+    if before:
+        where += " AND h.created_at < ?"
+        params.append(before)
+    params.append(limit)
+    cursor = await conn.execute(
+        "SELECT h.id, h.title, h.strategy_tag, h.description, "
+        "       a.name as agent_name, h.agent_id, h.parent_hypothesis_id, "
+        "       h.created_at "
+        "FROM hypotheses h JOIN agents a ON a.id = h.agent_id "
+        f"WHERE {where} "
+        "ORDER BY h.created_at DESC LIMIT ?",
+        params,
+    )
+    return [dict(row) for row in await cursor.fetchall()]
+
+
+async def _agent_state(
+    agent_id: str, challenge: str, role: str | None, seeded_start: str | None = None,
+) -> dict:
+    """Authenticated per-agent view of /api/state.
+
+    Mutates state: bumps the agent's heartbeat / per-challenge
+    last_active_at, may run the trajectory-reset state machine (which
+    consumes inactive-pool seeds — see server/trajectory_reset.py), and
+    increments hint counters. Returns the agent's private best code.
+    """
+    config = await get_config_cached()
     direction = await get_direction(challenge)
     challenge_cfg = await get_challenge_config_cached(challenge)
 
     async with db.connect() as conn:
         global_best = await db.get_global_best(conn, challenge, direction=direction)
-        baseline = await get_baseline_score(conn, challenge)
-        cutoff_ts = inactive_cutoff()
+        cutoff_ts = await inactive_cutoff()
+        # Swarm counters are read BEFORE the heartbeat/last_active_at bump
+        # below (same ordering as the original fused handler), so an
+        # agent's very first poll doesn't count itself as active yet.
+        counters = (
+            await _challenge_counters(conn, cutoff_ts, challenge=challenge)
+        ).get(challenge, {})
         # active = agents recently active on THIS challenge
-        cur = await conn.execute(
-            "SELECT COUNT(*) as c FROM agent_challenge_state "
-            "WHERE challenge = ? AND last_active_at >= ?",
-            (challenge, cutoff_ts),
-        )
-        active = (await cur.fetchone())["c"]
+        active = counters.get("active_agents", 0)
+        total_exp = counters.get("total_experiments", 0)
+        total_hyp = counters.get("hypotheses_count", 0)
         total_agents = await db.get_agent_count(conn, active_only=False)
-        total_agents_in_challenge = await db.get_challenge_total_agents(
-            conn, challenge,
-        )
-        cur = await conn.execute(
-            "SELECT COUNT(*) as c FROM experiments WHERE challenge = ?",
-            (challenge,),
-        )
-        total_exp = (await cur.fetchone())["c"]
-        cur = await conn.execute(
-            "SELECT COUNT(*) as c FROM hypotheses WHERE challenge = ?",
-            (challenge,),
-        )
-        total_hyp = (await cur.fetchone())["c"]
-        cur = await conn.execute(
-            "SELECT COUNT(*) as c FROM trajectories WHERE challenge = ?",
-            (challenge,),
-        )
-        total_traj = (await cur.fetchone())["c"]
 
-        # ── Agent-specific view ──
-        if agent_id is not None:
-            ts_now = now()
-            # Touch BOTH the global heartbeat AND the per-challenge
-            # last_active_at so leaderboards and inspiration filters see
-            # this agent as "currently working on `challenge`".
-            await conn.execute(
-                "UPDATE agents SET last_heartbeat = ? WHERE id = ?",
-                (ts_now, agent_id),
+        ts_now = now()
+        # Touch BOTH the global heartbeat AND the per-challenge
+        # last_active_at so leaderboards and inspiration filters see
+        # this agent as "currently working on `challenge`".
+        await conn.execute(
+            "UPDATE agents SET last_heartbeat = ? WHERE id = ?",
+            (ts_now, agent_id),
+        )
+        await db.ensure_agent_challenge_state(conn, agent_id, challenge, ts_now)
+        await conn.commit()
+
+        traj_best = await db.get_trajectory_best(conn, agent_id, challenge)
+        acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
+        runs_since = acs["runs_since_improvement"] if acs else 0
+        agent_tier = await db.get_agent_tier(conn, agent_id)
+        # Role is contributor-owned, reported by the client each poll and
+        # not persisted as authority. Normalize to the two known values;
+        # anything unrecognized (or absent) is an explorer — today's
+        # default behavior.
+        agent_role = "exploiter" if (role or "").strip().lower() == "exploiter" else "explorer"
+        # Like role, `seeded_start` is contributor-owned and reported each
+        # poll: 'true'/'false' override the tier/role seeding policy in
+        # seed_for_agent; anything else (or absent) means "auto".
+        agent_seeded = {"true": True, "false": False}.get(
+            (seeded_start or "").strip().lower()
+        )
+
+        # ── Trajectory reset on stagnation_limit ──
+        # The state machine itself (deactivate → adopt/fresh-start →
+        # deposit → upsert/clear trajectory_bests) lives in
+        # server/trajectory_reset.py and runs in its own BEGIN IMMEDIATE
+        # transaction; it re-checks the stagnation condition under the
+        # write lock, so concurrent calls can't double-reset.
+        trajectory_reset = None
+        # How this iteration's starting code was chosen ('seed' | 'peer' |
+        # 'stub'), whenever it came from seed_for_agent — on a fresh reset
+        # OR a true cold start. Surfaced in state so the client can log
+        # whether a standard-tier agent actually got a seed vs. the bare
+        # stub. None when the agent continued its own existing best.
+        seed_start = None
+        reset = None
+        stagnation_limit = swarm_setting(config, "stagnation_limit")
+        negative_limit = swarm_setting(config, "negative_trajectory_limit")
+        stagnated = (stagnation_limit > 0 and runs_since >= stagnation_limit
+                     and traj_best is not None)
+
+        # ── … or cull a trajectory that never turned positive ──
+        # A line inching upward while still below zero resets
+        # runs_since_improvement on every small win, so it never trips
+        # stagnation_limit — yet deposit_inactive refuses negative scores,
+        # so nothing harvestable can ever come out of it. After
+        # `negative_trajectory_limit` edits without crossing zero, treat it
+        # exactly like a stagnation trip. This is only the cheap pre-check
+        # (mirroring the stagnation one above); the machine re-checks both
+        # conditions under its write lock.
+        negative_cull = False
+        if not stagnated and traj_best is not None and negative_limit > 0:
+            cull_traj_id = acs["current_trajectory_id"] if acs else None
+            if cull_traj_id and not db.is_better(direction, traj_best["score"], 0.0):
+                traj_row = await db.get_trajectory(conn, cull_traj_id)
+                if traj_row and (traj_row["num_edits"] or 0) >= negative_limit:
+                    negative_cull = True
+
+        # ── … or measure the mainnet baseline, now rather than eventually ──
+        # The admin "Measure" button used to be a standing preference applied
+        # to the NEXT stagnation reset. On a healthy swarm — every agent
+        # improving, nothing stagnating — that reset may not arrive for hours,
+        # so the button appeared to do nothing. Claim it for exactly one agent
+        # and force the reset: that agent adopts the mainnet entry, benchmarks
+        # it unchanged through the existing needs_benchmark path, and its own
+        # best is deposited into the pool on the way past, so the work it
+        # abandons is banked rather than lost.
+        force_reason = None
+        if not (stagnated or negative_cull) and traj_best is not None:
+            if await _mainnet_measurement_claimable(conn, challenge):
+                claimed = await db.claim_mainnet_measurement(
+                    conn, challenge, agent_id, now_ts=now(),
+                    stale_before=await _measurement_stale_cutoff(),
+                )
+                # Commit before the reset machine runs: that UPDATE opened an
+                # implicit transaction, and maybe_reset_trajectory opens its
+                # own with BEGIN IMMEDIATE, which sqlite refuses to nest. The
+                # claim's WHERE clause is the mutex that makes two concurrent
+                # callers unable to both win, so it is safe standing alone —
+                # and if the reset then fails, the TTL re-arms it.
+                await conn.commit()
+                if claimed:
+                    force_reason = "mainnet_baseline"
+
+        if stagnated or negative_cull or force_reason:
+            reset = await maybe_reset_trajectory(
+                conn, agent_id=agent_id, challenge=challenge,
+                direction=direction, cutoff_ts=cutoff_ts,
+                force_reason=force_reason,
+                stagnation_limit=stagnation_limit,
+                negative_trajectory_limit=negative_limit,
+                agent_tier=agent_tier, agent_role=agent_role,
+                seed_fn=functools.partial(seed_for_agent, seeded=agent_seeded),
+                timestamp=now(),
             )
-            await db.ensure_agent_challenge_state(conn, agent_id, challenge, ts_now)
+            if reset is None:
+                # Lost the reset race: a concurrent /api/state call already
+                # reset this trajectory. Re-read so we serve the post-reset
+                # state instead of the stale pre-reset snapshot.
+                traj_best = await db.get_trajectory_best(conn, agent_id, challenge)
+                acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
+                runs_since = acs["runs_since_improvement"] if acs else 0
+        if reset is not None:
+            trajectory_reset = reset.reset_info
+            seed_start = reset.seed_start
+            traj_best = reset.traj_best
+            current_trajectory_best = reset.current_trajectory_best
+            traj_best_experiment_id = reset.traj_best_experiment_id
+            traj_best_code = reset.algorithm_code
+            traj_best_kernel_code = reset.kernel_code
+            traj_best_files = reset.algorithm_files
+            runs_since = 0
+            agent_name = await get_agent_name(conn, agent_id)
+            # Broadcast only after the machine's transaction committed —
+            # same commit-before-broadcast ordering as before the split.
+            await manager.broadcast(ws_events.TrajectoryReset(
+                challenge=challenge,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                reset_type=trajectory_reset["type"],
+                timestamp=reset.timestamp,
+            ))
+            # Re-read acs so subsequent reads see the reset state.
+            acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
+        else:
+            if traj_best:
+                traj_best_code = traj_best["algorithm_code"]
+                traj_best_kernel_code = traj_best.get("kernel_code")
+                traj_best_files = _row_files(traj_best)
+            else:
+                traj_best_code, traj_best_kernel_code, traj_best_files, _start = await seed_for_agent(
+                    conn, agent_id, challenge, agent_tier, agent_role,
+                    direction=direction, cutoff_ts=cutoff_ts, seeded=agent_seeded,
+                )
+                seed_start = _start
+            current_trajectory_best = traj_best["score"] if traj_best else None
+            traj_best_experiment_id = traj_best["experiment_id"] if traj_best else None
+
+        # ── Program ID management (per-(agent, challenge)) ──
+        current_program_id, program_id_created = await _ensure_current_program_id(
+            conn, agent_id, challenge, acs,
+        )
+        if program_id_created:
             await conn.commit()
 
-            traj_best = await db.get_trajectory_best(conn, agent_id, challenge)
-            acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
-            runs_since = acs["runs_since_improvement"] if acs else 0
-            agent_tier = await db.get_agent_tier(conn, agent_id)
-            # Role is contributor-owned, reported by the client each poll and
-            # not persisted as authority. Normalize to the two known values;
-            # anything unrecognized (or absent) is an explorer — today's
-            # default behavior.
-            agent_role = "exploiter" if (role or "").strip().lower() == "exploiter" else "explorer"
-
-            # ── Trajectory reset on stagnation_limit ──
-            trajectory_reset = None
-            # How this iteration's starting code was chosen ('seed' | 'peer' |
-            # 'stub'), whenever it came from seed_for_agent — on a fresh reset
-            # OR a true cold start. Surfaced in state so the client can log
-            # whether a standard-tier agent actually got a seed vs. the bare
-            # stub. None when the agent continued its own existing best.
-            seed_start = None
-            stagnation_limit = swarm_setting(config, "stagnation_limit")
-            if stagnation_limit > 0 and runs_since >= stagnation_limit and traj_best is not None:
-                timestamp = now()
-                # Deactivate the current trajectory.
-                cur_traj_id = acs["current_trajectory_id"] if acs else None
-                old_program_id = acs["current_program_id"] if acs else None
-                if cur_traj_id:
-                    await db.deactivate_trajectory(conn, cur_traj_id, timestamp)
-
-                # Pick from the per-challenge inactive pool BEFORE depositing,
-                # so the agent can't re-adopt its own just-deposited code.
-                # CORRECTNESS INVARIANT: pick must be filtered by challenge —
-                # otherwise a stagnating VRP agent could be handed SAT code.
-                inactive_pool = await db.get_inactive_with_deactivations(conn, challenge)
-                new_traj_id = None
-                new_program_id = None
-
-                # Fresh start if N^1.5 < D (number of trajectories^1.5 <
-                # total deactivations). At equilibrium N^1.5 ≈ D, so the
-                # trajectory count grows as total_work^(2/3) and mean
-                # trajectory length (D/N) grows as total_work^(1/3) —
-                # favors more diverse trajectories with shorter lives than
-                # the prior N² rule.
-                n_traj, total_deact = await db.trajectory_counts(conn, challenge)
-                go_fresh = not inactive_pool or n_traj ** 1.5 < total_deact
-
-                # Carries the adopted trajectory's peak score (None on a fresh
-                # start) so we can seed it as the agent's personal best below.
-                adopted_score = None
-                if go_fresh:
-                    new_code, new_kernel_code, _start = await seed_for_agent(
-                        conn, agent_id, challenge, agent_tier, agent_role,
-                        direction=direction, cutoff_ts=cutoff_ts,
-                    )
-                    new_program_id = new_id()
-                    trajectory_reset = {"type": "fresh_start", "start": _start}
-                    seed_start = _start
-                else:
-                    picked = random.choice(inactive_pool)
-                    new_code = picked["algorithm_code"]
-                    new_kernel_code = picked.get("kernel_code")
-                    new_program_id = picked.get("program_id") or new_id()
-                    adopted_score = picked.get("score")
-                    await db.remove_inactive(conn, picked["id"])
-                    trajectory_reset = {
-                        "type": "adopted_inactive",
-                        "prior_score": adopted_score,
-                    }
-                    if picked.get("trajectory_id"):
-                        new_traj_id = picked["trajectory_id"]
-                        await db.reactivate_trajectory(conn, new_traj_id)
-                        await db.increment_trajectory_agents(conn, new_traj_id)
-
-                # Now deposit the stagnated code into the per-challenge pool —
-                # but ONLY if the trajectory's best is feasible. The inactive
-                # pool is the adoption/seed pool other agents draw from on a
-                # stagnation reset (random.choice above), so an infeasible entry
-                # would hand broken code to a fresh agent and spread the
-                # infeasible-floor trap. With the feasibility-gated
-                # `beats_trajectory_best` above, trajectory_bests should already
-                # be feasible, but legacy rows (and the adopted-floor upsert)
-                # mean we can't assume it — gate explicitly here so infeasible
-                # algorithms never enter the pool.
-                if traj_best.get("feasible"):
-                    await db.deposit_inactive(
-                        conn, agent_id, challenge,
-                        traj_best["algorithm_code"], traj_best["score"], timestamp,
-                        trajectory_id=cur_traj_id, program_id=old_program_id,
-                        kernel_code=traj_best.get("kernel_code"),
-                        experiment_id=traj_best.get("experiment_id"),
-                    )
-
-                # Seed the agent's personal best with the adopted trajectory's
-                # peak so it builds UP from that best instead of from zero.
-                # Without this the floor is gone: the agent's first (possibly
-                # worse) result becomes its new best and the trajectory drifts
-                # below the peak it was handed. It also kept the adopted code
-                # alive only until the next publish — if that publish failed,
-                # the next state fell back to the stub (see the `else` branch
-                # below). Fresh starts, and pool entries with no score, keep the
-                # original clear-to-empty behaviour.
-                if adopted_score is not None:
-                    # Inherit the real experiment that earned this floor, carried
-                    # through the inactive pool. It belongs to whoever last
-                    # improved this (possibly shared) trajectory — not
-                    # necessarily this agent. NULL when provenance is unknown
-                    # (legacy inactive row predating experiment_id, or an
-                    # admin-seeded entry); never a fabricated id, so it always
-                    # resolves to a real experiments row or is absent.
-                    adopted_experiment_id = picked.get("experiment_id")
-                    await db.upsert_trajectory_best(
-                        conn, agent_id=agent_id, challenge=challenge,
-                        experiment_id=adopted_experiment_id,
-                        algorithm_code=new_code, score=adopted_score,
-                        feasible=True, challenge_metrics=None,
-                        solution_data=None, updated_at=timestamp,
-                        trajectory_id=new_traj_id, kernel_code=new_kernel_code,
-                    )
-                    traj_best = {
-                        "algorithm_code": new_code,
-                        "score": adopted_score,
-                        "experiment_id": adopted_experiment_id,
-                        "kernel_code": new_kernel_code,
-                    }
-                    current_trajectory_best = adopted_score
-                    traj_best_experiment_id = adopted_experiment_id
-                else:
-                    await db.clear_trajectory_best(conn, agent_id, challenge)
-                    traj_best = None
-                    current_trajectory_best = None
-                    traj_best_experiment_id = None
-                await db.update_agent_challenge_state(
-                    conn, agent_id, challenge,
-                    set_fields={
-                        "runs_since_improvement": 0,
-                        "current_trajectory_id": new_traj_id,
-                        "current_program_id": new_program_id,
-                    },
-                )
-                await conn.commit()
-                traj_best_code = new_code
-                traj_best_kernel_code = new_kernel_code
-                runs_since = 0
-                agent_name = await get_agent_name(conn, agent_id)
-                await manager.broadcast(ws_events.TrajectoryReset(
-                    challenge=challenge,
-                    agent_name=agent_name,
-                    agent_id=agent_id,
-                    reset_type=trajectory_reset["type"],
-                    timestamp=timestamp,
-                ))
-                # Re-read acs so subsequent reads see the reset state.
-                acs = await db.get_agent_challenge_state(conn, agent_id, challenge)
-            else:
-                if traj_best:
-                    traj_best_code = traj_best["algorithm_code"]
-                    traj_best_kernel_code = traj_best.get("kernel_code")
-                else:
-                    traj_best_code, traj_best_kernel_code, _start = await seed_for_agent(
-                        conn, agent_id, challenge, agent_tier, agent_role,
-                        direction=direction, cutoff_ts=cutoff_ts,
-                    )
-                    seed_start = _start
-                current_trajectory_best = traj_best["score"] if traj_best else None
-                traj_best_experiment_id = traj_best["experiment_id"] if traj_best else None
-
-            # ── Program ID management (per-(agent, challenge)) ──
-            current_program_id = (acs or {}).get("current_program_id") if acs else None
-            if not current_program_id:
-                current_program_id = new_id()
-                await db.update_agent_challenge_state(
-                    conn, agent_id, challenge,
-                    set_fields={"current_program_id": current_program_id},
-                )
-                await conn.commit()
-
-            # ── Prior hypotheses (program-scoped, shown only after threshold) ──
-            hypothesis_recall_threshold = swarm_setting(config, "hypothesis_recall_threshold")
-            prior_hypotheses: list[dict] = []
-            hypothesis_recall_message: str | None = None
-            if runs_since >= hypothesis_recall_threshold:
-                cursor = await conn.execute(
-                    """SELECT h.title, h.strategy_tag, h.description, e.score
-                       FROM hypotheses h
-                       LEFT JOIN experiments e ON e.hypothesis_id = h.id
-                       WHERE h.program_id = ? AND h.challenge = ? AND h.status = 'failed'
-                       ORDER BY h.created_at DESC LIMIT 20""",
-                    (current_program_id, challenge),
-                )
-                prior_hypotheses = [dict(row) for row in await cursor.fetchall()]
-                if prior_hypotheses:
-                    hypothesis_recall_message = (
-                        "The following strategies were tried on this program and "
-                        "did not improve the score. Try something structurally "
-                        "different from these approaches."
-                    )
-
-            # Inspiration on stagnation (only when not trajectory-resetting).
-            # CORRECTNESS INVARIANT: only pull inspiration from agents
-            # currently active on THIS challenge — not from agents whose
-            # global heartbeat is recent but whose last_active_at on this
-            # challenge is stale.
-            inspiration_code = None
-            inspiration_kernel_code = None
-            inspiration_agent_name = None
-            stagnation_hint = None
-            n_stagnation = swarm_setting(config, "stagnation_threshold")
-            if trajectory_reset is None and runs_since >= n_stagnation:
-                stagnation_hint = random.choice(["tacit_knowledge", "inspiration"])
-                if stagnation_hint == "tacit_knowledge":
-                    await db.increment_agent_challenge_counters(
-                        conn, agent_id, challenge,
-                        tacit_knowledge_inc=1,
-                        runs_since_improvement_inc=0,
-                    )
-                else:
-                    await db.increment_agent_challenge_counters(
-                        conn, agent_id, challenge,
-                        inspiration_inc=1,
-                        runs_since_improvement_inc=0,
-                    )
-                all_bests = await db.list_trajectory_bests(
-                    conn, challenge,
-                    exclude_agent_ids=[agent_id],
-                    direction=direction,
-                    active_only=True,
-                    inactive_cutoff=cutoff_ts,
-                )
-                pending_source = None
-                pending_source_traj = None
-                if all_bests:
-                    chosen = random.choice(all_bests)
-                    inspiration_code = chosen["algorithm_code"]
-                    inspiration_kernel_code = chosen.get("kernel_code")
-                    inspiration_agent_name = await get_agent_name(
-                        conn, chosen["agent_id"]
-                    )
-                    if stagnation_hint == "inspiration":
-                        pending_source = chosen["agent_id"]
-                        # Capture the source trajectory NOW, while it's known to
-                        # be correct. The matrix reads this instead of looking
-                        # up the source's *current* trajectory_bests later (that
-                        # row is wiped when the source agent stagnates).
-                        pending_source_traj = chosen.get("trajectory_id")
-                # Stash the hint (and inspiration source) so the next
-                # iteration this agent publishes can be tagged with them.
-                # /api/iterations reads + clears them atomically.
-                await db.update_agent_challenge_state(
-                    conn, agent_id, challenge,
-                    set_fields={
-                        "pending_hint": stagnation_hint,
-                        "pending_inspiration_source": pending_source,
-                        "pending_inspiration_source_trajectory": pending_source_traj,
-                    },
-                )
-                await conn.commit()
-
-            best_solution_data = traj_best["solution_data"] if traj_best else None
-            num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
-            leaderboard = await db.compute_leaderboard(
-                conn, challenge, inactive_cutoff(), direction=direction,
+        # ── Prior hypotheses (program-scoped, shown only after threshold) ──
+        hypothesis_recall_threshold = swarm_setting(config, "hypothesis_recall_threshold")
+        prior_hypotheses: list[dict] = []
+        hypothesis_recall_message: str | None = None
+        if runs_since >= hypothesis_recall_threshold:
+            cursor = await conn.execute(
+                """SELECT h.title, h.strategy_tag, h.description, e.score
+                   FROM hypotheses h
+                   LEFT JOIN experiments e ON e.hypothesis_id = h.id
+                   WHERE h.program_id = ? AND h.challenge = ? AND h.status = 'failed'
+                   ORDER BY h.created_at DESC LIMIT 20""",
+                (current_program_id, challenge),
             )
-            global_best_score = global_best["score"] if global_best else None
-
-            ch_def = challenges.CHALLENGES.get(challenge)
-            is_gpu = ch_def.is_gpu if ch_def else False
-
-            # Soft niching: suggest the least-covered strategy family to
-            # explorers (a hint the client nudges toward; the agent may ignore
-            # it). Exploiters make localized edits and don't pick a family.
-            assigned_strategy_tag = None
-            if agent_role == "explorer" and ch_def:
-                assigned_strategy_tag = await db.least_covered_tag(
-                    conn, challenge, list(ch_def.strategy_tags),
+            prior_hypotheses = [dict(row) for row in await cursor.fetchall()]
+            if prior_hypotheses:
+                hypothesis_recall_message = (
+                    "The following strategies were tried on this program and "
+                    "did not improve the score. Try something structurally "
+                    "different from these approaches."
                 )
 
-            # Server's view of this agent's name — used by the loop client
-            # to detect a local rename (swarm.config.json contributor_name
-            # diverging from server's agents.name) and POST /rename.
-            self_agent_name = await get_agent_name(conn, agent_id)
-            resp = {
-                "challenge": challenge,
-                "is_gpu": is_gpu,
-                "agent_name": self_agent_name,
-                "best_score": global_best_score,
-                "best_algorithm_code": traj_best_code,
-                "best_experiment_id": traj_best_experiment_id,
-                "current_trajectory_best": current_trajectory_best,
-                "my_runs": (acs or {}).get("experiments_completed") if acs else 0,
-                "my_improvements": (acs or {}).get("improvements") if acs else 0,
-                "my_runs_since_improvement": runs_since,
-                "num_instances": num_instances,
-                "active_agents": active,
-                "total_agents": total_agents,
-                "total_experiments": total_exp,
-                "hypotheses_count": total_hyp,
-                "prior_hypotheses": prior_hypotheses,
-                "hypothesis_recall_message": hypothesis_recall_message,
-                "inspiration_code": inspiration_code,
-                "inspiration_agent_name": inspiration_agent_name,
-                "stagnation_hint": stagnation_hint,
-                "trajectory_reset": trajectory_reset,
-                "seed_start": seed_start,
-                "leaderboard": leaderboard,
-                "tier": agent_tier,
-                "role": agent_role,
-                "assigned_strategy_tag": assigned_strategy_tag,
-            }
-            if is_gpu:
-                resp["best_kernel_code"] = traj_best_kernel_code or None
-                resp["inspiration_kernel_code"] = inspiration_kernel_code or None
-            return resp
+        # Inspiration on stagnation (only when not trajectory-resetting).
+        # CORRECTNESS INVARIANT: only pull inspiration from agents
+        # currently active on THIS challenge — not from agents whose
+        # global heartbeat is recent but whose last_active_at on this
+        # challenge is stale.
+        inspiration_code = None
+        inspiration_kernel_code = None
+        inspiration_agent_name = None
+        stagnation_hint = None
+        failed_attempts_payload = None
+        n_stagnation = swarm_setting(config, "stagnation_threshold")
+        if trajectory_reset is None and runs_since >= n_stagnation:
+            hint_choices = ["tacit_knowledge", "inspiration"]
+            # "failed_attempts" joins the rotation only when the archive is
+            # on AND this agent has material (an LLM record or a rejected
+            # iteration to derive one from) — never an empty hint.
+            if swarm_setting(config, "failed_attempts_archive") and (
+                await db.has_failure_material(conn, agent_id, challenge)
+            ):
+                hint_choices.append("failed_attempts")
+            stagnation_hint = random.choice(hint_choices)
+            if stagnation_hint == "tacit_knowledge":
+                await db.increment_agent_challenge_counters(
+                    conn, agent_id, challenge,
+                    tacit_knowledge_inc=1,
+                    runs_since_improvement_inc=0,
+                )
+            elif stagnation_hint == "failed_attempts":
+                await db.increment_agent_challenge_counters(
+                    conn, agent_id, challenge,
+                    failed_attempts_inc=1,
+                    runs_since_improvement_inc=0,
+                )
+            else:
+                await db.increment_agent_challenge_counters(
+                    conn, agent_id, challenge,
+                    inspiration_inc=1,
+                    runs_since_improvement_inc=0,
+                )
+            all_bests = await db.list_trajectory_bests(
+                conn, challenge,
+                exclude_agent_ids=[agent_id],
+                direction=direction,
+                active_only=True,
+                inactive_cutoff=cutoff_ts,
+            )
+            pending_source = None
+            pending_source_traj = None
+            if all_bests:
+                chosen = random.choice(all_bests)
+                inspiration_code = chosen["algorithm_code"]
+                inspiration_kernel_code = chosen.get("kernel_code")
+                inspiration_agent_name = await get_agent_name(
+                    conn, chosen["agent_id"]
+                )
+                if stagnation_hint == "inspiration":
+                    pending_source = chosen["agent_id"]
+                    # Capture the source trajectory NOW, while it's known to
+                    # be correct. The matrix reads this instead of looking
+                    # up the source's *current* trajectory_bests later (that
+                    # row is wiped when the source agent stagnates).
+                    pending_source_traj = chosen.get("trajectory_id")
+            if stagnation_hint == "failed_attempts":
+                # The agent's OWN prior dead ends: archived LLM artifacts
+                # plus lightweight records derived from its rejected
+                # iterations. Per-agent by construction — both queries
+                # filter on the requesting (token-verified) agent_id.
+                n_records = swarm_setting(config, "failed_attempts_hint_records")
+                failed_attempts_payload = {
+                    "retrospectives": await db.list_failure_records(
+                        conn, agent_id, challenge, n_records
+                    ),
+                    "recent_rejected": await db.list_rejected_experiments(
+                        conn, agent_id, challenge, n_records
+                    ),
+                }
+            # Stash the hint (and inspiration source) so the next
+            # iteration this agent publishes can be tagged with them.
+            # /api/iterations reads + clears them atomically.
+            await db.update_agent_challenge_state(
+                conn, agent_id, challenge,
+                set_fields={
+                    "pending_hint": stagnation_hint,
+                    "pending_inspiration_source": pending_source,
+                    "pending_inspiration_source_trajectory": pending_source_traj,
+                },
+            )
+            await conn.commit()
 
-        # ── Dashboard view (no agent_id) ──
+        best_solution_data = traj_best["solution_data"] if traj_best else None
+        num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
+        leaderboard = await db.compute_leaderboard(
+            conn, challenge, await inactive_cutoff(), direction=direction,
+        )
+        global_best_score = global_best["score"] if global_best else None
+
+        ch_def = challenges.CHALLENGES.get(challenge)
+        is_gpu = ch_def.is_gpu if ch_def else False
+
+        # Soft niching: suggest the least-covered strategy family to
+        # explorers (a hint the client nudges toward; the agent may ignore
+        # it). Exploiters make localized edits and don't pick a family.
+        assigned_strategy_tag = None
+        if agent_role == "explorer" and ch_def:
+            assigned_strategy_tag = await db.least_covered_tag(
+                conn, challenge, list(ch_def.strategy_tags),
+            )
+
+        # Server's view of this agent's name — used by the loop client
+        # to detect a local rename (swarm.config.json contributor_name
+        # diverging from server's agents.name) and POST /rename.
+        self_agent_name = await get_agent_name(conn, agent_id)
+        # Winning hyperparameter config of the current trajectory best (when
+        # it was tuned), surfaced so the loop / dashboard can recover the
+        # config the best score was achieved with. None when scored at
+        # in-code defaults or on a freshly reset/seeded trajectory.
+        traj_best_hyperparameters = None
+        if not trajectory_reset and traj_best and traj_best.get("hyperparameters"):
+            try:
+                traj_best_hyperparameters = json.loads(traj_best["hyperparameters"])
+            except (json.JSONDecodeError, TypeError):
+                traj_best_hyperparameters = None
+        # Recent improvement scores for the active trajectory, keyed by its
+        # (adoption-preserved) trajectory_id, so the HPO gate survives
+        # restarts and adoption out of the inactive pool. Fresh starts get a
+        # new id with no experiments → []; adopted trajectories inherit the
+        # original id's real history.
+        active_trajectory_id = (acs or {}).get("current_trajectory_id")
+        improvement_scores = await db.get_recent_improvement_scores(
+            conn, active_trajectory_id, _IMPROVEMENT_HISTORY_LIMIT
+        )
+        # Whether this trajectory has already been tuned once. The HPO gate
+        # auto-fires the first time a mature trajectory is eligible, then
+        # falls back to the improvement band.
+        has_tuned = await db.trajectory_has_tuned(conn, active_trajectory_id)
+        resp = {
+            "challenge": challenge,
+            "is_gpu": is_gpu,
+            "agent_name": self_agent_name,
+            "best_score": global_best_score,
+            "best_algorithm_code": traj_best_code,
+            "best_algorithm_files": traj_best_files,
+            "best_experiment_id": traj_best_experiment_id,
+            "best_hyperparameters": traj_best_hyperparameters,
+            "improvement_scores": improvement_scores,
+            "has_tuned": has_tuned,
+            "current_trajectory_best": current_trajectory_best,
+            "my_runs": (acs or {}).get("experiments_completed") if acs else 0,
+            "my_improvements": (acs or {}).get("improvements") if acs else 0,
+            "my_runs_since_improvement": runs_since,
+            "num_instances": num_instances,
+            "active_agents": active,
+            "total_agents": total_agents,
+            "total_experiments": total_exp,
+            "hypotheses_count": total_hyp,
+            "prior_hypotheses": prior_hypotheses,
+            "hypothesis_recall_message": hypothesis_recall_message,
+            "inspiration_code": inspiration_code,
+            "inspiration_agent_name": inspiration_agent_name,
+            "stagnation_hint": stagnation_hint,
+            "failed_attempts": failed_attempts_payload,
+            "trajectory_reset": trajectory_reset,
+            "seed_start": seed_start,
+            "leaderboard": leaderboard,
+            "tier": agent_tier,
+            "role": agent_role,
+            "assigned_strategy_tag": assigned_strategy_tag,
+        }
+        if is_gpu:
+            resp["best_kernel_code"] = traj_best_kernel_code or None
+            resp["inspiration_kernel_code"] = inspiration_kernel_code or None
+        return resp
+
+
+async def _dashboard_state(challenge: str, credentialed: bool = False) -> dict:
+    """Public dashboard view of /api/state (no agent_id): read-only swarm
+    stats, recent experiments/hypotheses, and the global-best code. No
+    side effects.
+
+    `credentialed` gates the code-bearing fields (best_algorithm_code,
+    best_algorithm_files, best_kernel_code) to callers who presented a
+    valid swarm password — see optional_swarm_password. Everything else
+    (scores, leaderboard, counters, recent activity) stays public."""
+    direction = await get_direction(challenge)
+    challenge_cfg = await get_challenge_config_cached(challenge)
+
+    async with db.connect() as conn:
+        cutoff_ts = await inactive_cutoff()
+        counters = (
+            await _challenge_counters(conn, cutoff_ts, challenge=challenge)
+        ).get(challenge, {})
+        # active = agents recently active on THIS challenge
+        active = counters.get("active_agents", 0)
+        total_agents = await db.get_agent_count(conn, active_only=False)
+        total_agents_in_challenge = counters.get("total_agents_in_challenge", 0)
+        total_exp = counters.get("total_experiments", 0)
+        total_hyp = counters.get("hypotheses_count", 0)
+        total_traj = counters.get("total_trajectories", 0)
+        global_best, baseline, num_instances, overall_imp = (
+            await _challenge_best_stats(conn, challenge, direction, challenge_cfg)
+        )
+
         cursor = await conn.execute(
             """SELECT e.*, a.name as agent_name,
                        EXISTS(SELECT 1 FROM best_history bh
@@ -1089,39 +1780,32 @@ async def get_state(
         )
         recent_experiments = [dict(row) for row in await cursor.fetchall()]
 
-        cursor = await conn.execute(
-            """SELECT h.id, h.title, h.strategy_tag, h.description,
-                      a.name as agent_name, h.agent_id, h.parent_hypothesis_id,
-                      h.created_at
-               FROM hypotheses h JOIN agents a ON a.id = h.agent_id
-               WHERE h.challenge = ?
-               ORDER BY h.created_at DESC LIMIT 30""",
-            (challenge,),
-        )
-        recent_hypotheses = [dict(row) for row in await cursor.fetchall()]
+        recent_hypotheses = await _recent_hypotheses(conn, challenge, limit=30)
 
         served = global_best
-        best_solution_data = served["solution_data"] if served else None
-        num_instances = get_num_instances_for(challenge_cfg, best_solution_data)
         leaderboard = await db.compute_leaderboard(
-            conn, challenge, inactive_cutoff(), direction=direction,
+            conn, challenge, await inactive_cutoff(), direction=direction,
         )
+        mainnet_baseline = await _mainnet_baseline_view(conn, challenge, direction)
 
     global_best_score = global_best["score"] if global_best else None
-    overall_imp = (
-        improvement_pct(baseline, global_best_score, direction)
-        if baseline is not None and global_best_score is not None
-        else 0
-    )
 
     _initial_algo = (None, None) if served else await load_initial_algorithm(challenge)
+    best_algorithm_code = served["algorithm_code"] if served else _initial_algo[0]
+    best_algorithm_files = _row_files(served) if served else None
+    best_kernel_code = (served.get("kernel_code") if served else _initial_algo[1]) or None
+    if not credentialed:
+        best_algorithm_code = None
+        best_algorithm_files = None
+        best_kernel_code = None
     return {
         "challenge": challenge,
         "baseline_score": baseline,
         "best_score": global_best_score,
         "improvement_pct": overall_imp,
-        "best_algorithm_code": served["algorithm_code"] if served else _initial_algo[0],
-        "best_kernel_code": (served.get("kernel_code") if served else _initial_algo[1]) or None,
+        "best_algorithm_code": best_algorithm_code,
+        "best_algorithm_files": best_algorithm_files,
+        "best_kernel_code": best_kernel_code,
         "best_experiment_id": served["id"] if served else None,
         "best_solution_data": json.loads(served["solution_data"]) if served and served["solution_data"] else None,
         "best_track_scores": (
@@ -1171,277 +1855,463 @@ async def get_state(
             for h in recent_hypotheses
         ],
         "leaderboard": leaderboard,
+        "mainnet_baseline": mainnet_baseline,
     }
 
 
 # ── Iteration endpoint (unified hypothesis + experiment) ──
+#
+# POST /api/iterations is the swarm's hottest write path. The route handler
+# is an orchestrator; each phase lives in a named helper directly below it.
 
-@app.post("/api/iterations", response_model=IterationResponse, dependencies=[Depends(verify_agent_token)])
-async def create_iteration(req: IterationCreate):
-    challenge = await resolve_challenge(req.challenge)
-    direction = await get_direction(challenge)
-    challenge_cfg = await get_challenge_config_cached(challenge)
-    exp_id = new_id()
-    hyp_id = new_id()
-    timestamp = now()
-    solution_data_json = json.dumps(req.solution_data) if req.solution_data else None
-    track_scores_json = json.dumps(req.track_scores) if req.track_scores else None
-    challenge_metrics_json = (
-        json.dumps(req.challenge_metrics) if req.challenge_metrics else None
+
+@dataclass
+class _IterationPayload:
+    """Pre-encoded JSON columns + token accounting for one publish."""
+    solution_data_json: str | None
+    track_scores_json: str | None
+    challenge_metrics_json: str | None
+    algorithm_files_json: str | None
+    hyperparameters_json: str | None
+    fingerprint: str
+    input_tokens: int
+    output_tokens: int
+    estimated_cost: float
+
+
+def _encode_iteration_payload(req: IterationCreate) -> _IterationPayload:
+    return _IterationPayload(
+        solution_data_json=json.dumps(req.solution_data) if req.solution_data else None,
+        track_scores_json=json.dumps(req.track_scores) if req.track_scores else None,
+        challenge_metrics_json=(
+            json.dumps(req.challenge_metrics) if req.challenge_metrics else None
+        ),
+        algorithm_files_json=_files_json(req.algorithm_files),
+        hyperparameters_json=(
+            json.dumps(req.hyperparameters) if req.hyperparameters else None
+        ),
+        fingerprint=fingerprint(req.title, req.strategy_tag),
+        input_tokens=req.input_tokens or 0,
+        output_tokens=req.output_tokens or 0,
+        estimated_cost=req.estimated_cost or 0.0,
     )
-    fp = fingerprint(req.title, req.strategy_tag)
 
-    async with db.connect() as conn:
-        await conn.execute("BEGIN IMMEDIATE")
 
-        # SQLite FKs aren't enforced (no PRAGMA), so /api/iterations would
-        # otherwise accept any client-supplied agent_id and silently create
-        # orphan rows in experiments/hypotheses/trajectory_bests/best_history.
-        # Those rows then get dropped from the dashboard's INNER JOINs on
-        # agents — leaderboard/recent_experiments go blank even though the
-        # data is "there." Reject up front instead.
-        cursor = await conn.execute(
-            "SELECT 1 FROM agents WHERE id = ?", (req.agent_id,)
+@dataclass
+class _IterationVerdict:
+    """How one publish scored against the global and trajectory bests."""
+    prev_best: dict | None
+    prev_trajectory_best: dict | None
+    baseline: float | None
+    is_new_best: bool
+    beats_trajectory_best: bool
+    is_refactor: bool
+    hyp_status: str
+    target_best_experiment_id: str | None
+    delta_vs_best_pct: float | None
+    delta_vs_trajectory_best_pct: float | None
+
+
+# How long a claimed-but-unfinished measurement is honoured before another
+# agent may take it. Longer than a slow C3 benchmark (a cold compile plus the
+# solve can run to tens of minutes), short enough that one crashed agent
+# doesn't park the measurement for the rest of the day.
+_MEASUREMENT_CLAIM_TTL_SECS = 3600
+
+
+async def _measurement_stale_cutoff() -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc)
+            - timedelta(seconds=_MEASUREMENT_CLAIM_TTL_SECS)).isoformat()
+
+
+async def _pooled_mainnet_entry_exists(conn, challenge: str, row) -> bool:
+    """Is there an UNSCORED copy of the recorded mainnet algorithm in the
+    inactive pool for an agent to adopt?
+
+    Unscored matters: a scored entry inherits its score as the trajectory
+    floor and skips the benchmark, which is the one thing we need it for."""
+    if not row or not row["code_fingerprint"]:
+        return False
+    pool = await db.get_inactive_with_deactivations(conn, challenge)
+    return any(
+        e.get("score") is None
+        and db.code_fingerprint(e.get("algorithm_code") or "") == row["code_fingerprint"]
+        for e in pool
+    )
+
+
+async def _mainnet_measurement_claimable(conn, challenge: str) -> bool:
+    """Is a measurement outstanding AND actually performable right now?
+
+    The second half matters: forcing an agent off its trajectory is only
+    justified if there is something for it to adopt. Without that check a
+    stale request would reset an agent for nothing, over and over."""
+    row = await db.get_mainnet_baseline(conn, challenge)
+    if not row or row["status"] not in ("requested", "measuring"):
+        return False
+    return await _pooled_mainnet_entry_exists(conn, challenge, row)
+
+
+async def _maybe_capture_mainnet_baseline(
+    conn, challenge: str, req: IterationCreate, *, timestamp: str,
+) -> bool:
+    """Adopt this iteration's score as the mainnet baseline if it benchmarked
+    the mainnet algorithm unchanged. Returns whether it did.
+
+    Fires while the row is un-measured — both 'pending' (waiting for whoever
+    gets there first) and 'requested' (the admin button steered a reset at it).
+    'requested' MUST be included: the button's whole purpose is to make this
+    happen, and accepting only 'pending' meant pressing it silently disabled
+    the capture it was asking for. Once 'ready', a later agent re-running the
+    same code must not overwrite a real measurement with a noisier one.
+    Infeasible runs are ignored — the bar has to be a score the algorithm can
+    actually reach here."""
+    row = await db.get_mainnet_baseline(conn, challenge)
+    if (not row or row["status"] not in db.MAINNET_UNMEASURED
+            or not row["code_fingerprint"]):
+        return False
+    if not req.feasible:
+        return False
+
+    # Two ways to recognise the measurement.
+    #
+    # By CODE, for the organic case: any agent that happens to benchmark the
+    # mainnet algorithm unchanged, with no claim involved.
+    #
+    # By CLAIM, for the case we asked for. Byte-identity is a fragile key here
+    # — the code round-trips through an agent's worktree, and the write
+    # sanitises it — so a measurement we explicitly commissioned must not hinge
+    # on it. When this agent is the one we handed the algorithm to and it is
+    # publishing the unchanged-seed benchmark (`seed_baseline`, emitted only by
+    # run_loop's SEED-BENCH block, before any mutation), that IS the
+    # measurement. Observed live: the seed scored 202728, and the capture
+    # dropped it on a fingerprint mismatch.
+    by_code = db.code_fingerprint(req.algorithm_code or "") == row["code_fingerprint"]
+    by_claim = (
+        row["status"] == "measuring"
+        and row["measured_by"] == f"agent:{req.agent_id}"
+        and (req.strategy_tag or "") == "seed_baseline"
+    )
+    if not (by_code or by_claim):
+        return False
+    cfg = await db.get_challenge_config(conn, challenge)
+    await db.set_mainnet_baseline_score(
+        conn, challenge, req.score, feasible=True, benchmarked_at=timestamp,
+        measured_by=f"agent:{req.agent_id}",
+        config_fingerprint_=db.config_fingerprint(
+            json.loads(cfg["tracks"]) if cfg and cfg.get("tracks") else None,
+            cfg.get("timeout") if cfg else None,
+        ),
+    )
+    return True
+
+
+async def _evaluate_iteration(
+    conn, req: IterationCreate, challenge: str, direction: str,
+) -> _IterationVerdict:
+    """Scoring/floor phase: compare the published score against the global
+    best and the agent's trajectory best (both feasibility-gated) and
+    classify the iteration (improvement / refactor / failed)."""
+    prev_best = await db.get_global_best(conn, challenge, direction=direction)
+    prev_trajectory_best = await db.get_trajectory_best(conn, req.agent_id, challenge)
+    baseline = await get_baseline_score(conn, challenge)
+
+    # Both "best" comparisons are gated on feasibility. Without this gate an
+    # infeasible run can outrank a feasible one numerically: the infeasible
+    # aggregate is a fixed floor (benchmark.INFEASIBLE_QUALITY), while a
+    # feasible-but-below-baseline score can sit *below* that floor (e.g. the
+    # neuralnet baseline is ~-2.29M, well under the old -1M infeasible
+    # floor). When that happened, an infeasible cheat edit registered as
+    # "beats trajectory best", became the trajectory anchor, and every later
+    # feasible recovery — scoring below the floor — was then rejected as
+    # "not an improvement". The trajectory was pinned at the infeasible floor
+    # forever (observed: 80+ flat edits). Feasibility is a hard precondition
+    # for any score to count as a best; benchmark.py also lowers the floor
+    # below the feasible clamp as defense-in-depth.
+    is_new_best = req.feasible and (
+        prev_best is None or db.is_better(direction, req.score, prev_best["score"])
+    )
+    beats_trajectory_best = req.feasible and (
+        prev_trajectory_best is None
+        or db.is_better(direction, req.score, prev_trajectory_best["score"])
+    )
+
+    # Refactor path (docs/cleaner-agent.md): a behavior-preserving
+    # bloat reduction the client has already benchmarked and delta-gated.
+    # It swaps the trajectory-best CODE while KEEPING the recorded score
+    # (a −2% refactor must not lower the bar the next mutation has to
+    # beat), and counts as neither improvement nor stagnation. Only
+    # meaningful when there IS a parent and the refactor didn't beat it —
+    # a refactor that beats outright is just a normal improvement.
+    is_refactor = (
+        req.iteration_type == "refactor"
+        and req.feasible
+        and prev_trajectory_best is not None
+        and not beats_trajectory_best
+    )
+
+    hyp_status = (
+        "refactor" if is_refactor
+        else "succeeded" if beats_trajectory_best else "failed"
+    )
+
+    delta_vs_best_pct: float | None = None
+    if prev_best is not None and prev_best["score"] != 0:
+        delta_vs_best_pct = round(
+            improvement_pct(prev_best["score"], req.score, direction), 6
         )
-        if await cursor.fetchone() is None:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"Agent {req.agent_id} is not registered. "
-                    "Call POST /api/agents/register first."
-                ),
-            )
-
-        await db.ensure_agent_challenge_state(conn, req.agent_id, challenge, timestamp)
-
-        prev_best = await db.get_global_best(conn, challenge, direction=direction)
-        prev_trajectory_best = await db.get_trajectory_best(conn, req.agent_id, challenge)
-        baseline = await get_baseline_score(conn, challenge)
-
-        # Both "best" comparisons are gated on feasibility. Without this gate an
-        # infeasible run can outrank a feasible one numerically: the infeasible
-        # aggregate is a fixed floor (benchmark.INFEASIBLE_QUALITY), while a
-        # feasible-but-below-baseline score can sit *below* that floor (e.g. the
-        # neuralnet baseline is ~-2.29M, well under the old -1M infeasible
-        # floor). When that happened, an infeasible cheat edit registered as
-        # "beats trajectory best", became the trajectory anchor, and every later
-        # feasible recovery — scoring below the floor — was then rejected as
-        # "not an improvement". The trajectory was pinned at the infeasible floor
-        # forever (observed: 80+ flat edits). Feasibility is a hard precondition
-        # for any score to count as a best; benchmark.py also lowers the floor
-        # below the feasible clamp as defense-in-depth.
-        is_new_best = req.feasible and (
-            prev_best is None or db.is_better(direction, req.score, prev_best["score"])
-        )
-        beats_trajectory_best = req.feasible and (
-            prev_trajectory_best is None
-            or db.is_better(direction, req.score, prev_trajectory_best["score"])
+    delta_vs_trajectory_best_pct: float | None = None
+    if prev_trajectory_best is not None and prev_trajectory_best["score"] != 0:
+        delta_vs_trajectory_best_pct = round(
+            improvement_pct(prev_trajectory_best["score"], req.score, direction), 6
         )
 
-        target_best_experiment_id = (
+    return _IterationVerdict(
+        prev_best=prev_best,
+        prev_trajectory_best=prev_trajectory_best,
+        baseline=baseline,
+        is_new_best=is_new_best,
+        beats_trajectory_best=beats_trajectory_best,
+        is_refactor=is_refactor,
+        hyp_status=hyp_status,
+        target_best_experiment_id=(
             prev_trajectory_best["experiment_id"] if prev_trajectory_best else None
+        ),
+        delta_vs_best_pct=delta_vs_best_pct,
+        delta_vs_trajectory_best_pct=delta_vs_trajectory_best_pct,
+    )
+
+
+async def _ensure_trajectory(
+    conn, agent_id: str, challenge: str, acs: dict | None, timestamp: str,
+    *, initial_score: float | None,
+) -> str:
+    """Trajectory-tracking phase (per-(agent, challenge)): reuse the agent's
+    current trajectory, or create one on its first publish."""
+    trajectory_id = (acs or {}).get("current_trajectory_id")
+    if not trajectory_id:
+        trajectory_id = new_id()
+        await db.create_trajectory(
+            conn, trajectory_id, challenge, timestamp,
+            current_score=initial_score,
         )
-        hyp_status = "succeeded" if beats_trajectory_best else "failed"
-
-        # ── Program ID: tag hypothesis with current program (per-(agent, challenge)) ──
-        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
-        current_program_id = (acs or {}).get("current_program_id")
-        if not current_program_id:
-            current_program_id = new_id()
-            await db.update_agent_challenge_state(
-                conn, req.agent_id, challenge,
-                set_fields={"current_program_id": current_program_id},
-            )
-
-        await conn.execute(
-            """INSERT INTO hypotheses
-               (id, agent_id, challenge, title, description, strategy_tag, status,
-                fingerprint, target_best_experiment_id, program_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (hyp_id, req.agent_id, challenge, req.title, req.description,
-             req.strategy_tag, hyp_status, fp, target_best_experiment_id,
-             current_program_id, timestamp),
-        )
-
-        delta_vs_best_pct: float | None = None
-        if prev_best is not None and prev_best["score"] != 0:
-            delta_vs_best_pct = round(
-                improvement_pct(prev_best["score"], req.score, direction), 6
-            )
-        delta_vs_trajectory_best_pct: float | None = None
-        if prev_trajectory_best is not None and prev_trajectory_best["score"] != 0:
-            delta_vs_trajectory_best_pct = round(
-                improvement_pct(prev_trajectory_best["score"], req.score, direction), 6
-            )
-
-        # ── Trajectory tracking (per-(agent, challenge)) ──
-        trajectory_id = (acs or {}).get("current_trajectory_id")
-        if not trajectory_id:
-            trajectory_id = new_id()
-            await db.create_trajectory(
-                conn, trajectory_id, challenge, timestamp,
-                current_score=req.score if beats_trajectory_best else None,
-            )
-            await db.update_agent_challenge_state(
-                conn, req.agent_id, challenge,
-                set_fields={"current_trajectory_id": trajectory_id},
-            )
-            await db.increment_agent_challenge_counters(
-                conn, req.agent_id, challenge, num_trajectories_inc=1,
-            )
-
-        # Hint that drove this iteration (set on the prior /api/state call
-        # when the agent was stagnating). We read + clear atomically so the
-        # next iteration only carries a hint if the server hands one out
-        # again.
-        received_hint = (acs or {}).get("pending_hint")
-        inspiration_source_id = (acs or {}).get("pending_inspiration_source")
-        inspiration_source_trajectory_id = (acs or {}).get(
-            "pending_inspiration_source_trajectory"
-        )
-
-        iter_input_tokens = req.input_tokens or 0
-        iter_output_tokens = req.output_tokens or 0
-        iter_estimated_cost = req.estimated_cost or 0.0
-
-        await conn.execute(
-            """INSERT INTO experiments
-               (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
-                score, feasible,
-                challenge_metrics, notes, solution_data, track_scores,
-                delta_vs_best_pct, delta_vs_trajectory_best_pct, beats_trajectory_best,
-                trajectory_id, received_hint, inspiration_source_id,
-                inspiration_source_trajectory_id,
-                input_tokens, output_tokens, estimated_cost, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
-             req.score,
-             1 if req.feasible else 0, challenge_metrics_json,
-             req.notes, solution_data_json, track_scores_json,
-             delta_vs_best_pct, delta_vs_trajectory_best_pct,
-             1 if beats_trajectory_best else 0,
-             trajectory_id, received_hint, inspiration_source_id,
-             inspiration_source_trajectory_id,
-             iter_input_tokens, iter_output_tokens, iter_estimated_cost, timestamp),
-        )
-
-        if received_hint is not None:
-            await db.update_agent_challenge_state(
-                conn, req.agent_id, challenge,
-                set_fields={
-                    "pending_hint": None,
-                    "pending_inspiration_source": None,
-                    "pending_inspiration_source_trajectory": None,
-                },
-            )
-
-        await db.update_trajectory_after_edit(
-            conn, trajectory_id, beats_trajectory_best,
-            new_score=req.score if beats_trajectory_best else None,
-        )
-
-        # Personal best-ever is a record of what THIS agent actually achieved
-        # with a mutation it made — it is independent of the trajectory floor.
-        # It must update on every feasible publish (even one that scores below
-        # an inherited trajectory best), and must never be raised by an
-        # infeasible run or by the adopted floor an agent is handed on pickup.
-        # increment_agent_challenge_counters applies a monotonic CASE guard, so
-        # passing the score on every feasible run only ever ratchets it up.
-        personal_best_candidate = req.score if req.feasible else None
-
-        if beats_trajectory_best:
-            new_program_id = new_id()
-            await db.increment_agent_challenge_counters(
-                conn, req.agent_id, challenge,
-                runs=1,
-                improvements=1,
-                runs_since_improvement_reset=True,
-                best_ever_score=personal_best_candidate,
-                direction=direction,
-                input_tokens=iter_input_tokens,
-                output_tokens=iter_output_tokens,
-                estimated_cost=iter_estimated_cost,
-            )
-            await db.update_agent_challenge_state(
-                conn, req.agent_id, challenge,
-                set_fields={"current_program_id": new_program_id},
-            )
-            await db.upsert_trajectory_best(
-                conn, agent_id=req.agent_id, challenge=challenge,
-                experiment_id=exp_id,
-                algorithm_code=req.algorithm_code, score=req.score,
-                feasible=req.feasible,
-                challenge_metrics=challenge_metrics_json,
-                solution_data=solution_data_json,
-                updated_at=timestamp, trajectory_id=trajectory_id,
-                track_scores=track_scores_json,
-                kernel_code=req.kernel_code,
-            )
-        else:
-            await db.increment_agent_challenge_counters(
-                conn, req.agent_id, challenge,
-                runs=1,
-                runs_since_improvement_inc=1,
-                best_ever_score=personal_best_candidate,
-                direction=direction,
-                input_tokens=iter_input_tokens,
-                output_tokens=iter_output_tokens,
-                estimated_cost=iter_estimated_cost,
-            )
-
-        agent_name = await get_agent_name(conn, req.agent_id)
-        incremental_pct = delta_vs_best_pct if is_new_best else None
-
-        if is_new_best:
-            await conn.execute(
-                """INSERT INTO best_history
-                   (experiment_id, agent_id, challenge, agent_name, score, solution_data, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (exp_id, req.agent_id, challenge, agent_name, req.score, solution_data_json, timestamp),
-            )
-
-        # This agent got a result through the benchmark (feasible or not), so
-        # it has "ever benchmarked" on this challenge. Agents that never reach
-        # here keep ever_benchmarked=0 — a quiet signal, no feed message.
         await db.update_agent_challenge_state(
-            conn, req.agent_id, challenge, set_fields={"ever_benchmarked": 1},
+            conn, agent_id, challenge,
+            set_fields={"current_trajectory_id": trajectory_id},
+        )
+        await db.increment_agent_challenge_counters(
+            conn, agent_id, challenge, num_trajectories_inc=1,
+        )
+    return trajectory_id
+
+
+async def _record_experiment(
+    conn, req: IterationCreate, *, exp_id: str, hyp_id: str, challenge: str,
+    trajectory_id: str, acs: dict | None, verdict: _IterationVerdict,
+    enc: _IterationPayload, timestamp: str,
+) -> None:
+    """Persist the experiments row, tagged with (and consuming) any pending
+    stagnation hint."""
+    # Hint that drove this iteration (set on the prior /api/state call
+    # when the agent was stagnating). We read + clear atomically so the
+    # next iteration only carries a hint if the server hands one out
+    # again.
+    received_hint = (acs or {}).get("pending_hint")
+    inspiration_source_id = (acs or {}).get("pending_inspiration_source")
+    inspiration_source_trajectory_id = (acs or {}).get(
+        "pending_inspiration_source_trajectory"
+    )
+
+    await conn.execute(
+        """INSERT INTO experiments
+           (id, agent_id, challenge, hypothesis_id, algorithm_code, kernel_code,
+            algorithm_files, hyperparameters,
+            score, default_score, feasible,
+            challenge_metrics, notes, solution_data, track_scores,
+            delta_vs_best_pct, delta_vs_trajectory_best_pct, beats_trajectory_best,
+            trajectory_id, received_hint, inspiration_source_id,
+            inspiration_source_trajectory_id,
+            input_tokens, output_tokens, estimated_cost, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (exp_id, req.agent_id, challenge, hyp_id, req.algorithm_code, req.kernel_code,
+         enc.algorithm_files_json, enc.hyperparameters_json,
+         req.score,
+         # default_score falls back to the published score for untuned
+         # iterations, where the two are equal by definition. Not a
+         # compatibility shim: most iterations are untuned.
+         req.default_score if req.default_score is not None else req.score,
+         1 if req.feasible else 0, enc.challenge_metrics_json,
+         req.notes, enc.solution_data_json, enc.track_scores_json,
+         verdict.delta_vs_best_pct, verdict.delta_vs_trajectory_best_pct,
+         1 if verdict.beats_trajectory_best else 0,
+         trajectory_id, received_hint, inspiration_source_id,
+         inspiration_source_trajectory_id,
+         enc.input_tokens, enc.output_tokens, enc.estimated_cost, timestamp),
+    )
+
+    if received_hint is not None:
+        await db.update_agent_challenge_state(
+            conn, req.agent_id, challenge,
+            set_fields={
+                "pending_hint": None,
+                "pending_inspiration_source": None,
+                "pending_inspiration_source_trajectory": None,
+            },
         )
 
-        # Auto-harvest: a frontier agent's first feasible algorithm for a
-        # strategy_tag becomes a seed for standard/exploiter agents. The
-        # UNIQUE(challenge, strategy_tag, source) index + INSERT OR IGNORE make
-        # first-feasible-per-tag win and bound the pool (≤ one seed per tag).
-        if req.feasible and req.algorithm_code.strip():
-            if (await db.get_agent_tier(conn, req.agent_id)) == "frontier":
-                await db.insert_seed(
-                    conn, challenge, req.strategy_tag, req.algorithm_code,
-                    created_at=timestamp, source="harvested", score=req.score,
-                    feasible=True, kernel_code=req.kernel_code,
-                    origin_agent_id=req.agent_id,
-                )
 
-        await conn.commit()
+async def _apply_iteration_outcome(
+    conn, req: IterationCreate, *, challenge: str, direction: str,
+    verdict: _IterationVerdict, exp_id: str, trajectory_id: str,
+    enc: _IterationPayload, timestamp: str,
+) -> None:
+    """Trajectory-best / counter bookkeeping for the scored iteration:
+    momentum update, then the improvement / refactor / failed branch."""
+    await db.update_trajectory_after_edit(
+        conn, trajectory_id, verdict.beats_trajectory_best,
+        new_score=req.score if verdict.beats_trajectory_best else None,
+    )
 
-        # Pull updated counters from the per-challenge row.
-        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
-        agent_info = {
-            "experiments_completed": acs["experiments_completed"] if acs else 0,
-            "improvements": acs["improvements"] if acs else 0,
-            "runs_since_improvement": acs["runs_since_improvement"] if acs else 0,
-        }
-        leaderboard = await db.compute_leaderboard(
-            conn, challenge, inactive_cutoff(), direction=direction,
+    # Personal best-ever is a record of what THIS agent actually achieved
+    # with a mutation it made — it is independent of the trajectory floor.
+    # It must update on every feasible publish (even one that scores below
+    # an inherited trajectory best), and must never be raised by an
+    # infeasible run or by the adopted floor an agent is handed on pickup.
+    # increment_agent_challenge_counters applies a monotonic CASE guard, so
+    # passing the score on every feasible run only ever ratchets it up.
+    personal_best_candidate = req.score if req.feasible else None
+
+    if verdict.beats_trajectory_best:
+        new_program_id = new_id()
+        await db.increment_agent_challenge_counters(
+            conn, req.agent_id, challenge,
+            runs=1,
+            improvements=1,
+            runs_since_improvement_reset=True,
+            best_ever_score=personal_best_candidate,
+            direction=direction,
+            input_tokens=enc.input_tokens,
+            output_tokens=enc.output_tokens,
+            estimated_cost=enc.estimated_cost,
         )
-        rank = next(
-            (e["rank"] for e in leaderboard if e["agent_id"] == req.agent_id),
-            0,
+        await db.update_agent_challenge_state(
+            conn, req.agent_id, challenge,
+            set_fields={"current_program_id": new_program_id},
+        )
+        await db.upsert_trajectory_best(
+            conn, agent_id=req.agent_id, challenge=challenge,
+            experiment_id=exp_id,
+            algorithm_code=req.algorithm_code, score=req.score,
+            feasible=req.feasible,
+            challenge_metrics=enc.challenge_metrics_json,
+            solution_data=enc.solution_data_json,
+            updated_at=timestamp, trajectory_id=trajectory_id,
+            track_scores=enc.track_scores_json,
+            kernel_code=req.kernel_code,
+            algorithm_files=enc.algorithm_files_json,
+            hyperparameters=enc.hyperparameters_json,
+        )
+    elif verdict.is_refactor:
+        # Neither improvement (no momentum/HPO-band credit) nor
+        # stagnation (runs_since_improvement untouched): pure
+        # bookkeeping. Swap in the lean code at the PARENT's score.
+        await db.increment_agent_challenge_counters(
+            conn, req.agent_id, challenge,
+            runs=1,
+            best_ever_score=personal_best_candidate,
+            direction=direction,
+            input_tokens=enc.input_tokens,
+            output_tokens=enc.output_tokens,
+            estimated_cost=enc.estimated_cost,
+        )
+        await db.upsert_trajectory_best(
+            conn, agent_id=req.agent_id, challenge=challenge,
+            experiment_id=exp_id,
+            algorithm_code=req.algorithm_code,
+            score=verdict.prev_trajectory_best["score"],
+            feasible=req.feasible,
+            challenge_metrics=enc.challenge_metrics_json,
+            solution_data=enc.solution_data_json,
+            updated_at=timestamp, trajectory_id=trajectory_id,
+            track_scores=enc.track_scores_json,
+            kernel_code=req.kernel_code,
+            algorithm_files=enc.algorithm_files_json,
+            # Preserve the parent's tuned config unless the client sent
+            # one: the refactor kept the Map plumbing, so the winning
+            # hyperparameters still apply to the lean code.
+            hyperparameters=(
+                enc.hyperparameters_json
+                if enc.hyperparameters_json is not None
+                else verdict.prev_trajectory_best.get("hyperparameters")
+            ),
+        )
+    else:
+        await db.increment_agent_challenge_counters(
+            conn, req.agent_id, challenge,
+            runs=1,
+            runs_since_improvement_inc=1,
+            best_ever_score=personal_best_candidate,
+            direction=direction,
+            input_tokens=enc.input_tokens,
+            output_tokens=enc.output_tokens,
+            estimated_cost=enc.estimated_cost,
         )
 
+
+async def _maybe_harvest_seed(
+    conn, req: IterationCreate, challenge: str, timestamp: str,
+) -> None:
+    # Auto-harvest into the seed pool: a frontier agent's feasible, SIMPLE,
+    # and structurally-NOVEL algorithm becomes a launch point for other
+    # agents. Diversity is by code similarity (server/seed_diversity.py), not
+    # strategy tags; the pool is capped at K and, when full, the most
+    # REDUNDANT seed is evicted (never the lowest-scoring) so seeds stay
+    # simple and sticky. strategy_tag is kept only as a display label.
+    if not (req.feasible and req.algorithm_code.strip()):
+        return
+    if (await db.get_agent_tier(conn, req.agent_id)) != "frontier":
+        return
+    swarm_cfg = await get_config_cached()
+    existing = await db.list_seeds(conn, challenge)
+    decision = seed_diversity.decide_admission(
+        req.algorithm_code,
+        [s["algorithm_code"] for s in existing],
+        pool_size=swarm_setting(swarm_cfg, "seed_pool_size"),
+        similarity_threshold=swarm_setting_float(
+            swarm_cfg, "seed_similarity_threshold"),
+        max_loc=swarm_setting(swarm_cfg, "seed_max_loc"),
+    )
+    if decision.admit:
+        if decision.evict_index is not None:
+            await db.evict_seed(
+                conn, existing[decision.evict_index]["id"])
+        await db.insert_seed(
+            conn, challenge, req.strategy_tag, req.algorithm_code,
+            created_at=timestamp, source="harvested", score=req.score,
+            feasible=True, kernel_code=req.kernel_code,
+            origin_agent_id=req.agent_id,
+            algorithm_files=_files_json(req.algorithm_files),
+        )
+
+
+async def _broadcast_iteration(
+    *, challenge: str, challenge_cfg: dict, direction: str,
+    req: IterationCreate, exp_id: str, hyp_id: str, agent_name: str,
+    verdict: _IterationVerdict, leaderboard: list, timestamp: str,
+) -> None:
+    """WS fan-out for a published iteration. Runs AFTER the transaction
+    committed — the dashboard must never see an event for a row that could
+    still roll back."""
     effective_solution_data = req.solution_data or (
-        prev_best["solution_data"] if prev_best else None
+        verdict.prev_best["solution_data"] if verdict.prev_best else None
     )
     num_instances = get_num_instances_for(challenge_cfg, effective_solution_data)
-    imp = improvement_pct(baseline, req.score, direction) if baseline is not None else 0.0
+    imp = (
+        improvement_pct(verdict.baseline, req.score, direction)
+        if verdict.baseline is not None else 0.0
+    )
+    incremental_pct = verdict.delta_vs_best_pct if verdict.is_new_best else None
 
     await manager.broadcast(ws_events.ExperimentPublished(
         challenge=challenge,
@@ -1451,11 +2321,11 @@ async def create_iteration(req: IterationCreate):
         score=req.score,
         feasible=req.feasible,
         improvement_pct=imp,
-        delta_vs_best_pct=delta_vs_best_pct,
-        beats_trajectory_best=beats_trajectory_best,
-        delta_vs_trajectory_best_pct=delta_vs_trajectory_best_pct,
+        delta_vs_best_pct=verdict.delta_vs_best_pct,
+        beats_trajectory_best=verdict.beats_trajectory_best,
+        delta_vs_trajectory_best_pct=verdict.delta_vs_trajectory_best_pct,
         num_instances=num_instances,
-        is_new_best=is_new_best,
+        is_new_best=verdict.is_new_best,
         hypothesis_id=hyp_id,
         strategy_tag=req.strategy_tag,
         title=req.title,
@@ -1464,7 +2334,7 @@ async def create_iteration(req: IterationCreate):
         timestamp=timestamp,
     ))
 
-    if is_new_best:
+    if verdict.is_new_best:
         await manager.broadcast(ws_events.NewGlobalBest(
             challenge=challenge,
             experiment_id=exp_id,
@@ -1485,11 +2355,214 @@ async def create_iteration(req: IterationCreate):
         timestamp=timestamp,
     ))
 
+
+@app.post("/api/failure_records")
+async def create_failure_record(
+    req: FailureRecordCreate,
+    token_agent_id: str = Depends(verify_agent_token),
+):
+    """Store an LLM-authored failed-attempt artifact (a structured
+    retrospective written when a trajectory dies, or a one-line tacit
+    lesson). Gated by the `failed_attempts_archive` swarm toggle — when
+    off this is a 200 no-op so older/misconfigured clients never error.
+
+    Provenance (trajectory_id, experiment_id, best_score) is filled
+    server-side, never trusted from the client. The client posts after
+    publish but before the next /api/state poll (where the trajectory
+    reset runs), so acs.current_trajectory_id is still the dying
+    trajectory. A late post would attribute to the successor trajectory —
+    acceptable telemetry drift, not corruption.
+    """
+    require_token_matches(token_agent_id, req.agent_id)
+    config = await get_config_cached()
+    if not swarm_setting(config, "failed_attempts_archive"):
+        return {"stored": False, "reason": "archive_disabled"}
+    challenge = await resolve_challenge(req.challenge)
+    max_per_agent = swarm_setting(config, "failure_records_max_per_agent")
+    record_id = new_id()
+    async with db.connect() as conn:
+        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
+        cursor = await conn.execute(
+            "SELECT id FROM experiments WHERE agent_id = ? AND challenge = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (req.agent_id, challenge),
+        )
+        latest_exp = await cursor.fetchone()
+        await db.insert_failure_record(
+            conn,
+            record_id=record_id,
+            agent_id=req.agent_id,
+            challenge=challenge,
+            trajectory_id=(acs or {}).get("current_trajectory_id"),
+            experiment_id=latest_exp["id"] if latest_exp else None,
+            kind=req.kind,
+            approach_summary=req.approach_summary,
+            what_was_tried=req.what_was_tried,
+            observed_outcome=req.observed_outcome,
+            possible_reasons=req.possible_reasons,
+            lesson=req.lesson,
+            best_score=(acs or {}).get("best_ever_score"),
+            created_at=now(),
+            max_per_agent=max_per_agent,
+        )
+        await conn.commit()
+    return {"stored": True, "id": record_id}
+
+
+@app.post("/api/iterations", response_model=IterationResponse)
+async def create_iteration(
+    req: IterationCreate,
+    token_agent_id: str = Depends(verify_agent_token),
+):
+    """One published iteration (unified hypothesis + experiment).
+
+    Orchestrates the phases (helpers above): validate → score against the
+    global/trajectory bests → record hypothesis + experiment → trajectory /
+    counter bookkeeping → maybe harvest a seed → commit → broadcast.
+    """
+    require_token_matches(token_agent_id, req.agent_id)
+    # A publish MUST state the challenge it was benchmarked against. The old
+    # behavior — falling back to the swarm's *current* `active_challenge` when
+    # the field was omitted (`resolve_challenge`) — is a race: if the host
+    # switched the active challenge between an agent's benchmark and this
+    # publish, the result would be recorded under the NEW challenge, tagging the
+    # old challenge's code onto the new challenge's trajectory. Require it
+    # explicitly so a result is always attributed to the challenge it actually
+    # ran on. The client always sends it (benchmark.py stamps the benchmarked
+    # challenge; publish falls back to the synced config challenge), so this
+    # only rejects a genuinely malformed publish.
+    if req.challenge is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "publish must include the benchmarked 'challenge'; refusing to "
+                "infer it from the swarm's active challenge (which may have "
+                "changed since this result was benchmarked)."
+            ),
+        )
+    challenge = await resolve_challenge(req.challenge)
+    direction = await get_direction(challenge)
+    challenge_cfg = await get_challenge_config_cached(challenge)
+    exp_id = new_id()
+    hyp_id = new_id()
+    timestamp = now()
+    enc = _encode_iteration_payload(req)
+
+    async with db.connect() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+
+        # FKs ARE enforced (db.connect() sets PRAGMA foreign_keys=ON), but a
+        # violation would only surface as an opaque IntegrityError 500 midway
+        # through the transaction. Pre-check the agent row so an unregistered
+        # agent_id gets a clear 404 up front instead.
+        cursor = await conn.execute(
+            "SELECT 1 FROM agents WHERE id = ?", (req.agent_id,)
+        )
+        if await cursor.fetchone() is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Agent {req.agent_id} is not registered. "
+                    "Call POST /api/agents/register first."
+                ),
+            )
+
+        await db.ensure_agent_challenge_state(conn, req.agent_id, challenge, timestamp)
+
+        verdict = await _evaluate_iteration(conn, req, challenge, direction)
+
+        # ── Program ID: tag hypothesis with current program (per-(agent, challenge)) ──
+        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
+        current_program_id, _ = await _ensure_current_program_id(
+            conn, req.agent_id, challenge, acs,
+        )
+
+        await conn.execute(
+            """INSERT INTO hypotheses
+               (id, agent_id, challenge, title, description, strategy_tag, status,
+                fingerprint, target_best_experiment_id, program_id, role, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (hyp_id, req.agent_id, challenge, req.title, req.description,
+             req.strategy_tag, verdict.hyp_status, enc.fingerprint,
+             verdict.target_best_experiment_id, current_program_id, req.role,
+             timestamp),
+        )
+
+        # ── Trajectory tracking (per-(agent, challenge)) ──
+        trajectory_id = await _ensure_trajectory(
+            conn, req.agent_id, challenge, acs, timestamp,
+            initial_score=req.score if verdict.beats_trajectory_best else None,
+        )
+
+        await _record_experiment(
+            conn, req, exp_id=exp_id, hyp_id=hyp_id, challenge=challenge,
+            trajectory_id=trajectory_id, acs=acs, verdict=verdict, enc=enc,
+            timestamp=timestamp,
+        )
+
+        await _apply_iteration_outcome(
+            conn, req, challenge=challenge, direction=direction,
+            verdict=verdict, exp_id=exp_id, trajectory_id=trajectory_id,
+            enc=enc, timestamp=timestamp,
+        )
+
+        # Free measurement: an agent that benchmarks the mainnet seed unchanged
+        # (the seed-adoption path does exactly this before mutating) has just
+        # produced the number the dashboard wants. Recognise it by code hash so
+        # nobody has to spend a second benchmark on it — and so a swarm that
+        # never runs the host-side measurement still gets a real bar.
+        await _maybe_capture_mainnet_baseline(
+            conn, challenge, req, timestamp=timestamp,
+        )
+
+        agent_name = await get_agent_name(conn, req.agent_id)
+
+        if verdict.is_new_best:
+            await conn.execute(
+                """INSERT INTO best_history
+                   (experiment_id, agent_id, challenge, agent_name, score, solution_data, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (exp_id, req.agent_id, challenge, agent_name, req.score,
+                 enc.solution_data_json, timestamp),
+            )
+
+        # This agent got a result through the benchmark (feasible or not), so
+        # it has "ever benchmarked" on this challenge. Agents that never reach
+        # here keep ever_benchmarked=0 — a quiet signal, no feed message.
+        await db.update_agent_challenge_state(
+            conn, req.agent_id, challenge, set_fields={"ever_benchmarked": 1},
+        )
+
+        await _maybe_harvest_seed(conn, req, challenge, timestamp)
+
+        await conn.commit()
+
+        # Pull updated counters from the per-challenge row.
+        acs = await db.get_agent_challenge_state(conn, req.agent_id, challenge)
+        agent_info = {
+            "experiments_completed": acs["experiments_completed"] if acs else 0,
+            "improvements": acs["improvements"] if acs else 0,
+            "runs_since_improvement": acs["runs_since_improvement"] if acs else 0,
+        }
+        leaderboard = await db.compute_leaderboard(
+            conn, challenge, await inactive_cutoff(), direction=direction,
+        )
+        rank = next(
+            (e["rank"] for e in leaderboard if e["agent_id"] == req.agent_id),
+            0,
+        )
+
+    await _broadcast_iteration(
+        challenge=challenge, challenge_cfg=challenge_cfg, direction=direction,
+        req=req, exp_id=exp_id, hyp_id=hyp_id, agent_name=agent_name,
+        verdict=verdict, leaderboard=leaderboard, timestamp=timestamp,
+    )
+
     return IterationResponse(
         experiment_id=exp_id,
         hypothesis_id=hyp_id,
-        is_new_best=is_new_best,
-        beats_trajectory_best=beats_trajectory_best,
+        is_new_best=verdict.is_new_best,
+        beats_trajectory_best=verdict.beats_trajectory_best,
         rank=rank,
         runs=agent_info["experiments_completed"],
         improvements=agent_info["improvements"],
@@ -1505,15 +2578,19 @@ async def get_leaderboard(challenge: str | None = None):
     direction = await get_direction(challenge)
     async with db.connect() as conn:
         leaderboard = await db.compute_leaderboard(
-            conn, challenge, inactive_cutoff(), direction=direction,
+            conn, challenge, await inactive_cutoff(), direction=direction,
         )
     return {"challenge": challenge, "updated_at": now(), "entries": leaderboard}
 
 
 # ── Messages (chat feed) ──
 
-@app.post("/api/messages", dependencies=[Depends(verify_agent_token)])
-async def create_message(req: MessageCreate):
+@app.post("/api/messages")
+async def create_message(
+    req: MessageCreate,
+    token_agent_id: str = Depends(verify_agent_token),
+):
+    require_token_matches(token_agent_id, req.agent_id)
     challenge = await resolve_challenge(req.challenge)
     msg_id = new_id()
     timestamp = now()
@@ -1596,29 +2673,15 @@ async def list_messages(
 async def list_hypotheses(
     limit: int = 30, challenge: str | None = None, before: str | None = None,
 ):
-    """Recent hypotheses for the challenge, newest-first. Mirrors the
-    `recent_hypotheses` block of /api/state but is paginated via an optional
-    `before` (created_at) cursor so the Ideas research feed can page backwards
-    through history that scrolled off its in-memory buffer."""
+    """Recent hypotheses for the challenge, newest-first. Same query as the
+    `recent_hypotheses` block of /api/state (shared via _recent_hypotheses)
+    but paginated via an optional `before` (created_at) cursor so the Ideas
+    research feed can page backwards through history that scrolled off its
+    in-memory buffer."""
     challenge = await resolve_challenge(challenge)
     limit = max(1, min(limit, 200))
-    where = "h.challenge = ?"
-    params: list = [challenge]
-    if before:
-        where += " AND h.created_at < ?"
-        params.append(before)
-    params.append(limit)
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "SELECT h.id, h.title, h.strategy_tag, h.description, "
-            "       a.name as agent_name, h.agent_id, h.parent_hypothesis_id, "
-            "       h.created_at "
-            "FROM hypotheses h JOIN agents a ON a.id = h.agent_id "
-            f"WHERE {where} "
-            "ORDER BY h.created_at DESC LIMIT ?",
-            params,
-        )
-        rows = [dict(row) for row in await cursor.fetchall()]
+        rows = await _recent_hypotheses(conn, challenge, limit, before=before)
     return rows
 
 
@@ -1913,7 +2976,16 @@ async def get_agent_experiments(
     agent_id: str,
     challenge: str | None = None,
     include_code: bool = False,
+    credentialed: bool = Depends(optional_swarm_password),
 ):
+    # include_code=true returns algorithm_code/kernel_code, so it's gated to
+    # callers with valid swarm credentials; the base (no-code) response stays
+    # public — see optional_swarm_password.
+    if include_code and not credentialed:
+        raise HTTPException(
+            status_code=403,
+            detail="X-Username/X-Swarm-Password required for include_code",
+        )
     # Per-agent full attempt history for the personal progress chart, scoped
     # to the requested challenge (defaults to active). Returns every experiment
     # (improvement or not, feasible or not) so the dashboard can render a
@@ -2045,12 +3117,20 @@ async def get_trajectory_experiments(
     challenge: str | None = None,
     trajectory_id: str | None = None,
     include_code: bool = False,
+    credentialed: bool = Depends(optional_swarm_password),
 ):
     """All experiments grouped by trajectory.
 
     Optionally filter to a single trajectory via ?trajectory_id=...
-    Pass include_code=true to return algorithm_code per experiment.
+    Pass include_code=true to return algorithm_code per experiment — gated
+    to callers with valid X-Username/X-Swarm-Password (see
+    optional_swarm_password); the base response stays public.
     """
+    if include_code and not credentialed:
+        raise HTTPException(
+            status_code=403,
+            detail="X-Username/X-Swarm-Password required for include_code",
+        )
     challenge = await resolve_challenge(challenge)
     async with db.connect() as conn:
         traj_filter = ""
@@ -2063,7 +3143,7 @@ async def get_trajectory_experiments(
         cursor = await conn.execute(
             f"""SELECT e.id, e.trajectory_id, e.agent_id, a.name AS agent_name,
                        e.score, e.feasible, e.beats_trajectory_best, e.notes,
-                       e.created_at, h.title, h.description, h.strategy_tag
+                       e.created_at, h.title, h.description, h.strategy_tag, h.role
                        {code_col}
                 FROM experiments e
                 LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
@@ -2088,6 +3168,7 @@ async def get_trajectory_experiments(
             "title": r["title"],
             "description": r["description"],
             "strategy_tag": r["strategy_tag"],
+            "role": r["role"],
             "created_at": r["created_at"],
         }
         if include_code:
@@ -2116,19 +3197,28 @@ async def admin_broadcast(req: AdminBroadcast):
 
 @app.post("/api/admin/reset_challenge")
 async def admin_reset_challenge(req: AdminResetChallenge):
-    """Per-challenge leaderboard reset. Drops `trajectory_bests` + `best_history`
-    for the named challenge so the next feasible publish becomes the new
-    global best. Preserves `experiments`, `hypotheses`, and `trajectories`
-    so the swarm's research history isn't erased.
+    """Per-challenge leaderboard reset — starts a new scoring era.
 
-    Use case: a wire-format change (e.g. the route_data → solution_data
-    rename + trailing-slash fix) leaves all prior best_history rows with
-    NULL solution_data, so the dashboard's gantt / route panels render
-    blank. Resetting the leaderboard lets fresh publishes — which now
-    carry solution_data correctly — repopulate the visualisation.
+    Drops `trajectory_bests` + `best_history` for the challenge, clears each
+    agent's `best_ever_score` on it, and stamps a **score epoch** so scores
+    published before now stop counting as the global best. Preserves
+    `experiments`, `hypotheses`, and `trajectories`, so the swarm's research
+    history, the inspiration matrix and every trajectory chart are intact.
+
+    The epoch is what makes this a real reset. `get_global_best` reads
+    `experiments` (deliberately — a peak from a deactivated trajectory still
+    counts), so deleting the two tables above cleared the CHART while the old
+    peak kept winning the publish gate. After a change that makes scores
+    incomparable — new instance counts, a different timeout — every new run
+    scored lower and was classified "not an improvement", forever. With an
+    epoch, the next feasible publish becomes the new best even if it is lower.
+
+    Reversible: clearing the `score_epoch:<challenge>` config row restores the
+    previous best, because nothing was deleted from `experiments`.
     """
     await verify_admin(req)
     challenge = req.challenge
+    timestamp = now()
     async with db.connect() as conn:
         cur = await conn.execute(
             "DELETE FROM best_history WHERE challenge = ?", (challenge,),
@@ -2138,20 +3228,27 @@ async def admin_reset_challenge(req: AdminResetChallenge):
             "DELETE FROM trajectory_bests WHERE challenge = ?", (challenge,),
         )
         trajectory_bests_deleted = cur.rowcount
+        # best_ever_score is monotonic and drives leaderboard ORDERING, so
+        # leaving it would show pre-reset peaks alongside a reset best.
+        cur = await conn.execute(
+            "UPDATE agent_challenge_state SET best_ever_score = NULL "
+            "WHERE challenge = ?", (challenge,),
+        )
+        agent_bests_cleared = cur.rowcount
+        await db.set_score_epoch(conn, challenge, timestamp)
         await conn.commit()
     await manager.broadcast(ws_events.ResetEvt(
         challenge=challenge,
-        timestamp=now(),
+        timestamp=timestamp,
     ))
     return {
         "reset": True,
         "challenge": challenge,
+        "score_epoch": timestamp,
         "best_history_deleted": best_history_deleted,
         "trajectory_bests_deleted": trajectory_bests_deleted,
+        "agent_bests_cleared": agent_bests_cleared,
     }
-
-
-SEED_INACTIVE_SUPPORTED = ("knapsack", "satisfiability")
 
 
 @app.post("/api/admin/seed_inactive")
@@ -2163,19 +3260,12 @@ async def admin_seed_inactive(req: AdminSeedInactive):
     branch in server.py — at which point it is removed from the pool
     (consume-once semantics).
 
-    Restricted to challenges whose mainnet algorithm format matches the
-    swarm's single-file expectation. The host-side wizard enforces the
-    same set; this is defense-in-depth so a stray curl can't seed an
-    unsupported challenge with a payload that would break adoption."""
+    Supports every challenge, single- or multi-file: `algorithm_code` is the
+    entry file and `algorithm_files` (when present) carries the full map —
+    multiple `.rs` modules and multiple `.cu` kernels, names preserved. The
+    Pydantic `ChallengeName` Literal already rejects unknown challenge names,
+    so no explicit allowlist is needed here."""
     await verify_admin(req)
-    if req.challenge not in SEED_INACTIVE_SUPPORTED:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"seed_inactive is supported for {list(SEED_INACTIVE_SUPPORTED)} "
-                f"only (got {req.challenge!r})"
-            ),
-        )
     if not req.algorithm_code.strip():
         raise HTTPException(status_code=400, detail="algorithm_code is empty")
     timestamp = now()
@@ -2183,10 +3273,37 @@ async def admin_seed_inactive(req: AdminSeedInactive):
         agent_id = await db.ensure_synthetic_agent(
             conn, req.source_label, timestamp,
         )
+        # Idempotency guard: if this source already has an unconsumed seed for
+        # the challenge, skip — re-running `setup.py create` must not pile up
+        # duplicate mainnet seeds. Consume-once means an adopted seed leaves no
+        # row, so a later create still re-seeds.
+        # Register the mainnet baseline when the caller says this IS the
+        # mainnet algorithm. Done BEFORE the idempotency return below: the
+        # registration is about which algorithm this challenge is measured
+        # against, and skipping a duplicate deposit is no reason to leave the
+        # dashboard with no bar. Cheap — one row, no benchmark.
+        if req.mainnet_algo_name:
+            await db.record_mainnet_algorithm(
+                conn, req.challenge, req.mainnet_algo_name, created_at=timestamp,
+                adoption_pct=req.mainnet_adoption_pct,
+                code_fingerprint_=db.code_fingerprint(req.algorithm_code),
+            )
+            await conn.commit()
+        existing = await db.count_inactive_from_agent(
+            conn, agent_id, req.challenge,
+        )
+        if existing:
+            return {
+                "seeded": False,
+                "challenge": req.challenge,
+                "reason": "already_seeded",
+                "source": req.source_label,
+            }
         inactive_id = await db.deposit_inactive(
             conn, agent_id, req.challenge,
             req.algorithm_code, None, timestamp,
             kernel_code=req.kernel_code,
+            algorithm_files=_files_json(req.algorithm_files),
         )
         await conn.commit()
     return {
@@ -2197,27 +3314,259 @@ async def admin_seed_inactive(req: AdminSeedInactive):
     }
 
 
+@app.post("/api/admin/clear_inactive")
+async def admin_clear_inactive(req: AdminClearInactive):
+    """Empty the inactive-pool for a challenge (optionally keeping one source),
+    so agents reliably adopt a specific seed on their next reset instead of a
+    diluting mix. Point-in-time only — the pool refills as agents stagnate."""
+    await verify_admin(req)
+    async with db.connect() as conn:
+        keep_agent_id = None
+        if req.keep_source_label:
+            row = await (await conn.execute(
+                "SELECT id FROM agents WHERE name = ?", (req.keep_source_label,),
+            )).fetchone()
+            keep_agent_id = row["id"] if row else None
+        deleted = await db.clear_inactive_pool(conn, req.challenge, keep_agent_id)
+        await conn.commit()
+    return {
+        "cleared": True,
+        "challenge": req.challenge,
+        "deleted": deleted,
+        "kept_source": req.keep_source_label,
+    }
+
+
 @app.post("/api/admin/seed_pool")
 async def admin_seed_pool(req: AdminSeedPool):
-    """Deposit a host-authored seed algorithm into `seed_pool`. Deduped by
-    (challenge, strategy_tag, source='authored'); a repeat for the same tag is
-    silently ignored (idempotent re-runs of `setup.py create`)."""
+    """Deposit a host-authored seed algorithm into `seed_pool` — an UPSERT
+    keyed by (challenge, strategy_tag): identical re-deposits are no-ops
+    (idempotent `setup.py create` re-runs) and changed code REPLACES the pool
+    copy (an edited seeds/<tag>.rs propagates on the next create). Harvested
+    seeds are never touched. `seeded` stays in the response for older
+    hostadmin clients; `action` says what actually happened."""
     await verify_admin(req)
     if not req.algorithm_code.strip():
         raise HTTPException(status_code=400, detail="algorithm_code is empty")
     timestamp = now()
+    files_json = json.dumps(req.algorithm_files) if req.algorithm_files else None
     async with db.connect() as conn:
-        added = await db.insert_seed(
+        action = await db.upsert_authored_seed(
             conn, req.challenge, req.strategy_tag, req.algorithm_code,
-            created_at=timestamp, source="authored", score=req.score,
-            feasible=True, kernel_code=req.kernel_code,
+            created_at=timestamp, score=req.score,
+            kernel_code=req.kernel_code, algorithm_files=files_json,
         )
         await conn.commit()
     return {
-        "seeded": added,
+        "seeded": action != "unchanged",
+        "action": action,
         "challenge": req.challenge,
         "strategy_tag": req.strategy_tag,
     }
+
+
+@app.post("/api/admin/seed_from_mainnet")
+async def admin_seed_from_mainnet(req: AdminSeedFromMainnet):
+    """Fetch the top-adoption TIG mainnet algorithm for each targeted
+    challenge and deposit it into the SEED pool (fresh-trajectory start,
+    strategy_tag="mainnet") and/or the INACTIVE reset pool.
+
+    The fetch/reshape runs server-side (server/mainnet_seed.py) so the Admin
+    Console — which only talks to this server — can seed a running swarm from
+    mainnet without the host's companion. Best-effort per challenge; a
+    challenge with no compilable/compatible mainnet algorithm is reported as
+    skipped, never a hard failure."""
+    import mainnet_seed
+
+    await verify_admin(req)
+    if req.challenge:
+        challenges = [req.challenge]
+    else:
+        async with db.connect() as conn:
+            rows = await db.list_challenge_configs(conn)
+        challenges = [r["challenge"] for r in rows]
+    if not challenges:
+        raise HTTPException(status_code=400, detail="no challenges configured to seed")
+
+    want_seed = req.target in ("seed_pool", "both")
+    want_inactive = req.target in ("inactive", "both")
+    results = []
+    for ch in challenges:
+        # Blocking urllib fetch — off the event loop.
+        info, note = await asyncio.to_thread(mainnet_seed.fetch_top_reshaped, ch)
+        if info is None:
+            # Record the absence too: the dashboard should say "no mainnet
+            # algorithm for this challenge" once, not sit on "pending" forever.
+            async with db.connect() as conn:
+                await db.mark_mainnet_baseline_unavailable(
+                    conn, ch, created_at=now())
+                await conn.commit()
+            results.append({"challenge": ch, "ok": False, "reason": note})
+            continue
+        code_files = info["code_files"]
+        files_json = _files_json(code_files)
+        entry = code_files["mod.rs"]
+        actions = {}
+        timestamp = now()
+        async with db.connect() as conn:
+            # Note WHICH algorithm this challenge is measured against. One
+            # INSERT, no benchmark — the score is filled in later, by the host
+            # on demand or by the first agent to run this code unchanged.
+            actions["baseline"] = await db.record_mainnet_algorithm(
+                conn, ch, info["algo_name"], created_at=timestamp,
+                adoption_pct=round(info["adoption"] / 1e16, 4),
+                code_fingerprint_=db.code_fingerprint(entry),
+            )
+            if want_seed:
+                actions["seed_pool"] = await db.upsert_authored_seed(
+                    conn, ch, "mainnet", entry, created_at=timestamp,
+                    kernel_code=info["kernel_code"], algorithm_files=files_json,
+                )
+            if want_inactive:
+                agent_id = await db.ensure_synthetic_agent(conn, "tig-foundation", timestamp)
+                # Ask whether THIS algorithm is pooled, not whether the source
+                # has anything pooled. The old count-based guard had two
+                # failure modes, both silent: a pool entry from the host-side
+                # reshape (byte-different from this one, see mainnet_seed's
+                # "rough sync" note) satisfied the count while never matching
+                # the fingerprint we just recorded, and any unrelated admin
+                # seed under the default "tig-foundation" label blocked
+                # mainnet deposits on the challenge outright. Either way the
+                # baseline could never be measured and nothing said so.
+                if await db.has_inactive_with_code(conn, agent_id, ch, entry):
+                    actions["inactive"] = "already_seeded"
+                else:
+                    # Deposit alongside whatever else is there rather than
+                    # replacing it: another entry under this label may be a
+                    # legitimate seed someone else put in, and deleting a
+                    # contributor's algorithm to fix our own bookkeeping is a
+                    # bad trade. An exact duplicate can't accumulate — the
+                    # check above short-circuits every later run.
+                    await db.deposit_inactive(
+                        conn, agent_id, ch, entry, None, timestamp,
+                        kernel_code=info["kernel_code"], algorithm_files=files_json)
+                    actions["inactive"] = "seeded"
+            await conn.commit()
+        results.append({
+            "challenge": ch, "ok": True, "algorithm": info["algo_name"],
+            "adoption_pct": round(info["adoption"] / 1e16, 4), "actions": actions,
+        })
+    return {"target": req.target, "results": results}
+
+
+@app.post("/api/admin/measure_mainnet_baseline")
+async def admin_measure_mainnet_baseline(req: AdminMeasureMainnetBaseline):
+    """Measure the mainnet algorithm on this swarm's own instances.
+
+    One button, no prerequisites. It used to require the host to run "Seed
+    from mainnet" into the *inactive* pool first and then press this — two
+    steps with a non-obvious ordering, where getting it wrong produced a
+    request that could never be fulfilled and said so only in small print. It
+    now provisions whatever is missing: fetches the top-adoption algorithm if
+    this challenge has none recorded, and deposits it into the inactive pool
+    if nothing adoptable is there.
+
+    The server has no Docker and no C3 — it cannot benchmark — so the last
+    step queues the work for the fleet: marking the baseline 'requested' makes
+    the next agent to check in adopt that entry and benchmark it unchanged
+    (see _mainnet_measurement_claimable), and the published score is
+    recognised by code fingerprint.
+
+    Pressing it again re-measures: the score is cleared and re-taken, which is
+    what you want after editing tracks or the timeout, since the old number
+    was earned on a different instance set."""
+    import mainnet_seed
+
+    await verify_admin(req)
+    challenge = await resolve_challenge(req.challenge)
+
+    # Only fetch when we actually need to. A fetch is two HTTP calls to
+    # someone else's API; if the algorithm is already recorded AND an
+    # adoptable copy is pooled, there is nothing to provision.
+    async with db.connect() as conn:
+        row = await db.get_mainnet_baseline(conn, challenge)
+        ready = await _pooled_mainnet_entry_exists(conn, challenge, row)
+
+    provisioned: list[str] = []
+    if not ready:
+        info, note = await asyncio.to_thread(
+            mainnet_seed.fetch_top_reshaped, challenge)
+        if info is None:
+            # Record the absence so the dashboard says so once instead of
+            # sitting on "measuring…" for a challenge that can never resolve.
+            async with db.connect() as conn:
+                await db.mark_mainnet_baseline_unavailable(
+                    conn, challenge, created_at=now())
+                await conn.commit()
+            raise HTTPException(
+                status_code=400,
+                detail=(f"No compatible mainnet algorithm for {challenge}: "
+                        f"{note}"),
+            )
+        entry = info["code_files"]["mod.rs"]
+        timestamp = now()
+        async with db.connect() as conn:
+            action = await db.record_mainnet_algorithm(
+                conn, challenge, info["algo_name"], created_at=timestamp,
+                adoption_pct=round(info["adoption"] / 1e16, 4),
+                code_fingerprint_=db.code_fingerprint(entry),
+            )
+            if action != "unchanged":
+                provisioned.append(f"recorded {info['algo_name']}")
+            agent_id = await db.ensure_synthetic_agent(
+                conn, "tig-foundation", timestamp)
+            if not await db.has_inactive_with_code(
+                    conn, agent_id, challenge, entry):
+                await db.deposit_inactive(
+                    conn, agent_id, challenge, entry, None, timestamp,
+                    kernel_code=info["kernel_code"],
+                    algorithm_files=_files_json(info["code_files"]))
+                provisioned.append("added it to the inactive pool")
+            await conn.commit()
+
+    async with db.connect() as conn:
+        await conn.execute(
+            "UPDATE mainnet_baselines SET status = 'requested', score = NULL, "
+            "measured_by = NULL, benchmarked_at = NULL WHERE challenge = ?",
+            (challenge,),
+        )
+        await conn.commit()
+        row = await db.get_mainnet_baseline(conn, challenge)
+
+    lead = (f"{'; '.join(provisioned)}. " if provisioned else "")
+    return {
+        "challenge": challenge,
+        "algorithm": row["algo_name"],
+        "status": "requested",
+        "queued": True,
+        "provisioned": provisioned,
+        "detail": (
+            f"{lead}Claimed by the next agent to check in: it benchmarks the "
+            f"algorithm unchanged and publishes the score, usually within an "
+            f"iteration. Its own work is banked to the pool first."
+        ),
+    }
+
+
+@app.post("/api/admin/seeds")
+async def admin_list_seeds(req: AdminSeedsQuery):
+    """Read-only: every seed_pool row for a challenge (feasible or not) as
+    metadata — tag, source, score, feasibility, code sizes, provenance. Code
+    bodies are omitted (they can run to megabytes); the point is to let the
+    host see at a glance whether the pool is populated, instead of inferring
+    it from agents' start-source log lines."""
+    await verify_admin(req)
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "SELECT id, strategy_tag, source, score, feasible, origin_agent_id, "
+            "       created_at, LENGTH(algorithm_code) AS code_chars, "
+            "       LENGTH(COALESCE(kernel_code, '')) AS kernel_chars, "
+            "       (algorithm_files IS NOT NULL) AS multi_file "
+            "FROM seed_pool WHERE challenge = ? ORDER BY strategy_tag, id",
+            (req.challenge,),
+        )
+        seeds = [dict(r) for r in await cursor.fetchall()]
+    return {"challenge": req.challenge, "count": len(seeds), "seeds": seeds}
 
 
 @app.post("/api/admin/revoke")
@@ -2288,7 +3637,7 @@ async def admin_contributors(req: AdminAuth):
       - revoked: true if the username is in config.revoked_contributors
     """
     await verify_admin(req)
-    cutoff = inactive_cutoff()
+    cutoff = await inactive_cutoff()
     config = await get_config_cached()
     revoked = _revoked_usernames(config)
     rows: dict[str, dict] = {}
@@ -2395,6 +3744,11 @@ async def get_swarm_config():
             "has_initial_kernel_code": bool(row.get("initial_kernel_code")),
             "is_gpu": ch_def.is_gpu if ch_def else False,
             "strategy_tags": strategy_tags,
+            # Canonical track labels for this challenge — a superset of the
+            # configured `tracks` keys. Lets the Admin Console's instances
+            # editor offer tracks currently at 0 instances (absent from
+            # `tracks`), which would otherwise be invisible and uneditable.
+            "track_keys": list(ch_def.track_keys) if ch_def else [],
         }
 
     return {
@@ -2406,9 +3760,20 @@ async def get_swarm_config():
         "swarm_type": config.get("swarm_type", "cpu"),
         "stagnation_threshold": swarm_setting(config, "stagnation_threshold"),
         "stagnation_limit": swarm_setting(config, "stagnation_limit"),
+        "negative_trajectory_limit": swarm_setting(
+            config, "negative_trajectory_limit",
+        ),
         "hypothesis_recall_threshold": swarm_setting(
             config, "hypothesis_recall_threshold",
         ),
+        # HPO gate + search knobs, read client-side by scripts/run_loop.py.
+        "hpo_first_tune_improvements": swarm_setting(config, "hpo_first_tune_improvements"),
+        "hpo_min_improvements": swarm_setting(config, "hpo_min_improvements"),
+        "hpo_search_budget": swarm_setting(config, "hpo_search_budget"),
+        "hpo_num_suggested_configs": swarm_setting(config, "hpo_num_suggested_configs"),
+        # Failed-attempts archive toggle, read client-side so the loop knows
+        # whether to distill + post failure retrospectives.
+        "failed_attempts_archive": swarm_setting(config, "failed_attempts_archive"),
     }
 
 
@@ -2463,7 +3828,15 @@ async def update_swarm_config(req: SwarmConfigUpdate):
             ("swarm_type", req.swarm_type),
             ("stagnation_threshold", str(req.stagnation_threshold) if req.stagnation_threshold is not None else None),
             ("stagnation_limit", str(req.stagnation_limit) if req.stagnation_limit is not None else None),
+            ("negative_trajectory_limit", str(req.negative_trajectory_limit) if req.negative_trajectory_limit is not None else None),
             ("hypothesis_recall_threshold", str(req.hypothesis_recall_threshold) if req.hypothesis_recall_threshold is not None else None),
+            ("hpo_first_tune_improvements", str(req.hpo_first_tune_improvements) if req.hpo_first_tune_improvements is not None else None),
+            ("hpo_min_improvements", str(req.hpo_min_improvements) if req.hpo_min_improvements is not None else None),
+            ("hpo_search_budget", str(req.hpo_search_budget) if req.hpo_search_budget is not None else None),
+            ("hpo_num_suggested_configs", str(req.hpo_num_suggested_configs) if req.hpo_num_suggested_configs is not None else None),
+            ("failed_attempts_archive", str(req.failed_attempts_archive) if req.failed_attempts_archive is not None else None),
+            ("failure_records_max_per_agent", str(req.failure_records_max_per_agent) if req.failure_records_max_per_agent is not None else None),
+            ("failed_attempts_hint_records", str(req.failed_attempts_hint_records) if req.failed_attempts_hint_records is not None else None),
         ):
             if value is not None:
                 await conn.execute(

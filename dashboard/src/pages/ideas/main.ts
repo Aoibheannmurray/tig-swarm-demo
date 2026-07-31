@@ -48,6 +48,10 @@ async function loadInitialState(apiUrl: string) {
     const res = await fetch(`${apiUrl}/api/state${q}`);
     if (!res.ok) return;
     const state = await res.json();
+    // Drop stale responses: if the user switched challenges while the fetch
+    // was in flight, these events belong to the previous challenge and would
+    // leak into the freshly-reset panels.
+    if (ch !== getViewedChallenge()) return;
 
     // Replay all hypothesis outcomes.
     const allHyps = state.recent_hypotheses || [];
@@ -70,14 +74,15 @@ async function loadInitialState(apiUrl: string) {
 
     console.log(`[Ideas] Loaded ${allHyps.length} hypotheses`);
 
-    const msgRes = await fetch(`${apiUrl}/api/messages?limit=50&challenge=${encodeURIComponent(getViewedChallenge())}`);
+    const msgRes = await fetch(`${apiUrl}/api/messages?limit=50&challenge=${encodeURIComponent(ch)}`);
 
     if (msgRes.ok) {
       const messages = await msgRes.json();
+      if (ch !== getViewedChallenge()) return;
       for (const m of messages.reverse()) {
         handleMessage({
           type: "chat_message",
-          challenge: getViewedChallenge(),
+          challenge: ch,
           message_id: m.id,
           agent_name: m.agent_name,
           agent_id: m.agent_id,

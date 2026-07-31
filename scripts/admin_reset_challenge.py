@@ -24,23 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 
-
-def _resolve_server_url() -> str:
-    env = os.environ.get("TIG_SWARM_SERVER")
-    if env:
-        return env.rstrip("/")
-    cfg = ROOT / ".swarm-cache.json"
-    if cfg.exists():
-        try:
-            url = json.loads(cfg.read_text()).get("server_url", "")
-            if url:
-                return url.rstrip("/")
-        except Exception:
-            pass
-    sys.exit(
-        "admin_reset_challenge.py: server URL not configured. "
-        "Set TIG_SWARM_SERVER or run `python setup.py sync`."
-    )
+from swarm_client import resolve_server_url  # noqa: E402
 
 
 def _resolve_admin_key(arg: str | None) -> str:
@@ -81,7 +65,7 @@ def main() -> int:
                         help="Admin key (defaults to $ADMIN_KEY or swarm.admin.json).")
     args = parser.parse_args()
 
-    server = _resolve_server_url()
+    server = resolve_server_url("admin_reset_challenge.py")
     admin_key = _resolve_admin_key(args.admin_key)
 
     payload = {"admin_key": admin_key, "challenge": args.challenge}
@@ -92,7 +76,7 @@ def main() -> int:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             print(json.dumps(json.load(resp), indent=2))
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")

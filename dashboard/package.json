@@ -1,6 +1,7 @@
 {
   "name": "dashboard",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "version": "0.0.0",
   "type": "module",
   "scripts": {
@@ -10,15 +11,16 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@types/d3": "^7.4.3",
     "typescript": "~6.0.2",
-    "vite": "^8.0.4",
+    "vite": "^8.1.5",
     "vitest": "^3.0.0"
   },
   "dependencies": {
-    "@types/d3": "^7.4.3",
     "d3": "^7.9.0"
   },
   "overrides": {
-    "postcss": "^8.5.10"
+    "postcss": "^8.5.18",
+    "esbuild": "^0.28.1"
   }
 }

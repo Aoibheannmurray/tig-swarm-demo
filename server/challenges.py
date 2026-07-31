@@ -8,7 +8,7 @@ silently no-op'd if you forgot setup.py.
 
 Now both files import from here. The Literal stays static (Python's type
 system requires it), but the validation that the Literal matches the
-registry runs at import time — so adding a 6th challenge means: add an
+registry runs at import time — so adding a new challenge means: add an
 entry below, then add the same key string to the Literal in models.py.
 A dev who forgets the second step gets an ImportError at server boot,
 not a quietly-broken endpoint at runtime.
@@ -16,7 +16,7 @@ not a quietly-broken endpoint at runtime.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 
@@ -24,7 +24,7 @@ from typing import Literal
 class ChallengeDef:
     """Server-side metadata for one challenge.
 
-    Mirrored on the dashboard by ``dashboard/src/lib/challengeRegistry.ts``.
+    Mirrored on the dashboard by ``dashboard/src/challenges/registry.ts``.
     Fields here are wire-shape only; UI metadata (panel factory, pretty
     name, score label) lives in the dashboard registry.
     """
@@ -36,6 +36,11 @@ class ChallengeDef:
     is_gpu: bool = False
 
 
+# `default_timeout` values are calibrated against the current mainnet winner
+# per challenge, run at the hyperparameters mainnet benchmarkers actually use
+# (max over all five tracks, ~1.5-2x headroom). CPU challenges timed natively
+# on an 8-core host, GPU challenges on a C3 L40 via the mainnet harness.
+# Measurement data: reports/timeout_calibration_2026-07-29.md.
 CHALLENGES: dict[str, ChallengeDef] = {
     "satisfiability": ChallengeDef(
         name="satisfiability",
@@ -51,7 +56,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=300,
+        default_timeout=420,  # sat_imp_v4: max 408s (n_vars=10000)
     ),
     "vehicle_routing": ChallengeDef(
         name="vehicle_routing",
@@ -68,7 +73,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "constraint_relaxation", "decomposition", "hybrid",
             "data_structure", "other",
         ),
-        default_timeout=260,
+        default_timeout=200,  # hgs_advance: max 136s (n_nodes=1000)
     ),
     "knapsack": ChallengeDef(
         name="knapsack",
@@ -84,39 +89,40 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "dp", "branch_and_bound", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
+        default_timeout=30,  # superfast_knap_v1: max 15.6s (n_items=5000,budget=25)
     ),
     "job_scheduling": ChallengeDef(
         name="job_scheduling",
         scoring_direction="max",
         track_keys=(
-            "n=20,s=FLOW_SHOP",
-            "n=20,s=HYBRID_FLOW_SHOP",
-            "n=20,s=JOB_SHOP",
-            "n=20,s=FJSP_MEDIUM",
-            "n=20,s=FJSP_HIGH",
+            "n=50,s=flow_shop",
+            "n=50,s=hybrid_flow_shop",
+            "n=50,s=job_shop",
+            "n=50,s=fjsp_medium",
+            "n=50,s=fjsp_high",
         ),
         strategy_tags=(
             "greedy", "construction", "local_search", "metaheuristic",
             "constraint_relaxation", "decomposition", "hybrid",
             "data_structure", "other",
         ),
-        default_timeout=260,
+        default_timeout=90,  # adaptive_js_v9: max 57s (s=job_shop)
     ),
     "energy_arbitrage": ChallengeDef(
         name="energy_arbitrage",
         scoring_direction="max",
         track_keys=(
-            "s=BASELINE",
-            "s=CONGESTED",
-            "s=MULTIDAY",
-            "s=DENSE",
-            "s=CAPSTONE",
+            "s=baseline",
+            "s=congested",
+            "s=multiday",
+            "s=dense",
+            "s=capstone",
         ),
         strategy_tags=(
             "greedy", "dp", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
+        default_timeout=45,  # titan_v6: max 21s (s=capstone)
     ),
     "hypergraph": ChallengeDef(
         name="hypergraph",
@@ -132,7 +138,7 @@ CHALLENGES: dict[str, ChallengeDef] = {
             "greedy", "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
+        default_timeout=180,  # sigma_freud_v8: max 137s (n_h_edges=100000)
         is_gpu=True,
     ),
     "neuralnet_optimizer": ChallengeDef(
@@ -140,34 +146,34 @@ CHALLENGES: dict[str, ChallengeDef] = {
         scoring_direction="max",
         track_keys=(
             "n_hidden=4",
-            "n_hidden=6",
-            "n_hidden=8",
+            "n_hidden=7",
             "n_hidden=10",
-            "n_hidden=12",
+            "n_hidden=14",
+            "n_hidden=18",
         ),
         strategy_tags=(
             "adaptive_optimizer", "momentum", "lr_schedule", "regularization",
             "lookahead", "second_order", "kernel_optimization", "hyperparameters",
             "code_optimization", "hybrid", "other",
         ),
-        default_timeout=120,
+        default_timeout=90,  # prometheus_aidda: max 46s (n_hidden=18)
         is_gpu=True,
     ),
     "vector_search": ChallengeDef(
         name="vector_search",
         scoring_direction="max",
         track_keys=(
-            "n_queries=10",
-            "n_queries=20",
-            "n_queries=50",
-            "n_queries=100",
-            "n_queries=200",
+            "n_queries=7000",
+            "n_queries=9000",
+            "n_queries=11000",
+            "n_queries=13000",
+            "n_queries=15000",
         ),
         strategy_tags=(
             "construction", "local_search", "metaheuristic",
             "decomposition", "hybrid", "data_structure", "other",
         ),
-        default_timeout=60,
+        default_timeout=30,  # there_v10: max 0.7s/nonce; floor for GPU warmup
         is_gpu=True,
     ),
 }

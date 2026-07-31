@@ -1,7 +1,8 @@
 import type { Panel, WSMessage } from "../../types";
 import { getAgentColor } from "../../lib/colors";
-import { formatScore } from "../../lib/format";
+import { escapeHTML, formatScore } from "../../lib/format";
 import { getViewedChallenge } from "../../lib/viewedChallenge";
+import { getDashboardUrls } from "../../lib/bootstrap";
 
 interface TopEntry {
   experiment_id: string;
@@ -54,20 +55,7 @@ export class StrategyLeaderboardPanel implements Panel {
     `;
     this.listEl = document.getElementById("strategy-lb-list")!;
 
-    const params = new URLSearchParams(window.location.search);
-    const explicit = params.get("api");
-    if (explicit) this.apiUrl = explicit;
-    else {
-      const ws = params.get("ws") || "";
-      if (ws) {
-        this.apiUrl = ws
-          .replace("ws://", "http://")
-          .replace("wss://", "https://")
-          .replace("/ws/dashboard", "");
-      } else {
-        this.apiUrl = `${window.location.protocol}//${window.location.host}`;
-      }
-    }
+    this.apiUrl = getDashboardUrls().apiUrl;
 
     this.loadInitial();
   }
@@ -82,7 +70,7 @@ export class StrategyLeaderboardPanel implements Panel {
 
     if (msg.type !== "experiment_published") return;
     if (!msg.feasible) return;
-    // Drop events for any other challenge — main-ideas.ts also filters but
+    // Drop events for any other challenge — pages/ideas/main.ts also filters but
     // double-check here so the panel can never accumulate cross-challenge state.
     if (msg.challenge && msg.challenge !== getViewedChallenge()) return;
     if (this.entries.has(msg.experiment_id)) return; // already recorded
@@ -179,16 +167,12 @@ export class StrategyLeaderboardPanel implements Panel {
         <span class="sl-rank">${i + 1}</span>
         <span class="sl-score">${formatScore(entry.score)}</span>
         <span class="sl-tag-col">
-          <span class="sl-tag" style="color:${tagColor};border-color:${tagColor}">${this.escape(tag)}</span>
+          <span class="sl-tag" style="color:${tagColor};border-color:${tagColor}">${escapeHTML(tag)}</span>
         </span>
-        <span class="sl-title" title="${this.escape(title)}">${this.escape(title)}</span>
-        <span class="sl-agent" style="color:${agentColor}">${this.escape(agentName)}</span>
+        <span class="sl-title" title="${escapeHTML(title)}">${escapeHTML(title)}</span>
+        <span class="sl-agent" style="color:${agentColor}">${escapeHTML(agentName)}</span>
       `;
       this.listEl.appendChild(row);
     });
-  }
-
-  private escape(s: string): string {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 }

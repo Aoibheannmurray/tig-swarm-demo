@@ -26,6 +26,8 @@ algorithm for that challenge:
     - knapsack: greedy by value-density (`compute_greedy_baseline`).
     - job_scheduling: SOTA dispatching rules (`compute_sota_baseline`).
     - energy_arbitrage: max(greedy, conservative) (`compute_baseline`).
+    - hypergraph / neuralnet_optimizer / vector_search (GPU): each
+      challenge's own baseline in src/<challenge>/ (see _AGG_EXTRAS).
 
 Higher quality is always better. Aggregation is two-step:
 
@@ -63,6 +65,7 @@ Output JSON shape:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -110,20 +113,11 @@ INFEASIBLE_QUALITY = -QUALITY_CLAMP
 # positive in [1, 20M+1] before geo mean, then unshift the result.
 GEOMEAN_SHIFT = QUALITY_CLAMP + 1
 
-def _resolve_server_url() -> str:
-    if os.environ.get("TIG_SWARM_SERVER"):
-        return os.environ["TIG_SWARM_SERVER"].rstrip("/")
-    cfg_path = ROOT_DIR / ".swarm-cache.json"
-    if cfg_path.exists():
-        try:
-            url = json.loads(cfg_path.read_text()).get("server_url", "")
-            if url and not url.startswith("$"):
-                return url.rstrip("/")
-        except Exception:
-            pass
-    return ""
+from swarm_client import resolve_server_url
 
-SERVER = _resolve_server_url()
+# required=False: benchmark.py can run fully offline (the server probe is
+# advisory), so "" is a valid resolution rather than a fatal error.
+SERVER = resolve_server_url("benchmark.py", required=False)
 
 
 # ── Config loading ──────────────────────────────────────────────────
@@ -170,6 +164,10 @@ def load_swarm_config() -> dict:
         "scoring_direction": local.get("scoring_direction", "min"),
         "is_gpu": local.get("is_gpu", False),
         "synced_at": local.get("synced_at"),
+        # Optional: concurrent solver processes per benchmark job (see
+        # _bench_workers). Hosts running big C3 CPU boxes raise this to match
+        # the machine; absent => the conservative legacy default of 4.
+        "bench_workers": local.get("bench_workers"),
     }
     # Advisory probe: tell the user if the host has rotated since the last
     # sync. Never overrides — local stays in charge.
@@ -225,32 +223,91 @@ def build(challenge: str) -> tuple[str, str, str]:
     )
 
 
+def _bench_workers(cfg: dict, num_instances: int) -> int:
+    """Concurrent solver processes for a CPU benchmark job.
+
+    Resolution: env `TIG_BENCH_WORKERS` > config `bench_workers` > a default
+    that scales with the machine: max(4, cpu_count // 2). Half the vCPUs ≈
+    the physical cores (cloud vCPUs are SMT threads): solvers are
+    single-threaded and timeout-bounded, so two solvers sharing a physical
+    core each lose real work inside their deadline — the default rides the
+    core count without oversubscribing. On the small 4-vCPU C3 profiles this
+    is the legacy 4; on a 96-vCPU box it's 48, so `auto` hardware
+    (c3_compute._best_cpu_hardware) exploits whatever machine the job lands
+    on with no extra config. Set the knob explicitly to pin contention (and
+    score comparability) across the fleet."""
+    for raw in (os.environ.get("TIG_BENCH_WORKERS"), cfg.get("bench_workers")):
+        if raw in (None, ""):
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            print(f"  [BENCH] ignoring non-integer bench workers: {raw!r}",
+                  file=sys.stderr)
+            continue
+        if value > 0:
+            return min(num_instances, value)
+    return min(num_instances, max(4, (os.cpu_count() or 1) // 2))
+
+
+def _track_starts() -> dict[str, int]:
+    """Per-track first-instance offsets from env `TIG_TRACK_STARTS` (JSON
+    `{track_key: start}`), set by a distributed C3 shard job (c3_compute.py).
+    A shard configured with `tracks[t] = count` and `starts[t] = start` runs
+    GLOBAL instances start..start+count-1 of track t — the per-instance seed
+    depends only on the global index, so the union of shard windows is
+    byte-identical to the unsharded run. Absent/unparseable => {} (start 0)."""
+    raw = os.environ.get("TIG_TRACK_STARTS")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return {str(k): int(v) for k, v in parsed.items()}
+    except (ValueError, TypeError, AttributeError):
+        print(f"  [BENCH] ignoring unparseable TIG_TRACK_STARTS: {raw!r}",
+              file=sys.stderr)
+        return {}
+
+
 def materialize_instances(
-    challenge: str, tracks: dict, generator_bin: str
+    challenge: str, tracks: dict, generator_bin: str, seed: str | None = None,
+    starts: dict[str, int] | None = None,
 ) -> list[tuple[str, str, Path]]:
     """Generate instances per the active swarm config, cached on disk.
 
     `tracks` is the `test.json` shape: `{"seed": "test", "track_key": count, ...}`.
     Each (track_key, count) becomes `count` instances under
-    `datasets/<challenge>/generated/<track_key>/{0..count-1}.txt`. Generation
-    is skipped when the cache already has at least `count` files for the
-    track — re-running the wizard with smaller counts won't regenerate.
+    `datasets/<challenge>/generated/<track_key>/{start..start+count-1}.txt`
+    (`start` from `starts`, default 0 — see _track_starts). Generation is
+    skipped when the cache already has every file in the window, so shard
+    windows and re-runs coexist in one cache dir without regenerating.
+
+    `seed` overrides the seed read from `tracks` (used by the hyperparameter
+    search to materialise a fresh, non-test instance pool). Non-`"test"` seeds
+    are cached under `datasets/<challenge>/generated/<seed>/<track_key>/` so a
+    search never overwrites the scored `"test"` instances.
 
     Returns a list of `(track_key, instance_filename, instance_path)`.
     """
-    seed = str(tracks.get("seed", "test"))
+    if seed is None:
+        seed = str(tracks.get("seed", "test"))
+    starts = starts or {}
     out: list[tuple[str, str, Path]] = []
     base = ROOT_DIR / "datasets" / challenge / "generated"
+    if seed != "test":
+        base = base / seed
     for track_key, count in tracks.items():
         if track_key == "seed" or not isinstance(count, int) or count <= 0:
             continue
+        start = max(0, int(starts.get(track_key, 0)))
         track_dir = base / track_key
         track_dir.mkdir(parents=True, exist_ok=True)
-        existing = sorted(p for p in track_dir.glob("*.txt"))
-        if len(existing) < count:
+        window = list(range(start, start + count))
+        missing = [i for i in window if not (track_dir / f"{i}.txt").exists()]
+        if missing:
             print(
-                f"  generating {count - len(existing)} new instances for "
-                f"{challenge}/{track_key} (have {len(existing)})…",
+                f"  generating {len(missing)} new instances for "
+                f"{challenge}/{track_key} (window {start}..{start + count - 1})…",
                 file=sys.stderr,
             )
             subprocess.run(
@@ -258,11 +315,12 @@ def materialize_instances(
                     generator_bin, challenge, track_key,
                     "--seed", seed,
                     "-n", str(count),
+                    "--start", str(start),
                     "-o", str(track_dir),
                 ],
                 check=True, capture_output=True,
             )
-        for i in range(count):
+        for i in window:
             inst = track_dir / f"{i}.txt"
             if inst.exists():
                 out.append((track_key, f"{track_key}/{i}", inst))
@@ -291,6 +349,7 @@ def parse_evaluator_score(eval_result: subprocess.CompletedProcess) -> tuple[flo
 def run_instance(
     challenge: str, track_key: str, instance_id: str, instance_path: Path,
     solver: str, evaluator: str, timeout: int,
+    hyperparameters: str | None = None,
 ) -> dict:
     with tempfile.NamedTemporaryFile(suffix=".sol", delete=False) as tmp:
         sol_path = tmp.name
@@ -298,10 +357,13 @@ def run_instance(
         # Wall-clock the solver run only (not the evaluator) so `elapsed`
         # matches the GPU path's semantics — algorithm run time per nonce.
         timed_out = False
+        solver_cmd = [solver, challenge, str(instance_path), sol_path]
+        if hyperparameters:
+            solver_cmd += ["--hyperparameters", hyperparameters]
         start = time.monotonic()
         try:
             subprocess.run(
-                [solver, challenge, str(instance_path), sol_path],
+                solver_cmd,
                 capture_output=True, text=True, timeout=timeout,
             )
         except subprocess.TimeoutExpired:
@@ -370,12 +432,22 @@ def _ensure_docker_daemon() -> None:
             )
             sys.exit(1)
     elif sys.platform.startswith("linux"):
-        # Best-effort: Docker Desktop on Linux registers a user-level service.
-        # System dockerd usually needs sudo, which we don't have here.
-        subprocess.run(
+        # Two shapes of Docker on Linux, started two different ways:
+        #   - Docker Engine (apt / get.docker.com) is a SYSTEM unit, so it needs
+        #     root. Plain systemctl works when we already are root; `sudo -n`
+        #     covers passwordless sudo. Never an interactive sudo — there's no
+        #     TTY here to answer the prompt, so it would just hang.
+        #   - Docker Desktop for Linux registers a USER unit instead.
+        # Try each and stop at the first that brings the daemon up; all are
+        # no-ops when the corresponding install isn't present.
+        for cmd in (
+            ["systemctl", "start", "docker"],
+            ["sudo", "-n", "systemctl", "start", "docker"],
             ["systemctl", "--user", "start", "docker-desktop"],
-            capture_output=True,
-        )
+        ):
+            subprocess.run(cmd, capture_output=True)
+            if _daemon_running():
+                break
     else:
         print(
             f"error: don't know how to auto-start Docker on {sys.platform} — start it manually.",
@@ -396,18 +468,61 @@ def _ensure_docker_daemon() -> None:
     sys.exit(1)
 
 
+_IMAGE_INPUT_LABEL = "tig.swarm.inputs"
+
+
+def _image_inputs_digest(dockerfile: str) -> str:
+    """Fingerprint of everything that decides what the local image contains.
+
+    The toolchain pin is in here because it is not part of the Dockerfile: an
+    image baked against a different rustc still *works*, but rustup honours
+    `rust-toolchain.toml` by DOWNLOADING the pinned toolchain inside the
+    container — 6 components, on every single benchmark."""
+    h = hashlib.sha256()
+    for rel in (dockerfile, "rust-toolchain.toml", ".cargo/config.toml",
+                "requirements.txt"):
+        path = ROOT_DIR / rel
+        h.update(rel.encode())
+        try:
+            h.update(path.read_bytes())
+        except OSError:
+            h.update(b"<absent>")
+    return h.hexdigest()[:16]
+
+
 def _ensure_docker_image(image: str, dockerfile: str) -> None:
-    """Ensure the local Docker image exists, building it if missing."""
-    if subprocess.run(
-        ["docker", "image", "inspect", image], capture_output=True
-    ).returncode == 0:
-        return
-    print(
-        f"Docker image '{image}' not found — building from {dockerfile}…",
-        file=sys.stderr,
+    """Ensure the local Docker image exists AND matches its build inputs.
+
+    Existence alone was the check, so the image was built once and then reused
+    forever: editing the Dockerfile, the toolchain pin or requirements.txt
+    changed nothing until someone manually removed the image. That is not
+    merely stale — a pin the image doesn't satisfy makes every benchmark
+    re-download a toolchain before it can compile."""
+    want = _image_inputs_digest(dockerfile)
+    probe = subprocess.run(
+        ["docker", "image", "inspect", "-f",
+         f'{{{{index .Config.Labels "{_IMAGE_INPUT_LABEL}"}}}}', image],
+        capture_output=True, text=True,
     )
+    if probe.returncode == 0:
+        if probe.stdout.strip() == want:
+            return
+        print(
+            f"Docker image '{image}' is stale (build inputs changed) — "
+            f"rebuilding from {dockerfile}…",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"Docker image '{image}' not found — building from {dockerfile}…",
+            file=sys.stderr,
+        )
     build = subprocess.run(
-        ["docker", "build", "-f", dockerfile, "-t", image, str(ROOT_DIR)],
+        ["docker", "build", "-f", dockerfile,
+         # Stamp the inputs onto the image so the next run can tell whether
+         # this build is still current without re-deriving anything.
+         "--label", f"{_IMAGE_INPUT_LABEL}={want}",
+         "-t", image, str(ROOT_DIR)],
     )
     if build.returncode != 0:
         print(
@@ -465,6 +580,15 @@ def _reexec_in_docker(cfg: dict) -> int:
     server = os.environ.get("TIG_SWARM_SERVER")
     if server:
         env_flags += ["-e", f"TIG_SWARM_SERVER={server}"]
+    # Forward hyperparameter-search hooks across the Docker boundary so a
+    # benchmark launched by the agent loop tunes/scores with the right
+    # seed and solver hyperparameters (subprocess args, not a shell, so the
+    # JSON value needs no quoting).
+    for _var in ("TIG_BENCH_SEED", "TIG_HYPERPARAMETERS", "TIG_TRACK_STARTS",
+                 "TIG_BENCH_WORKERS"):
+        _val = os.environ.get(_var)
+        if _val is not None:
+            env_flags += ["-e", f"{_var}={_val}"]
 
     suffix = "gpu" if is_gpu_challenge(cfg) else "cpu"
     cmd = [
@@ -554,13 +678,17 @@ def build_gpu(challenge: str) -> tuple[str, str]:
 def run_gpu_instance(
     challenge: str, track_key: str, instance_index: int,
     binary: str, ptx: str, seed: str, timeout: int,
+    hyperparameters: str | None = None,
 ) -> dict:
     """Run one GPU instance. Returns same shape as run_instance()."""
+    cmd = [binary, challenge, track_key,
+           "--seed", seed, "--index", str(instance_index),
+           "--timeout", str(timeout), "--ptx", ptx]
+    if hyperparameters:
+        cmd += ["--hyperparameters", hyperparameters]
     try:
         result = subprocess.run(
-            [binary, challenge, track_key,
-             "--seed", seed, "--index", str(instance_index),
-             "--timeout", str(timeout), "--ptx", ptx],
+            cmd,
             capture_output=True, text=True,
             timeout=timeout + 30,
         )
@@ -1197,6 +1325,43 @@ def _print_timing_summary(results: list[dict]) -> None:
         )
 
 
+# viz_data is decorative per-instance geometry the dashboard overlays; the
+# server caps a publish's solution_data at 2MB (MAX_CODE_LEN) and rejects the
+# WHOLE publish — score included — if it overflows. A big challenge like VRP
+# (up to 100 instances × ~1000 customers of route geometry ≈ several MB) blows
+# that easily, so bound viz_data to a byte budget well under the cap: include
+# whole instances until the next would exceed it. The dashboard renders
+# whatever instances are present, so a representative subset visualizes fine.
+VIZ_DATA_BUDGET = 1_500_000  # ~1.5MB serialized, comfortably under the 2MB cap
+
+
+def _bounded_viz_data(results: list[dict], per_field: str) -> dict | None:
+    """Assemble {instance: extras} for viz, capped at VIZ_DATA_BUDGET bytes of
+    serialized JSON so an oversized payload can't 422 the publish. Instances
+    are taken in result order; the count kept/dropped is logged."""
+    viz: dict = {}
+    used = 0
+    dropped = 0
+    for r in results:
+        payload = r.get(per_field)
+        if not payload:
+            continue
+        size = len(json.dumps({r["instance"]: payload}))
+        if viz and used + size > VIZ_DATA_BUDGET:
+            dropped += 1
+            continue
+        viz[r["instance"]] = payload
+        used += size
+    if dropped:
+        print(
+            f"  [BENCH] viz_data capped at {len(viz)} instance(s) "
+            f"(~{used // 1024}KB); dropped {dropped} to stay under the "
+            f"{VIZ_DATA_BUDGET // 1024}KB budget.",
+            file=sys.stderr,
+        )
+    return viz or None
+
+
 def aggregate(results: list[dict]) -> dict:
     """Group per-instance qualities by track, average each track, then
     combine via shifted geometric mean. Infeasible instances contribute
@@ -1284,6 +1449,42 @@ def _resolve_user_id() -> str:
     return "unknown"
 
 
+def _is_per_track_hyperparameters(parsed: object) -> bool:
+    """True if `parsed` is a per-track map {track_key: {param: value}} rather than
+    a flat {param: value} config.
+
+    Disambiguation is by value type: a flat config's values are scalars
+    (int/float/str/bool — see hpo.sample_config), while a per-track map's values
+    are all dicts. An empty dict is treated as flat (the default config).
+    """
+    return (
+        isinstance(parsed, dict)
+        and len(parsed) > 0
+        and all(isinstance(v, dict) for v in parsed.values())
+    )
+
+
+def _track_hyperparameters(raw: str | None, track_key: str) -> str | None:
+    """Resolve the --hyperparameters JSON string to pass for one track.
+
+    `raw` (the TIG_HYPERPARAMETERS value) is either a flat config applied to
+    every track, or a per-track map {track_key: config}. The hyperparameter
+    search runs flat configs uniformly; the final tuned-score benchmark passes a
+    per-track map (a winner per track — see docs/hyperparameter-search.md).
+    For a per-track map this selects the track's own config (a missing track =>
+    the default config {}). Flat configs and unparseable strings pass through.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return raw  # let the solver surface the parse error
+    if _is_per_track_hyperparameters(parsed):
+        return json.dumps(parsed.get(track_key, {}))
+    return raw
+
+
 def main() -> int:
     print("Loading swarm config…", file=sys.stderr)
     cfg = load_swarm_config()
@@ -1309,12 +1510,35 @@ def main() -> int:
 
     challenge = cfg["challenge"]
     timeout = int(cfg.get("timeout", 30))
-    # Direction is no longer used by aggregation — every challenge's
-    # quality score is higher-is-better. Kept here for forward-compat
-    # with downstream callers that still read it.
-    _direction = cfg.get("scoring_direction", "max")  # noqa: F841
+    # No scoring_direction read here on purpose: `aggregate` is
+    # higher-is-better for every challenge (infeasible instances sink to
+    # INFEASIBLE_QUALITY), so there is nothing for a direction to switch.
+    # The synced value still rides along in the challenge config for the
+    # server, which stores it per challenge.
     tracks = cfg.get("tracks") or {}
-    seed = str(tracks.get("seed", "test"))
+    # Hyperparameter-search hooks, set by the agent loop and forwarded across
+    # the Docker boundary by _reexec_in_docker:
+    #   TIG_BENCH_SEED       — override the instance seed. The search runs on a
+    #                          non-test seed so tuning never touches the scored
+    #                          ("test"-seeded) instances; the winning config is
+    #                          then re-scored on the test seed.
+    #   TIG_HYPERPARAMETERS  — JSON string passed to the solver as
+    #                          --hyperparameters. Absent => solver uses its
+    #                          in-code defaults (today's behaviour, the
+    #                          "default score"). Either a flat {param: value}
+    #                          config applied to every track, or a per-track map
+    #                          {track_key: {param: value}} (a winner per track,
+    #                          selected per instance by _track_hyperparameters).
+    seed_override = os.environ.get("TIG_BENCH_SEED")
+    seed = seed_override or str(tracks.get("seed", "test"))
+    hyperparameters = os.environ.get("TIG_HYPERPARAMETERS") or None
+    starts = _track_starts()
+    if seed_override:
+        print(f"  [BENCH] seed override: {seed}", file=sys.stderr)
+    if hyperparameters:
+        print(f"  [BENCH] hyperparameters: {hyperparameters}", file=sys.stderr)
+    if starts:
+        print(f"  [BENCH] shard window starts: {starts}", file=sys.stderr)
 
     results: list[dict] = []
 
@@ -1326,7 +1550,8 @@ def main() -> int:
         for track_key, count in tracks.items():
             if track_key == "seed" or not isinstance(count, int) or count <= 0:
                 continue
-            for i in range(count):
+            t_start = max(0, int(starts.get(track_key, 0)))
+            for i in range(t_start, t_start + count):
                 instance_list.append((track_key, i))
 
         if not instance_list:
@@ -1335,7 +1560,8 @@ def main() -> int:
         print(f"  {len(instance_list)} GPU instance(s) total (sequential)", file=sys.stderr)
 
         for track_key, idx in instance_list:
-            r = run_gpu_instance(challenge, track_key, idx, binary, ptx, seed, timeout)
+            r = run_gpu_instance(challenge, track_key, idx, binary, ptx, seed, timeout,
+                                 _track_hyperparameters(hyperparameters, track_key))
             _log_instance_result(r, timeout)
             results.append(r)
     else:
@@ -1343,7 +1569,7 @@ def main() -> int:
         solver, evaluator, generator = build(challenge)
 
         print(f"Materialising instances under datasets/{challenge}/generated/…", file=sys.stderr)
-        instances = materialize_instances(challenge, tracks, generator)
+        instances = materialize_instances(challenge, tracks, generator, seed, starts=starts)
         if not instances:
             print(
                 "error: no instances to run. Run `python setup.py` to configure this clone, "
@@ -1353,10 +1579,11 @@ def main() -> int:
             return 2
         print(f"  {len(instances)} instance(s) total", file=sys.stderr)
 
-        workers = min(len(instances), min(4, os.cpu_count() or 1))
+        workers = _bench_workers(cfg, len(instances))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(run_instance, challenge, tk, iid, ipath, solver, evaluator, timeout): iid
+                pool.submit(run_instance, challenge, tk, iid, ipath, solver, evaluator, timeout,
+                            _track_hyperparameters(hyperparameters, tk)): iid
                 for tk, iid, ipath in instances
             }
             for fut in as_completed(futures):
@@ -1369,6 +1596,19 @@ def main() -> int:
         "challenge": challenge,
         **agg,
         "errors": [f"{r['instance']}: {r['error']}" for r in results if "error" in r] or None,
+        # Compact per-instance records so a distributed C3 run can merge shard
+        # outputs and re-aggregate (c3_compute._merge_shard_benchmarks) — the
+        # merged score is then identical to an unsharded run's.
+        "instance_results": [
+            {
+                "instance": r.get("instance"),
+                "track": r.get("track", "unknown"),
+                "feasible": bool(r.get("feasible")),
+                "score": r.get("score"),
+                **({"error": r["error"]} if "error" in r else {}),
+            }
+            for r in results
+        ],
     }
 
     # Per-challenge viz_data aggregation. Driven by `_AGG_EXTRAS` so a
@@ -1378,12 +1618,7 @@ def main() -> int:
     if per_field is None:
         out["viz_data"] = None
     else:
-        viz = {
-            r["instance"]: r[per_field]
-            for r in results
-            if r.get(per_field)
-        } or None
-        out["viz_data"] = viz
+        out["viz_data"] = _bounded_viz_data(results, per_field)
 
     # Per-challenge aggregate metrics, dispatched from `_AGG_METRICS`.
     # Surfaced on the published payload under `challenge_metrics` (a generic

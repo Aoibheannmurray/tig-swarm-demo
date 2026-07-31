@@ -31,14 +31,21 @@ STANDARD_MARKERS = (
     "-nano",
     "-8b",
     "3.5-sonnet",
+    "3-sonnet",
 )
 
-# Checked SECOND. Sonnet-class and up. `sonnet-4` matches `claude-sonnet-4-6`
-# but not `claude-3.5-sonnet` (caught by STANDARD_MARKERS first). `gpt-5`
-# matches but `gpt-4o` does not. `gemini-2.5-pro` is frontier; `*-flash` is not.
+# Checked SECOND. Sonnet-class and up. `gpt-5` matches but `gpt-4o` does not.
+# `gemini-2.5-pro` is frontier; `*-flash` is not.
+#
+# Bare "sonnet" is safe BECAUSE standard markers are checked first: the models
+# it would wrongly promote are the old ones, and those carry their own
+# downgrade markers ("3.5-sonnet", "3-sonnet"). It has to be bare so the Claude
+# CLI's version-less aliases — `opus` / `sonnet` / `haiku`, which resolve to
+# whatever is current — tier correctly; a fleet running `sonnet` was otherwise
+# classified `standard` and handed the exploiter role.
 FRONTIER_MARKERS = (
     "opus",
-    "sonnet-4",
+    "sonnet",
     "gpt-5",
     "gemini-2.5-pro",
     "o1",

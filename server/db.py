@@ -1,9 +1,13 @@
 import aiosqlite
 import base64
 import gzip
+import hashlib
 import json
 import secrets
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import os
@@ -42,6 +46,7 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     parent_hypothesis_id TEXT,
     program_id TEXT,
     target_best_experiment_id TEXT,
+    role TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
@@ -184,10 +189,11 @@ CREATE TABLE IF NOT EXISTS agent_challenge_state (
     num_trajectories INTEGER DEFAULT 0,
     tacit_knowledge_count INTEGER DEFAULT 0,
     inspiration_count INTEGER DEFAULT 0,
-    -- "tacit_knowledge" / "inspiration" / NULL — the most recent hint the
-    -- server gave this agent on this challenge. Set when /api/state issues
-    -- the hint, cleared when the agent publishes the next iteration (whose
-    -- experiments.received_hint absorbs the value).
+    failed_attempts_count INTEGER DEFAULT 0,
+    -- "tacit_knowledge" / "inspiration" / "failed_attempts" / NULL — the most
+    -- recent hint the server gave this agent on this challenge. Set when
+    -- /api/state issues the hint, cleared when the agent publishes the next
+    -- iteration (whose experiments.received_hint absorbs the value).
     pending_hint TEXT,
     pending_inspiration_source TEXT,
     -- The source agent's trajectory_id captured at hint-out time. Recorded
@@ -236,6 +242,78 @@ CREATE TABLE IF NOT EXISTS seed_pool (
     origin_agent_id TEXT,
     created_at TEXT NOT NULL
 );
+
+-- Server-stored per-contributor fleet config + tacit knowledge.
+-- `config_json` is the sanitized
+-- fleet plan the hosted contributor console edits — the same agents-array
+-- shape as fleet.config.json, secrets hard-rejected at the API layer.
+-- `tacit_text` is the contributor's hosted tacit-knowledge notes. The
+-- local runner fetches both in --join mode.
+-- The TIG mainnet algorithm's score ON THIS SWARM'S OWN INSTANCES, so the
+-- dashboard can show members the bar they are trying to clear. One row per
+-- challenge: the top-adoption mainnet algorithm, benchmarked unchanged.
+--
+-- Deliberately NOT measured during `setup.py create` — nobody should wait on a
+-- benchmark to finish standing up a swarm. A row starts life 'pending' (a
+-- single cheap INSERT) and is filled in afterwards by whichever comes first:
+-- the host measuring it on demand, or an agent organically benchmarking the
+-- mainnet seed, which the server recognises by `code_fingerprint`.
+--
+-- `config_fingerprint` is what makes the comparison honest. A score is only
+-- meaningful against the exact instance set that produced it, so we record a
+-- hash of the challenge's tracks + timeout at benchmark time; when the host
+-- later edits either, the dashboard marks the baseline stale instead of
+-- silently comparing against a different problem.
+CREATE TABLE IF NOT EXISTS mainnet_baselines (
+    challenge TEXT PRIMARY KEY,
+    algo_name TEXT NOT NULL,
+    adoption_pct REAL,
+    -- NULL until measured; `status` says whether that's expected.
+    score REAL,
+    feasible INTEGER NOT NULL DEFAULT 1,
+    -- 'pending'   — known algorithm, not benchmarked here yet
+    -- 'ready'     — score is real and current
+    -- 'unavailable' — no compatible mainnet algorithm for this challenge
+    status TEXT NOT NULL DEFAULT 'pending',
+    -- sha256 of the mainnet algorithm's code, so an agent that benchmarks the
+    -- seed unchanged is recognised and its score adopted for free.
+    code_fingerprint TEXT,
+    config_fingerprint TEXT,
+    measured_by TEXT,
+    benchmarked_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contributor_configs (
+    username TEXT PRIMARY KEY,
+    config_json TEXT,
+    tacit_text TEXT,
+    updated_at TEXT NOT NULL
+);
+
+-- Failed-attempts archive: LLM-authored artifacts only (structured
+-- retrospectives written when a trajectory dies, plus the one-line "- LLM:"
+-- tacit lessons). The lightweight per-iteration failure record is DERIVED
+-- from experiments (beats_trajectory_best=0) at read time, never written
+-- here — no code bodies either; experiment_id links back to experiments.
+-- Gated by config.failed_attempts_archive; records are only ever served
+-- back to the agent that wrote them (per-agent visibility).
+CREATE TABLE IF NOT EXISTS failure_records (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    trajectory_id TEXT,
+    experiment_id TEXT,
+    kind TEXT NOT NULL DEFAULT 'retrospective',  -- 'retrospective' | 'lesson'
+    approach_summary TEXT DEFAULT '',
+    what_was_tried TEXT DEFAULT '',
+    observed_outcome TEXT DEFAULT '',
+    possible_reasons TEXT DEFAULT '',
+    lesson TEXT DEFAULT '',
+    best_score REAL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
 """
 
 # Indexes are split out from the main schema so they can be applied after
@@ -262,10 +340,11 @@ CREATE INDEX IF NOT EXISTS idx_acs_active ON agent_challenge_state(challenge, la
 -- Covers get_baseline_score: WHERE feasible=1 AND challenge=? ORDER BY created_at ASC LIMIT 1.
 -- Called from periodic_stats per-challenge, /api/state per fetch, /api/iterations per publish.
 CREATE INDEX IF NOT EXISTS idx_exp_baseline ON experiments(challenge, feasible, created_at);
--- Lookup seeds for a challenge, and enforce one seed per (challenge, tag,
--- source) so auto-harvest's INSERT OR IGNORE keeps first-feasible-per-tag.
+-- Lookup seeds for a challenge. Diversity is now driven by code-similarity
+-- admission (server/seed_diversity.py), NOT a per-(tag, source) unique index —
+-- the old idx_seed_pool_dedup is dropped in the init_db migrations.
 CREATE INDEX IF NOT EXISTS idx_seed_pool_lookup ON seed_pool(challenge, strategy_tag);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_seed_pool_dedup ON seed_pool(challenge, strategy_tag, source);
+CREATE INDEX IF NOT EXISTS idx_failure_records_agent ON failure_records(agent_id, challenge, created_at);
 """
 
 DEFAULT_CONFIG = {
@@ -281,7 +360,64 @@ DEFAULT_CONFIG = {
     "owner_name": "",
     "swarm_type": "cpu",
     "hypothesis_recall_threshold": "3",
+    # Public URL of this swarm's hosted fleet runner (Tier 1), if the host
+    # deployed one. Empty = no cloud-run option; the join page then only
+    # offers the local runner. Set via POST /api/swarm_config (admin).
+    "runner_url": "",
 }
+
+
+# ── Schema versioning ────────────────────────────────────────────────
+#
+# Every schema change is a numbered `Migration`, applied once and recorded in
+# the `schema_version` table. Before this, init_db re-ran ~24 idempotent
+# statements on every boot: workable, but with no ordering guarantee, no record
+# of what had run, and no way to tell a fully-migrated DB from a half-migrated
+# one. Ordering is load-bearing here — the trajectory_bests rebuild below has to
+# run after the _add_column steps that create the columns it copies, or the
+# first boot after an upgrade silently drops them.
+#
+# Adopting a pre-versioning database is safe: every migration is individually
+# idempotent (that is exactly what made the old re-run-everything approach
+# work), so an unstamped DB simply runs them all once and is stamped to head.
+#
+# Adding a migration: append one entry with the next version number. Never
+# renumber, never edit a released migration in place — a deployed DB has
+# already recorded it as applied and will not run it again. (The numbers
+# below were assigned when this list was introduced, before any database
+# had recorded them, which is the only moment renumbering is free.)
+
+SCHEMA_VERSION_TABLE = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"""
+
+
+@dataclass(frozen=True)
+class Migration:
+    """One numbered schema step.
+
+    `own_connection` marks a migration that opens its own aiosqlite connection
+    (the table rebuild does — it wraps BEGIN/DROP TABLE and must not nest
+    inside init_db's transaction). The runner commits and hands it no db.
+    """
+
+    version: int
+    name: str
+    apply: Callable[..., Awaitable[None]]
+    own_connection: bool = False
+
+
+def _add_col_migration(version: int, table: str, column: str,
+                       typedef: str) -> Migration:
+    """Shorthand for the common case: one nullable/defaulted column."""
+    return Migration(
+        version, f"{table}.{column}",
+        lambda db, t=table, c=column, d=typedef: _add_column(db, t, c, d),
+    )
 
 
 async def _add_column(db, table: str, column: str, typedef: str) -> None:
@@ -309,6 +445,11 @@ _ENV_CONFIG_KEYS = (
     ("STAGNATION_THRESHOLD", "stagnation_threshold"),
     ("STAGNATION_LIMIT", "stagnation_limit"),
     ("HYPOTHESIS_RECALL_THRESHOLD", "hypothesis_recall_threshold"),
+    ("HPO_FIRST_TUNE_IMPROVEMENTS", "hpo_first_tune_improvements"),
+    ("HPO_MIN_IMPROVEMENTS", "hpo_min_improvements"),
+    ("HPO_SEARCH_BUDGET", "hpo_search_budget"),
+    ("HPO_NUM_SUGGESTED_CONFIGS", "hpo_num_suggested_configs"),
+    ("FAILED_ATTEMPTS_ARCHIVE", "failed_attempts_archive"),
 )
 
 
@@ -364,6 +505,190 @@ async def _column_is_notnull(db, table: str, column: str) -> bool:
     return False
 
 
+# The ordered migration list. Comments preserved from the inline statements
+# these replace — each explains why a column exists and how legacy rows read.
+MIGRATIONS: tuple[Migration, ...] = (
+    # Per-agent session token, generated at register. Used by every
+    # non-register participant-write endpoint instead of the swarm password
+    # (which is only consumed at register).
+    _add_col_migration(1, "agents", "token", "TEXT"),
+    # Contributor username stamped at register. Lets the dashboard group agents
+    # by owner. Derived from the X-Username header at register time.
+    _add_col_migration(2, "agents", "contributor_username", "TEXT"),
+    # Auto-classified model tier (frontier/standard), drives seeding. Pre-tier
+    # rows back-fill to 'standard'; read via COALESCE for safety.
+    _add_col_migration(3, "agents", "tier", "TEXT DEFAULT 'standard'"),
+    # Token accounting.
+    _add_col_migration(4, "experiments", "input_tokens", "INTEGER DEFAULT 0"),
+    _add_col_migration(5, "experiments", "output_tokens", "INTEGER DEFAULT 0"),
+    _add_col_migration(6, "experiments", "estimated_cost", "REAL DEFAULT 0.0"),
+    _add_col_migration(7, "agent_challenge_state", "total_input_tokens", "INTEGER DEFAULT 0"),
+    _add_col_migration(8, "agent_challenge_state", "total_output_tokens", "INTEGER DEFAULT 0"),
+    _add_col_migration(9, "agent_challenge_state", "total_estimated_cost", "REAL DEFAULT 0.0"),
+    # Set to 1 the first time an agent publishes a benchmarked iteration on a
+    # challenge. Stays 0 for an agent that never produced anything the
+    # benchmark could run — a quiet "never benchmarked" signal (no feed noise).
+    _add_col_migration(10, "agent_challenge_state", "ever_benchmarked", "INTEGER DEFAULT 0"),
+    # Inspiration-source trajectory capture (see schema comments). Rows from
+    # before this stay NULL; the inspiration matrix falls back to
+    # reconstruction for those and uses the column for everything after.
+    _add_col_migration(11, "experiments", "inspiration_source_trajectory_id", "TEXT"),
+    _add_col_migration(12, "agent_challenge_state", "pending_inspiration_source_trajectory", "TEXT"),
+    # Real experiment that earned a deposited best, carried through the
+    # inactive pool so adoption inherits true provenance (see deposit_inactive
+    # / the adoption branch in server.py). Older rows back-fill to NULL — their
+    # originating experiment_id was never stored.
+    _add_col_migration(13, "inactive_algorithms", "experiment_id", "TEXT"),
+    # Winning hyperparameter config (JSON) for a trajectory best tuned by the
+    # hyperparameter search. NULL for untuned bests. See
+    # docs/hyperparameter-search.md.
+    _add_col_migration(14, "trajectory_bests", "hyperparameters", "TEXT"),
+    # The no-hyperparameters (default-config) score for this experiment. The
+    # HPO gate's band is default-vs-default, so improvement scores are read
+    # from here (COALESCE to `score` for untuned iterations).
+    _add_col_migration(15, "experiments", "default_score", "REAL"),
+    # Publishing agent's role ("explorer"/"exploiter") at iteration time, for
+    # attribution. NULL for clients that don't send it.
+    _add_col_migration(16, "hypotheses", "role", "TEXT"),
+    # Multi-file algorithm bundle: a JSON {relpath: content} map (keys relative
+    # to the algorithm dir, `mod.rs` is the entry). NULL for single-file rows,
+    # where `algorithm_code` is the whole algorithm. When set it is the source
+    # of truth; `algorithm_code` keeps the entry file for back-compat. Carried
+    # through every place a stored algorithm can be handed to another agent.
+    _add_col_migration(17, "experiments", "algorithm_files", "TEXT"),
+    _add_col_migration(18, "trajectory_bests", "algorithm_files", "TEXT"),
+    _add_col_migration(19, "seed_pool", "algorithm_files", "TEXT"),
+    _add_col_migration(20, "inactive_algorithms", "algorithm_files", "TEXT"),
+    # Per-iteration winning hyperparameter map (JSON) when this experiment was
+    # tuned, else NULL. Lets the HPO gate ask "has this trajectory tuned
+    # before?" (the first eligible candidate auto-fires; later ones respect the
+    # improvement band).
+    _add_col_migration(21, "experiments", "hyperparameters", "TEXT"),
+    # Seed-pool diversity moved from a per-(tag, source) UNIQUE index to
+    # code-similarity admission (server/seed_diversity.py). Drop the old unique
+    # index so multiple seeds can share a strategy_tag and admission is decided
+    # by similarity/LOC/cap, not first-feasible-per-tag.
+    Migration(
+        22, "drop idx_seed_pool_dedup",
+        lambda db: db.execute("DROP INDEX IF EXISTS idx_seed_pool_dedup"),
+    ),
+    # (The authored-seed dedup that used to sit here is NOT a migration — it is
+    # a recurring boot repair. See _collapse_duplicate_authored_seeds.)
+    # Offered-count for the third stagnation hint type, "failed_attempts"
+    # (mirrors tacit_knowledge_count / inspiration_count).
+    _add_col_migration(23, "agent_challenge_state", "failed_attempts_count", "INTEGER DEFAULT 0"),
+    # MUST stay after 14 and 18: the rebuild copies hyperparameters and
+    # algorithm_files, and would drop them if it ran first.
+    Migration(
+        24, "trajectory_bests.experiment_id nullable",
+        lambda: _relax_trajectory_bests_experiment_id(),
+        own_connection=True,
+    ),
+)
+
+# Columns asserted present after migrating. A half-applied schema otherwise
+# surfaces as a 500 on the first query that touches the missing column, long
+# after boot and far from the cause.
+_EXPECTED_COLUMNS: tuple[tuple[str, str], ...] = tuple(
+    (m.name.split(".")[0], m.name.split(".")[1])
+    for m in MIGRATIONS if "." in m.name and not m.own_connection
+)
+
+
+def _validate_migrations() -> None:
+    """Numbering must be dense and strictly increasing from 1 — a gap or a
+    duplicate means a migration was renumbered or lost in a merge, and a
+    deployed DB would silently skip or re-run one."""
+    versions = [m.version for m in MIGRATIONS]
+    if versions != list(range(1, len(versions) + 1)):
+        raise ValueError(
+            f"MIGRATIONS must be numbered 1..N with no gaps; got {versions}"
+        )
+
+
+_validate_migrations()
+
+
+async def _apply_migrations(db) -> list[str]:
+    """Run every migration this DB has not recorded, in order. Returns the
+    names applied (empty on an up-to-date DB, which is the steady state)."""
+    await db.executescript(SCHEMA_VERSION_TABLE)
+    cursor = await db.execute("SELECT version FROM schema_version")
+    done = {row[0] for row in await cursor.fetchall()}
+    applied: list[str] = []
+    for m in MIGRATIONS:
+        if m.version in done or m.own_connection:
+            continue
+        await m.apply(db)
+        await db.execute(
+            "INSERT INTO schema_version (version, name, applied_at) "
+            "VALUES (?, ?, ?)",
+            (m.version, m.name, datetime.now(timezone.utc).isoformat()),
+        )
+        applied.append(f"{m.version}:{m.name}")
+    await db.commit()
+    return applied
+
+
+async def _apply_own_connection_migrations() -> None:
+    """Migrations that manage their own connection, run after init_db's block
+    has closed so they never nest inside its transaction."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript(SCHEMA_VERSION_TABLE)
+        cursor = await db.execute("SELECT version FROM schema_version")
+        done = {row[0] for row in await cursor.fetchall()}
+        for m in MIGRATIONS:
+            if not m.own_connection or m.version in done:
+                continue
+            await m.apply()
+            await db.execute(
+                "INSERT INTO schema_version (version, name, applied_at) "
+                "VALUES (?, ?, ?)",
+                (m.version, m.name, datetime.now(timezone.utc).isoformat()),
+            )
+            await db.commit()
+
+
+async def _collapse_duplicate_authored_seeds(db) -> None:
+    """Enforce one authored seed per (challenge, strategy_tag), every boot.
+
+    NOT a migration, deliberately. It began as a fix for the window where the
+    unique index was gone but /api/admin/seed_pool still assumed the DB deduped
+    — but because it ran on every boot it has been acting as a standing repair
+    ever since, and server/test_seed_pool_upsert.py depends on that: it inserts
+    duplicates into an already-migrated DB and expects the next init_db to
+    collapse them. Numbering it as a once-only migration would silently retire
+    a live safety net, so it stays a boot-time invariant.
+
+    Authored seeds are host-owned; the newest row wins. Harvested seeds may
+    legitimately share a tag (similarity admission) and are never touched.
+    """
+    await db.execute(
+        "DELETE FROM seed_pool WHERE source = 'authored' AND id NOT IN ("
+        "  SELECT MAX(id) FROM seed_pool WHERE source = 'authored' "
+        "  GROUP BY challenge, strategy_tag)"
+    )
+
+
+async def _verify_schema(db) -> None:
+    """Fail loudly on a half-migrated schema, at boot, naming the column."""
+    missing: list[str] = []
+    by_table: dict[str, set[str]] = {}
+    for table, column in _EXPECTED_COLUMNS:
+        if table not in by_table:
+            cursor = await db.execute(f"PRAGMA table_info({table})")
+            by_table[table] = {row[1] for row in await cursor.fetchall()}
+        if column not in by_table[table]:
+            missing.append(f"{table}.{column}")
+    if missing:
+        raise RuntimeError(
+            "schema is incomplete after migration — missing "
+            + ", ".join(missing)
+            + ". The database may be from a newer version, or a migration "
+            "failed partway. Refusing to serve on a half-applied schema."
+        )
+
+
 async def _relax_trajectory_bests_experiment_id() -> None:
     """One-time table rebuild dropping the NOT NULL on
     trajectory_bests.experiment_id, so an adopted floor with no known source
@@ -393,13 +718,23 @@ async def _relax_trajectory_bests_experiment_id() -> None:
                 track_scores TEXT,
                 updated_at TEXT NOT NULL,
                 trajectory_id TEXT,
+                -- Added by _add_column earlier in init_db; the rebuild must
+                -- carry them or the first boot after upgrade on a legacy DB
+                -- drops them and every read of these columns 500s.
+                hyperparameters TEXT,
+                algorithm_files TEXT,
                 PRIMARY KEY (agent_id, challenge),
                 FOREIGN KEY (agent_id) REFERENCES agents(id)
             );
             INSERT INTO trajectory_bests_new
+                (agent_id, challenge, experiment_id, algorithm_code,
+                 kernel_code, score, feasible, challenge_metrics,
+                 solution_data, track_scores, updated_at, trajectory_id,
+                 hyperparameters, algorithm_files)
                 SELECT agent_id, challenge, experiment_id, algorithm_code,
                        kernel_code, score, feasible, challenge_metrics,
-                       solution_data, track_scores, updated_at, trajectory_id
+                       solution_data, track_scores, updated_at, trajectory_id,
+                       hyperparameters, algorithm_files
                 FROM trajectory_bests;
             DROP TABLE trajectory_bests;
             ALTER TABLE trajectory_bests_new RENAME TO trajectory_bests;
@@ -425,39 +760,18 @@ async def init_db() -> None:
         await db.executescript(SCHEMA_INDEXES)
         await db.commit()
 
-        # Per-agent session token, generated at register. Used by every
-        # non-register participant-write endpoint instead of the swarm
-        # password (which is only consumed at register).
-        await _add_column(db, "agents", "token", "TEXT")
-        # Contributor username stamped at register. Lets the dashboard
-        # group agents by owner. Derived from the X-Username header at
-        # register time; not modifiable after the fact.
-        await _add_column(db, "agents", "contributor_username", "TEXT")
-        # Auto-classified model tier (frontier/standard), drives seeding.
-        # Legacy rows back-fill to 'standard'; read via COALESCE for safety.
-        await _add_column(db, "agents", "tier", "TEXT DEFAULT 'standard'")
-        # Migrations for token tracking columns on existing databases.
-        await _add_column(db, "experiments", "input_tokens", "INTEGER DEFAULT 0")
-        await _add_column(db, "experiments", "output_tokens", "INTEGER DEFAULT 0")
-        await _add_column(db, "experiments", "estimated_cost", "REAL DEFAULT 0.0")
-        await _add_column(db, "agent_challenge_state", "total_input_tokens", "INTEGER DEFAULT 0")
-        await _add_column(db, "agent_challenge_state", "total_output_tokens", "INTEGER DEFAULT 0")
-        await _add_column(db, "agent_challenge_state", "total_estimated_cost", "REAL DEFAULT 0.0")
-        # Set to 1 the first time an agent publishes a benchmarked iteration on
-        # a challenge. Stays 0 for an agent that never produced anything the
-        # benchmark could run — a quiet "never benchmarked" signal (no feed
-        # noise). Surfaced in the dashboard/logs.
-        await _add_column(db, "agent_challenge_state", "ever_benchmarked", "INTEGER DEFAULT 0")
-        # Inspiration-source trajectory capture (see schema comments). Legacy
-        # rows stay NULL; the inspiration matrix falls back to reconstruction
-        # for those and uses this column for everything published afterwards.
-        await _add_column(db, "experiments", "inspiration_source_trajectory_id", "TEXT")
-        await _add_column(db, "agent_challenge_state", "pending_inspiration_source_trajectory", "TEXT")
-        # Real experiment that earned a deposited best, carried through the
-        # inactive pool so adoption inherits true provenance (see
-        # deposit_inactive / the adoption branch in server.py). Legacy rows
-        # back-fill to NULL — their originating experiment_id was never stored.
-        await _add_column(db, "inactive_algorithms", "experiment_id", "TEXT")
+        # Numbered, recorded schema steps (see MIGRATIONS). Replaces the
+        # ~24 statements that used to be re-run inline on every boot.
+        applied = await _apply_migrations(db)
+        if applied:
+            # One line, not 24: a fresh DB applies them all and the names add
+            # nothing. On an upgrade the range is the useful part.
+            print(f"init_db: applied {len(applied)} migration(s) "
+                  f"({applied[0]}..{applied[-1]})")
+        await _verify_schema(db)
+        # Boot-time invariants (not schema, not versioned) — see the docstring.
+        await _collapse_duplicate_authored_seeds(db)
+        await db.commit()
         await db.commit()
 
         for key, value in DEFAULT_CONFIG.items():
@@ -523,10 +837,9 @@ async def init_db() -> None:
             )
             await db.commit()
 
-    # Drop the legacy NOT NULL on trajectory_bests.experiment_id so an adopted
-    # floor with unknown provenance can store NULL instead of a fabricated id.
-    # Runs in its own connection after the schema pass above; idempotent.
-    await _relax_trajectory_bests_experiment_id()
+    # Migration 24 (trajectory_bests rebuild) opens its own connection, so it
+    # runs after the block above has closed — see Migration.own_connection.
+    await _apply_own_connection_migrations()
 
 
 @asynccontextmanager
@@ -571,11 +884,68 @@ def is_better(direction: str, candidate: float, prior: float) -> bool:
     return candidate > prior if direction == "max" else candidate < prior
 
 
+# ── algorithm_files JSON codecs ──
+#
+# Multi-file algorithms are stored as one JSON {relpath: content} map in the
+# `algorithm_files` column (experiments / trajectory_bests / seed_pool /
+# inactive_algorithms all share the convention). Shared by server.py and
+# trajectory_reset.py.
+
+
+def files_json(files: dict | None) -> str | None:
+    """JSON-encode a {relpath: content} files-map for storage, or None when it
+    is empty/single-file (the entry lives in `algorithm_code`)."""
+    return json.dumps(files) if files else None
+
+
+def row_files(row) -> dict | None:
+    """Decode a stored `algorithm_files` JSON column to a dict, or None."""
+    raw = row.get("algorithm_files") if hasattr(row, "get") else None
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return d if isinstance(d, dict) and d else None
+
+
 _TRAJECTORY_BESTS_COLS = (
     "agent_id, challenge, experiment_id as id, experiment_id, algorithm_code, "
-    "kernel_code, score, feasible, challenge_metrics, solution_data, "
-    "track_scores, updated_at, trajectory_id"
+    "kernel_code, algorithm_files, score, feasible, challenge_metrics, solution_data, "
+    "track_scores, updated_at, trajectory_id, hyperparameters"
 )
+
+
+def score_epoch_key(challenge: str) -> str:
+    """`config` key holding the cutoff for one challenge's leaderboard.
+
+    Set by the admin "Reset leaderboard" action to the moment of the reset.
+    Scores published before it stop counting as the global best, WITHOUT
+    deleting the experiments themselves — the swarm's research history, the
+    inspiration matrix and every trajectory chart still read those rows."""
+    return f"score_epoch:{challenge}"
+
+
+async def set_score_epoch(
+    conn: aiosqlite.Connection, challenge: str, timestamp: str
+) -> None:
+    """Start a new scoring era for `challenge` as of `timestamp`."""
+    await conn.execute(
+        "INSERT INTO config (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (score_epoch_key(challenge), timestamp),
+    )
+
+
+async def get_score_epoch(
+    conn: aiosqlite.Connection, challenge: str
+) -> str | None:
+    cursor = await conn.execute(
+        "SELECT value FROM config WHERE key = ?", (score_epoch_key(challenge),),
+    )
+    row = await cursor.fetchone()
+    return row["value"] if row else None
 
 
 async def get_global_best(
@@ -588,15 +958,25 @@ async def get_global_best(
     # which would otherwise hide historical peaks once their trajectory
     # ended. Returned shape mirrors the prior trajectory_bests-based result so
     # callers don't need to change.
+    #
+    # The score epoch (set by POST /api/admin/reset_challenge) excludes rows
+    # published before the last leaderboard reset. Without it a "reset" cleared
+    # only the chart: this query still found the old peak in `experiments`, so
+    # after a change that makes scores incomparable — new instance counts, a new
+    # timeout — no legitimately lower score could ever become the new best.
+    # Comparing ISO-8601 strings is a plain lexicographic compare, and the
+    # COALESCE default of '' keeps every row when no epoch is set.
     order = _direction_order(direction)
     cursor = await conn.execute(
         "SELECT id as experiment_id, id, agent_id, challenge, "
-        "algorithm_code, kernel_code, score, feasible, challenge_metrics, "
+        "algorithm_code, kernel_code, algorithm_files, score, feasible, challenge_metrics, "
         "solution_data, track_scores, created_at as updated_at, "
         "trajectory_id "
         "FROM experiments WHERE feasible = 1 AND challenge = ? "
+        "  AND created_at > COALESCE("
+        "        (SELECT value FROM config WHERE key = ?), '') "
         f"ORDER BY score {order} LIMIT 1",
-        (challenge,),
+        (challenge, score_epoch_key(challenge)),
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
@@ -628,19 +1008,80 @@ async def insert_seed(
     feasible: bool = True,
     kernel_code: str | None = None,
     origin_agent_id: str | None = None,
+    algorithm_files: str | None = None,
 ) -> bool:
-    """Insert a seed, deduped by (challenge, strategy_tag, source) via the
-    UNIQUE index. INSERT OR IGNORE means first-write-per-tag wins and later
-    writes are silently dropped. Returns True iff a row was actually added."""
+    """Insert a seed row. Plain insert — there is NO uniqueness constraint
+    (the old per-(challenge, tag, source) UNIQUE index was dropped when pool
+    diversity moved to similarity-based admission), so admission is the
+    CALLER's job: harvested seeds go through seed_diversity.decide_admission,
+    authored seeds through `upsert_authored_seed`. Returns True iff a row was
+    added (kept for call-site compatibility; always True on success)."""
     cur = await conn.execute(
-        "INSERT OR IGNORE INTO seed_pool "
+        "INSERT INTO seed_pool "
         "(challenge, strategy_tag, source, score, feasible, algorithm_code, "
-        " kernel_code, origin_agent_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " kernel_code, algorithm_files, origin_agent_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (challenge, strategy_tag, source, score, 1 if feasible else 0,
-         algorithm_code, kernel_code, origin_agent_id, created_at),
+         algorithm_code, kernel_code, algorithm_files, origin_agent_id, created_at),
     )
     return cur.rowcount > 0
+
+
+async def upsert_authored_seed(
+    conn: aiosqlite.Connection,
+    challenge: str,
+    strategy_tag: str,
+    algorithm_code: str,
+    *,
+    created_at: str,
+    score: float | None = None,
+    kernel_code: str | None = None,
+    algorithm_files: str | None = None,
+) -> str:
+    """Deposit a HOST-AUTHORED seed, keyed by (challenge, strategy_tag).
+
+    Authored seeds mirror files under initial_algorithms/<ch>/seeds/ — the
+    host owns them, so a re-deposit must REPLACE the pool copy (a host who
+    fixes a seed and re-runs `setup.py create` expects agents to draw the
+    fixed version), and repeat deposits of identical content must be no-ops
+    (idempotent create re-runs). Harvested seeds are untouched — they share
+    tags freely under similarity-based admission.
+
+    Returns 'inserted' | 'updated' | 'unchanged'. Legacy duplicate authored
+    rows for the key (from the era when the endpoint lost its dedupe) are
+    collapsed to the newest row as a side effect."""
+    cursor = await conn.execute(
+        "SELECT id, algorithm_code, kernel_code, algorithm_files FROM seed_pool "
+        "WHERE challenge = ? AND strategy_tag = ? AND source = 'authored' "
+        "ORDER BY id DESC",
+        (challenge, strategy_tag),
+    )
+    rows = await cursor.fetchall()  # positional access: works with or without row_factory
+    if len(rows) > 1:  # collapse legacy duplicates, keep the newest
+        stale = [r[0] for r in rows[1:]]
+        await conn.execute(
+            f"DELETE FROM seed_pool WHERE id IN ({','.join('?' * len(stale))})",
+            stale,
+        )
+    if not rows:
+        await insert_seed(
+            conn, challenge, strategy_tag, algorithm_code,
+            created_at=created_at, source="authored", score=score,
+            feasible=True, kernel_code=kernel_code, algorithm_files=algorithm_files,
+        )
+        return "inserted"
+    newest_id, newest_code, newest_kernel, newest_files = (
+        rows[0][0], rows[0][1], rows[0][2], rows[0][3])
+    if (newest_code == algorithm_code
+            and (newest_kernel or None) == (kernel_code or None)
+            and (newest_files or None) == (algorithm_files or None)):
+        return "unchanged"
+    await conn.execute(
+        "UPDATE seed_pool SET algorithm_code = ?, kernel_code = ?, "
+        "algorithm_files = ?, score = ?, feasible = 1, created_at = ? WHERE id = ?",
+        (algorithm_code, kernel_code, algorithm_files, score, created_at, newest_id),
+    )
+    return "updated"
 
 
 async def list_seeds(conn: aiosqlite.Connection, challenge: str) -> list[dict]:
@@ -648,11 +1089,16 @@ async def list_seeds(conn: aiosqlite.Connection, challenge: str) -> list[dict]:
     a per-agent hash assignment is deterministic across calls."""
     cursor = await conn.execute(
         "SELECT id, strategy_tag, source, score, feasible, algorithm_code, "
-        "kernel_code FROM seed_pool WHERE challenge = ? AND feasible = 1 "
+        "kernel_code, algorithm_files FROM seed_pool WHERE challenge = ? AND feasible = 1 "
         "ORDER BY strategy_tag, id",
         (challenge,),
     )
     return [dict(r) for r in await cursor.fetchall()]
+
+
+async def evict_seed(conn: aiosqlite.Connection, seed_id: int) -> None:
+    """Remove one seed by id (used by similarity-based redundancy eviction)."""
+    await conn.execute("DELETE FROM seed_pool WHERE id = ?", (seed_id,))
 
 
 async def least_covered_tag(
@@ -685,6 +1131,64 @@ async def get_trajectory_best(
     return dict(row) if row else None
 
 
+async def get_recent_improvement_scores(
+    conn: aiosqlite.Connection, trajectory_id: str | None, limit: int
+) -> list[float]:
+    """The last `limit` feasible improvement scores on a trajectory, ascending.
+
+    An "improvement" is an experiment that beat the trajectory best when it ran
+    (`beats_trajectory_best = 1`), so the scores are monotonically increasing.
+    Keyed by `trajectory_id`, which is preserved when a trajectory is adopted
+    out of the inactive pool — so an adopted trajectory inherits its real
+    improvement history (and survives process restarts). Returns [] when the
+    trajectory is unknown or has no recorded improvements.
+
+    Powers the hyperparameter-search gate (see docs/hyperparameter-search.md):
+    the count is `len(...)`, the band floor is `result[-min_improvements]`, and
+    the parent (band ceiling) is `result[-1]` — after the first tune the gate
+    fires only when floor < candidate < parent (direction-aware).
+
+    The scores are each improvement's *default* (no-hyperparameters) score, so the
+    band is default-vs-default: an ancestor that tuned never raises the bar for its
+    descendants. Falls back to the published `score` wherever `default_score`
+    is absent — the common ongoing case is an untuned row, where the two are
+    equal by definition.
+    Note these default scores are not strictly monotonic (only the published
+    scores are), but the band only needs the value from `min_improvements` ago.
+    """
+    if not trajectory_id:
+        return []
+    cursor = await conn.execute(
+        """SELECT COALESCE(default_score, score) FROM experiments
+           WHERE trajectory_id = ? AND beats_trajectory_best = 1 AND feasible = 1
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?""",
+        (trajectory_id, limit),
+    )
+    rows = await cursor.fetchall()
+    # Fetched newest-first; reverse to oldest-first so [-min_improvements] is the
+    # band floor and the list reads as the recent improvement sequence.
+    return [float(r[0]) for r in reversed(rows)]
+
+
+async def trajectory_has_tuned(
+    conn: aiosqlite.Connection, trajectory_id: str | None
+) -> bool:
+    """True if any experiment on this trajectory was hyperparameter-tuned (has a
+    non-NULL `hyperparameters` map). The HPO gate auto-fires the FIRST time a
+    mature trajectory is eligible (this returns False), then defers to the
+    improvement band thereafter. Keyed by trajectory_id so it survives adoption
+    and process restarts. See docs/hyperparameter-search.md."""
+    if not trajectory_id:
+        return False
+    cursor = await conn.execute(
+        "SELECT 1 FROM experiments "
+        "WHERE trajectory_id = ? AND hyperparameters IS NOT NULL LIMIT 1",
+        (trajectory_id,),
+    )
+    return (await cursor.fetchone()) is not None
+
+
 async def upsert_trajectory_best(
     conn: aiosqlite.Connection,
     agent_id: str,
@@ -699,26 +1203,33 @@ async def upsert_trajectory_best(
     trajectory_id: str | None = None,
     track_scores: str | None = None,
     kernel_code: str | None = None,
+    hyperparameters: str | None = None,
+    algorithm_files: str | None = None,
 ) -> None:
     await conn.execute(
         """INSERT INTO trajectory_bests
-           (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score, feasible,
-            challenge_metrics, solution_data, track_scores, updated_at, trajectory_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (agent_id, challenge, experiment_id, algorithm_code, kernel_code, algorithm_files,
+            score, feasible,
+            challenge_metrics, solution_data, track_scores, updated_at, trajectory_id,
+            hyperparameters)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, challenge) DO UPDATE SET
              experiment_id = excluded.experiment_id,
              algorithm_code = excluded.algorithm_code,
              kernel_code = excluded.kernel_code,
+             algorithm_files = excluded.algorithm_files,
              score = excluded.score,
              feasible = excluded.feasible,
              challenge_metrics = excluded.challenge_metrics,
              solution_data = excluded.solution_data,
              track_scores = excluded.track_scores,
              updated_at = excluded.updated_at,
-             trajectory_id = excluded.trajectory_id""",
-        (agent_id, challenge, experiment_id, algorithm_code, kernel_code, score,
-         1 if feasible else 0, challenge_metrics,
-         solution_data, track_scores, updated_at, trajectory_id),
+             trajectory_id = excluded.trajectory_id,
+             hyperparameters = excluded.hyperparameters""",
+        (agent_id, challenge, experiment_id, algorithm_code, kernel_code, algorithm_files,
+         score, 1 if feasible else 0, challenge_metrics,
+         solution_data, track_scores, updated_at, trajectory_id,
+         hyperparameters),
     )
 
 
@@ -797,6 +1308,14 @@ async def compute_leaderboard(
     # only ever fetched /api/state for this challenge gets a row in
     # agent_challenge_state via ensure_agent_challenge_state, but with
     # zero experiments — those would otherwise show up as ghosts.
+    #
+    # tacit/inspiration counts are derived from experiments.received_hint
+    # (hints actually CONSUMED by a published iteration), not from the
+    # acs.tacit_knowledge_count / acs.inspiration_count columns. Those
+    # columns are bumped at hint-OFFER time on every /api/state fetch
+    # while stagnated, so a client stuck in a fetch→fail→retry loop
+    # inflates them without ever running an iteration (observed: 703
+    # offers vs 6 consumed). They remain as raw offer telemetry only.
     order = _direction_order(direction)
     # CORRECTNESS INVARIANT: `active` is sourced from acs.last_active_at,
     # NOT from a.last_heartbeat. An agent currently working on VRP is alive
@@ -814,8 +1333,9 @@ async def compute_leaderboard(
             acs.last_active_at as last_active_at,
             acs.best_ever_score as best_ever_score,
             acs.num_trajectories as num_trajectories,
-            acs.tacit_knowledge_count as tacit_knowledge_count,
-            acs.inspiration_count as inspiration_count,
+            COALESCE(hints.tacit_knowledge_count, 0) as tacit_knowledge_count,
+            COALESCE(hints.inspiration_count, 0) as inspiration_count,
+            COALESCE(hints.failed_attempts_count, 0) as failed_attempts_count,
             acs.total_input_tokens as total_input_tokens,
             acs.total_output_tokens as total_output_tokens,
             acs.total_estimated_cost as total_estimated_cost,
@@ -824,6 +1344,18 @@ async def compute_leaderboard(
         JOIN agents a ON a.id = acs.agent_id
         LEFT JOIN trajectory_bests ab
             ON ab.agent_id = a.id AND ab.challenge = ? AND ab.feasible = 1
+        LEFT JOIN (
+            SELECT agent_id,
+                   SUM(CASE WHEN received_hint = 'tacit_knowledge' THEN 1 ELSE 0 END)
+                       AS tacit_knowledge_count,
+                   SUM(CASE WHEN received_hint = 'inspiration' THEN 1 ELSE 0 END)
+                       AS inspiration_count,
+                   SUM(CASE WHEN received_hint = 'failed_attempts' THEN 1 ELSE 0 END)
+                       AS failed_attempts_count
+            FROM experiments
+            WHERE challenge = ?
+            GROUP BY agent_id
+        ) hints ON hints.agent_id = a.id
         WHERE acs.challenge = ?
           AND acs.experiments_completed > 0
         -- Sort by best-ever score (not current_score from trajectory_bests):
@@ -835,7 +1367,7 @@ async def compute_leaderboard(
         -- they've ever held on this challenge.
         ORDER BY best_ever_score IS NULL, best_ever_score {order}, a.name ASC
         """,
-        (challenge, challenge),
+        (challenge, challenge, challenge),
     )
     rows = await cursor.fetchall()
     return [
@@ -852,6 +1384,7 @@ async def compute_leaderboard(
             "num_trajectories": row["num_trajectories"] or 0,
             "tacit_knowledge_count": row["tacit_knowledge_count"] or 0,
             "inspiration_count": row["inspiration_count"] or 0,
+            "failed_attempts_count": row["failed_attempts_count"] or 0,
             "total_tokens": (row["total_input_tokens"] or 0) + (row["total_output_tokens"] or 0),
             "estimated_cost_usd": round(row["total_estimated_cost"] or 0, 4),
             "active": row["last_active_at"] >= inactive_cutoff if inactive_cutoff and row["last_active_at"] else False,
@@ -947,6 +1480,7 @@ async def increment_agent_challenge_counters(
     num_trajectories_inc: int = 0,
     tacit_knowledge_inc: int = 0,
     inspiration_inc: int = 0,
+    failed_attempts_inc: int = 0,
     best_ever_score: float | None = None,
     direction: str = "max",
     input_tokens: int = 0,
@@ -976,18 +1510,123 @@ async def increment_agent_challenge_counters(
                 num_trajectories = num_trajectories + ?,
                 tacit_knowledge_count = tacit_knowledge_count + ?,
                 inspiration_count = inspiration_count + ?,
+                failed_attempts_count = failed_attempts_count + ?,
                 total_input_tokens = total_input_tokens + ?,
                 total_output_tokens = total_output_tokens + ?,
                 total_estimated_cost = total_estimated_cost + ?
                 {best_clause}
               WHERE agent_id = ? AND challenge = ?"""
     params: list = [runs, improvements, num_trajectories_inc,
-                    tacit_knowledge_inc, inspiration_inc,
+                    tacit_knowledge_inc, inspiration_inc, failed_attempts_inc,
                     input_tokens, output_tokens, estimated_cost]
     if best_ever_score is not None:
         params.extend([best_ever_score, best_ever_score, best_ever_score])
     params.extend([agent_id, challenge])
     await conn.execute(sql, params)
+
+
+# ── failure_records helpers ──
+
+
+async def insert_failure_record(
+    conn: aiosqlite.Connection,
+    *,
+    record_id: str,
+    agent_id: str,
+    challenge: str,
+    trajectory_id: str | None,
+    experiment_id: str | None,
+    kind: str,
+    approach_summary: str,
+    what_was_tried: str,
+    observed_outcome: str,
+    possible_reasons: str,
+    lesson: str,
+    best_score: float | None,
+    created_at: str,
+    max_per_agent: int,
+) -> None:
+    """Insert an LLM-authored failure artifact and prune retention in the
+    same transaction: only the newest `max_per_agent` rows survive per
+    (agent, challenge)."""
+    await conn.execute(
+        """INSERT INTO failure_records
+             (id, agent_id, challenge, trajectory_id, experiment_id, kind,
+              approach_summary, what_was_tried, observed_outcome,
+              possible_reasons, lesson, best_score, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (record_id, agent_id, challenge, trajectory_id, experiment_id, kind,
+         approach_summary, what_was_tried, observed_outcome,
+         possible_reasons, lesson, best_score, created_at),
+    )
+    await conn.execute(
+        """DELETE FROM failure_records
+            WHERE agent_id = ? AND challenge = ?
+              AND id NOT IN (SELECT id FROM failure_records
+                              WHERE agent_id = ? AND challenge = ?
+                              ORDER BY created_at DESC, id DESC LIMIT ?)""",
+        (agent_id, challenge, agent_id, challenge, max(1, int(max_per_agent))),
+    )
+
+
+async def list_failure_records(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str, limit: int
+) -> list[dict]:
+    """Newest-first LLM-authored failure artifacts for ONE agent. The
+    agent_id filter is the per-agent-visibility guarantee — records are
+    never served across agents."""
+    cursor = await conn.execute(
+        """SELECT id, trajectory_id, experiment_id, kind, approach_summary,
+                  what_was_tried, observed_outcome, possible_reasons,
+                  lesson, best_score, created_at
+             FROM failure_records
+            WHERE agent_id = ? AND challenge = ?
+            ORDER BY created_at DESC, id DESC LIMIT ?""",
+        (agent_id, challenge, limit),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def list_rejected_experiments(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str, limit: int
+) -> list[dict]:
+    """Derived lightweight failure records: the agent's own most recent
+    non-improving iterations, joined to their hypothesis. No new storage —
+    experiments already keeps everything."""
+    cursor = await conn.execute(
+        """SELECT e.id, e.score, e.feasible, e.delta_vs_trajectory_best_pct,
+                  e.trajectory_id, e.created_at, e.notes,
+                  h.title, h.strategy_tag, h.description
+             FROM experiments e
+             LEFT JOIN hypotheses h ON h.id = e.hypothesis_id
+            WHERE e.agent_id = ? AND e.challenge = ?
+              AND e.beats_trajectory_best = 0
+            ORDER BY e.created_at DESC LIMIT ?""",
+        (agent_id, challenge, limit),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    for r in rows:
+        r["description"] = (r.get("description") or "")[:500]
+        r["notes"] = (r.get("notes") or "")[:500]
+    return rows
+
+
+async def has_failure_material(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str
+) -> bool:
+    """True when the failed_attempts hint has something to serve for this
+    agent: an archived LLM record OR a rejected iteration to derive a
+    lightweight record from. Two cheap indexed EXISTS."""
+    cursor = await conn.execute(
+        """SELECT EXISTS(SELECT 1 FROM failure_records
+                          WHERE agent_id = ? AND challenge = ?)
+                OR EXISTS(SELECT 1 FROM experiments
+                           WHERE agent_id = ? AND challenge = ?
+                             AND beats_trajectory_best = 0) AS present""",
+        (agent_id, challenge, agent_id, challenge),
+    )
+    row = await cursor.fetchone()
+    return bool(row["present"]) if row else False
 
 
 # ── challenge_configs helpers ──
@@ -1009,6 +1648,146 @@ async def get_challenge_config(
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
+
+
+# ── Mainnet baseline ────────────────────────────────────────────────
+
+
+def config_fingerprint(tracks: object, timeout: object) -> str:
+    """Identity of the instance set a score was earned on.
+
+    Two scores are only comparable if they solved the same problems, so the
+    dashboard needs to know when the host has edited tracks or the solver
+    timeout since the baseline was measured."""
+    payload = json.dumps({"tracks": tracks, "timeout": timeout}, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def code_fingerprint(algorithm_code: str) -> str:
+    """Identity of an algorithm's source, so a score published for the
+    unmodified mainnet algorithm can be recognised wherever it comes from.
+
+    Line endings are normalised first. The code makes a round trip the server
+    does not control — deposited here, written to an agent's worktree (where
+    challenge_files._safe_write rewrites CRLF to LF), benchmarked, read back
+    and published — so raw bytes are not preserved end to end. A mainnet
+    algorithm arrives base64-decoded from GitHub and may well carry CRLF, in
+    which case a byte-exact hash can never match what comes back."""
+    normalised = algorithm_code.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+
+
+async def get_mainnet_baseline(
+    conn: aiosqlite.Connection, challenge: str,
+) -> dict | None:
+    cursor = await conn.execute(
+        "SELECT * FROM mainnet_baselines WHERE challenge = ?", (challenge,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def record_mainnet_algorithm(
+    conn: aiosqlite.Connection,
+    challenge: str,
+    algo_name: str,
+    *,
+    created_at: str,
+    adoption_pct: float | None = None,
+    code_fingerprint_: str | None = None,
+) -> str:
+    """Note WHICH mainnet algorithm this challenge is measured against, without
+    measuring it. One INSERT — safe to call from anything on the setup path,
+    because it adds no benchmark and no network round trip of its own.
+
+    Returns 'inserted' | 'updated' | 'unchanged'. A new algorithm (mainnet's
+    top-adoption entry changed) resets the row to pending: the old score
+    belongs to different code."""
+    existing = await get_mainnet_baseline(conn, challenge)
+    if existing and existing["algo_name"] == algo_name and (
+        code_fingerprint_ is None or existing["code_fingerprint"] == code_fingerprint_
+    ):
+        return "unchanged"
+    if existing:
+        await conn.execute(
+            "UPDATE mainnet_baselines SET algo_name = ?, adoption_pct = ?, "
+            "code_fingerprint = ?, score = NULL, status = 'pending', "
+            "config_fingerprint = NULL, measured_by = NULL, benchmarked_at = NULL "
+            "WHERE challenge = ?",
+            (algo_name, adoption_pct, code_fingerprint_, challenge),
+        )
+        return "updated"
+    await conn.execute(
+        "INSERT INTO mainnet_baselines (challenge, algo_name, adoption_pct, "
+        "code_fingerprint, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+        (challenge, algo_name, adoption_pct, code_fingerprint_, created_at),
+    )
+    return "inserted"
+
+
+# States in which a published run of the mainnet code is still wanted. Shared
+# by the claim, the adoption preference, and the capture — they have to agree,
+# or the flow stalls at whichever one disagrees (it has, once already).
+MAINNET_UNMEASURED = ("pending", "requested", "measuring")
+
+
+async def claim_mainnet_measurement(
+    conn: aiosqlite.Connection, challenge: str, agent_id: str, *,
+    now_ts: str, stale_before: str,
+) -> bool:
+    """Reserve the measurement for exactly one agent. Returns whether we got it.
+
+    Without a claim, every agent polling for state would be handed the same
+    forced reset and they would all abandon their trajectories to benchmark
+    the same algorithm. `stale_before` re-arms a claim whose agent died mid-run
+    so one crash can't park the measurement forever."""
+    cursor = await conn.execute(
+        "UPDATE mainnet_baselines SET status = 'measuring', measured_by = ?, "
+        "benchmarked_at = ? "
+        "WHERE challenge = ? AND ("
+        "  status = 'requested'"
+        "  OR (status = 'measuring' AND (benchmarked_at IS NULL "
+        "                                OR benchmarked_at < ?))"
+        ")",
+        (f"agent:{agent_id}", now_ts, challenge, stale_before),
+    )
+    return cursor.rowcount > 0
+
+
+async def set_mainnet_baseline_score(
+    conn: aiosqlite.Connection,
+    challenge: str,
+    score: float,
+    *,
+    feasible: bool,
+    benchmarked_at: str,
+    measured_by: str,
+    config_fingerprint_: str | None = None,
+) -> bool:
+    """Fill in a measured score. Returns False when no row exists — the caller
+    must have recorded WHICH algorithm it measured first, so a score can never
+    be attributed to an unknown one."""
+    cursor = await conn.execute(
+        "UPDATE mainnet_baselines SET score = ?, feasible = ?, status = 'ready', "
+        "config_fingerprint = ?, measured_by = ?, benchmarked_at = ? "
+        "WHERE challenge = ?",
+        (score, 1 if feasible else 0, config_fingerprint_, measured_by,
+         benchmarked_at, challenge),
+    )
+    return cursor.rowcount > 0
+
+
+async def mark_mainnet_baseline_unavailable(
+    conn: aiosqlite.Connection, challenge: str, *, created_at: str,
+) -> None:
+    """No compatible mainnet algorithm exists for this challenge. Recorded so
+    the dashboard can say so once instead of showing a permanent 'pending'."""
+    await conn.execute(
+        "INSERT INTO mainnet_baselines (challenge, algo_name, status, created_at) "
+        "VALUES (?, '', 'unavailable', ?) "
+        "ON CONFLICT(challenge) DO UPDATE SET status = 'unavailable'",
+        (challenge, created_at),
+    )
 
 
 async def list_challenge_configs(conn: aiosqlite.Connection) -> list[dict]:
@@ -1118,31 +1897,27 @@ async def deposit_inactive(
     program_id: str | None = None,
     kernel_code: str | None = None,
     experiment_id: str | None = None,
+    algorithm_files: str | None = None,
 ) -> int:
-    # Keep one-and-done weak attempts out of the inactive trajectory pool.
-    # An agent that publishes a single algorithm scoring below zero and then
-    # stagnates or goes offline would otherwise deposit that lone bad result
-    # here, where other agents adopt it on a fresh reset — polluting the pool
-    # with a trajectory that never proved itself. Require either a real
-    # iterated line (>1 edit) or a non-negative score before a trajectory can
-    # seed others. Centralised here so BOTH deposit paths (online stagnation
-    # reset and offline-agent cleanup) are covered. Returns -1 to signal the
-    # deposit was skipped; callers ignore the row id.
+    # Keep negative-scoring attempts out of the inactive trajectory pool.
+    # The pool is what other agents adopt from on a fresh reset, so a
+    # negative deposit hands known-bad code to whoever draws it — polluting
+    # the pool regardless of how many edits the trajectory accumulated
+    # (an iterated line that never climbed above zero is still a dead end).
+    # Centralised here so BOTH deposit paths (online stagnation reset and
+    # offline-agent cleanup) are covered. Returns -1 to signal the deposit
+    # was skipped; callers ignore the row id.
     #
     # Note: on challenges whose feasible scores are themselves negative (e.g.
-    # neuralnet), this also drops single-edit feasible results — accepted
-    # tradeoff per the chosen `score < 0` definition of "bad".
-    if trajectory_id is not None and score is not None and score < 0:
-        traj = await (await conn.execute(
-            "SELECT num_edits FROM trajectories WHERE id = ?", (trajectory_id,),
-        )).fetchone()
-        if traj is not None and traj["num_edits"] is not None and traj["num_edits"] <= 1:
-            return -1
+    # neuralnet divergence), this also drops feasible-but-negative results —
+    # accepted tradeoff per the chosen `score < 0` definition of "bad".
+    if score is not None and score < 0:
+        return -1
     cursor = await conn.execute(
         "INSERT INTO inactive_algorithms "
-        "  (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (agent_id, challenge, algorithm_code, kernel_code, score, deposited_at, trajectory_id, program_id, experiment_id),
+        "  (agent_id, challenge, algorithm_code, kernel_code, algorithm_files, score, deposited_at, trajectory_id, program_id, experiment_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, challenge, algorithm_code, kernel_code, algorithm_files, score, deposited_at, trajectory_id, program_id, experiment_id),
     )
     return cursor.lastrowid
 
@@ -1151,6 +1926,68 @@ async def remove_inactive(conn: aiosqlite.Connection, inactive_id: int) -> None:
     await conn.execute(
         "DELETE FROM inactive_algorithms WHERE id = ?", (inactive_id,)
     )
+
+
+async def clear_inactive_pool(
+    conn: aiosqlite.Connection, challenge: str, keep_agent_id: str | None = None
+) -> int:
+    """Delete all inactive-pool entries for `challenge`, optionally keeping those
+    attributed to `keep_agent_id` (e.g. a preserved seed source). Returns the
+    number of rows removed."""
+    if keep_agent_id:
+        cur = await conn.execute(
+            "DELETE FROM inactive_algorithms WHERE challenge = ? AND agent_id != ?",
+            (challenge, keep_agent_id),
+        )
+    else:
+        cur = await conn.execute(
+            "DELETE FROM inactive_algorithms WHERE challenge = ?", (challenge,),
+        )
+    return cur.rowcount
+
+
+async def has_inactive_with_code(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str, algorithm_code: str,
+) -> bool:
+    """Is this EXACT algorithm already sitting unconsumed in the pool for
+    `agent_id`?
+
+    The mainnet seeder needs this rather than a bare "does any row exist"
+    count. It records a fingerprint of the code it fetched, and the capture
+    and adoption paths both match on that hash — so what matters is not
+    whether the source has *a* seed here, but whether the seed it has is the
+    one the fingerprint describes. Two different reshapes of the same mainnet
+    algorithm (host-side challenge_files vs server-side mainnet_seed, kept
+    only in "rough sync") hash differently and would otherwise leave the
+    baseline permanently unmeasurable."""
+    cursor = await conn.execute(
+        "SELECT algorithm_code FROM inactive_algorithms "
+        "WHERE agent_id = ? AND challenge = ?",
+        (agent_id, challenge),
+    )
+    target = code_fingerprint(algorithm_code)
+    for row in await cursor.fetchall():
+        if code_fingerprint(row["algorithm_code"] or "") == target:
+            return True
+    return False
+
+
+async def count_inactive_from_agent(
+    conn: aiosqlite.Connection, agent_id: str, challenge: str
+) -> int:
+    """Number of unconsumed inactive-pool rows on `challenge` attributed to
+    `agent_id`. Used by the admin seeder's idempotency guard: a synthetic
+    source agent (e.g. tig-foundation) that still has an unconsumed seed for
+    this challenge shouldn't be re-seeded, so a repeated `setup.py create`
+    doesn't pile up duplicate mainnet seeds in the pool. (Consume-once
+    semantics mean a genuinely-adopted seed leaves no row, so the next create
+    correctly re-seeds.)"""
+    row = await (await conn.execute(
+        "SELECT COUNT(*) AS c FROM inactive_algorithms "
+        "WHERE agent_id = ? AND challenge = ?",
+        (agent_id, challenge),
+    )).fetchone()
+    return row["c"]
 
 
 async def trajectory_counts(
@@ -1169,7 +2006,8 @@ async def get_inactive_with_deactivations(
     conn: aiosqlite.Connection, challenge: str
 ) -> list[dict]:
     cursor = await conn.execute(
-        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, ia.score, "
+        "SELECT ia.id, ia.agent_id, ia.challenge, ia.algorithm_code, ia.kernel_code, "
+        "  ia.algorithm_files, ia.score, "
         "  ia.trajectory_id, ia.program_id, ia.experiment_id, "
         "  COALESCE(t.num_deactivations, 1) as num_deactivations "
         "FROM inactive_algorithms ia "
@@ -1206,6 +2044,16 @@ async def create_trajectory(
         "VALUES (?, ?, ?, 'active', ?, ?)",
         (trajectory_id, challenge, started_at, current_score, num_agents),
     )
+
+
+async def get_trajectory(
+    conn: aiosqlite.Connection, trajectory_id: str
+) -> dict | None:
+    cur = await conn.execute(
+        "SELECT * FROM trajectories WHERE id = ?", (trajectory_id,)
+    )
+    row = await cur.fetchone()
+    return dict(row) if row else None
 
 
 async def deactivate_trajectory(
@@ -1293,8 +2141,8 @@ async def deactivate_inactive_agent_trajectories(
         # feasible best. An infeasible entry would hand broken code to whoever
         # adopts it and spread the infeasible-floor trap. trajectory_bests is
         # normally feasible-only, but legacy rows / the adopted floor mean we
-        # can't assume it. deposit_inactive applies the extra single-edit /
-        # negative-score guard on top.
+        # can't assume it. deposit_inactive applies the extra negative-score
+        # guard on top.
         if best is not None:
             if best.get("feasible"):
                 await deposit_inactive(
@@ -1414,3 +2262,34 @@ async def get_trajectory_score_history(
             best = score
             steps.append({"score": score, "created_at": row["created_at"]})
     return steps
+
+
+# ── Contributor configs (hosted-console storage) ──
+
+
+async def get_contributor_config(
+    conn: aiosqlite.Connection, username: str,
+) -> dict | None:
+    """The contributor's stored fleet config row, or None before first save.
+    `config_json` is returned as stored (a JSON string or NULL) — the API
+    layer owns encoding/decoding and validation."""
+    cursor = await conn.execute(
+        "SELECT config_json, tacit_text, updated_at "
+        "FROM contributor_configs WHERE username = ?",
+        (username,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def set_contributor_config(
+    conn: aiosqlite.Connection, username: str,
+    config_json: str | None, tacit_text: str | None, updated_at: str,
+) -> None:
+    """Full-row upsert. Partial-update semantics (PUT with only `config` or
+    only `tacit`) are the caller's job: read the existing row, merge, write."""
+    await conn.execute(
+        "INSERT OR REPLACE INTO contributor_configs "
+        "(username, config_json, tacit_text, updated_at) VALUES (?, ?, ?, ?)",
+        (username, config_json, tacit_text, updated_at),
+    )

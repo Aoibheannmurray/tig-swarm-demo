@@ -1,0 +1,29 @@
+{
+  "name": "tig-swarm-control-ui",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "postbuild": "python3 ../scripts/ui_buildstamp.py --write",
+    "build:fast": "vite build",
+    "postbuild:fast": "python3 ../scripts/ui_buildstamp.py --write",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tsconfig/svelte": "^5.0.4",
+    "svelte": "^5.15.0",
+    "svelte-check": "^4.1.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "postcss": "^8.5.18"
+  }
+}

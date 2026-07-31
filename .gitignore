@@ -1,5 +1,9 @@
 node_modules/
 dist/
+# Exception: ship the prebuilt companion UI so contributors need no Node/npm.
+# (dashboard/dist stays ignored — it reaches users via the server Docker image.)
+!control-ui/dist/
+!control-ui/dist/**
 target/
 .venv/
 __pycache__/
@@ -9,20 +13,32 @@ __pycache__/
 .c3
 .c3.local
 c3-artifacts/
-job_*/
-# …but the job_scheduling challenge's seed/algorithm dir is real source, not a job artifact.
-!initial_algorithms/job_scheduling/
-fly.toml
-Procfile
-runtime.txt
+# C3 job artifact dirs, ROOT-ANCHORED. Unanchored (`job_*/`) this also matched
+# `src/job_scheduling/` and `initial_algorithms/job_scheduling/` — real source
+# — so new files under them were silently unstageable: `git add` reported no
+# error and staged nothing. C3 stages jobs in a tempdir (c3_compute.py), so the
+# only place a stray `job_<id>/` lands is a manual `c3 pull` at the repo root.
+/job_*/
 server/static/
 
 # Per-deploy / per-contributor state — never committed
 .swarm-cache.json
-swarm.admin.json
+# Globbed, not pinned to the exact name: these hold admin_key / swarm_password,
+# and the copies people actually make ("swarm.admin copy.json", a dated backup
+# before a `setup.py switch`) were landing outside an exact-match rule — one
+# `git add -A` from being committed credentials.
+swarm.admin*.json
 fleet.config.json
+.fleet-cache.json
+.companion-port.json
+secrets.local.json
 agent.config.json
-swarm.config.json
+# Fleet-wide C3 slot-pool coordination dir (c3_pool.py) — runtime state
+.c3-pool/
+# Hosted runner (runner/) local state — never committed
+runner/data/
+runner/workspaces/
+swarm.config*.json
 worktrees/
 CHALLENGE.md
 data/
@@ -31,15 +47,23 @@ datasets/*/generated/
 # is the contributor's filesystem. The shared repo doesn't need them.
 tacit_knowledge.md
 tacit_knowledge_*.md
-tacit_knowledge_personal.md
 
-src/*/algorithm/mod.rs
-src/*/algorithm/kernels.cu
+# Whole dir: agents may write multi-file helpers (mod.rs, kernels.cu, track_a.rs, …)
+src/*/algorithm/
 tig-monorepo/
 prompts_log/
 feedback/
 
-# Local planning/scratch docs, not part of the shared repo
-multi_agent_docker_plan.md
-DASHBOARD_PLAN.md
-SANDBOX_SPEC.md
+# Local-only artifacts (backups, C3 env) — never committed
+.c3.env
+*.bak
+*.bak.*
+# c3_tig_bench.py's default --out lives here (reports/tig_bench.json), and a
+# GPU verify run is ~200 KB of raw per-nonce results. Machine-specific
+# measurements, not shared state.
+reports/
+
+# Per-user Claude Code settings — the swarm writes its own sandbox settings
+# into worktrees (.swarm/sandbox-settings.json), so nothing here is shared.
+.claude/settings.json
+.claude/settings.local.json

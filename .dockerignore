@@ -1,9 +1,26 @@
 target/
 datasets/
-node_modules/
+**/node_modules
 *.db
 *.db-journal
 .git/
 .railway/
-__pycache__/
+**/__pycache__
 dashboard/dist/
+# Development-only symlink to dashboard/dist. The container receives the
+# dashboard from its dedicated build stage, so copying this path would make
+# /app/static a symlink (or a regular file on Windows) instead of a directory.
+server/static
+# Local swarm state and agent output are never inputs to any image.
+worktrees/
+local/
+reports/
+prompts_log/
+feedback/
+*.pyc
+*.bak
+*.bak.*
+swarm.admin*.json
+fleet.config.json
+.fleet-cache.json
+.swarm-cache.json

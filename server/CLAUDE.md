@@ -1,0 +1,46 @@
+# CLAUDE.md — server/ (coordination server)
+
+The per-swarm coordination server: stores scores/config, serves the leaderboard
+and dashboard, and pushes live updates over WebSocket. **One independent
+deployment per swarm** — no multi-tenancy.
+
+## Stack & run
+
+- FastAPI + uvicorn + aiosqlite (SQLite). Deps in `server/requirements.txt`
+  (separate from the repo-root `requirements.txt`).
+- Run locally: `pip install -r requirements.txt && uvicorn server:app`
+  (uvicorn's default port 8000; the container listens on 8080 via
+  `entrypoint.sh`). `DATA_DIR` sets where `swarm.db` lives — defaults to
+  this dir; in prod it's a Railway volume.
+- **Self-contained.** The production `Dockerfile` at the repo root copies
+  `server/` plus the built dashboard and the control-ui admin/join bundles —
+  nothing else. Don't add imports reaching into `scripts/` or the repo
+  root — they won't exist in the image.
+
+## Layout
+
+- `server.py` — FastAPI app + routes; `app` is the ASGI entry point.
+  GET /api/state dispatches to `_agent_state` / `_dashboard_state`;
+  POST /api/iterations is an orchestrator over phase helpers.
+- `trajectory_reset.py` — the stagnation-driven trajectory-reset state
+  machine (deactivate → adopt/fresh-start → deposit). Runs in one
+  BEGIN IMMEDIATE transaction on an injected conn; called from the
+  /api/state agent view.
+- `db.py` — SQLite schema/access; config applied from env on first boot.
+  Schema changes are numbered `Migration`s recorded in the `schema_version`
+  table (see `MIGRATIONS`): append with the next number, **never renumber or
+  edit a released one** — deployed DBs record it as applied and won't re-run
+  it. Recurring boot-time invariants (e.g. the authored-seed dedup) are
+  deliberately *not* migrations; they run every boot.
+- `models.py` / `api_models.py` — internal and API data shapes.
+- `challenges.py`, `tiers.py`, `dedup.py`, `names.py`, `ws_events.py`,
+  `mainnet_seed.py`, `seed_diversity.py` — domain logic. `entrypoint.sh` —
+  container start.
+- `swarm.db` — local dev DB, created in this dir (gitignored).
+
+## Tests
+
+No pytest — `test_*.py` are self-running scripts (`if __name__ == "__main__":
+asyncio.run(...)`). Each sets `DATA_DIR` to a temp dir *before* importing server
+modules, so it runs hermetically. Run one directly, e.g.
+`python server/test_infeasible_floor_trap.py`.

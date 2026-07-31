@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Lint (pyflakes rules) + syntax
+        run: |
+          # `F` is the pyflakes rule set: undefined names, unused imports and
+          # locals. Deliberately narrow — this gate exists to catch code that
+          # cannot work, not to enforce style, so it stays quiet enough that a
+          # red run always means something. `# noqa` is honoured (run.py's
+          # import probes rely on that).
+          pip install ruff
+          ruff check --select F \
+            --exclude control-ui,dashboard,node_modules,tig-monorepo,worktrees .
+          # compileall reaches files no test imports, where a syntax error
+          # would otherwise only surface for whoever runs that path.
+          python -m compileall -q scripts server hostadmin runner *.py
+
+      - name: Script tests (stdlib only)
+        run: |
+          for f in scripts/test_*.py; do
+            echo "=== $f"
+            python "$f"
+          done
+      - name: Server + companion tests
+        run: |
+          # httpx: test-only dep — FastAPI's TestClient needs it; without it
+          # test_control_server.py silently skips its HTTP checks.
+          pip install -r server/requirements.txt -r control-ui-requirements.txt httpx
+          for f in server/test_*.py test_control_server.py; do
+            echo "=== $f"
+            python "$f"
+          done
+
+  rust-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Seed algorithms (src/*/algorithm is gitignored)
+        run: python3 scripts/seed_algorithms.py
+      # GPU challenges (hypergraph, neuralnet_optimizer, vector_search) need
+      # nvcc and are excluded here.
+      - name: cargo check each CPU challenge
+        run: |
+          for ch in satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage; do
+            echo "=== $ch"
+            cargo check --features solver,$ch
+          done
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  control-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: control-ui/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

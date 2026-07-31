@@ -1,0 +1,6 @@
+# Python deps for the local control-plane companion (control_server.py),
+# launched via `python control_server.py` or `python run.py --ui`.
+# These mirror the server's web stack; install with:
+#     pip install -r control-ui-requirements.txt
+fastapi==0.115.0
+uvicorn[standard]==0.30.0

@@ -13,11 +13,13 @@ with ``input_tokens`` and ``output_tokens`` (both int, 0 when unavailable).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -31,6 +33,36 @@ DEFAULT_MODELS = {
 
 VENICE_API_BASE = "https://api.venice.ai/api/v1"
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+
+# Hostnames that can only mean "a machine on this network" — the rest is
+# decided by the address itself (see is_local_api_base).
+_LOCAL_HOST_SUFFIXES = (".local", ".internal", ".lan", ".home.arpa")
+
+
+def is_local_api_base(api_base: str | None) -> bool:
+    """Does this OpenAI-compatible endpoint live on the caller's own machine
+    or private network?
+
+    Self-hosted inference servers (llama.cpp, vLLM, Ollama, LM Studio) ship
+    with no authentication by default, so a missing API key is the normal
+    case for them and a misconfiguration for a public provider. Callers use
+    this to tell those two apart instead of refusing to launch either.
+    """
+    if not api_base:
+        return False
+    raw = api_base.strip()
+    if "://" not in raw:
+        raw = "http://" + raw  # bare "127.0.0.1:8000" has no scheme to split on
+    host = (urllib.parse.urlsplit(raw).hostname or "").strip().lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(_LOCAL_HOST_SUFFIXES):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # a public DNS name
+    return ip.is_loopback or ip.is_private or ip.is_link_local
 
 Usage = dict[str, int]  # {"input_tokens": N, "output_tokens": N}
 
@@ -64,8 +96,12 @@ _MODEL_MAX_TOKENS: list[tuple[str, int]] = [
 ]
 
 
+def _base_model_name(model: str) -> str:
+    return model.rsplit("/", 1)[-1]
+
+
 def _max_tokens_for_model(model: str) -> int:
-    m = model.lower()
+    m = _base_model_name(model).lower()
     for prefix, limit in _MODEL_MAX_TOKENS:
         if m.startswith(prefix):
             return limit
@@ -141,9 +177,69 @@ def _get_json(url: str, headers: dict) -> dict:
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
 
 
-# CLI-auth providers have no HTTP models endpoint to query — they accept
-# whatever model IDs their CLI knows about.
+# CLI-auth providers have no HTTP models endpoint to query. Codex does expose
+# the model catalog it currently sees through `codex debug models`; Claude has
+# no equivalent machine-readable command.
 _CLI_PROVIDERS = ("claude-code", "claude-code-agentic", "codex-agentic")
+
+
+def _parse_codex_model_catalog(raw: str) -> list[str]:
+    """Return visible Codex model slugs in the CLI's preferred order."""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Codex CLI returned invalid model JSON: {exc}") from None
+    entries = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise RuntimeError("Codex CLI model catalog has no `models` list")
+
+    ranked: list[tuple[int, int, str]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or entry.get("visibility", "list") != "list":
+            continue
+        slug = entry.get("slug")
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        priority = entry.get("priority")
+        ranked.append((priority if isinstance(priority, int) else 1_000_000,
+                       index, slug.strip()))
+
+    # Preserve the best-ranked occurrence if a malformed catalog repeats a slug.
+    seen: set[str] = set()
+    models: list[str] = []
+    for _, _, slug in sorted(ranked):
+        if slug not in seen:
+            seen.add(slug)
+            models.append(slug)
+    if not models:
+        raise RuntimeError("Codex CLI model catalog contains no visible models")
+    return models
+
+
+def _list_codex_cli_models() -> list[str]:
+    """Ask the installed Codex CLI for its refreshed, account-aware catalog."""
+    # Reuse the runner's cross-platform CLI resolution, including CODEX_CLI and
+    # Windows npm .cmd shims, so setup and actual fleet execution see one binary.
+    from agentic_backends import CodexAgent, _scrubbed_env, _wrap_for_windows
+
+    codex_bin = CodexAgent().resolve_cli()
+    if codex_bin is None:
+        raise RuntimeError("Codex CLI is not installed or is not on PATH")
+    cmd = _wrap_for_windows([codex_bin, "debug", "models"])
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+            env=_scrubbed_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"could not run `codex debug models`: {exc}") from None
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-800:]
+        raise RuntimeError(
+            f"`codex debug models` exited {result.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+    return _parse_codex_model_catalog(result.stdout)
 
 
 def list_models(
@@ -156,15 +252,18 @@ def list_models(
     providers require `api_key`; OpenRouter's catalog is public so the key
     is optional there.
 
-    Raises ``ValueError`` for the CLI-auth providers (no endpoint exists) and
+    For Codex CLI, asks the installed CLI for its current model catalog.
+    Raises ``ValueError`` for Claude CLI providers (no endpoint exists) and
     ``RuntimeError`` (with the HTTP status / body) on an API error — typically
     a missing or invalid key."""
+    if provider == "codex-agentic":
+        return _list_codex_cli_models()
     if provider in _CLI_PROVIDERS:
         raise ValueError(
             f"{provider} authenticates through its own CLI, not an HTTP API, "
             "so there is no models endpoint to query. It accepts any model ID "
-            "the CLI knows — for the Claude CLI see `claude --help`; for the "
-            "Codex CLI accept the wizard's empty default and it picks its own."
+            "the CLI knows; choose one of the recommended models or enter a "
+            "custom model ID."
         )
 
     if provider == "google":
@@ -229,7 +328,21 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> tuple[
         },
     )
     usage = data.get("usage") or {}
-    return data["content"][0]["text"], {
+    # Guard the body shape: an empty `content` list (e.g. the model stopped
+    # before emitting any block, or the request hit max_tokens mid-thought)
+    # would otherwise surface as an opaque IndexError. Mirror the OpenAI
+    # path: raise an informative error the caller logs and retries.
+    text = ""
+    for block in data.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text") or ""
+            break
+    if not text.strip():
+        stop = data.get("stop_reason") or "unknown"
+        raise RuntimeError(
+            f"Anthropic returned an empty completion (stop_reason={stop})"
+        )
+    return text, {
         "input_tokens": usage.get("input_tokens", 0),
         "output_tokens": usage.get("output_tokens", 0),
     }
@@ -237,11 +350,41 @@ def call_anthropic(system: str, prompt: str, model: str, api_key: str) -> tuple[
 
 def _needs_new_api(model: str) -> bool:
     """Models that require max_completion_tokens and developer role."""
-    if re.match(r"^o\d", model, re.IGNORECASE):
+    base_model = _base_model_name(model)
+    if re.match(r"^o\d", base_model, re.IGNORECASE):
         return True
-    if re.match(r"^gpt-5", model, re.IGNORECASE):
+    if re.match(r"^gpt-5", base_model, re.IGNORECASE):
         return True
     return False
+
+
+def _is_max_tokens_unsupported(error: str) -> bool:
+    return (
+        "Unsupported parameter" in error
+        and "'max_tokens'" in error
+        and "max_completion_tokens" in error
+    )
+
+
+def _openai_chat_body(
+    system: str,
+    prompt: str,
+    model: str,
+    token_param: str,
+    new_api: bool,
+) -> dict:
+    messages = (
+        [{"role": "developer", "content": system},
+         {"role": "user", "content": prompt}]
+        if new_api else
+        [{"role": "system", "content": system},
+         {"role": "user", "content": prompt}]
+    )
+    return {
+        "model": model,
+        "messages": messages,
+        token_param: _max_tokens_for_model(model),
+    }
 
 
 def call_openai(
@@ -258,25 +401,29 @@ def call_openai(
     )
     new_api = _needs_new_api(model)
     token_param = "max_completion_tokens" if new_api else "max_tokens"
-    messages = (
-        [{"role": "developer", "content": system},
-         {"role": "user", "content": prompt}]
-        if new_api else
-        [{"role": "system", "content": system},
-         {"role": "user", "content": prompt}]
-    )
-    data = _post_json(
-        chat_url,
-        {
-            "model": model,
-            "messages": messages,
-            token_param: _max_tokens_for_model(model),
-        },
-        {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
+    # No key, no Authorization header: a self-hosted server that checks
+    # nothing would still see `Bearer ` and some reject the empty value
+    # outright. Same rule list_models applies.
+    headers = {"Content-Type": "application/json",
+               **({"Authorization": f"Bearer {api_key}"} if api_key else {})}
+    try:
+        data = _post_json(
+            chat_url,
+            _openai_chat_body(system, prompt, model, token_param, new_api),
+            headers,
+        )
+    except RuntimeError as e:
+        # Belt-and-braces behind the _base_model_name fix above: a gateway may
+        # route to a max_completion_tokens-only model under an id whose prefix
+        # we don't recognise. Retry once on the provider's own complaint
+        # rather than failing the iteration.
+        if token_param != "max_tokens" or not _is_max_tokens_unsupported(str(e)):
+            raise
+        data = _post_json(
+            chat_url,
+            _openai_chat_body(system, prompt, model, "max_completion_tokens", new_api),
+            headers,
+        )
     # OpenRouter (and some gateways) return provider/moderation errors in the
     # body with HTTP 200 rather than a 4xx/5xx, so _post_json doesn't raise.
     # Surface them as a real error instead of silently treating it as empty.
@@ -374,7 +521,24 @@ def call_google(system: str, prompt: str, model: str, api_key: str) -> tuple[str
         {"Content-Type": "application/json"},
     )
     um = data.get("usageMetadata") or {}
-    return data["candidates"][0]["content"]["parts"][0]["text"], {
+    # Guard the body shape: a safety-blocked prompt has no candidates at all,
+    # and a blocked/empty candidate can lack content.parts — either way the
+    # old chained indexing raised an opaque IndexError/KeyError. Mirror the
+    # OpenAI path: raise an informative error the caller logs and retries.
+    candidates = data.get("candidates") or []
+    candidate = candidates[0] if candidates else {}
+    parts = (candidate.get("content") or {}).get("parts") or []
+    text = "".join(
+        p.get("text", "") for p in parts if isinstance(p, dict)
+    )
+    if not text.strip():
+        finish = candidate.get("finishReason") or "unknown"
+        detail = f"finishReason={finish}"
+        block = (data.get("promptFeedback") or {}).get("blockReason")
+        if block:
+            detail += f", blockReason={block}"
+        raise RuntimeError(f"Google returned an empty completion ({detail})")
+    return text, {
         "input_tokens": um.get("promptTokenCount", 0),
         "output_tokens": um.get("candidatesTokenCount", 0),
     }

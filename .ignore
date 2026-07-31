@@ -1,30 +1,25 @@
-# Files irrelevant to the agent optimization loop
-# (infra, inactive challenges, build artifacts)
+# Files irrelevant to BOTH deployables — kept out of the `railway up` upload
+# snapshot (the Railway CLI honors .ignore). Only genuine build artifacts, the
+# monorepo mirror, long-form docs, and datasets.
 #
-# WARNING: Do NOT add Dockerfile*, dashboard/, or server/ here.
-# Railway CLI respects .ignore when building its upload snapshot,
-# so excluding them breaks `railway up` deploys.
-
+# WARNING: the RUNNER service (runner/Dockerfile does `COPY . .`) needs the
+# FULL repo at runtime — run.py, scripts/, setup.py, hostadmin/, src/,
+# Cargo.*, initial_algorithms/ — because it runs whole fleets per contributor.
+# Do NOT re-add those here or `railway up` for the runner ships a broken image.
+# The server image only COPYs server/ + initial_algorithms/ + built dist, so
+# the extra files in the upload are harmless (and unused) for it.
 docs/
 tig-monorepo/
 target/
 datasets/
-initial_algorithms/
-
-scripts/run_loop.py
-scripts/llm_backends.py
-scripts/admin_reset_challenge.py
-scripts/dump_trajectories.py
-
-ARCHITECTURE.md
-README.md
-AGENTS.md.template
-Cargo.lock
-setup.py
-
-src/energy_arbitrage/
-src/vehicle_routing/
-src/knapsack/
-src/job_scheduling/
-src/satisfiability/
-src/hypergraph/
+# Local state and generated agent output are not image inputs. Most are also
+# covered by .gitignore, but listing them here keeps Railway snapshots small
+# even if uploader ignore precedence changes.
+worktrees/
+local/
+reports/
+prompts_log/
+feedback/
+*.db
+*.db-journal
+swarm.admin*.json

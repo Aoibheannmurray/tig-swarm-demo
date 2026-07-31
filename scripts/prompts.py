@@ -5,6 +5,9 @@ All build_*_prompt functions live here, plus hypothesis parsing.
 
 from __future__ import annotations
 
+import json
+import re
+
 from challenge_files import is_stub_code, read_tacit_knowledge
 
 
@@ -22,6 +25,32 @@ from challenge_files import is_stub_code, read_tacit_knowledge
 #   Uniform output format at the cost of one extra LLM call per
 #   trajectory reset.
 DRIVER_DISTILL_FOR_AGENTIC = False
+
+
+def _tacit_write_enabled(config: dict) -> bool:
+    """Per-agent kill switch for tacit-knowledge writing (mirrors
+    `run_loop.tacit_write_enabled`). Defaults to True when `tacit_write`
+    is absent. Accepts JSON booleans and the string forms
+    "false"/"0"/"no"/"off" (case-insensitive)."""
+    value = config.get("tacit_write", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
+
+
+def _failed_attempts_enabled(config: dict) -> bool:
+    """Whether failure retrospectives should be produced and posted to the
+    server's failed-attempts archive (mirrors
+    `run_loop.failed_attempts_enabled`). Requires BOTH the swarm-wide
+    `failed_attempts_archive` toggle (synced from /api/swarm_config,
+    default off) AND the per-agent `failed_attempts_write` opt-out to be
+    true (default true, same string forms as `tacit_write`)."""
+    if not config.get("failed_attempts_archive"):
+        return False
+    value = config.get("failed_attempts_write", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
 
 
 # ── Strategy tags ──────────────────────────────────────────────────
@@ -130,6 +159,67 @@ def _format_inspiration(state: dict, is_gpu: bool, headline: str) -> list[str]:
     return out
 
 
+# Neutral framing is the point: the archive is served as "prior attempts and
+# outcomes", never as a ban list — a failed idea may work with a key
+# modification, so the agent is invited to hypothesize a variant.
+_FAILED_ATTEMPTS_HEADER = (
+    "Prior attempts and their outcomes (informational — NOT prohibitions):\n"
+    "You tried the approaches below on this challenge before and they did not\n"
+    "improve your score at the time. This is context, not a ban list — an idea\n"
+    "that failed once may succeed with a key modification, different\n"
+    "parameters, or against your current (different) code. Consider\n"
+    "hypothesizing a MODIFIED or SIMILAR approach that addresses what appears\n"
+    "to have gone wrong, or take a different direction if you have a stronger\n"
+    "idea."
+)
+
+
+def _format_failed_attempts(state: dict) -> list[str]:
+    """Render the server's failed_attempts hint payload (the agent's OWN
+    archived retrospectives/lessons + recent rejected iterations)."""
+    fa = state.get("failed_attempts") or {}
+    retros = fa.get("retrospectives") or []
+    rejected = fa.get("recent_rejected") or []
+    if not retros and not rejected:
+        return []
+    parts = ["\n" + _FAILED_ATTEMPTS_HEADER]
+    for r in retros:
+        if r.get("kind") == "lesson":
+            lesson = (r.get("lesson") or "").strip()
+            if lesson:
+                parts.append(f"\nLesson you distilled earlier:\n  {lesson}")
+            continue
+        lines = ["\nRetrospective from a previous trajectory of yours:"]
+        for label, key in (
+            ("Approach", "approach_summary"),
+            ("What was tried", "what_was_tried"),
+            ("Observed outcome", "observed_outcome"),
+            ("Possible reasons", "possible_reasons"),
+        ):
+            value = (r.get(key) or "").strip()
+            if value:
+                lines.append(f"  {label}: {value}")
+        if len(lines) > 1:
+            parts.append("\n".join(lines))
+    if rejected:
+        lines = ["\nRecent iterations of yours that did not improve the score:"]
+        for e in rejected:
+            tag = e.get("strategy_tag") or "?"
+            title = e.get("title") or "?"
+            score = e.get("score")
+            delta = e.get("delta_vs_trajectory_best_pct")
+            desc = f"  - [{tag}] {title}"
+            if score is not None:
+                desc += f" — score {score}"
+            if delta is not None:
+                desc += f", {delta}% vs trajectory best"
+            if not e.get("feasible", True):
+                desc += " (infeasible)"
+            lines.append(desc)
+        parts.append("\n".join(lines))
+    return parts
+
+
 def build_hypothesis_user_prompt(
     state: dict, config: dict, *, role: str = "explorer",
     assigned_tag: str | None = None,
@@ -187,6 +277,8 @@ def build_hypothesis_user_prompt(
             parts.extend(_format_inspiration(
                 state, is_gpu, "Study this approach for ideas:",
             ))
+    elif hint == "failed_attempts":
+        parts.extend(_format_failed_attempts(state))
 
     reset = state.get("trajectory_reset")
     if reset:
@@ -245,8 +337,39 @@ _TACIT_DISTILL_SYSTEM = (
 )
 
 
+# Archive variant: the lesson rules above PLUS a structured retrospective of
+# the dying trajectory, for the server's failed-attempts archive. Delimited
+# line-prefix format (not JSON) — matches the TITLE:/DESCRIPTION: parsing
+# style used everywhere else and survives models that wrap JSON in prose.
+_TACIT_DISTILL_ARCHIVE_SYSTEM = (
+    _TACIT_DISTILL_SYSTEM
+    + "\n\n"
+    "ADDITIONALLY, after the lesson line, write a structured retrospective "
+    "of this dying trajectory. Unlike the lesson, the retrospective MAY be "
+    "challenge-specific and concrete — it is stored privately for YOUR "
+    "future self on this challenge, as a record of \"I tried this and it "
+    "didn't work\", NOT as a prohibition list.\n\n"
+    "Full output format (five labeled sections, each value may span "
+    "multiple lines until the next label; ~100 words per section, total "
+    "under ~400 words):\n"
+    "LESSON: <the `- LLM: ` line as specified above, or SKIP>\n"
+    "APPROACH_SUMMARY: <1-3 sentences: the overall strategy this "
+    "trajectory pursued>\n"
+    "WHAT_WAS_TRIED: <the concrete variations attempted, most recent "
+    "first>\n"
+    "OBSERVED_OUTCOME: <what the scores/diagnostics actually did>\n"
+    "POSSIBLE_REASONS: <your best hypotheses for WHY it did not work>\n\n"
+    "The LESSON and retrospective skips are independent: LESSON may be "
+    "SKIP while the retrospective is still worth writing, and vice versa. "
+    "If the trajectory has too little material for ANY retrospective, "
+    "output RETROSPECTIVE_SKIP alone on its own line instead of the four "
+    "retrospective sections."
+)
+
+
 def build_tacit_distillation_prompts(
     state: dict, config: dict, current_code: str, existing_tacit: str,
+    *, include_retrospective: bool = False,
 ) -> tuple[str, str]:
     """Build (system, user) prompts for the tacit-knowledge distillation
     call. Fired by the driver after the iteration that's about to trigger
@@ -297,6 +420,20 @@ def build_tacit_distillation_prompts(
         if current_code else "Current algorithm: (none on disk)"
     )
 
+    if include_retrospective:
+        final_instruction = (
+            "Now: produce the five labeled sections (LESSON, "
+            "APPROACH_SUMMARY, WHAT_WAS_TRIED, OBSERVED_OUTCOME, "
+            "POSSIBLE_REASONS) from the failed hypotheses above. LESSON "
+            "may be SKIP; output RETROSPECTIVE_SKIP alone if the "
+            "trajectory has too little material for a retrospective."
+        )
+    else:
+        final_instruction = (
+            "Now: write one `- LLM: ` line distilling a transferable lesson "
+            "from the failed hypotheses above, or output SKIP if nothing new "
+            "and transferable has emerged."
+        )
     user = (
         "Trajectory summary\n"
         f"- Best score on this trajectory: {traj_best}\n"
@@ -309,11 +446,13 @@ def build_tacit_distillation_prompts(
         "\n"
         f"{code_block}\n"
         "\n"
-        "Now: write one `- LLM: ` line distilling a transferable lesson "
-        "from the failed hypotheses above, or output SKIP if nothing new "
-        "and transferable has emerged."
+        f"{final_instruction}"
     )
-    return _TACIT_DISTILL_SYSTEM, user
+    system = (
+        _TACIT_DISTILL_ARCHIVE_SYSTEM if include_retrospective
+        else _TACIT_DISTILL_SYSTEM
+    )
+    return system, user
 
 
 def parse_tacit_distillation(response: str) -> str | None:
@@ -336,6 +475,80 @@ def parse_tacit_distillation(response: str) -> str | None:
     return None
 
 
+# Per-field clamp for retrospective sections (mirrors the server's
+# MAX_FAILURE_FIELD_LEN in server/models.py — the server clamps again, this
+# just avoids shipping pathological output over the wire).
+_RETRO_FIELD_MAX = 2000
+_RETRO_HEADERS = {
+    "APPROACH_SUMMARY": "approach_summary",
+    "WHAT_WAS_TRIED": "what_was_tried",
+    "OBSERVED_OUTCOME": "observed_outcome",
+    "POSSIBLE_REASONS": "possible_reasons",
+}
+
+
+def parse_failure_retrospective(response: str) -> dict | None:
+    """Parse the archive-distillation output into
+    {approach_summary, what_was_tried, observed_outcome, possible_reasons,
+    lesson} — `lesson` is the `- LLM: …` line or None (LESSON: SKIP).
+
+    Returns None when the model output RETROSPECTIVE_SKIP or produced no
+    retrospective sections at all (the lesson, if any, is then recoverable
+    via `parse_archive_lesson` — the two skips are independent). Values
+    accumulate across lines until the next label; each is clamped to
+    _RETRO_FIELD_MAX chars."""
+    if not response:
+        return None
+    fields: dict[str, list[str]] = {}
+    lesson_raw: str | None = None
+    current: str | None = None
+    for line in response.strip().splitlines():
+        s = line.strip()
+        if s.upper() == "RETROSPECTIVE_SKIP":
+            return None
+        matched = False
+        for header, key in _RETRO_HEADERS.items():
+            if s.upper().startswith(header + ":"):
+                current = key
+                fields[key] = [s[len(header) + 1:].strip()]
+                matched = True
+                break
+        if matched:
+            continue
+        if s.upper().startswith("LESSON:"):
+            lesson_raw = s[len("LESSON:"):].strip()
+            current = None
+            continue
+        if current and s:
+            fields[current].append(s)
+    if not fields:
+        return None
+    out = {
+        key: " ".join(v for v in values if v)[:_RETRO_FIELD_MAX]
+        for key, values in fields.items()
+    }
+    if not any(out.values()):
+        return None
+    for key in _RETRO_HEADERS.values():
+        out.setdefault(key, "")
+    out["lesson"] = parse_tacit_distillation(lesson_raw) if lesson_raw else None
+    return out
+
+
+def parse_archive_lesson(response: str) -> str | None:
+    """Extract the `- LLM: …` lesson from archive-format distillation
+    output (the `LESSON:` label), independent of whether the retrospective
+    was skipped. Falls back to plain `parse_tacit_distillation` for a
+    model that ignored the labels and answered in the bare format."""
+    if not response:
+        return None
+    for line in response.strip().splitlines():
+        s = line.strip()
+        if s.upper().startswith("LESSON:"):
+            return parse_tacit_distillation(s[len("LESSON:"):].strip())
+    return parse_tacit_distillation(response)
+
+
 # ── Code generation prompts ────────────────────────────────────────
 
 # Rust guardrails appended to every code-generation / compile-fix system
@@ -348,9 +561,14 @@ RUST RULES (the output is compiled as-is — it MUST build):
 - Available crates: `std` plus `anyhow`, `rand`, `serde`, `serde_json` (already
   in Cargo.toml). Do NOT add any OTHER crate (no rayon, itertools, ndarray, …)
   and do NOT edit `[dependencies]`.
-- KEEP the `use super::*;` import and the other `use` lines the starting file
-  relies on (e.g. `use anyhow::...;`) — dropping a needed import makes the file
-  fail to compile with `E0425: cannot find type ... in this scope`.
+- KEEP the existing `use` lines at the top of the starting file (e.g.
+  `use tig_challenges::...;`, `use anyhow::...;`) — dropping a needed import makes
+  the file fail to compile with `E0425: cannot find type ... in this scope`.
+  In particular `use serde_json::{Map, Value};` is REQUIRED whenever the
+  entry-point signature mentions `&Option<Map<String, Value>>` — never drop
+  it while rewriting the import block. Likewise every `std::collections`
+  type you use (`HashMap`, `VecDeque`, `BinaryHeap`, …) needs its
+  `use std::collections::...;` line in the SAME file that uses it.
 - Keep the EXACT signatures of the harness entry-point function(s) you were
   given and don't rename them: for MOST challenges that is `fn solve_challenge(`
   (call the provided `save_solution` closure to record solutions); for
@@ -449,7 +667,7 @@ GENERAL COMPILE HYGIENE:
   suggests — do NOT rewrite the call into something else.
 - Don't introduce new generics, trait bounds, lifetimes, or macros unless the
   starting code already uses them — they are a common source of errors.
-- Reuse the data structures already imported via `use super::*;`; don't invent
+- Reuse the data structures already imported at the top of the file; don't invent
   types, constants, or functions that aren't defined. A `crate::...::NAME` path
   (or a bare name) that isn't actually declared is `E0425: cannot find
   value/function`. If you need a threshold or hyperparameter, define it as a
@@ -624,7 +842,7 @@ signature/name/visibility change is a compile error:
     ) -> Result<Vec<CudaSlice<f32>>>
 
 State — define ONE struct that implements the provided `OptimizerStateTrait`
-(in scope via `use super::*;`) and derives Clone:
+(in scope via the file's imports) and derives Clone:
 
     #[derive(Clone)]
     struct OptimizerState { /* lr, step count, momentum/variance buffers, ... */ }
@@ -687,27 +905,47 @@ def _rust_rules_block(config: dict) -> str:
     return block
 
 
+def _time_budget_guidance(config: dict) -> str:
+    """Bounding guidance for code prompts: each instance is killed at a hard
+    wall-clock deadline, so solvers must save early and often. The deadline is
+    the HARNESS's job, not the algorithm's: reading the clock inside the
+    algorithm (std::time::Instant / SystemTime) is banned because these
+    algorithms are later ported to the upstream TIG monorepo, whose
+    fuel-instrumented runtime requires deterministic control flow — a
+    clock-gated loop won't survive submission."""
+    timeout = config.get("timeout", 30)
+    if _is_optimizer_hook_challenge(config):
+        return (
+            f"\nPer-instance time budget: {timeout} seconds — the harness-owned training "
+            f"loop is killed at this hard deadline and the best checkpoint it saved is "
+            f"evaluated. Keep your optimizer hooks fast so more epochs fit in the budget; "
+            f"the harness calls save_solution for you (you do NOT call it). Never read the "
+            f"clock inside your hooks (std::time::Instant / SystemTime): these algorithms "
+            f"are ported to the upstream TIG runtime, which requires deterministic, "
+            f"clock-free control flow."
+        )
+    return (
+        f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
+        f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
+        f"keep improving and re-saving — the last saved solution is evaluated. If no "
+        f"solution was saved when the deadline hits, the instance counts as infeasible. "
+        f"Do NOT read the clock (std::time::Instant / SystemTime) or use wall-time as a "
+        f"stopping condition — the harness owns the deadline, and these algorithms are "
+        f"later ported to the upstream TIG runtime, which requires deterministic, "
+        f"clock-free control flow. Bound your search with tunable HYPERPARAMETERS instead "
+        f"(e.g. num_iterations, restarts, no-improvement patience, convergence tolerance), "
+        f"with defaults sized to finish comfortably inside the time budget — the "
+        f"hyperparameter search can then tune them to fill it."
+    )
+
+
 def build_code_system_prompt(
     challenge_md: str, config: dict, *, role: str = "explorer",
 ) -> str:
     challenge = config.get("challenge", "unknown")
     is_gpu = bool(config.get("is_gpu"))
-    timeout = config.get("timeout", 30)
     opt_hooks = _is_optimizer_hook_challenge(config)
-    if opt_hooks:
-        time_guidance = (
-            f"\nPer-instance time budget: {timeout} seconds — the harness-owned training "
-            f"loop is killed at this hard deadline and the best checkpoint it saved is "
-            f"evaluated. Keep your optimizer hooks fast so more epochs fit in the budget; "
-            f"the harness calls save_solution for you (you do NOT call it)."
-        )
-    else:
-        time_guidance = (
-            f"\nPer-instance time budget: {timeout} seconds. Your solver process is killed "
-            f"after this hard deadline. Call save_solution() early with your first feasible solution, then "
-            f"keep improving and re-saving — the last saved solution is evaluated. If no "
-            f"solution was saved when the deadline hits, the instance counts as infeasible."
-        )
+    time_guidance = _time_budget_guidance(config)
     # For exploiters, inject the localized-edit rule between the time budget and
     # the output-format rules so it's read before they start writing.
     if role == "exploiter":
@@ -733,7 +971,7 @@ You are optimizing a Rust+CUDA algorithm for the "{challenge}" GPU challenge.
 {time_guidance}
 
 IMPORTANT RULES:
-- `use super::*;` must remain as the first import in the Rust file.
+- The existing `use` imports at the top of the starting file must remain.
 {entry_rule}
 - Return BOTH files: the complete Rust source AND the complete CUDA kernel source.
 - Separate them with a line containing exactly: // --- kernels.cu ---
@@ -748,9 +986,9 @@ You are optimizing a Rust algorithm for the "{challenge}" challenge.
 
 OUTPUT FORMAT (strict):
 Your response will be written verbatim to mod.rs and compiled. The very first
-character of your response MUST be `u` from `use super::*;`. No preamble, no
+character of your response MUST be `u` from the opening `use` line. No preamble, no
 prose, no markdown fences (```), no commentary before or after the code.
-`use super::*;` must remain as the first import.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
+The starting file's `use` imports must remain.{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
 
 
 def build_code_user_prompt(
@@ -807,16 +1045,378 @@ def build_code_user_prompt(
     if role == "exploiter":
         parts.append(
             "\nApply ONE localized change only — preserve the rest of the code "
-            "and return the COMPLETE file (still starting with `use super::*;`)."
+            "and return the COMPLETE file (still starting with the same `use` imports)."
         )
 
     return "\n".join(parts)
 
 
+# ── Search/replace (soft edit) prompts ─────────────────────────────
+#
+# Used in API (non-agentic) mode for multi-file algorithms, exploiters, and any
+# agent with `edit_mode: search_replace`. Instead of returning whole files the
+# model emits targeted SEARCH/REPLACE blocks (parsed by scripts/search_replace).
+# Far cheaper on output tokens; the apply step is whitespace-tolerant.
+
+SEARCH_REPLACE_FORMAT = """\
+OUTPUT FORMAT (strict) — emit ONLY search/replace blocks, no prose, no fences:
+
+<<<<<<< SEARCH <relpath>
+<exact lines copied from the current file to find>
+=======
+<the replacement lines>
+>>>>>>> REPLACE
+
+Rules:
+- `<relpath>` is the file to edit (e.g. `mod.rs`, `helpers.rs`). Always include it.
+- The SEARCH text must be copied verbatim from the file shown below and be large
+  enough to match EXACTLY ONE place — include a few surrounding lines for context
+  if a snippet would otherwise be ambiguous.
+- Emit one block per distinct edit; you may emit several blocks.
+- Change ONLY what your hypothesis requires; leave everything else untouched.
+- Keep the `use tig_challenges::<challenge>::*;` import and `pub fn help()`
+  intact, and do not change the `solve_challenge` signature (or, for
+  optimizer-hook challenges, the hook signatures)."""
+
+
+def _format_files_for_prompt(files: dict) -> str:
+    parts = []
+    for path in sorted(files):
+        lang = "cuda" if path.endswith((".cu", ".cuh")) else "rust"
+        parts.append(f"### {path}\n```{lang}\n{files[path]}\n```")
+    return "\n\n".join(parts)
+
+
+def build_search_replace_system_prompt(
+    challenge_md: str, config: dict, *, role: str = "explorer",
+) -> str:
+    challenge = config.get("challenge", "unknown")
+    role_steer = ("\n\n" + _role_guidance(role)) if role == "exploiter" else ""
+    rust_rules = _rust_rules_block(config)
+    opt_contract = OPTIMIZER_HOOK_CONTRACT if _is_optimizer_hook_challenge(config) else ""
+    return f"""\
+You are optimizing a Rust algorithm for the "{challenge}" challenge by making
+targeted edits to its source files.
+
+{challenge_md}
+{_time_budget_guidance(config)}{role_steer}
+
+{SEARCH_REPLACE_FORMAT}{opt_contract}{rust_rules}{EVOLUTION_GUIDANCE}"""
+
+
+def build_search_replace_user_prompt(
+    files: dict, hypothesis: dict, config: dict, *, role: str = "explorer",
+    omitted: list | None = None,
+) -> str:
+    title = hypothesis.get("title", "")
+    description = hypothesis.get("description", "")
+    parts = [
+        "Current algorithm source files:\n",
+        _format_files_for_prompt(files),
+    ]
+    if omitted:
+        parts.append(
+            "\nThese files also exist but are NOT shown (too large for this "
+            "request): " + ", ".join(sorted(omitted)) + ". Only emit "
+            "search/replace blocks for the files shown above."
+        )
+    parts.append(
+        f"\nApply this change as search/replace blocks:\n{title}\n{description}"
+    )
+    if role == "exploiter":
+        parts.append(
+            "\nMake ONE small, localized change — the fewest blocks that "
+            "implement the hypothesis. Do not restructure the code."
+        )
+    return "\n".join(parts)
+
+
+def build_search_replace_repair_prompt(
+    files: dict, misses_text: str, config: dict,
+) -> str:
+    return (
+        "Some of your search/replace blocks did not match the current files and "
+        "were skipped. Re-emit ONLY the failed edits, copying the SEARCH text "
+        "EXACTLY from the files below (enough lines to be unique).\n\n"
+        "Failed blocks:\n" + misses_text +
+        "\n\nCurrent files:\n" + _format_files_for_prompt(files) +
+        "\n\n" + SEARCH_REPLACE_FORMAT
+    )
+
+
+# ── Hyperparameter extraction prompts (Phase 3) ────────────────────
+#
+# A separate LLM call, made only when a candidate passes the tuning gate (see
+# docs/hyperparameter-search.md). It reads the *final, compiled* mutated
+# algorithm (ALL its files) and (1) decides which constants become tunable
+# hyperparameters with a search range, (2) suggests a few concrete configs, and
+# (3) makes each chosen constant read from the `Map` argument with the in-code
+# value as default, so an empty Map reproduces the default-score behaviour
+# exactly. The rewrite is expressed as SEARCH/REPLACE edits (multi-file aware),
+# or omitted entirely when the algorithm already applies the Map to a config.
+#
+# Response layout: a JSON spec, then (only if code edits are needed) the
+# separator line below, then SEARCH/REPLACE blocks.
+HYPERPARAM_EDITS_SEP = "// --- hyperparameter edits ---"
+
+
+def build_hyperparameter_system_prompt(challenge_md: str, config: dict) -> str:
+    challenge = config.get("challenge", "unknown")
+    rust_rules = _rust_rules_block(config)
+    return f"""\
+You are tuning a Rust algorithm for the "{challenge}" challenge. The algorithm
+has already been written (possibly across several files); your job is NOT to
+change its logic, but to expose its most impactful magic-number constants as
+searchable hyperparameters so a search can find a good configuration.
+
+Do TWO things:
+
+1. Choose 2-5 constants that are genuinely worth tuning (a learning rate, a
+   temperature, a restart count, a threshold, a population size, …). Prefer
+   FEWER — a smaller search space is searched better. For each, give a sensible
+   search `range` that brackets plausibly-good values, a `scale` ("log" for
+   multiplicative quantities like learning rates / temperatures, "linear"
+   otherwise), a `type` ("float", "int", or "categorical"), and the `default`
+   equal to the constant's CURRENT in-code value.
+
+2. Make each chosen hyperparameter read from the
+   `hyperparameters: &Option<Map<String, Value>>` argument, falling back to its
+   current in-code value when the key is absent. This MUST be behaviour-
+   preserving: an empty or `None` map must reproduce today's behaviour EXACTLY.
+
+   SCOPE RULE — the Map is a function ARGUMENT, in scope ONLY at the entry
+   (`solve_challenge`, or the optimizer hooks). You CANNOT read it from a
+   module-level `const`/`static` or from a helper that isn't given it. So:
+   - If the algorithm ALREADY threads the Map into a config/params object
+     (e.g. `Config::initialize(hyperparameters, …)` that merges Map keys onto a
+     struct), and your chosen names are existing FIELDS of that object, emit NO
+     code edits at all — the spec alone suffices (the existing merge applies
+     them). Make every hyperparameter `name` exactly such a field name.
+   - Otherwise, edit the code so the values enter AT THE ENTRY and reach their
+     use site: read each from the Map into a local at the top of the entry and
+     thread it down (e.g. override a config object's fields right after it is
+     constructed), or — for a constant read directly across modules — set a
+     process-global `OnceLock<…>` at the top of the entry from the Map and read
+     it via an accessor whose fallback equals the old constant. (Exactly one
+     instance runs per process, so a process-global set once at the entry is
+     safe.) Keep edits minimal and behaviour-preserving.
+
+OUTPUT FORMAT (strict):
+First, a single JSON object (you may wrap it in a ```json fence):
+{{
+  "hyperparameters": [
+    {{"name": "learning_rate", "type": "float", "range": [0.0001, 0.1], "scale": "log", "default": 0.01}},
+    {{"name": "n_restarts", "type": "int", "range": [1, 16], "scale": "linear", "default": 4}}
+  ],
+  "suggested_configs": [
+    {{"learning_rate": 0.01, "n_restarts": 4}},
+    {{"learning_rate": 0.03, "n_restarts": 8}}
+  ]
+}}
+Every key used in a suggested config MUST be a declared hyperparameter `name`,
+and every declared hyperparameter MUST appear in every suggested config.
+
+THEN:
+- If the spec alone is enough (the algorithm already applies the Map to those
+  fields), output NOTHING after the JSON.
+- Otherwise, on its own line emit exactly this separator:
+{HYPERPARAM_EDITS_SEP}
+  followed by one or more SEARCH/REPLACE blocks (across any files) in this
+  format — the SEARCH text must be copied verbatim from the files shown and
+  match exactly one place:
+
+<<<<<<< SEARCH <relpath>
+<original lines>
+=======
+<replacement lines>
+>>>>>>> REPLACE
+
+Do not output whole files or markdown fences after the separator — only blocks.{rust_rules}"""
+
+
+def build_hyperparameter_user_prompt(
+    files: dict, config: dict,
+    parent_hyperparameters: dict | None = None,
+    num_suggested_configs: int = 5,
+) -> str:
+    parts: list[str] = []
+    parts.append("Current algorithm source files:\n")
+    parts.append(_format_files_for_prompt(files))
+    if parent_hyperparameters:
+        parts.append(
+            "\nThe parent algorithm in this trajectory was tuned. Its winning "
+            "configuration is a map from track key to that track's best config "
+            "(different tracks may have favoured different values):\n"
+            f"```json\n{json.dumps(parent_hyperparameters, indent=2)}\n```\n"
+            "Use it to inform your choice of hyperparameters, ranges, and "
+            "suggested configs where the code is similar — paying attention to "
+            "how the winning values varied across tracks — but only expose "
+            "constants that actually exist in the algorithm above."
+        )
+    parts.append(
+        f"\nPropose the hyperparameters and exactly {num_suggested_configs} "
+        "suggested configs as JSON. If the algorithm already applies the Map to "
+        "your chosen fields, output JSON only; otherwise add the separator and "
+        "SEARCH/REPLACE blocks."
+    )
+    return "\n".join(parts)
+
+
+_HYPERPARAM_SPEC_RELPATH = ".swarm/hyperparameters.json"
+
+
+def build_hyperparameter_agentic_prompt(
+    config: dict,
+    parent_hyperparameters: dict | None = None,
+    num_suggested_configs: int = 5,
+) -> str:
+    """Extraction task for the agentic backends (Fix 1).
+
+    Unlike the API path (one structured completion parsed by
+    `parse_hyperparameter_response`), the agent edits the algorithm file in its
+    worktree directly and drops the spec as a JSON file we read back.
+    """
+    algo_path = config.get("algorithm_path", "the algorithm file")
+    algo_dir = algo_path.rsplit("/", 1)[0] if "/" in algo_path else "the algorithm directory"
+    parent_block = ""
+    if parent_hyperparameters:
+        parent_block = (
+            "\nThe parent algorithm in this trajectory was tuned; its winning "
+            "configuration is a per-track map (track key -> that track's best "
+            f"config):\n{json.dumps(parent_hyperparameters)}\n"
+            "Use it to inform your choices where the code is similar.\n"
+        )
+    return f"""\
+This is a hyperparameter-extraction task, NOT a new optimization. Do not change \
+the algorithm's logic.
+
+Edit the algorithm's source (files under `{algo_dir}`; the entry is \
+`{algo_path}`) so its most impactful magic-number constants become tunable \
+hyperparameters read from the `hyperparameters: &Option<Map<String, Value>>` \
+argument, each falling back to its CURRENT in-code value when the key is absent. \
+The rewrite MUST be behaviour-preserving: with an empty or None map the \
+algorithm must behave EXACTLY as it does now.
+
+SCOPE RULE: the Map is a function argument, in scope ONLY at the entry \
+(`solve_challenge` / the optimizer hooks) — you cannot read it from a \
+module-level const. If the algorithm already threads the Map into a config (e.g. \
+`Config::initialize(hyperparameters, …)`) and your chosen names are existing \
+fields of that config, you need NO code edits — just write the spec. Otherwise \
+inject at the entry and thread the values to their use sites (override a config \
+object's fields after construction, or set a process-global `OnceLock` at the \
+entry and read it via an accessor whose fallback equals the old const; one \
+instance runs per process, so that is safe).
+
+Choose 2-5 constants worth tuning (a learning rate, temperature, restart count, \
+threshold, population size, …) — prefer fewer; a smaller search space is \
+searched better.
+{parent_block}
+Then write the search specification to `{_HYPERPARAM_SPEC_RELPATH}` as JSON:
+{{
+  "hyperparameters": [
+    {{"name": "learning_rate", "type": "float", "range": [0.0001, 0.1], "scale": "log", "default": 0.01}},
+    {{"name": "n_restarts", "type": "int", "range": [1, 16], "scale": "linear", "default": 4}}
+  ],
+  "suggested_configs": [
+    {{"learning_rate": 0.01, "n_restarts": 4}}
+  ]
+}}
+Use "scale": "log" for multiplicative quantities (learning rates, temperatures), \
+"linear" otherwise; "type" is "float", "int", or "categorical" (categorical uses \
+"choices": [...] instead of "range"). Provide exactly {num_suggested_configs} \
+suggested configs. Every key in a suggested config MUST be a declared \
+hyperparameter name, and every declared hyperparameter MUST appear in every \
+suggested config, with `default` equal to the constant's current in-code value.
+
+Finally, run `cargo check` to confirm the edited code compiles. Only edit source \
+files under `{algo_dir}` and write `{_HYPERPARAM_SPEC_RELPATH}`."""
+
+
+def _strip_code_fence(text: str, lang: str = "") -> str:
+    """Strip a leading/trailing markdown code fence if present."""
+    text = text.strip()
+    fence = re.match(r"^```[a-zA-Z]*\n(.*)\n```$", text, re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+    return text
+
+
+def _validate_hyperparameter_spec(spec: dict) -> str:
+    """Return an error string if the spec is malformed, else ""."""
+    hps = spec.get("hyperparameters")
+    if not isinstance(hps, list) or not hps:
+        return "spec.hyperparameters must be a non-empty list"
+    names: set[str] = set()
+    for hp in hps:
+        if not isinstance(hp, dict) or "name" not in hp:
+            return "each hyperparameter needs a 'name'"
+        name = hp["name"]
+        names.add(name)
+        ptype = hp.get("type", "float")
+        if ptype == "categorical":
+            if not isinstance(hp.get("choices"), list) or not hp["choices"]:
+                return f"categorical {name!r} needs a non-empty 'choices' list"
+        else:
+            rng = hp.get("range")
+            if not (isinstance(rng, list) and len(rng) == 2):
+                return f"{name!r} needs a [min, max] 'range'"
+            if hp.get("scale") == "log" and rng[0] <= 0:
+                return f"log-scaled {name!r} needs a positive range minimum"
+    configs = spec.get("suggested_configs")
+    if not isinstance(configs, list):
+        return "spec.suggested_configs must be a list"
+    for cfg in configs:
+        if not isinstance(cfg, dict):
+            return "each suggested config must be an object"
+        for key in cfg:
+            if key not in names:
+                return f"suggested config uses unknown hyperparameter {key!r}"
+    return ""
+
+
+def parse_hyperparameter_response(response: str) -> dict:
+    """Parse the extraction response into a spec + search/replace edit text.
+
+    Returns {ok, error, hyperparameters, suggested_configs, edits_text}, where
+    `edits_text` is the SEARCH/REPLACE block text after the separator (parsed by
+    scripts/search_replace), or "" for the spec-only case (Case 0 — the
+    algorithm already applies the Map to the chosen config fields).
+    """
+    fail = {
+        "ok": False, "hyperparameters": [], "suggested_configs": [],
+        "edits_text": "",
+    }
+    if HYPERPARAM_EDITS_SEP in response:
+        json_part, _, edits_text = response.partition(HYPERPARAM_EDITS_SEP)
+    else:
+        json_part, edits_text = response, ""  # spec-only (no code edits)
+    json_text = _strip_code_fence(json_part)
+    # The JSON may have prose around it; grab the outermost {...}.
+    brace = re.search(r"\{.*\}", json_text, re.DOTALL)
+    if not brace:
+        return {**fail, "error": "no JSON spec object found"}
+    try:
+        spec = json.loads(brace.group(0))
+    except json.JSONDecodeError as e:
+        return {**fail, "error": f"invalid JSON spec: {e}"}
+    err = _validate_hyperparameter_spec(spec)
+    if err:
+        return {**fail, "error": err}
+    return {
+        "ok": True,
+        "error": "",
+        "hyperparameters": spec["hyperparameters"],
+        "suggested_configs": spec.get("suggested_configs", []),
+        "edits_text": edits_text.strip(),
+    }
+
+
 # ── Error recovery prompts ─────────────────────────────────────────
 
 
-def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", timeout: int = 30) -> str:
+def build_runtime_fix_prompt(
+    code: str, bench: dict, kernel_code: str = "", timeout: int = 30,
+) -> str:
     errors = bench.get("errors") or []
     error_lines = "\n".join(f"  - {e}" for e in errors)
     score = bench.get("score", 0)
@@ -837,9 +1437,12 @@ def build_runtime_fix_prompt(code: str, bench: dict, kernel_code: str = "", time
         "How to interpret the errors:\n"
         "- 'no solution saved' = the code crashed, panicked, or returned Err() "
         "before ever calling save_solution(), OR the solver ran out of time "
-        f"without saving. Fix: use a time-based loop (std::time::Instant + deadline "
-        f"at {timeout}s minus a few seconds margin) and call save_solution() EARLY "
-        "with your first feasible solution, then keep improving and re-saving.\n"
+        "without saving. Fix: call save_solution() EARLY with your first feasible "
+        "solution, then keep improving and re-saving inside a hyperparameter-bounded "
+        "loop (e.g. num_iterations / patience sized to finish within the time "
+        "budget). Do NOT read the clock (std::time::Instant / SystemTime) as a "
+        "stopping condition — the harness owns the deadline, and clock-free control "
+        "flow is required when the algorithm is ported to the upstream TIG runtime.\n"
         "- Any other error = the code saved a solution but the evaluator "
         "rejected it (constraint violation). Fix: check that your solution "
         "satisfies all feasibility constraints described in the challenge.\n\n"
@@ -913,7 +1516,7 @@ def build_compile_fix_system_prompt(config: dict) -> str:
     else:
         fmt = (
             "Return the COMPLETE corrected mod.rs. The very first character of your "
-            "response MUST be `u` from `use super::*;`. No markdown fences, no prose."
+            "response MUST be `u` from the opening `use` line. No markdown fences, no prose."
         )
     return f"""\
 You are fixing Rust compile errors so the file builds. The code is otherwise
@@ -1048,18 +1651,13 @@ def build_agentic_user_prompt(
     is_gpu = bool(config.get("is_gpu"))
     challenge = config.get("challenge", "unknown")
 
-    my_score = state.get("current_trajectory_best")
-    global_best = state.get("best_score")
+    # `stagnation` still gates the tacit-knowledge distillation trigger below.
     stagnation = state.get("my_runs_since_improvement", 0)
-    runs = state.get("my_runs", 0)
-    improvements = state.get("my_improvements", 0)
 
     parts.append(
         f"## Iteration context\n"
-        f"- Challenge: {challenge}{' (GPU)' if is_gpu else ''}\n"
-        f"- Your best score: {my_score}\n"
-        f"- Global best score: {global_best}\n"
-        f"- Runs / improvements / stagnation: {runs} / {improvements} / {stagnation}"
+        f"- Your best score: {state.get('current_trajectory_best')}\n"
+        f"- Global best score: {state.get('best_score')}"
     )
 
     if role == "exploiter":
@@ -1154,7 +1752,7 @@ def build_agentic_user_prompt(
                 if insp_kernel:
                     block += [
                         "",
-                        f"Peer CUDA kernels:",
+                        "Peer CUDA kernels:",
                         "```cuda",
                         insp_kernel,
                         "```",
@@ -1167,12 +1765,29 @@ def build_agentic_user_prompt(
             "present) for strategy hints the contributor wrote down. If "
             "absent, fall back to the inspiration_code block above if any."
         )
+    elif hint == "failed_attempts":
+        fa_parts = _format_failed_attempts(state)
+        if fa_parts:
+            parts.append(
+                "\n## Stagnation hint — your own prior failed attempts"
+                + "".join(fa_parts)
+            )
 
     stagnation_limit = int(config.get("stagnation_limit") or 0)
-    in_band_distill = (
+    # Last iteration before the server resets this trajectory — the shared
+    # trigger for the in-band contributions. When the failed-attempts
+    # archive is on, the DB is the source of truth: the lesson travels
+    # inside failure_retrospective.json (block below) and the local tacit
+    # file is NOT written; the file-append instruction is the archive-off
+    # legacy path.
+    at_distill_point = (
         not DRIVER_DISTILL_FOR_AGENTIC
         and stagnation_limit >= 3
         and stagnation == stagnation_limit - 1
+    )
+    in_band_distill = (
+        _tacit_write_enabled(config) and at_distill_point
+        and not _failed_attempts_enabled(config)
     )
     if in_band_distill:
         parts.append(
@@ -1195,6 +1810,28 @@ def build_agentic_user_prompt(
             "- Under 30 words. No code, no scores, no instance IDs.\n"
             "- Skip silently if nothing genuinely new and transferable has "
             "emerged since the last `- LLM:` entry already in the file."
+        )
+
+    if _failed_attempts_enabled(config) and at_distill_point:
+        parts.append(
+            "\n## Failure retrospective (failed-attempts archive)\n"
+            "Also before you stop: write a structured retrospective of "
+            "this dying trajectory as JSON to "
+            "`.swarm/failure_retrospective.json` (same directory as "
+            "hypothesis.json), with these string keys:\n"
+            '{"approach_summary": "...", "what_was_tried": "...",\n'
+            ' "observed_outcome": "...", "possible_reasons": "...",\n'
+            ' "lesson": "- LLM: ..."}\n'
+            "Keep each field under ~100 words. The four retrospective "
+            "fields MAY be challenge-specific and concrete — they are "
+            "stored privately for YOUR future self on this challenge, as a "
+            "record of \"I tried this and it didn't work\", not a "
+            "prohibition. `lesson` is different: ONE transferable "
+            "cross-problem insight under 30 words, prefixed `- LLM: ` "
+            "(omit the key if nothing genuinely new emerged). Do NOT "
+            "write to tacit_knowledge_personal.md — this file replaces "
+            "that. Skip the file only if the trajectory has no real "
+            "material."
         )
 
     parts.append(

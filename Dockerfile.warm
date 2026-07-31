@@ -1,0 +1,60 @@
+# Warm benchmark image: toolchain + swarm crate source + a pre-built release
+# cargo target for every challenge of one flavor (cpu | gpu). A C3 job (or any
+# runner) then only injects the algorithm dir and does an INCREMENTAL cargo
+# build — seconds-to-a-minute instead of a 10-20 minute cold compile.
+#
+# Build (see scripts/build_warm_image.sh, or CI build-warm-images.yml):
+#   docker build -f Dockerfile.warm --build-arg FLAVOR=cpu -t tig-swarm-warm-cpu .
+#   docker build -f Dockerfile.warm --build-arg FLAVOR=gpu \
+#     --build-arg BASE=nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04 -t tig-swarm-warm-gpu .
+#
+# The build context must contain src/<ch>/algorithm/ for every baked challenge
+# (gitignored — CI seeds the stubs first via scripts/seed_algorithms.py). The
+# baked algorithm is a throwaway placeholder; jobs always overwrite it.
+#
+# Rebuild + republish whenever src/ (challenge harnesses), Cargo.toml/lock, or
+# the toolchain change — CI does this on push to staging. Baked scripts/ are a
+# fallback only: the C3 runner overlays the current scripts/*.py per job.
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+
+RUN apt-get update && apt-get install -y \
+    curl build-essential python3 python3-pip pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install -r /tmp/requirements.txt --break-system-packages
+
+# Install rustup WITHOUT a toolchain, then let the pin decide which one.
+# rust-toolchain.toml is the single source of truth for the version AND its
+# components, so bumping Rust is a one-line change there and nowhere else —
+# verified by scripts/test_toolchain_pin.py. Baking it at image-build time
+# matters: otherwise rustup honours the pin by DOWNLOADING the toolchain on
+# first cargo invocation, inside every job.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+      --default-toolchain none --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /app
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY scripts ./scripts
+
+# Warm the release target for every challenge this flavor serves. Cargo keys
+# unit fingerprints on the feature set, so all builds coexist in one target/
+# and a job's re-build with any baked feature set is a cache hit for the deps.
+ARG FLAVOR=cpu
+RUN set -eux; \
+    if [ "$FLAVOR" = "gpu" ]; then \
+      for ch in hypergraph vector_search neuralnet_optimizer; do \
+        cargo build -r --bin tig_gpu_benchmark --features "gpu_benchmark,$ch"; \
+      done; \
+    else \
+      for ch in satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage; do \
+        for b in solver evaluator generator; do \
+          cargo build -r --bin "tig_$b" --features "$b,$ch"; \
+        done; \
+      done; \
+    fi

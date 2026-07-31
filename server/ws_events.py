@@ -11,10 +11,10 @@ This file is the single source of truth for what the server sends. Every
 broadcast goes through `WSEvent` so type errors fail at import time, not
 at runtime in some panel that silently dropped a missing field.
 
-The TS counterpart (`dashboard/src/types.ts`) is hand-mirrored. Run
+The TS counterpart (`dashboard/src/types.ts`) is hand-mirrored — when you
+change an event here, update types.ts to match. Run
 ``python -m server.ws_events --dump-schema`` to dump every event's
-JSON schema; CI hashes the output so any change here without a matching
-edit to ``types.ts`` shows up as a drift.
+JSON schema for comparison.
 """
 
 from __future__ import annotations
@@ -105,6 +105,7 @@ class _LeaderboardEntry(BaseModel):
     num_trajectories: int
     tacit_knowledge_count: int
     inspiration_count: int
+    failed_attempts_count: int = 0
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
     active: bool
@@ -189,13 +190,6 @@ WSEvent = Annotated[
     ],
     Field(discriminator="type"),
 ]
-
-
-def event_to_payload(event: BaseModel) -> dict[str, Any]:
-    """Serialize an event for `manager.broadcast`. Centralised so any
-    future schema-level wrapping (envelope, schema version, etc.) lives
-    in one place."""
-    return event.model_dump(mode="json")
 
 
 def _dump_schema() -> None:

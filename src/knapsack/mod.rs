@@ -173,11 +173,13 @@ impl Challenge {
         let mut indices: Vec<usize> = selected_items.into_iter().collect();
         indices.sort();
 
-        let mut total_value = 0i32;
+        // Accumulate in i64: the pairwise interaction sum overflows i32 for
+        // large instances (~2100 items suffice at the +1000 Jaccard scale).
+        let mut total_value = 0i64;
 
         // Sum the individual values
         for &i in &indices {
-            total_value += self.values[i] as i32;
+            total_value += self.values[i] as i64;
         }
 
         // Sum the interactive values for pairs in indices
@@ -185,14 +187,11 @@ impl Challenge {
             for j in (i + 1)..indices.len() {
                 let idx_i = indices[i];
                 let idx_j = indices[j];
-                total_value += self.interaction_values[idx_i][idx_j];
+                total_value += self.interaction_values[idx_i][idx_j] as i64;
             }
         }
 
-        Ok(match total_value {
-            v if v < 0 => 0u32,
-            v => v as u32,
-        })
+        Ok(total_value.clamp(0, u32::MAX as i64) as u32)
     }
 
     conditional_pub!(

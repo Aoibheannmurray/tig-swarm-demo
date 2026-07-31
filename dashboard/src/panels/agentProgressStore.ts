@@ -24,10 +24,11 @@ export interface AgentExperiment {
   //  - trajectoryId   → group of consecutive experiments sharing a trajectory
   //  - trajectoryDeactivated → last experiment on a trajectory that became
   //                            inactive (cross marker)
-  //  - receivedHint   → "tacit_knowledge" (star) / "inspiration" (square)
+  //  - receivedHint   → "tacit_knowledge" (star) / "inspiration" (square) /
+  //                     "failed_attempts" (hollow diamond)
   trajectoryId?: string | null;
   trajectoryDeactivated?: boolean;
-  receivedHint?: "tacit_knowledge" | "inspiration" | null;
+  receivedHint?: "tacit_knowledge" | "inspiration" | "failed_attempts" | null;
 }
 
 export interface AgentProgress {
@@ -48,7 +49,7 @@ interface AgentExperimentsResponse {
     feasible: boolean;
     created_at: string;
     trajectory_id?: string | null;
-    received_hint?: "tacit_knowledge" | "inspiration" | null;
+    received_hint?: "tacit_knowledge" | "inspiration" | "failed_attempts" | null;
     trajectory_deactivated?: boolean;
   }[];
 }

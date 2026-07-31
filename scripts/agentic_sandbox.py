@@ -22,6 +22,15 @@ WORKTREES_DIR = ROOT / "worktrees"
 # synthesized hypothesis so the iteration still publishes.
 HYPOTHESIS_RELPATH = ".swarm/hypothesis.json"
 
+# Where the agent writes the hyperparameter-search spec during an extraction
+# pass (Fix 1 in docs/hyperparameter-search.md). Read back by the loop.
+HYPERPARAMS_RELPATH = ".swarm/hyperparameters.json"
+
+# Where the agent writes its failure retrospective on the last iteration
+# before a trajectory reset (failed-attempts archive). Read back + posted by
+# the loop after the agent exits, then deleted.
+FAILURE_RETRO_RELPATH = ".swarm/failure_retrospective.json"
+
 # Worktree branch namespace for agentic runs that aren't part of a fleet.
 # Fleet runs use the fleet/<name> namespace (see run_fleet.py); agentic
 # single-contributor runs use agentic/<short-id> so the two don't collide.
@@ -29,9 +38,19 @@ _AGENTIC_BRANCH_PREFIX = "agentic"
 
 
 def _git(args: list[str]) -> str:
-    result = subprocess.run(
-        ["git"] + args, cwd=ROOT, capture_output=True, text=True,
-    )
+    # Timeout: a wedged git (stale index.lock, hung credential/askpass helper,
+    # dead network filesystem) would otherwise block the agent loop forever.
+    # 60s is far above any healthy worktree/branch operation on this repo.
+    try:
+        result = subprocess.run(
+            ["git"] + args, cwd=ROOT, capture_output=True, text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"git {' '.join(args)} timed out after 60s — git may be blocked "
+            f"on a lock file or a hung credential helper in {ROOT}"
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed:\n{result.stderr.strip()}")
     return result.stdout.strip()
@@ -120,20 +139,46 @@ def seed_worktree_config(workdir: Path) -> None:
 
 
 def reset_iteration_state(workdir: Path) -> None:
-    """Clear per-iteration scratch state before launching the agent.
-
-    Right now that's just .swarm/hypothesis.json — if a previous iteration's
-    file lingered, the loop would mis-attribute it to this iteration's
-    edits.
+    """Clear per-iteration scratch state before launching the agent:
+    .swarm/hypothesis.json and .swarm/failure_retrospective.json — if a
+    previous iteration's file lingered, the loop would mis-attribute it to
+    this iteration's edits.
     """
     swarm_dir = workdir / ".swarm"
     swarm_dir.mkdir(exist_ok=True)
-    hyp = workdir / HYPOTHESIS_RELPATH
-    if hyp.exists():
-        hyp.unlink()
+    for relpath in (HYPOTHESIS_RELPATH, FAILURE_RETRO_RELPATH):
+        stale = workdir / relpath
+        if stale.exists():
+            stale.unlink()
 
 
 _STRATEGY_TAG_FALLBACK = "other"
+
+
+def reset_hyperparameter_spec(workdir: Path) -> None:
+    """Clear a stale hyperparameter spec before an extraction pass, so a leftover
+    file from a previous candidate can't be mistaken for this one's output."""
+    swarm_dir = workdir / ".swarm"
+    swarm_dir.mkdir(exist_ok=True)
+    spec = workdir / HYPERPARAMS_RELPATH
+    if spec.exists():
+        spec.unlink()
+
+
+def read_hyperparameter_spec(workdir: Path) -> dict | None:
+    """Read .swarm/hyperparameters.json written by an agentic extraction pass.
+
+    Returns the parsed dict ({hyperparameters, suggested_configs}), or None if
+    missing/malformed. Schema validation is the caller's job.
+    """
+    spec = workdir / HYPERPARAMS_RELPATH
+    if not spec.exists():
+        return None
+    try:
+        data = json.loads(spec.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read_agent_hypothesis(workdir: Path) -> dict | None:

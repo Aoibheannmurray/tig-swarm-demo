@@ -36,15 +36,25 @@ if sys.version_info < (3, 9):
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+
+from llm_backends import is_local_api_base
+from proc_utils import group_kwargs, kill_tree, term_tree
+import secrets_local
 
 ROOT = Path(__file__).resolve().parent.parent
 FLEET_CONFIG_PATH = ROOT / "fleet.config.json"
+# Last-known server-hosted fleet plan, so `config_source: server` runners can
+# restart while the coordination server is briefly unreachable. Gitignored.
+FLEET_CACHE_PATH = ROOT / ".fleet-cache.json"
 WORKTREES_DIR = ROOT / "worktrees"
 
 # Windows PowerShell `Set-Content` writes UTF-8 with a BOM by default. Strict
@@ -53,6 +63,14 @@ WORKTREES_DIR = ROOT / "worktrees"
 # the BOM transparently and is a no-op for normal UTF-8.
 def _read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Write JSON via tmp file + os.replace so concurrent readers (run_loop
+    re-reads agent.config.json every iteration) never observe a torn file."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # Windows console crashes on the box-drawing / ellipsis characters this script
@@ -65,39 +83,34 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, OSError):
         pass
 
-# Fields on a fleet entry that are forwarded into the worktree's
-# agent.config.json. run_loop.py reads its provider/model/compute defaults
-# from there — no CLI flags needed on the subprocess.
-_AGENT_CONFIG_KEYS = (
-    "provider", "model", "api_base", "compute",
-    "c3_hardware", "c3_time", "c3_cloud_provider", "c3_no_build",
-    # Per-agent C3 API key (raw value). Omit to inherit the top-level fleet
-    # `c3_api_key`, the C3_API_KEY env var, or the `c3 login` session — in that
-    # order. Lets each agent bill C3 to a different key without separate fleets.
-    "c3_api_key",
-    # Honor hand-set agent_id / agent_name in a fleet entry — useful if a user
-    # wants to point a new clone at an existing dashboard agent without
-    # re-registering. Normal flow: run_loop.py writes these after the first
-    # /api/agents/register call so restarts resume the same identity.
-    "agent_id", "agent_name",
-    "log_prompts",
-    # Opt-in stricter Rust prompt for smaller/cheaper models (prompts.py).
-    "detailed_prompts",
-    # Contributor-owned behavior role (explorer/exploiter). Materialized at
-    # spawn AND re-synced live by the monitor loop so editing it in
-    # fleet.config.json takes effect on the agent's next iteration.
-    "role",
+# The per-agent config knobs live in one registry — scripts/agent_config_keys.py
+# — which declares each knob once and derives these three lists from its flags.
+# They were four hand-synced tuples across this module and run_loop.py; keeping
+# them in step by hand is what failed in df13614 (documented hot-reload knobs
+# that needed a restart). Add a knob there, not here.
+#
+#   _AGENT_CONFIG_KEYS       forwarded into the worktree's agent.config.json at
+#                            spawn, so run_loop reads its provider/model/compute
+#                            defaults from there with no CLI flags
+#   _FLEET_WIDE_DEFAULT_KEYS top-level fleet keys inherited by every agent via
+#                            setdefault, so a per-agent override still wins
+#   _HOT_RELOAD_KEYS         re-synced into a RUNNING worktree by the monitor,
+#                            so an edit to fleet.config.json (or the hosted
+#                            plan) lands on the agent's next iteration
+#
+# The aliases keep this module's existing (private) spelling; the registry is
+# the source of truth.
+from agent_config_keys import (
+    AGENT_CONFIG_KEYS as _AGENT_CONFIG_KEYS,
+    FLEET_WIDE_DEFAULT_KEYS as _FLEET_WIDE_DEFAULT_KEYS,
+    HOT_RELOAD_KEYS as _HOT_RELOAD_KEYS,
 )
-
-# Fleet-entry fields the monitor loop re-syncs into a running worktree's
-# agent.config.json when they change. Only role is hot-reloadable today —
-# identity/provider/model are fixed for the life of a process.
-_HOT_RELOAD_KEYS = ("role",)
 
 _PROVIDER_TO_DEFAULT_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
-    "google": "GOOGLE_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
     "venice": "VENICE_API_KEY",
 }
 
@@ -130,6 +143,66 @@ def _resolve_tacit_source(
     return path, bool(explicit_rel)
 
 
+def _fetch_server_config(
+    server_url: str, username: str, swarm_password: str, *, timeout: int = 20,
+) -> dict | None:
+    """GET /api/contributor/config with the contributor's credentials.
+
+    Returns the stored `{agents, tacit, …}` plan, {} when the contributor has
+    saved nothing yet (server 404), or None on any transport/HTTP error so the
+    caller can fall back to the on-disk cache. Stdlib-only HTTP to keep the
+    launcher dependency-free."""
+    import urllib.error
+    import urllib.request
+
+    url = f"{server_url.rstrip('/')}/api/contributor/config"
+    req = urllib.request.Request(url, headers={
+        "X-Username": username,
+        "X-Swarm-Password": swarm_password,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.load(resp)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}  # authenticated, just nothing saved yet
+        print(f"  [fleet] server config fetch failed (HTTP {e.code})", file=sys.stderr)
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        print(f"  [fleet] server config fetch failed ({e})", file=sys.stderr)
+        return None
+    cfg = body.get("config") or {}
+    if body.get("tacit"):
+        cfg["tacit"] = body["tacit"]
+    return cfg
+
+
+def _load_server_config(
+    server_url: str, username: str, swarm_password: str,
+) -> dict:
+    """Server-hosted fleet plan for `config_source: server`, with a durable
+    cache. On a successful fetch the plan is cached to `.fleet-cache.json`;
+    when the server is unreachable the cache is used so a restart still
+    launches. Returns {} only when both the server and the cache are empty."""
+    fetched = _fetch_server_config(server_url, username, swarm_password)
+    if fetched is not None:
+        if fetched.get("agents"):
+            try:
+                _write_json_atomic(FLEET_CACHE_PATH, fetched)
+            except OSError:
+                pass  # cache is best-effort; the fetched plan still launches
+        return fetched
+    # Fetch failed — fall back to the last good plan.
+    if FLEET_CACHE_PATH.exists():
+        try:
+            cached = _read_json(FLEET_CACHE_PATH)
+            print("  [fleet] using cached fleet config (server unreachable)")
+            return cached
+        except (OSError, ValueError):
+            pass
+    return {}
+
+
 def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
     if not FLEET_CONFIG_PATH.exists():
         sys.exit(
@@ -140,9 +213,6 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
             f"    cp fleet.config.example.json fleet.config.json"
         )
     data = _read_json(FLEET_CONFIG_PATH)
-    agents = data.get("agents") or []
-    if not agents:
-        sys.exit("fleet.config.json has no agents.")
 
     server_url = data.get("server_url") or ""
     if not server_url:
@@ -167,6 +237,28 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
             "they'll send you a derived password to paste here."
         )
 
+    # Resolve the fleet plan. A local `agents` array always wins (escape hatch
+    # + full back-compat). Otherwise, when the config opts into server-hosted
+    # mode (`"config_source": "server"`, written by `run.py --join`), fetch the
+    # plan authored in the hosted contributor console — falling back to the
+    # last-cached copy when the server is unreachable.
+    agents = data.get("agents") or []
+    if not agents and data.get("config_source") == "server":
+        server_cfg = _load_server_config(server_url, username, swarm_password)
+        agents = server_cfg.get("agents") or []
+        # Surface the server's fleet-wide knobs + tacit as if they were local
+        # top-level keys, so the merge logic below is source-agnostic.
+        for key, value in server_cfg.items():
+            if key not in ("agents",):
+                data.setdefault(key, value)
+    if not agents:
+        if data.get("config_source") == "server":
+            sys.exit(
+                "No fleet configured yet. Open your swarm's join page and add "
+                "agents under “My fleet”, then re-run `python run.py`."
+            )
+        sys.exit("fleet.config.json has no agents.")
+
     names: list[str] = []
     for entry in agents:
         name = entry.get("name")
@@ -176,7 +268,42 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
     if len(set(names)) != len(names):
         sys.exit("fleet.config.json has duplicate agent names.")
 
+    # Distinct names can still collide once slugged — "Darth Vader" and
+    # "Darth-Vader" are two agents by name and one worktree on disk. Left
+    # unchecked they share a directory, an agent.config.json and a git branch,
+    # with two loops writing all three. Caught here, while it is still a config
+    # typo rather than a corrupted run.
+    by_slug: dict[str, list[str]] = {}
+    for name in names:
+        by_slug.setdefault(slug_for_git(name), []).append(name)
+    collisions = {s: ns for s, ns in by_slug.items() if len(ns) > 1}
+    if collisions:
+        detail = "; ".join(
+            f"{' and '.join(repr(n) for n in ns)} -> worktrees/{slug}"
+            for slug, ns in sorted(collisions.items())
+        )
+        sys.exit(
+            "fleet.config.json has agent names that collide on disk: "
+            f"{detail}.\n"
+            "Agent names may differ only by characters git can't put in a "
+            "branch name (spaces, slashes, punctuation). Rename one."
+        )
+
     fleet_tacit = data.get("tacit_knowledge") or None
+
+    # Server-hosted tacit knowledge (from the contributor console) materializes
+    # into the default shared file so agents see it on stagnation exactly like
+    # locally-authored notes. Only in server mode, and only when the console
+    # actually holds notes — never clobber a non-empty local file.
+    server_tacit = data.get("tacit")
+    if data.get("config_source") == "server" and server_tacit:
+        tacit_path = ROOT / SHARED_TACIT_DEFAULT
+        try:
+            if not (tacit_path.exists() and tacit_path.read_text(
+                    encoding="utf-8-sig").strip()):
+                tacit_path.write_text(server_tacit, encoding="utf-8")
+        except OSError:
+            pass
 
     # Top-level `c3_api_key` is a fleet-wide default: every agent that doesn't
     # set its own inherits it. setdefault() (not overwrite) keeps per-agent keys
@@ -186,22 +313,108 @@ def _load_fleet() -> tuple[str, str, str, list[dict], str | None]:
         for entry in agents:
             entry.setdefault("c3_api_key", fleet_c3_api_key)
 
+    _apply_fleet_wide_defaults(data, agents)
+
     return server_url, username, swarm_password, agents, fleet_tacit
+
+
+def _apply_fleet_wide_defaults(data: dict, agents: list[dict]) -> None:
+    """Fleet-wide defaults: a top-level key is inherited by every agent that
+    doesn't set its own. setdefault keeps per-agent overrides winning.
+
+    Mutates the entries in `agents` in place. Used at launch AND by the
+    hot-reload monitor — most of these knobs are documented as "set once at the
+    top level", so a monitor that read only the per-agent entries would miss
+    exactly the way contributors are told to configure them."""
+    for key in _FLEET_WIDE_DEFAULT_KEYS:
+        if key in data:
+            for entry in agents:
+                entry.setdefault(key, data[key])
+
+
+def _hot_reload_entries(data: dict) -> dict[str, dict]:
+    """name -> fleet entry, with fleet-wide top-level defaults folded in, for
+    the monitor's hot-reload sync. `data` is a whole fleet config: the local
+    fleet.config.json or a freshly-fetched hosted plan."""
+    agents = [
+        a for a in (data.get("agents") or [])
+        if isinstance(a, dict) and a.get("name")
+    ]
+    _apply_fleet_wide_defaults(data, agents)
+    return {a["name"]: a for a in agents}
 
 
 # ── Git worktree helpers ───────────────────────────────────────────
 
 
-def _git(args: list[str]) -> str:
-    result = subprocess.run(
-        ["git"] + args, cwd=ROOT, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-    )
+# Ceiling on any single git call in the launch path. Creating a worktree
+# writes a full checkout, so it gets real headroom — but not "forever": these
+# run with their output captured, so a git that blocks is a fleet that hangs
+# with nothing on screen.
+_GIT_TIMEOUT_SECS = 300
+
+
+def _git_env() -> dict:
+    """Environment for git calls made during launch.
+
+    GIT_TERMINAL_PROMPT=0 is the important one. A git subprocess that decides
+    to ask for credentials (a private submodule, an https remote whose helper
+    has expired) waits on a prompt nobody can see — output is captured, and
+    under the web companion there is no terminal at all. Off, it fails
+    immediately with a message we can show instead of hanging."""
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.setdefault("GCM_INTERACTIVE", "never")  # Git Credential Manager
+    return env
+
+
+def _run_git(args: list[str], *, cwd: Path, timeout: int) -> str:
+    try:
+        result = subprocess.run(
+            args, cwd=cwd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            env=_git_env(), timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"{' '.join(args)} did not finish within {timeout}s.\n"
+            f"  Run it yourself in {cwd} to see what it's waiting on — a "
+            f"stale lock (.git/index.lock) and a credential prompt are the "
+            f"usual causes."
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(
-            f"git {' '.join(args)} failed:\n{result.stderr.strip()}"
+            f"{' '.join(args)} failed:\n{result.stderr.strip()}"
         )
     return result.stdout.strip()
+
+
+def _git(args: list[str], timeout: int = _GIT_TIMEOUT_SECS) -> str:
+    return _run_git(["git"] + args, cwd=ROOT, timeout=timeout)
+
+
+# Characters git refuses in a refname (git check-ref-format), plus the path
+# separators and shell-hostile ones we don't want in a worktree directory
+# either. A SPACE is the one that bites in practice: "Darth Vader" is a
+# perfectly reasonable agent name, and `git worktree add -b "fleet/Darth
+# Vader"` dies with "not a valid branch name" — which used to surface as a
+# launch that simply stopped after "preparing Darth Vader…".
+_REF_UNSAFE = re.compile(r"[\s~^:?*\[\]\\/@{}]+")
+
+
+def slug_for_git(name: str) -> str:
+    """A git-safe slug for an agent name, used for its branch and worktree dir.
+
+    The agent's real name is untouched everywhere a human sees it — the
+    leaderboard, the logs, agent.config.json. This is only the on-disk and
+    on-ref spelling, so someone can call an agent whatever they like without
+    having to know git's refname rules."""
+    slug = _REF_UNSAFE.sub("-", name.strip())
+    slug = re.sub(r"-{2,}", "-", slug).strip("-.")
+    # Refs can't end in .lock, be empty, or be a lone dot sequence.
+    while slug.lower().endswith(".lock"):
+        slug = slug[: -len(".lock")].strip("-.")
+    return slug or "agent"
 
 
 def _normalize_path(p: str | Path) -> str:
@@ -228,9 +441,44 @@ def _branch_exists(branch: str) -> bool:
     return bool(_git(["branch", "--list", branch]))
 
 
-def _ensure_worktree(name: str) -> Path:
-    path = WORKTREES_DIR / name
-    branch = f"fleet/{name}"
+def _git_in(path: Path, args: list[str], timeout: int = _GIT_TIMEOUT_SECS) -> str:
+    """Run git inside a specific worktree (``_git`` is pinned to ROOT)."""
+    return _run_git(["git", "-C", str(path)] + args, cwd=ROOT, timeout=timeout)
+
+
+def _refresh_worktree(path: Path, name: str, log=print) -> None:
+    """Reset an agent worktree's code to the repo's current HEAD commit.
+
+    Worktrees persist across fleet restarts (identity + cargo cache live
+    there), and their `fleet/<name>` branch stays wherever it was when the
+    worktree was FIRST created — so without this reset, a stopped-and-
+    restarted fleet keeps running months-old orchestration code and bug
+    fixes silently never reach the agents (this is how the vrp-swarm
+    benchmark-heartbeat fix sat inert for two weeks). `reset --hard` moves
+    only TRACKED files: agent.config.json, .swarm-cache.json, and
+    tacit_knowledge_personal.md are untracked and survive, and algorithm
+    files are rewritten from server state at the top of every iteration.
+
+    Best-effort: a failed reset (e.g. a stale index.lock) logs a warning and
+    launches on the existing code — the pre-refresh status quo — rather than
+    blocking the fleet.
+    """
+    try:
+        head = _git(["rev-parse", "HEAD"])
+        current = _git_in(path, ["rev-parse", "HEAD"])
+        _git_in(path, ["reset", "--hard", head])
+        if current != head:
+            log(f"  [fleet] {name}: worktree code refreshed "
+                f"{current[:7]} -> {head[:7]}")
+    except (RuntimeError, OSError) as e:
+        log(f"  [fleet] WARNING: could not refresh {name}'s worktree to "
+            f"current HEAD ({e}); launching with its existing code")
+
+
+def _ensure_worktree(name: str, log=print) -> Path:
+    slug = slug_for_git(name)
+    path = WORKTREES_DIR / slug
+    branch = f"fleet/{slug}"
     known = _existing_worktree_paths()
 
     if path.exists() and _normalize_path(path) not in known:
@@ -240,11 +488,20 @@ def _ensure_worktree(name: str) -> Path:
 
     if not path.exists():
         WORKTREES_DIR.mkdir(exist_ok=True)
+        # The genuinely slow step on a first run: a full checkout per agent.
+        # Announced because it is where a launch sits longest, and a silent
+        # minute here is indistinguishable from a hang.
+        log(f"  [fleet] {name}: creating worktree at {path} "
+            f"(full checkout — slowest step of a first launch)")
         if _branch_exists(branch):
             _git(["worktree", "add", str(path), branch])
         else:
             _git(["worktree", "add", "-b", branch, str(path)])
 
+    # Both branches above need the refresh: a reused worktree AND a fresh
+    # `worktree add <existing fleet/... branch>` both check out wherever that
+    # branch last pointed, not current HEAD.
+    _refresh_worktree(path, name, log=log)
     return path
 
 
@@ -303,7 +560,7 @@ def _seed_worktree(
     merged["swarm_password"] = fleet_swarm_password
     if agent.get("tacit_knowledge"):
         merged["tacit_knowledge"] = agent["tacit_knowledge"]
-    wt_agent.write_text(json.dumps(merged, indent=2) + "\n")
+    _write_json_atomic(wt_agent, merged)
 
     src, explicit = _resolve_tacit_source(agent, fleet_tacit)
     if src.exists():
@@ -317,13 +574,22 @@ def _seed_worktree(
 # ── API keys ───────────────────────────────────────────────────────
 
 
-def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
+def _resolve_api_key(agent: dict, log=print) -> tuple[str | None, str | None]:
     """Return (env_var_to_set, value) for this agent's subprocess.
 
     Returns (None, None) for claude-code, claude-code-agentic, and
     codex-agentic — all three use their respective CLI's local auth
-    (OAuth / subscription / `codex login`). Exits with a clear message if
-    a required env var is missing for an API-key provider.
+    (OAuth / subscription / `codex login`).
+
+    Key source order: a set environment variable, then the local
+    `secrets.local.json` store, then (on an interactive terminal only) a
+    one-time prompt that saves the pasted key to that store. Exits with an
+    actionable message when none of those yields a key.
+
+    The exception is a self-hosted endpoint (`api_base` on this machine or the
+    local network — llama.cpp, vLLM, Ollama): those usually check no key at
+    all, so an absent one is normal. Use a stored key if there is one, but
+    never prompt for or demand it.
     """
     provider = agent.get("provider") or "anthropic"
     if provider in ("claude-code", "claude-code-agentic", "codex-agentic"):
@@ -333,19 +599,41 @@ def _resolve_api_key(agent: dict) -> tuple[str | None, str | None]:
 
     target = _PROVIDER_TO_DEFAULT_ENV[provider]
     source = agent.get("api_key_env") or target
-    value = os.environ.get(source, "")
+    if is_local_api_base(agent.get("api_base")):
+        stored = secrets_local.resolve(source)
+        return (target, stored) if stored else (None, None)
+    # prompt_and_store() blocks on input() when the key is missing and stdin is
+    # a terminal. Say so FIRST: its own prompt goes to stdout, which the web
+    # companion doesn't show and a redirected launch buffers, so the fleet
+    # looked hung with no clue that it was waiting on a human.
+    if not secrets_local.resolve(source):
+        log(f"  [fleet] {agent['name']}: no {source} found in your environment "
+            f"or secrets.local.json")
+        if sys.stdin.isatty() and not os.environ.get("TIG_SWARM_NO_PROMPT"):
+            log(f"  [fleet] waiting for you to paste {source} at the prompt "
+                f"below (Ctrl-C to cancel)…")
+    value = secrets_local.prompt_and_store(
+        source, label=f"{source} for agent {agent['name']}",
+    )
     if not value:
         sys.exit(
-            f"Agent {agent['name']}: environment variable {source} is unset or empty.\n"
-            f"  To fix: export {source}=<your-key> and re-run `python run.py`."
+            f"Agent {agent['name']}: no API key for {source}.\n"
+            f"  Fix any one of: export {source}=<your-key>; add it in the\n"
+            f"  web setup (python run.py --ui → Keys); or re-run in a terminal\n"
+            f"  to be prompted for it once (saved to secrets.local.json)."
         )
     return target, value
 
 
 # ── First-run bootstrap ────────────────────────────────────────────
 
+# Ceiling on the one-shot `setup.py sync` at launch. run_sync's own HTTP calls
+# are short-timeout and fail soft, so this only catches a wedge — but without
+# it the wedge is unbounded and silent (output is captured).
+_SYNC_TIMEOUT_SECS = 180
 
-def _ensure_root_swarm_cache(server_url: str) -> None:
+
+def _ensure_root_swarm_cache(server_url: str, log=print) -> None:
     """Run `setup.py sync` once at the host root so .swarm-cache.json exists
     before _seed_worktree tries to copy it into each worktree.
 
@@ -364,12 +652,31 @@ def _ensure_root_swarm_cache(server_url: str) -> None:
         if cached_url and cached_url != server_url.rstrip("/"):
             cache.unlink()
 
-    print(f"  [fleet] syncing swarm state from {server_url}…")
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "setup.py"), "sync"],
-        cwd=ROOT, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-    )
+    # log(), not print(): the web companion streams the fleet log to the
+    # browser, and everything this function printed went to the companion's own
+    # stdout instead — so a slow or unreachable server showed up in the UI as
+    # the previous line and nothing after it.
+    log(f"  [fleet] syncing swarm state from {server_url}…")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "setup.py"), "sync"],
+            cwd=ROOT, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            # Bounded so an unreachable or wedged server can't hang the launch
+            # indefinitely with its output captured and invisible. Generous:
+            # a sleeping Railway instance can take a while to wake.
+            timeout=_SYNC_TIMEOUT_SECS,
+        )
+    except subprocess.TimeoutExpired:
+        sys.exit(
+            f"  [fleet] `setup.py sync` didn't finish within "
+            f"{_SYNC_TIMEOUT_SECS}s while contacting the swarm server.\n"
+            f"  Tried: {server_url}\n"
+            f"  Check that URL opens in a browser (a Railway swarm that has\n"
+            f"  been idle can take a minute to wake — try again once it does).\n"
+            f"  If the URL is wrong, fix `server_url` in fleet.config.json.\n"
+            f"  To see what sync is doing, run it directly: python setup.py sync"
+        )
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
         sys.exit(f"  [fleet] setup.py sync failed:\n{err}")
@@ -386,12 +693,24 @@ def _ensure_root_swarm_cache(server_url: str) -> None:
 # ── Streaming ──────────────────────────────────────────────────────
 
 
-def _stream_output(name: str, color: str, proc: subprocess.Popen) -> None:
+def _stream_output(
+    name: str,
+    color: str,
+    proc: subprocess.Popen,
+    on_output=None,
+) -> None:
     prefix = f"{color}[{name}]{_RESET} " if color else f"[{name}] "
     assert proc.stdout is not None
     for line in proc.stdout:
         sys.stdout.write(prefix + line)
         sys.stdout.flush()
+        # Mirror each line (without the ANSI prefix) to an optional consumer —
+        # the control-ui companion feeds these to its live-log WebSocket.
+        if on_output is not None:
+            try:
+                on_output(name, line.rstrip("\n"))
+            except Exception:  # a UI consumer must never kill the fleet
+                pass
 
 
 # ── Subcommands ────────────────────────────────────────────────────
@@ -402,7 +721,7 @@ def cmd_list(agents: list[dict]) -> int:
     print(f"  {'name':20s}  {'worktree':10s}  {'agent_id':40s}  path")
     for agent in agents:
         name = agent["name"]
-        path = WORKTREES_DIR / name
+        path = WORKTREES_DIR / slug_for_git(name)
         present = "ok" if _normalize_path(path) in known else "missing"
         agent_id = "<unregistered>"
         wt_agent = path / "agent.config.json"
@@ -416,20 +735,6 @@ def cmd_list(agents: list[dict]) -> int:
     return 0
 
 
-def _safe_volume_suffix(name: str) -> str:
-    """Mirror of `_safe_volume_suffix` in benchmark.py — kept duplicated here
-    instead of imported so `run_fleet.py --clean` doesn't pull benchmark.py's
-    heavier import graph (urllib, math, ThreadPoolExecutor, …) just to delete
-    a few Docker volumes. Keep these two helpers in sync."""
-    import re
-    s = re.sub(r"[^a-zA-Z0-9_.-]", "_", name)
-    if not s:
-        return "x"
-    if not s[0].isalnum():
-        s = "x" + s
-    return s
-
-
 def _remove_cargo_volumes(agent_name: str) -> None:
     """Best-effort cleanup of the per-agent cargo target volumes.
 
@@ -439,6 +744,11 @@ def _remove_cargo_volumes(agent_name: str) -> None:
     errors. A docker daemon that isn't running is also fine — the volumes
     will just stay there until the user starts Docker and removes them
     manually."""
+    # Shared with the volume creator (benchmark.py) so the names always
+    # match. Imported lazily so run/list paths don't pull benchmark.py's
+    # import graph; benchmark.py is import-safe (its module-level
+    # resolve_server_url call is required=False, so no I/O failure exits).
+    from benchmark import _safe_volume_suffix
     safe = _safe_volume_suffix(agent_name)
     for suffix in ("cpu", "gpu"):
         vol = f"tig-cargo-cache-{suffix}-{safe}"
@@ -455,8 +765,9 @@ def _remove_cargo_volumes(agent_name: str) -> None:
 
 def _clean_one(name: str, docker_available: bool) -> None:
     """Remove a single agent's worktree, fleet branch, and cargo volumes."""
-    path = WORKTREES_DIR / name
-    branch = f"fleet/{name}"
+    slug = slug_for_git(name)
+    path = WORKTREES_DIR / slug
+    branch = f"fleet/{slug}"
     if path.exists():
         try:
             _git(["worktree", "remove", "--force", str(path)])
@@ -532,49 +843,213 @@ def cmd_clean(agents: list[dict]) -> int:
     return 0
 
 
-def _sync_hot_reload_to_worktrees(agents: list[dict]) -> None:
-    """Patch hot-reloadable fields (role) from fleet.config.json into each
-    running worktree's agent.config.json when they've changed.
+def _sync_hot_reload_to_worktrees(
+    agents: list[dict], entries: dict[str, dict] | None = None,
+) -> None:
+    """Patch hot-reloadable fields (role, seeded_start) into each running
+    worktree's agent.config.json when they've changed.
+
+    Desired values come from `entries` (name→entry) when provided — the
+    server-hosted plan in `config_source: server` mode — otherwise from the
+    local fleet.config.json, the classic behavior.
 
     Best-effort: a transient read/parse/write error on one agent is logged and
     skipped, never crashing the fleet monitor. Only fields in _HOT_RELOAD_KEYS
     are touched; everything else in agent.config.json (identity, provider,
     runtime defaults run_loop wrote) is preserved."""
-    try:
-        fleet = _read_json(FLEET_CONFIG_PATH)
-    except Exception:
-        return
-    entries = {
-        a.get("name"): a
-        for a in (fleet.get("agents") or [])
-        if a.get("name")
-    }
+    if entries is None:
+        try:
+            entries = _hot_reload_entries(_read_json(FLEET_CONFIG_PATH))
+        except Exception:
+            return
     for agent in agents:
         name = agent.get("name")
         entry = entries.get(name)
         if not entry:
             continue
-        wt_cfg_path = WORKTREES_DIR / name / "agent.config.json"
+        wt_cfg_path = WORKTREES_DIR / slug_for_git(name) / "agent.config.json"
         try:
             current = _read_json(wt_cfg_path)
         except Exception:
             continue
         if not isinstance(current, dict):
             continue
-        changed = False
+        changed_keys = []
         for key in _HOT_RELOAD_KEYS:
             desired = entry.get(key)
             if desired is not None and current.get(key) != desired:
                 current[key] = desired
-                changed = True
-        if changed:
+                changed_keys.append(key)
+        if changed_keys:
             try:
-                wt_cfg_path.write_text(
-                    json.dumps(current, indent=2) + "\n", encoding="utf-8",
+                # run_loop may have registered and persisted agent_id/name/
+                # token between our read above and this write — re-read and
+                # keep those so the hot-reload write can't clobber a freshly
+                # issued agent_token (which would force a re-register).
+                try:
+                    latest = _read_json(wt_cfg_path)
+                except Exception:
+                    latest = {}
+                if isinstance(latest, dict):
+                    for ident_key in ("agent_id", "agent_name", "agent_token"):
+                        if latest.get(ident_key) and not current.get(ident_key):
+                            current[ident_key] = latest[ident_key]
+                _write_json_atomic(wt_cfg_path, current)
+                synced = ", ".join(
+                    f"{k} -> {current.get(k)}" for k in changed_keys
                 )
-                print(f"  [fleet] {name}: role -> {current.get('role')}")
+                print(f"  [fleet] {name}: {synced}")
             except OSError as e:
-                print(f"  [fleet] {name}: role sync failed: {e}", file=sys.stderr)
+                print(f"  [fleet] {name}: hot-reload sync failed: {e}", file=sys.stderr)
+
+
+# C3 control-plane defaults. The concurrency cap is read LIVE from C3, never
+# from a hardcoded tier table — the cap C3 actually enforces is the truth (e.g.
+# an account may carry a custom limit, or C3 may retune a tier). Override the
+# host with C3_API_ENDPOINT (self-hosted / test control planes).
+_C3_API_ENDPOINT = "https://api.cthree.cloud"
+_C3_API_TIMEOUT_SECS = 20
+
+
+def _c3_access_token() -> str | None:
+    """Fall back to the `c3 login` OAuth token when no API key is configured
+    (local dev). The runner and API-key fleets never need this."""
+    try:
+        creds = json.loads((Path.home() / ".c3" / "credentials.json").read_text())
+    except (OSError, ValueError):
+        return None
+    tok = creds.get("access_token")
+    return tok if isinstance(tok, str) and tok else None
+
+
+def _c3_api_get(base: str, path: str, token: str) -> dict | None:
+    """GET a C3 control-plane JSON endpoint with a bearer token. None on any
+    transport/decode error — the caller degrades gracefully."""
+    # A User-Agent is required — the control plane's edge 403s the default
+    # `Python-urllib` agent.
+    req = urllib.request.Request(
+        base.rstrip("/") + path,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "tig-swarm-fleet/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_C3_API_TIMEOUT_SECS) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _select_concurrency_limit(subscription: dict, tiers: dict) -> int | None:
+    """The actual concurrent-job cap C3 enforces, from live API payloads. An
+    account-specific `concurrency_limit` on the subscription wins; otherwise the
+    current tier's `concurrency_limit` from the tiers catalog. None if neither is
+    a positive int (so the caller can fall back)."""
+    override = subscription.get("concurrency_limit")
+    if isinstance(override, int) and override > 0:
+        return override
+    tier = (subscription.get("tier") or "").strip().lower()
+    if not tier:
+        return None
+    for entry in (tiers or {}).get("tiers", []):
+        if (entry.get("tier") or "").strip().lower() == tier:
+            cap = entry.get("concurrency_limit")
+            return cap if isinstance(cap, int) and cap > 0 else None
+    return None
+
+
+def _query_c3_plan_cap(c3_key: str | None) -> int | None:
+    """Return the concurrent-job cap C3 *actually* enforces for this account, by
+    reading it live from the control plane (`/v2/billing/subscription` for the
+    current/overridden plan, `/v2/billing/tiers` for the plan's limit). None if
+    it can't be determined (no auth, offline, unexpected payload) — the caller
+    then falls back to the configured value."""
+    token = c3_key or _c3_access_token()
+    if not token:
+        return None
+    base = os.environ.get("C3_API_ENDPOINT") or _C3_API_ENDPOINT
+    subscription = _c3_api_get(base, "/v2/billing/subscription", token)
+    if not subscription:
+        return None
+    # Account override short-circuits before we even fetch the tier catalog.
+    override = subscription.get("concurrency_limit")
+    if isinstance(override, int) and override > 0:
+        return override
+    tiers = _c3_api_get(base, "/v2/billing/tiers", token)
+    return _select_concurrency_limit(subscription, tiers or {})
+
+
+def _warn_orphaned_c3_jobs(c3_key: str | None, log=print) -> None:
+    """Warn about leftover ``tig-*`` C3 jobs still queued/running on this
+    account before launch — never cancel them.
+
+    A prior fleet whose jobs outlive it (C3 gives each a 2h walltime) keeps
+    holding chips against the plan's concurrency cap, so a fresh fleet can't
+    claim its full slot budget and benchmarks stall on the concurrency-limit
+    retry (c3_compute._run_one_c3_job_inner). Surfacing them — with the exact
+    ``c3 cancel`` line — lets the user reclaim the chips if they want to. Pure
+    courtesy: silent when nothing is stale, and any error (no CLI, no auth,
+    unparseable payload) is swallowed so this never blocks a launch."""
+    if shutil.which("c3") is None:
+        return
+    env = os.environ.copy()
+    if c3_key:
+        env["C3_API_KEY"] = c3_key
+    try:
+        proc = subprocess.run(
+            ["c3", "squeue", "--json"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    # Reuse the same job-shape + status parsing the C3 poller uses, so this
+    # can't drift from what counts as an active job elsewhere.
+    from c3_compute import _iter_job_dicts, _normalise_status, _NON_TERMINAL
+
+    stale: list[tuple[str, str, str]] = []
+    for job in _iter_job_dicts(data):
+        name = str(job.get("name") or job.get("job_name") or "")
+        if not name.startswith("tig-"):
+            continue  # only our benchmark jobs — leave unrelated jobs alone
+        status = _normalise_status(
+            job.get("status") or job.get("state") or job.get("phase")
+        ) or ""
+        if not any(s in status for s in _NON_TERMINAL):
+            continue  # terminal/unknown — not holding a chip
+        jid = next(
+            (str(job[k]) for k in ("id", "job_id", "jobId") if job.get(k)), "?"
+        )
+        stale.append((jid, name, status))
+    if not stale:
+        return
+    log(f"  [fleet] WARNING: {len(stale)} C3 job(s) from a previous run are "
+        f"still holding chips against your concurrency cap "
+        f"(a fresh benchmark may queue behind them):")
+    for jid, name, status in stale:
+        log(f"  [fleet]     {jid}  {name}  {status}")
+    ids = " ".join(jid for jid, _, _ in stale)
+    log(f"  [fleet]   they free on their own at their walltime, or reclaim the "
+        f"chips now with:  c3 cancel {ids}")
+
+
+def _resolve_fleet_c3_key(agents: list[dict]) -> str | None:
+    """The single C3 key the fleet shares: env override, then any agent's
+    resolved `c3_api_key` (top-level default already merged in by _load_fleet),
+    then the local secrets store."""
+    return (
+        os.environ.get("C3_API_KEY")
+        or next((a.get("c3_api_key") for a in agents if a.get("c3_api_key")), None)
+        or secrets_local.resolve("C3_API_KEY")
+    )
 
 
 def cmd_run(
@@ -584,7 +1059,20 @@ def cmd_run(
     username: str,
     swarm_password: str,
     fleet_tacit: str | None = None,
+    stop_event: "threading.Event | None" = None,
+    on_output=None,
+    on_status=None,
 ) -> int:
+    """Launch and supervise the fleet until every agent exits or a stop is
+    requested.
+
+    Interactive/CLI use (the default) installs SIGINT/SIGTERM handlers and runs
+    in the foreground. The control-ui companion instead runs this in a worker
+    thread and passes `stop_event` (set it to request a graceful shutdown),
+    `on_output(agent_name, line)` (live log lines), and `on_status(event, info)`
+    (lifecycle events: 'spawned', 'running', 'exited', 'stopped'). Signal
+    handlers are only installed when running on the main thread — installing
+    them elsewhere raises ValueError."""
     if only:
         names = {a["name"] for a in agents}
         unknown = [n for n in only if n not in names]
@@ -592,30 +1080,122 @@ def cmd_run(
             sys.exit(f"Unknown agent name(s) in --only: {', '.join(unknown)}")
         agents = [a for a in agents if a["name"] in only]
 
+    # Mirror fleet-level bootstrap milestones to BOTH the terminal (CLI users)
+    # and the control-ui log stream (`on_output`). Without this, everything up
+    # to the first agent subprocess print — key resolution, the C3 subscription
+    # query, per-agent worktree creation/seeding — is terminal-only, so the web
+    # companion shows "launched" with an empty log panel and looks hung during a
+    # bootstrap that can take a while (git worktree + `setup.py sync` + a live
+    # C3 API round-trip). Routing them through `on_output` gives the UI real
+    # progress and makes any stall visible instead of silent.
+    def _fleet_log(msg: str) -> None:
+        # flush: Python block-buffers stdout when it isn't a terminal, so a
+        # piped or redirected launch (`| tee`, nohup, a service manager)
+        # otherwise shows NOTHING until the buffer fills — during exactly the
+        # bootstrap where a stall needs to be visible.
+        print(msg, flush=True)
+        if on_output is not None:
+            try:
+                on_output("fleet", msg.strip())
+            except Exception:  # a UI consumer must never kill the fleet
+                pass
+
+    # One message used to cover key resolution AND the swarm sync, so a stall
+    # in either looked identical and the user had nothing to act on or report.
+    # Each step now names itself before it can block.
+    _fleet_log(f"  [fleet] resolving API keys for {len(agents)} agent(s)…")
+
     # Resolve every API key up front so missing secrets fail fast before any
     # worktree work or subprocess starts.
-    key_envs = [_resolve_api_key(a) for a in agents]
+    key_envs = [_resolve_api_key(a, log=_fleet_log) for a in agents]
 
     # Make sure .swarm-cache.json exists at root before any worktree is seeded.
     # _seed_worktree copies the root cache into each worktree; without it,
     # run_loop.py's first call to load_config() would bail with the legacy
     # "Run `python setup.py sync` first" error that contributors aren't
     # expected to know how to fix.
-    _ensure_root_swarm_cache(server_url)
+    _ensure_root_swarm_cache(server_url, log=_fleet_log)
 
     use_color = sys.stdout.isatty()
     procs: list[tuple[str, subprocess.Popen, threading.Thread]] = []
 
+    # One coherent fleet-wide C3 slot-pool cap (c3_pool.py). All agents share ONE
+    # C3 key, so the cap is the subscription's max concurrent-job limit — query
+    # it live from C3 rather than trusting a hand-set number. We stamp it onto
+    # every agent's c3_max_parallel_jobs before seeding worktrees.
+    def _agent_cap(a: dict) -> int:
+        try:
+            return max(1, int(a.get("c3_max_parallel_jobs", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    c3_agents = [a for a in agents if (a.get("compute") or "local") == "c3"]
+    fleet_pool_size = None
+    if c3_agents:
+        fleet_c3_key = _resolve_fleet_c3_key(agents)
+        _fleet_log("  [fleet] querying C3 subscription for the concurrency cap…")
+        fleet_pool_size = _query_c3_plan_cap(fleet_c3_key)
+        # Courtesy check: leftover jobs from a previous fleet hold chips against
+        # the same cap, so a fresh fleet can't get its full slot budget. Warn
+        # (never cancel — the user owns that call); silent when nothing's stale.
+        _warn_orphaned_c3_jobs(fleet_c3_key, log=_fleet_log)
+    if fleet_pool_size:
+        _fleet_log(f"  [fleet] C3 subscription cap: {fleet_pool_size} concurrent job(s) "
+                   f"(fleet-wide pool size + shards per benchmark)")
+        for a in agents:
+            a["c3_max_parallel_jobs"] = fleet_pool_size
+    else:
+        # No C3 agents, or the query failed (offline / auth) — fall back to the
+        # configured value so the fleet still launches with a sane, coherent cap.
+        fleet_pool_size = max((_agent_cap(a) for a in agents), default=3)
+        if c3_agents:
+            _fleet_log(f"  [fleet] WARNING: could not read C3 subscription cap; "
+                       f"falling back to configured c3_max_parallel_jobs={fleet_pool_size}")
+
     for i, agent in enumerate(agents):
         name = agent["name"]
-        print(f"  [fleet] preparing {name}…")
-        path = _ensure_worktree(name)
+        # Says what THIS step does. The old wording promised "first run
+        # compiles, which can take a few minutes" — but compiling happens
+        # inside the agent process, well after this, so anyone stuck here was
+        # told to wait for something that had not started yet.
+        _fleet_log(f"  [fleet] preparing {name}… (git worktree + agent config)")
+        path = _ensure_worktree(name, log=_fleet_log)
         _seed_worktree(path, agent, fleet_tacit, server_url, username, swarm_password)
 
         env = os.environ.copy()
         target, value = key_envs[i]
         if target and value:
             env[target] = value
+        # C3 cloud benchmarking reads C3_API_KEY from the environment (a raw
+        # per-agent `c3_api_key` in config still wins downstream). Inject it
+        # from the local secrets store when the launching shell didn't export
+        # it, so `--join` contributors never have to `export C3_API_KEY`.
+        if (agent.get("compute") or "local") == "c3" and not agent.get("c3_api_key"):
+            c3_key = secrets_local.resolve("C3_API_KEY")
+            if c3_key:
+                env["C3_API_KEY"] = c3_key
+        # Fleet-wide C3 slot pool (c3_pool.py): every agent in this fleet shares
+        # ONE C3 key and thus one plan cap, so point them all at one pool dir
+        # under the repo/clone root (shared by every worktree, isolated per
+        # contributor on the hosted runner) and one agreed pool size. Agents
+        # coordinate FCFS through it.
+        env["C3_POOL_DIR"] = str(ROOT / ".c3-pool")
+        env["C3_POOL_SIZE"] = str(fleet_pool_size)
+        # C3 warm-image opt-in, delivered via env as well as agent.config.json:
+        # worktrees live on persistent fleet/<name> branches whose scripts/ may
+        # predate the config passthrough, but c3_compute._warm_c3_image has
+        # honored these env vars from the start.
+        # Tri-state: warm images default ON in c3_compute, so an explicit
+        # `c3_warm_images: false` has to be forwarded too — otherwise the
+        # opt-out is silently dropped and the agent runs warm anyway.
+        if agent.get("c3_warm_images") is not None:
+            env["TIG_C3_WARM_IMAGES"] = (
+                "1" if agent["c3_warm_images"] else "0"
+            )
+        if agent.get("c3_warm_image"):
+            env["TIG_C3_WARM_IMAGE"] = str(agent["c3_warm_image"])
+        if agent.get("tig_dockerhub"):
+            env["TIG_DOCKERHUB"] = str(agent["tig_dockerhub"])
         # Stdout is piped (not a TTY), so Python would block-buffer the child's
         # output and the fleet would look silent until buffers fill. Force
         # line-buffered I/O so [BENCH]/registration prints stream live.
@@ -628,32 +1208,47 @@ def cmd_run(
         # spillover, Rust panic backtraces with raw bytes). Without
         # errors="replace" the parent crashes the moment it tries to decode a
         # stray byte, killing the whole fleet.
+        # group_kwargs(): each agent loop gets its own process group (POSIX)
+        # so teardown can kill its docker/cargo/CLI grandchildren too, not
+        # just the run_loop.py process itself.
         proc = subprocess.Popen(
             cmd, cwd=path, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
             encoding="utf-8", errors="replace",
+            **group_kwargs(),
         )
         t = threading.Thread(
-            target=_stream_output, args=(name, color, proc), daemon=True,
+            target=_stream_output, args=(name, color, proc, on_output),
+            daemon=True,
         )
         t.start()
         procs.append((name, proc, t))
-        print(f"  [fleet] spawned {name} (pid {proc.pid}) in {path}")
+        # Naming the compile here (rather than back at "preparing") puts the
+        # warning where the wait actually is: from this point the silence
+        # belongs to the agent's first cargo build, not to the launcher.
+        _fleet_log(f"  [fleet] spawned {name} (pid {proc.pid}) in {path} — its "
+                   f"first iteration compiles, which can take a few minutes")
+        if on_status is not None:
+            on_status("spawned", {"name": name, "pid": proc.pid})
 
-    print(f"  [fleet] {len(procs)} agent(s) running. Ctrl-C to stop.")
+    _fleet_log(f"  [fleet] {len(procs)} agent(s) running. Ctrl-C to stop.")
+    if on_status is not None:
+        on_status("running", {"count": len(procs)})
 
     stopping = False
 
-    def _shutdown(_signum, _frame):
+    def _terminate_all(reason: str) -> None:
         nonlocal stopping
         if stopping:
             return
         stopping = True
-        print("\n  [fleet] shutdown signal — terminating agents…")
+        print(f"\n  [fleet] {reason} — terminating agents…")
+        # Tree-wide TERM/KILL (see proc_utils): each agent's whole process
+        # group dies, so in-flight docker/cargo grandchildren don't linger.
         for _, p, _t in procs:
             if p.poll() is None:
-                p.terminate()
+                term_tree(p)
         deadline = time.time() + 10
         for nm, p, _t in procs:
             remaining = max(0.0, deadline - time.time())
@@ -661,28 +1256,59 @@ def cmd_run(
                 p.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 print(f"  [fleet] killing {nm} (didn't exit in 10s)")
-                p.kill()
+                kill_tree(p)
 
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
+    def _shutdown(_signum, _frame):
+        _terminate_all("shutdown signal")
 
-    # Re-sync hot-reloadable fields (role) from fleet.config.json into each
-    # running worktree's agent.config.json on a cadence, so a contributor can
-    # change an agent's role mid-run by editing fleet.config.json. run_loop.py
-    # re-reads agent.config.json every iteration and picks the change up.
+    # Signal handlers can only be installed on the main thread. The companion
+    # runs cmd_run in a worker thread and drives shutdown via stop_event instead.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
+
+    # Is this a server-hosted fleet? In that mode the source of truth for
+    # hot-reloadable fields is the contributor console, not the local file.
+    try:
+        server_sourced = (
+            _read_json(FLEET_CONFIG_PATH).get("config_source") == "server"
+        )
+    except Exception:
+        server_sourced = False
+
+    # Re-sync hot-reloadable fields (_HOT_RELOAD_KEYS: role, seeded_start, and
+    # the HPO / cleaner / freeze / warm-image knobs) into each running
+    # worktree's agent.config.json on a cadence, so a contributor can retune a
+    # live fleet — by editing fleet.config.json locally, or in the hosted
+    # console when server-sourced. run_loop.py re-reads agent.config.json every
+    # iteration and picks the change up. The server is polled on a slower
+    # cadence than the local file sync to keep request volume modest.
     _SYNC_EVERY_S = 5
+    _SERVER_REFETCH_EVERY_S = 60
+    server_entries: dict[str, dict] | None = None
     ticks = 0
     while any(p.poll() is None for _, p, _ in procs):
+        if stop_event is not None and stop_event.is_set():
+            _terminate_all("stop requested")
+            break
         time.sleep(1)
         ticks += 1
+        if server_sourced and ticks % _SERVER_REFETCH_EVERY_S == 0:
+            fresh = _fetch_server_config(server_url, username, swarm_password)
+            if fresh and fresh.get("agents"):
+                server_entries = _hot_reload_entries(fresh)
         if ticks % _SYNC_EVERY_S == 0:
-            _sync_hot_reload_to_worktrees(agents)
+            _sync_hot_reload_to_worktrees(agents, server_entries)
 
     for name, p, t in procs:
         t.join(timeout=2)
         print(f"  [fleet] {name} {_describe_exit(p.returncode)}")
+        if on_status is not None:
+            on_status("exited", {"name": name, "returncode": p.returncode})
 
     _sync_tacit_back(agents, fleet_tacit)
+    if on_status is not None:
+        on_status("stopped", {})
     return 0
 
 
@@ -700,7 +1326,7 @@ def _sync_tacit_back(agents: list[dict], fleet_tacit: str | None) -> None:
         name = agent.get("name")
         if not name:
             continue
-        wt_path = WORKTREES_DIR / name / "tacit_knowledge_personal.md"
+        wt_path = WORKTREES_DIR / slug_for_git(name) / "tacit_knowledge_personal.md"
         if not wt_path.exists():
             continue
         src_path, _ = _resolve_tacit_source(agent, fleet_tacit)

@@ -1,13 +1,18 @@
 import { max, min } from "d3-array";
-import { scaleLinear } from "d3-scale";
+import { scaleLinear, scaleSymlog } from "d3-scale";
 import { select } from "d3-selection";
 import { symbol, symbolDiamond, symbolSquare, symbolStar } from "d3-shape";
-import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform, type D3ZoomEvent } from "d3-zoom";
+import {
+  clampZoom, identityZoom, isZoomed, panBy, panByThumb, panToThumbStart,
+  thumbGeometry, zoomAt, type AxisZoom,
+} from "../lib/axisZoom";
 import { getAgentColor, token } from "../lib/colors";
 import { formatScore } from "../lib/format";
+import { getDashboardUrls } from "../lib/bootstrap";
 import { isBetter } from "../lib/swarmConfig";
+import { isComparable } from "../lib/mainnetBaseline";
 import { AgentProgressStore, type AgentExperiment } from "./agentProgressStore";
-import type { Panel, WSMessage } from "../types";
+import type { MainnetBaseline, Panel, WSMessage } from "../types";
 
 const AXIS_TEXT = () => token("--ink-dim", "rgba(26,26,26,0.50)");
 const GRID_LINE = () => token("--border-subtle", "rgba(26,26,26,0.08)");
@@ -18,6 +23,17 @@ const GRID_LINE = () => token("--border-subtle", "rgba(26,26,26,0.08)");
 // gigantic on an ultrawide.
 const axisFontPx = (width: number) =>
   Math.min(22, Math.max(10, Math.round(width / 90)));
+
+// Tooltip for the zoom hint chip — the one place the gesture vocabulary is
+// spelled out for the user.
+const ZOOM_HELP = [
+  "Wheel: zoom both axes",
+  "Shift+wheel: time only",
+  "Alt+wheel: score only",
+  "Wheel over an axis: that axis only",
+  "Drag to pan, or drag the scrollbars",
+  "Double-click to reset",
+].join(" · ");
 
 interface DataPoint {
   time: number; // ms since start
@@ -31,10 +47,21 @@ type Tab =
   | { type: "global" }
   | { type: "agent"; agentId: string; agentName: string };
 
+// Cap on retained global best-so-far points. globalData only grows on a new
+// global best, so this is a high ceiling in practice — but a swarm running for
+// weeks can still cross it, and every redraw is an O(N) SVG rebuild. When we
+// exceed it we drop the OLDEST points: the curve is a monotonic best-so-far
+// line, so the oldest points are the lowest scores (least interesting) and the
+// recent high-score region — the part users care about — is preserved.
+const MAX_GLOBAL_POINTS = 2000;
+
 export class ChartPanel implements Panel {
   private svg!: any;
   private g!: any;
   private globalData: DataPoint[] = [];
+  // The mainnet threshold for the viewed challenge (null until /api/state
+  // reports one). Survives `reset`: it belongs to the challenge, not the run.
+  private baseline: MainnetBaseline | null = null;
   private globalStartTime = 0;
   private width = 0;
   private height = 0;
@@ -50,13 +77,40 @@ export class ChartPanel implements Panel {
   private tabPrevEl!: HTMLElement;
   private tabNextEl!: HTMLElement;
   private zoomResetEl!: HTMLElement;
+  private zoomHintEl!: HTMLElement;
+  private yScaleToggleEl!: HTMLElement;
+  private scrollX!: { track: HTMLElement; thumb: HTMLElement };
+  private scrollY!: { track: HTMLElement; thumb: HTMLElement };
   private redrawScheduled = false;
 
-  // X-axis pan/zoom. The transform is applied to the x-scale on every redraw
-  // (drag = scroll along a long run, wheel = zoom into a span). Reset to
-  // identity on tab/challenge switch so a fresh dataset always starts fit.
-  private zoomBehavior!: ZoomBehavior<SVGSVGElement, unknown>;
-  private xZoomTransform: ZoomTransform = zoomIdentity;
+  // Y-axis scale. "log" is a symlog scale (log-like away from zero, linear
+  // through it) because scores can be negative — neuralnet divergence runs
+  // sit at -2M while the best band is +500k, and a plain scaleLog inverts
+  // the domain on all-negative challenges (that bug shipped once already).
+  // Persisted so a host watching the benchmark page keeps their choice.
+  private yScaleMode: "linear" | "log" =
+    (localStorage.getItem("chartYScaleMode") as "linear" | "log") || "log";
+
+  // Pan/zoom. The two axes zoom INDEPENDENTLY: a run that spans days but
+  // whose interesting scores sit in a 2k-wide band needs the y-axis stretched
+  // far harder than the x-axis, which a single shared transform can't express.
+  // Each axis keeps its own {k, t} (see lib/axisZoom) and both are applied to
+  // their own scale on every redraw. Reset to fit on tab/challenge switch so a
+  // fresh dataset always starts unzoomed.
+  private zx: AxisZoom = identityZoom();
+  private zy: AxisZoom = identityZoom();
+
+  // The plot box (inside the axis margins) from the last layout, in SVG
+  // pixels. Pointer handlers need it to turn a client coordinate into an
+  // anchor and to decide which axis a gesture belongs to.
+  private plot = { left: 0, top: 0, w: 0, h: 0 };
+
+  // Live pointers on the SVG, keyed by pointerId: one = drag-to-pan, two =
+  // pinch (each axis scaled by its own finger span, so a pinch can stretch
+  // one axis alone). `dragAxes` is which axes the current drag moves.
+  private pointers = new Map<number, { x: number; y: number }>();
+  private dragAxes: { x: boolean; y: boolean } | null = null;
+  private pinchSpan: { dx: number; dy: number } | null = null;
 
   init(container: HTMLElement) {
     container.innerHTML = `
@@ -66,9 +120,19 @@ export class ChartPanel implements Panel {
           <button class="chart-tab-btn" id="chart-tab-prev" type="button">&lsaquo;</button>
           <span class="chart-tab-label" id="chart-tab-label">GLOBAL</span>
           <button class="chart-tab-btn" id="chart-tab-next" type="button">&rsaquo;</button>
+          <button class="chart-zoom-reset" id="chart-yscale-toggle" type="button" title="Toggle y-axis scale (log handles negative scores)"></button>
+          <span class="chart-zoom-hint" id="chart-zoom-hint" title="${ZOOM_HELP}">shift+wheel: x · alt+wheel: y</span>
           <button class="chart-zoom-reset" id="chart-zoom-reset" type="button" title="Reset zoom (or double-click the chart)" style="display:none">⟲ reset zoom</button>
         </div>
-        <svg id="chart-svg"></svg>
+        <div class="chart-plot-wrap">
+          <svg id="chart-svg"></svg>
+          <div class="chart-scroll chart-scroll-y" id="chart-scroll-y">
+            <div class="chart-scroll-thumb" id="chart-scroll-y-thumb"></div>
+          </div>
+          <div class="chart-scroll chart-scroll-x" id="chart-scroll-x">
+            <div class="chart-scroll-thumb" id="chart-scroll-x-thumb"></div>
+          </div>
+        </div>
       </div>
     `;
 
@@ -81,13 +145,34 @@ export class ChartPanel implements Panel {
 
     this.zoomResetEl = document.getElementById("chart-zoom-reset")!;
     this.zoomResetEl.addEventListener("click", () => this.resetZoom());
+    this.zoomHintEl = document.getElementById("chart-zoom-hint")!;
 
-    // Measure the SVG itself, not the parent panel — the SVG is `flex: 1`
-    // so the browser has already sized it to fit the remaining space after
-    // the panel label, tabs row, and panel padding. The previous
-    // `parent.height - 48` underestimated the chrome (closer to ~78px on
-    // the mainpage), so the SVG coordinate space extended below the
-    // visible flex box and the bottom-most y-tick label got clipped.
+    this.scrollX = {
+      track: document.getElementById("chart-scroll-x")!,
+      thumb: document.getElementById("chart-scroll-x-thumb")!,
+    };
+    this.scrollY = {
+      track: document.getElementById("chart-scroll-y")!,
+      thumb: document.getElementById("chart-scroll-y-thumb")!,
+    };
+    this.installScrollbar("x");
+    this.installScrollbar("y");
+
+    this.yScaleToggleEl = document.getElementById("chart-yscale-toggle")!;
+    this.renderYScaleToggle();
+    this.yScaleToggleEl.addEventListener("click", () => {
+      this.yScaleMode = this.yScaleMode === "log" ? "linear" : "log";
+      localStorage.setItem("chartYScaleMode", this.yScaleMode);
+      this.renderYScaleToggle();
+      this.redraw();
+    });
+
+    // Measure the SVG itself, not the parent panel — the SVG fills its grid
+    // cell in `.chart-plot-wrap`, so the browser has already sized it to what
+    // is left after the panel label, tabs row, scrollbar gutters and padding.
+    // The previous `parent.height - 48` underestimated the chrome (closer to
+    // ~78px on the mainpage), so the SVG coordinate space extended below the
+    // visible box and the bottom-most y-tick label got clipped.
     const svgEl = document.getElementById("chart-svg")!;
     const rect = svgEl.getBoundingClientRect();
     this.width = rect.width;
@@ -99,38 +184,16 @@ export class ChartPanel implements Panel {
 
     this.g = this.svg.append("g");
 
-    // X-axis pan/zoom. scaleExtent floor of 1 means you can't zoom out past
-    // "fit" (no empty gutters); ceiling lets long runs be expanded ~64× to
-    // read a dense segment. We apply the resulting transform to the x-scale in
-    // redraw rather than transforming the SVG group, so y-scale, axis labels
-    // and stroke widths stay unscaled.
-    this.zoomBehavior = zoom<SVGSVGElement, unknown>()
-      .scaleExtent([1, 64])
-      .on("zoom", (e: D3ZoomEvent<SVGSVGElement, unknown>) => {
-        this.xZoomTransform = e.transform;
-        this.zoomResetEl.style.display = e.transform.k > 1.001 ? "" : "none";
-        this.redraw();
-      });
-    this.svg.call(this.zoomBehavior);
-    // Replace d3-zoom's default double-click-to-zoom-in with reset-to-fit.
-    this.svg.on("dblclick.zoom", null);
-    this.svg.on("dblclick", () => this.resetZoom());
+    // Prime the plot box so a gesture arriving before the first redraw has
+    // real margins to work with.
+    this.computeLayout();
 
-    // Resolve API base URL the same way other panels do.
-    const params = new URLSearchParams(window.location.search);
-    const explicit = params.get("api");
-    if (explicit) this.apiUrl = explicit;
-    else {
-      const ws = params.get("ws") || "";
-      if (ws) {
-        this.apiUrl = ws
-          .replace("ws://", "http://")
-          .replace("wss://", "https://")
-          .replace("/ws/dashboard", "");
-      } else {
-        this.apiUrl = `${window.location.protocol}//${window.location.host}`;
-      }
-    }
+    // Pan/zoom gestures. The transforms are applied to the scales in redraw
+    // rather than to the SVG group, so axis labels and stroke widths stay
+    // unscaled at any zoom depth.
+    this.installGestures(svgEl as unknown as SVGSVGElement);
+
+    this.apiUrl = getDashboardUrls().apiUrl;
 
     const observer = new ResizeObserver(() => {
       const newRect = svgEl.getBoundingClientRect();
@@ -178,11 +241,19 @@ export class ChartPanel implements Panel {
         isBreakthrough: true,
       });
     }
-    this.globalData = filtered;
+    this.globalData =
+      filtered.length > MAX_GLOBAL_POINTS
+        ? filtered.slice(filtered.length - MAX_GLOBAL_POINTS)
+        : filtered;
     if (this.currentTab().type === "global") this.redraw();
   }
 
   handleMessage(msg: WSMessage) {
+    if (msg.type === "mainnet_baseline") {
+      this.baseline = msg.baseline;
+      this.redraw();
+      return;
+    }
     if (msg.type === "reset") {
       this.globalData = [];
       this.globalStartTime = 0;
@@ -284,6 +355,10 @@ export class ChartPanel implements Panel {
         agentId: msg.agent_id,
         isBreakthrough: msg.is_new_best,
       });
+      // Bound retained points (see MAX_GLOBAL_POINTS) — drop the oldest.
+      if (this.globalData.length > MAX_GLOBAL_POINTS) {
+        this.globalData.splice(0, this.globalData.length - MAX_GLOBAL_POINTS);
+      }
       if (this.currentTab().type === "global") this.redraw();
     };
 
@@ -357,6 +432,12 @@ export class ChartPanel implements Panel {
     };
     const w = Math.max(0, this.width - m.left - m.right);
     const h = Math.max(0, this.height - m.top - m.bottom);
+    // Remember the plot box for the pointer handlers, and re-clamp: a resize
+    // changes how far a given zoom level is allowed to pan.
+    this.plot = { left: m.left, top: m.top, w, h };
+    this.zx = clampZoom(this.zx, w);
+    this.zy = clampZoom(this.zy, h);
+    this.syncZoomChrome();
     return { m, w, h, fs };
   }
 
@@ -364,7 +445,6 @@ export class ChartPanel implements Panel {
     this.g.selectAll("*").remove();
 
     const { m, w, h, fs } = this.computeLayout();
-    this.configureZoomExtent();
 
     if (this.globalData.length < 1) {
       // Empty-state placeholder so an unstarted challenge doesn't look
@@ -388,15 +468,13 @@ export class ChartPanel implements Panel {
     const baseXScale = scaleLinear()
       .domain([0, latestData + xPad])
       .range([0, w]);
-    // Apply the current pan/zoom to the x-axis only.
-    const xScale = this.xZoomTransform.rescaleX(baseXScale);
+    // Apply each axis' own pan/zoom.
+    const xScale = this.rescaleX(baseXScale, w);
 
     const yDomain = this.getGlobalYDomain();
     if (!yDomain) return;
 
-    const yScale = scaleLinear()
-      .domain(yDomain)
-      .range([h, 0]);
+    const yScale = this.rescaleY(this.makeYScale(yDomain, h), h);
 
     const chartG = this.g.append("g")
       .attr("transform", `translate(${m.left},${m.top})`);
@@ -405,7 +483,7 @@ export class ChartPanel implements Panel {
     // chartG (unclipped).
     const plotG = this.appendClippedPlot(chartG, w, h);
 
-    const yTicks = yScale.ticks(5);
+    const yTicks = this.yTicksFor(yScale, h);
     yTicks.forEach((tick) => {
       chartG.append("line")
         .attr("x1", 0).attr("x2", w)
@@ -413,6 +491,8 @@ export class ChartPanel implements Panel {
         .attr("stroke", GRID_LINE())
         .attr("stroke-width", 0.5);
     });
+
+    this.drawBaseline(chartG, yScale, w, fs);
 
     const trailTime = latestData + xPad;
     for (let i = 0; i < this.globalData.length; i++) {
@@ -478,8 +558,11 @@ export class ChartPanel implements Panel {
       const isLastPoint = i === lastIdx;
       // Labels render unclipped (they may overflow the right margin, as before)
       // but are culled when panned outside the plot so they don't float in the
-      // y-axis gutter.
-      if (d.agentName && (winnerChanged || isLastPoint) && x >= 0 && x <= w) {
+      // axis gutters — including vertically, which a deep y-only zoom makes
+      // easy to hit: the point scrolls off the plot but its label would still
+      // be drawn over the x-axis tick labels.
+      if (d.agentName && (winnerChanged || isLastPoint)
+          && x >= 0 && x <= w && y >= 0 && y <= h) {
         chartG.append("text")
           .attr("x", x + 6)
           .attr("y", y - 8)
@@ -523,7 +606,6 @@ export class ChartPanel implements Panel {
 
     const progress = this.progressStore.get(agentId);
     const { m, w, h, fs } = this.computeLayout();
-    this.configureZoomExtent();
 
     const chartG = this.g.append("g")
       .attr("transform", `translate(${m.left},${m.top})`);
@@ -551,7 +633,7 @@ export class ChartPanel implements Panel {
     const baseXScale = scaleLinear()
       .domain([0, xDomainEnd])
       .range([0, w]);
-    const xScale = this.xZoomTransform.rescaleX(baseXScale);
+    const xScale = this.rescaleX(baseXScale, w);
 
     // Y: anchor on the GLOBAL chart's domain when available so per-agent
     // tabs roughly share a visual scale, but always extend it to include
@@ -562,18 +644,16 @@ export class ChartPanel implements Panel {
     const globalYDomain = this.getGlobalYDomain();
     const minScore = min(exps, (d) => d.score)!;
     const maxScore = max(exps, (d) => d.score)!;
-    const fallbackPad = Math.max(Math.abs(maxScore - minScore) * 0.15, 1);
+    const agentDomain = this.padYDomain(minScore, maxScore);
     const yDomain: [number, number] = globalYDomain
       ? [
-          Math.min(globalYDomain[0], minScore - fallbackPad),
-          Math.max(globalYDomain[1], maxScore + fallbackPad),
+          Math.min(globalYDomain[0], agentDomain[0]),
+          Math.max(globalYDomain[1], agentDomain[1]),
         ]
-      : [minScore - fallbackPad, maxScore + fallbackPad];
-    const yScale = scaleLinear()
-      .domain(yDomain)
-      .range([h, 0]);
+      : agentDomain;
+    const yScale = this.rescaleY(this.makeYScale(yDomain, h), h);
 
-    const yTicks = yScale.ticks(5);
+    const yTicks = this.yTicksFor(yScale, h);
     yTicks.forEach((tick) => {
       chartG.append("line")
         .attr("x1", 0).attr("x2", w)
@@ -643,6 +723,13 @@ export class ChartPanel implements Panel {
           .attr("transform", `translate(${x0},${y0})`)
           .attr("fill", color).attr("opacity", 0.95)
           .attr("stroke", color).attr("stroke-width", 0.5);
+      } else if (event === "failed_attempts") {
+        // Hollow diamond — agent was shown its own archived failed attempts.
+        plotG.append("path")
+          .attr("d", symbol(symbolDiamond, 55)())
+          .attr("transform", `translate(${x0},${y0})`)
+          .attr("fill", "none").attr("opacity", 0.95)
+          .attr("stroke", color).attr("stroke-width", 1.4);
       } else {
         plotG.append("circle")
           .attr("cx", x0)
@@ -691,10 +778,11 @@ export class ChartPanel implements Panel {
   ) {
     // Stack short rows in the top-right corner. Each row is a tiny marker
     // followed by a label. Kept compact so it doesn't crowd the plot.
-    const items: { kind: "trajectory_deactivated" | "tacit_knowledge" | "inspiration"; label: string }[] = [
+    const items: { kind: "trajectory_deactivated" | "tacit_knowledge" | "inspiration" | "failed_attempts"; label: string }[] = [
       { kind: "trajectory_deactivated", label: "trajectory deactivated" },
       { kind: "tacit_knowledge",        label: "tacit knowledge" },
       { kind: "inspiration",            label: "inspiration" },
+      { kind: "failed_attempts",        label: "failed attempts" },
     ];
     const lineH = Math.max(12, fs + 2);
     // "trajectory deactivated" is the longest label (~21 chars). Reserve
@@ -720,6 +808,12 @@ export class ChartPanel implements Panel {
           .attr("d", symbol(symbolStar, 36)())
           .attr("transform", `translate(${x0},${cy})`)
           .attr("fill", color).attr("opacity", 0.9);
+      } else if (item.kind === "failed_attempts") {
+        legend.append("path")
+          .attr("d", symbol(symbolDiamond, 32)())
+          .attr("transform", `translate(${x0},${cy})`)
+          .attr("fill", "none").attr("opacity", 0.9)
+          .attr("stroke", color).attr("stroke-width", 1.2);
       } else {
         legend.append("path")
           .attr("d", symbol(symbolSquare, 30)())
@@ -739,17 +833,133 @@ export class ChartPanel implements Panel {
 
   private getGlobalYDomain(): [number, number] | null {
     if (this.globalData.length < 1) return null;
-    const scoreMin = min(this.globalData, (d) => d.score);
-    const scoreMax = max(this.globalData, (d) => d.score);
+    let scoreMin = min(this.globalData, (d) => d.score);
+    let scoreMax = max(this.globalData, (d) => d.score);
     if (scoreMin == null || scoreMax == null) return null;
+    // Keep the mainnet line inside the view. A threshold the swarm hasn't
+    // reached yet sits above every plotted point, and a line drawn off the top
+    // of the chart is worse than no line — the one thing it has to show is how
+    // far away it is.
+    const bar = this.baselineScore();
+    if (bar !== null) {
+      scoreMin = Math.min(scoreMin, bar);
+      scoreMax = Math.max(scoreMax, bar);
+    }
+    return this.padYDomain(scoreMin, scoreMax);
+  }
 
-    // Pad both sides symmetrically. Previously yMin was clamped to >= 1
-    // because the y-axis used scaleLog, but now that we always use
-    // scaleLinear that floor inverts the domain whenever all scores are
-    // negative (e.g. job_scheduling at -4k..-2k) — every point ends up
-    // rendered below the visible chart.
+  // The mainnet score, only when it can honestly be drawn on this axis.
+  private baselineScore(): number | null {
+    return isComparable(this.baseline) ? this.baseline!.score : null;
+  }
+
+  // The dashed mainnet threshold plus its label. Drawn into the UNCLIPPED
+  // group with the gridlines: it is a reference like an axis, not a data mark,
+  // so it should span the full plot width and keep its label readable at the
+  // edge even when the user has panned the data away.
+  private drawBaseline(chartG: any, yScale: any, w: number, fs: number): void {
+    const bar = this.baselineScore();
+    if (bar === null) return;
+    const y = yScale(bar);
+    // Panned out of view — drawing it pinned to an edge would misrepresent
+    // where the bar actually sits.
+    if (!Number.isFinite(y) || y < 0 || y > yScale.range()[0]) return;
+
+    const accent = token("--color-accent", "#c2410c");
+    chartG.append("line")
+      .attr("class", "chart-mainnet-line")
+      .attr("x1", 0).attr("x2", w)
+      .attr("y1", y).attr("y2", y)
+      .attr("stroke", accent)
+      .attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", "7 5")
+      .attr("opacity", 0.85);
+
+    const b = this.baseline!;
+    const label = `mainnet · ${b.algorithm ?? "?"} · ${formatScore(bar)}`;
+    // Above the line normally; below it when the line is near the top, so the
+    // text never escapes the plot.
+    const above = y > fs + 8;
+    const text = chartG.append("text")
+      .attr("class", "chart-mainnet-label")
+      .attr("x", w - 4)
+      .attr("y", above ? y - 6 : y + fs + 4)
+      .attr("text-anchor", "end")
+      .attr("fill", accent)
+      .attr("font-size", `${Math.max(9, fs - 1)}px`)
+      .attr("font-family", "var(--mono, monospace)")
+      .text(label);
+    // A readable halo: the line and the best-so-far curve both run underneath.
+    text.attr("paint-order", "stroke")
+      .attr("stroke", token("--bg-page", "#fff"))
+      .attr("stroke-width", 3)
+      .attr("stroke-linejoin", "round");
+  }
+
+  // Pad the y-domain in the active scale's own space. Linear mode pads
+  // symmetrically in score units (never clamp the floor to >= 1 — that
+  // inverts the domain on all-negative challenges like job_scheduling at
+  // -4k..-2k, a bug that shipped once already). Log mode pads in symlog
+  // space instead: a linear pad below a positive floor (e.g. 48k - 15%
+  // of a 550k range) flips the floor negative, and on a symlog axis that
+  // wastes half the chart on an empty sign change.
+  private padYDomain(scoreMin: number, scoreMax: number): [number, number] {
+    if (this.yScaleMode === "log") {
+      const c = symlogConstant(scoreMin, scoreMax);
+      const t = (v: number) => Math.sign(v) * Math.log1p(Math.abs(v) / c);
+      const ti = (u: number) => Math.sign(u) * c * Math.expm1(Math.abs(u));
+      const lo = t(scoreMin);
+      const hi = t(scoreMax);
+      const pad = Math.max((hi - lo) * 0.05, 0.05);
+      return [ti(lo - pad), ti(hi + pad)];
+    }
     const pad = Math.max(Math.abs(scoreMax - scoreMin) * 0.15, 1);
     return [scoreMin - pad, scoreMax + pad];
+  }
+
+  // Y-scale for the active mode. "log" is symlog so negative scores (and a
+  // domain crossing zero) render without the scaleLog domain-inversion trap.
+  // The constant anchors where the scale transitions from linear to log-like;
+  // tying it to the data's magnitude keeps the axis from wasting space on
+  // |score| decades the data never visits (with the d3 default of 1, a
+  // -2M..+600k domain spends ~60% of its pixels on the empty |v| < 10k band).
+  private makeYScale(domain: [number, number], h: number): any {
+    if (this.yScaleMode === "log") {
+      return scaleSymlog()
+        .domain(domain)
+        .range([h, 0])
+        .constant(symlogConstant(domain[0], domain[1]));
+    }
+    return scaleLinear().domain(domain).range([h, 0]);
+  }
+
+  // Gridline/label positions for the active mode. d3's symlog ticks() are
+  // linearly spaced VALUES, which bunch into one end of a log-like axis —
+  // so in log mode we instead take evenly spaced PIXEL rows and snap each
+  // to a nice number. The snap precision comes from the gap to the
+  // neighboring row, NOT from the value's own magnitude: when zoomed deep
+  // into a narrow band (e.g. 589k..593k) magnitude-based snapping collapses
+  // every row to the same 500k and the axis goes blank.
+  private yTicksFor(yScale: any, h: number): number[] {
+    if (this.yScaleMode === "linear") return yScale.ticks(5);
+    const ticks = new Set<number>();
+    const n = 5;
+    for (let i = 0; i <= n; i++) {
+      const v = yScale.invert((h * i) / n);
+      const neighbor = yScale.invert((h * (i === n ? i - 1 : i + 1)) / n);
+      ticks.add(snapToStep(v, Math.abs(neighbor - v)));
+    }
+    // Snapping can land a tick just outside the visible domain; cull so
+    // gridlines never draw into the margins.
+    return [...ticks].filter((v) => {
+      const y = yScale(v);
+      return y >= -0.5 && y <= h + 0.5;
+    });
+  }
+
+  private renderYScaleToggle() {
+    this.yScaleToggleEl.textContent =
+      this.yScaleMode === "log" ? "y: log" : "y: linear";
   }
 
   // Build a sub-group clipped to the [0,w]×[0,h] plot rect. Data marks go here
@@ -760,35 +970,288 @@ export class ChartPanel implements Panel {
     return chartG.append("g").attr("clip-path", "url(#chart-plot-clip)");
   }
 
-  // Bound the zoom gesture to the current SVG box so you can't pan/zoom out
-  // into empty space (paired with the scaleExtent floor of 1).
-  private configureZoomExtent() {
-    if (!this.zoomBehavior) return;
-    this.zoomBehavior
-      .extent([[0, 0], [this.width, this.height]])
-      .translateExtent([[0, 0], [this.width, this.height]]);
+  // ── Pan/zoom ──
+  //
+  // Each axis is rescaled from its OWN transform, which is what makes the two
+  // independent: `rescaleX` mirrors d3-zoom's rescaleX for the x transform
+  // alone, `rescaleY` likewise (and works on symlog, since it only goes
+  // through the scale's own invert).
+
+  private rescaleX(base: any, w: number): any {
+    const { k, t } = this.zx;
+    if (k === 1 && t === 0) return base;
+    return base.copy().domain([base.invert(-t / k), base.invert((w - t) / k)]);
   }
 
-  // User-triggered reset (button / double-click): fires a zoom event so the
-  // chart redraws back at fit.
+  private rescaleY(base: any, h: number): any {
+    const { k, t } = this.zy;
+    if (k === 1 && t === 0) return base;
+    // The y range runs [h, 0] (top = high score), so the domain floor comes
+    // from the BOTTOM pixel.
+    return base.copy().domain([base.invert((h - t) / k), base.invert(-t / k)]);
+  }
+
+  private installGestures(svgEl: SVGSVGElement) {
+    svgEl.addEventListener("wheel", (e) => this.onWheel(e), { passive: false });
+    svgEl.addEventListener("pointerdown", (e) => this.onPointerDown(e));
+    svgEl.addEventListener("pointermove", (e) => this.onPointerMove(e));
+    svgEl.addEventListener("pointerup", (e) => this.onPointerUp(e));
+    svgEl.addEventListener("pointercancel", (e) => this.onPointerUp(e));
+    svgEl.addEventListener("dblclick", () => this.resetZoom());
+  }
+
+  // Pointer position in SVG pixels.
+  private localPoint(e: { clientX: number; clientY: number }) {
+    const node = this.svg?.node?.() as SVGSVGElement | null;
+    if (!node) return { x: 0, y: 0 };
+    const r = node.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  // Which axes a gesture drives. Modifiers win; otherwise the axis gutters
+  // act like the axis itself — a wheel over the score labels zooms scores,
+  // a wheel over the time labels zooms time, and the plot area drives both.
+  private axesFor(
+    e: { shiftKey: boolean; altKey: boolean }, p: { x: number; y: number },
+  ): { x: boolean; y: boolean } {
+    if (e.shiftKey && !e.altKey) return { x: true, y: false };
+    if (e.altKey && !e.shiftKey) return { x: false, y: true };
+    if (p.x < this.plot.left) return { x: false, y: true };
+    if (p.y > this.plot.top + this.plot.h) return { x: true, y: false };
+    return { x: true, y: true };
+  }
+
+  private onWheel(e: WheelEvent) {
+    if (this.plot.w <= 0 || this.plot.h <= 0) return;
+    e.preventDefault();
+    const p = this.localPoint(e);
+    const axes = this.axesFor(e, p);
+    // d3-zoom's delta normalization, so a notch feels the same as before.
+    const unit = e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002;
+    const factor = Math.pow(2, -e.deltaY * unit);
+    if (axes.x) this.zx = zoomAt(this.zx, p.x - this.plot.left, factor, this.plot.w);
+    if (axes.y) this.zy = zoomAt(this.zy, p.y - this.plot.top, factor, this.plot.h);
+    this.redraw();
+  }
+
+  private onPointerDown(e: PointerEvent) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    // Stop the browser turning a pan into a text/SVG selection drag.
+    e.preventDefault();
+    const node = this.svg?.node?.() as SVGSVGElement | null;
+    node?.setPointerCapture?.(e.pointerId);
+    this.pointers.set(e.pointerId, this.localPoint(e));
+    if (this.pointers.size === 1) {
+      this.dragAxes = this.axesFor(e, this.localPoint(e));
+    } else {
+      // A second finger turns the gesture into a pinch; the next move
+      // establishes the baseline spans.
+      this.dragAxes = null;
+      this.pinchSpan = this.currentPinchSpan();
+    }
+    this.applyCursor(true);
+  }
+
+  private onPointerMove(e: PointerEvent) {
+    const prev = this.pointers.get(e.pointerId);
+    if (!prev) {
+      // Hovering: keep the cursor honest about what a drag here would do.
+      this.applyCursor(false, this.axesFor(e, this.localPoint(e)));
+      return;
+    }
+    const p = this.localPoint(e);
+    this.pointers.set(e.pointerId, p);
+
+    if (this.pointers.size >= 2) {
+      this.applyPinch();
+    } else if (this.dragAxes) {
+      if (this.dragAxes.x) this.zx = panBy(this.zx, p.x - prev.x, this.plot.w);
+      if (this.dragAxes.y) this.zy = panBy(this.zy, p.y - prev.y, this.plot.h);
+    }
+    this.redraw();
+  }
+
+  private onPointerUp(e: PointerEvent) {
+    const node = this.svg?.node?.() as SVGSVGElement | null;
+    if (node?.hasPointerCapture?.(e.pointerId)) node.releasePointerCapture(e.pointerId);
+    this.pointers.delete(e.pointerId);
+    if (this.pointers.size < 2) this.pinchSpan = null;
+    if (this.pointers.size === 0) this.dragAxes = null;
+    this.applyCursor(this.pointers.size > 0);
+  }
+
+  private currentPinchSpan(): { dx: number; dy: number } | null {
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return null;
+    return {
+      dx: Math.abs(pts[0].x - pts[1].x),
+      dy: Math.abs(pts[0].y - pts[1].y),
+    };
+  }
+
+  // Two-finger pinch: x scales by how the horizontal finger span changed and
+  // y by the vertical one, so spreading fingers sideways stretches time only.
+  // Spans under ~24px are ignored — their ratios are noise.
+  private applyPinch() {
+    const span = this.currentPinchSpan();
+    const prev = this.pinchSpan;
+    this.pinchSpan = span;
+    if (!span || !prev) return;
+    const pts = [...this.pointers.values()];
+    const mid = {
+      x: (pts[0].x + pts[1].x) / 2 - this.plot.left,
+      y: (pts[0].y + pts[1].y) / 2 - this.plot.top,
+    };
+    const MIN_SPAN = 24;
+    if (prev.dx > MIN_SPAN && span.dx > MIN_SPAN) {
+      this.zx = zoomAt(this.zx, mid.x, span.dx / prev.dx, this.plot.w);
+    }
+    if (prev.dy > MIN_SPAN && span.dy > MIN_SPAN) {
+      this.zy = zoomAt(this.zy, mid.y, span.dy / prev.dy, this.plot.h);
+    }
+  }
+
+  private applyCursor(active: boolean, axes?: { x: boolean; y: boolean }) {
+    const node = this.svg?.node?.() as SVGSVGElement | null;
+    if (!node) return;
+    const a = axes ?? this.dragAxes ?? { x: true, y: true };
+    node.style.cursor = a.x && a.y
+      ? (active ? "grabbing" : "grab")
+      : a.x ? "ew-resize" : "ns-resize";
+  }
+
+  // ── Scrollbars ──
+  //
+  // One per axis, tracking the visible window. They exist because zooming in
+  // used to leave no way to tell where in the run you were looking, or to get
+  // somewhere else without dragging the plot around.
+
+  private installScrollbar(axis: "x" | "y") {
+    const bar = axis === "x" ? this.scrollX : this.scrollY;
+    let dragging = false;
+    let last = 0;
+    // Track px → plot px. They match in practice (the track is inset to the
+    // plot box) but a rounded layout shouldn't make the thumb drift.
+    let ratio = 1;
+
+    const posOf = (e: PointerEvent) => {
+      const r = bar.track.getBoundingClientRect();
+      return axis === "x" ? e.clientX - r.left : e.clientY - r.top;
+    };
+
+    bar.track.addEventListener("pointerdown", (e: PointerEvent) => {
+      const size = axis === "x" ? this.plot.w : this.plot.h;
+      const r = bar.track.getBoundingClientRect();
+      const trackLen = axis === "x" ? r.width : r.height;
+      if (size <= 0 || trackLen <= 0) return;
+      e.preventDefault();
+      bar.track.setPointerCapture(e.pointerId);
+      dragging = true;
+      ratio = size / trackLen;
+      last = posOf(e);
+
+      // Clicking the track outside the thumb jumps the window there, centred
+      // on the click; clicking the thumb itself just starts a drag.
+      const z = axis === "x" ? this.zx : this.zy;
+      const { offset, length } = thumbGeometry(z, size);
+      const thumbStart = offset * trackLen;
+      const thumbLen = length * trackLen;
+      if (last < thumbStart || last > thumbStart + thumbLen) {
+        const start = (last - thumbLen / 2) * ratio;
+        if (axis === "x") this.zx = panToThumbStart(this.zx, start, size);
+        else this.zy = panToThumbStart(this.zy, start, size);
+        this.redraw();
+      }
+    });
+
+    bar.track.addEventListener("pointermove", (e: PointerEvent) => {
+      if (!dragging) return;
+      const pos = posOf(e);
+      const delta = (pos - last) * ratio;
+      last = pos;
+      if (axis === "x") this.zx = panByThumb(this.zx, delta, this.plot.w);
+      else this.zy = panByThumb(this.zy, delta, this.plot.h);
+      this.redraw();
+    });
+
+    const end = (e: PointerEvent) => {
+      dragging = false;
+      if (bar.track.hasPointerCapture?.(e.pointerId)) {
+        bar.track.releasePointerCapture(e.pointerId);
+      }
+    };
+    bar.track.addEventListener("pointerup", end);
+    bar.track.addEventListener("pointercancel", end);
+  }
+
+  // Keep the scrollbars, the reset button and the hint in sync with the
+  // current transforms. Called from computeLayout, so every redraw path and
+  // every resize refreshes them.
+  private syncZoomChrome() {
+    if (!this.scrollX || !this.scrollY) return;
+    const { left, top, w, h } = this.plot;
+
+    // Inset each track to the plot box so the thumb lines up with the data
+    // it scrolls, not with the axis labels.
+    this.scrollX.track.style.marginLeft = `${left}px`;
+    this.scrollX.track.style.marginRight = `${Math.max(0, this.width - left - w)}px`;
+    this.scrollY.track.style.marginTop = `${top}px`;
+    this.scrollY.track.style.marginBottom = `${Math.max(0, this.height - top - h)}px`;
+
+    const gx = thumbGeometry(this.zx, w);
+    this.scrollX.thumb.style.left = `${gx.offset * 100}%`;
+    this.scrollX.thumb.style.width = `${gx.length * 100}%`;
+    this.scrollX.track.classList.toggle("is-zoomed", isZoomed(this.zx));
+
+    const gy = thumbGeometry(this.zy, h);
+    this.scrollY.thumb.style.top = `${gy.offset * 100}%`;
+    this.scrollY.thumb.style.height = `${gy.length * 100}%`;
+    this.scrollY.track.classList.toggle("is-zoomed", isZoomed(this.zy));
+
+    const zoomed = isZoomed(this.zx) || isZoomed(this.zy);
+    this.zoomResetEl.style.display = zoomed ? "" : "none";
+    // The hint only fits on the full-screen benchmark page, not the small
+    // panel in the home grid.
+    this.zoomHintEl.style.display = this.width >= 700 ? "" : "none";
+  }
+
+  // User-triggered reset (button / double-click): both axes back to fit.
   private resetZoom() {
-    if (!this.zoomBehavior) return;
-    this.zoomBehavior.transform(this.svg, zoomIdentity);
+    this.zx = identityZoom();
+    this.zy = identityZoom();
+    this.redraw();
   }
 
-  // Silent reset on tab/challenge switch — clears the transform without firing
-  // a zoom event, since those code paths already redraw.
+  // Silent reset on tab/challenge switch — the callers already redraw (or
+  // clear the chart outright), so this only touches state and chrome.
   private resetZoomSilently() {
-    this.xZoomTransform = zoomIdentity;
-    const node = this.svg?.node?.() as any;
-    if (node) node.__zoom = zoomIdentity;
-    if (this.zoomResetEl) this.zoomResetEl.style.display = "none";
+    this.zx = identityZoom();
+    this.zy = identityZoom();
+    this.syncZoomChrome();
   }
+}
+
+// Symlog linear→log transition point for a score domain: 1/10,000th of the
+// largest magnitude (floored at 10). Everything with |score| below this sits
+// in the scale's linear region; everything above spreads across log decades.
+function symlogConstant(lo: number, hi: number): number {
+  return Math.max(Math.abs(lo), Math.abs(hi), 1e5) / 1e4;
+}
+
+// Round a value onto a 1/2/5 × 10^k grid sized from `step` — the distance
+// to the neighboring tick row — so adjacent log-mode ticks stay distinct at
+// any zoom depth while still landing on round numbers.
+function snapToStep(v: number, step: number): number {
+  if (!Number.isFinite(step) || step <= 0) return v;
+  const unit = Math.pow(10, Math.floor(Math.log10(step)));
+  const m = step / unit;
+  const grid = m >= 5 ? 5 * unit : m >= 2 ? 2 * unit : unit;
+  return Math.round(v / grid) * grid;
 }
 
 function pickEventKind(
   e: AgentExperiment,
-): "trajectory_deactivated" | "tacit_knowledge" | "inspiration" | null {
+): "trajectory_deactivated" | "tacit_knowledge" | "inspiration" | "failed_attempts" | null {
   // Priority: a trajectory deactivation is the loudest event, so it wins
   // when both apply (rare — the agent published an iteration that was then
   // the last on a trajectory which became inactive on its next /api/state
@@ -796,6 +1259,7 @@ function pickEventKind(
   if (e.trajectoryDeactivated) return "trajectory_deactivated";
   if (e.receivedHint === "tacit_knowledge") return "tacit_knowledge";
   if (e.receivedHint === "inspiration") return "inspiration";
+  if (e.receivedHint === "failed_attempts") return "failed_attempts";
   return null;
 }
 

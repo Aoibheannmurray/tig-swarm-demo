@@ -2,10 +2,6 @@ import "./style.css";
 import { SwarmWebSocket } from "./lib/websocket";
 import { getDashboardUrls, installKeyboardNav } from "./lib/bootstrap";
 import { viewportFlash } from "./lib/animate";
-import {
-  soundAgentJoined, soundHypothesisProposed, soundExperimentPublished,
-  soundNewGlobalBest, startHeartbeat,
-} from "./lib/sounds";
 import { initWelcome, toggleWelcome } from "./lib/welcome";
 import { startReplay } from "./lib/replay";
 import {
@@ -51,6 +47,24 @@ const agentNameMap = new Map<string, string>();
 const lookupAgentName = (agent_id: string): string | undefined =>
   agentNameMap.get(agent_id);
 
+// Bound the map so a very long-running dashboard can't grow it without limit.
+// The ceiling is far above any real swarm's agent count; when crossed we drop
+// the oldest-inserted entries (Map preserves insertion order). This is safe
+// because names re-seed from every leaderboard_update/agent_joined, and the
+// feed falls back to the name carried on each message when a lookup misses.
+const MAX_AGENT_NAMES = 5000;
+function rememberAgentName(agent_id: string, agent_name: string): void {
+  agentNameMap.set(agent_id, agent_name);
+  if (agentNameMap.size > MAX_AGENT_NAMES) {
+    const overflow = agentNameMap.size - MAX_AGENT_NAMES;
+    let i = 0;
+    for (const key of agentNameMap.keys()) {
+      if (i++ >= overflow) break;
+      agentNameMap.delete(key);
+    }
+  }
+}
+
 function initPanel<T extends Panel>(PanelClass: new () => T, containerId: string): T {
   const panel = new PanelClass();
   const container = document.getElementById(containerId)!;
@@ -93,8 +107,6 @@ function constructPanels() {
 }
 
 // ── Message dispatch ──
-let soundEnabled = false;
-
 function handleMessage(msg: WSMessage) {
   // Drop challenge-scoped events that don't belong to the viewed challenge.
   // See lib/messageScope.ts for which event types are filtered.
@@ -112,23 +124,15 @@ function handleMessage(msg: WSMessage) {
   if (msg.type === "leaderboard_update") {
     for (const entry of msg.entries) {
       if (entry.agent_id && entry.agent_name) {
-        agentNameMap.set(entry.agent_id, entry.agent_name);
+        rememberAgentName(entry.agent_id, entry.agent_name);
         registerAgentColor(entry.agent_id);
       }
     }
   } else if (msg.type === "agent_renamed") {
-    agentNameMap.set(msg.agent_id, msg.new_name);
+    rememberAgentName(msg.agent_id, msg.new_name);
   } else if (msg.type === "agent_joined") {
-    agentNameMap.set(msg.agent_id, msg.agent_name);
+    rememberAgentName(msg.agent_id, msg.agent_name);
     if (msg.agent_id) registerAgentColor(msg.agent_id);
-  }
-
-  if (soundEnabled) {
-    if (msg.type === "agent_joined") soundAgentJoined();
-    if (msg.type === "hypothesis_proposed") soundHypothesisProposed(msg.strategy_tag);
-    if (msg.type === "experiment_published") soundExperimentPublished();
-    if (msg.type === "new_global_best") soundNewGlobalBest();
-    if (msg.type === "stats_update") startHeartbeat(msg.total_agents ?? msg.active_agents ?? 0);
   }
 
   if (msg.type === "new_global_best") {
@@ -253,6 +257,16 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       } as any);
     }
 
+    // The mainnet bar for this challenge — drawn as a threshold on the chart
+    // and a ranked row in the leaderboard. Dispatched even when null so a
+    // challenge switch clears the previous challenge's bar.
+    handleMessage({
+      type: "mainnet_baseline",
+      challenge: getViewedChallenge(),
+      baseline: state.mainnet_baseline ?? null,
+      timestamp: new Date().toISOString(),
+    } as any);
+
     // Merge experiments + hypotheses into a single chronologically-sorted
     // stream and dispatch oldest-first. feed.ts prepends each event, so
     // the last-dispatched lands at the top — meaning the newest event
@@ -366,7 +380,6 @@ async function loadInitialState(apiUrl: string, challenge: string) {
       })
       .catch((e) => console.warn("[Dashboard] /api/messages backfill failed:", e));
 
-    soundEnabled = true;
     console.log("[Dashboard] Loaded initial state for challenge:", challenge);
 
     // Seed the chart's score-history line when the (compact) replay

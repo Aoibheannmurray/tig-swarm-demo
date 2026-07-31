@@ -1,0 +1,176 @@
+[
+  {
+    "key": "anthropic",
+    "label": "Claude API",
+    "default_model": "claude-opus-4-8",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "name_stub": "claude",
+    "supports_c3": true,
+    "blurb": "Claude, called directly over Anthropic's API.",
+    "needs_api_base": false,
+    "wire_provider": "anthropic",
+    "api_base": null,
+    "popular_models": [
+      "claude-opus-4-8",
+      "claude-sonnet-5",
+      "claude-haiku-4-5-20251001"
+    ]
+  },
+  {
+    "key": "openai",
+    "label": "OpenAI API",
+    "default_model": "gpt-5",
+    "api_key_env": "OPENAI_API_KEY",
+    "name_stub": "gpt",
+    "supports_c3": true,
+    "blurb": "GPT, called directly over OpenAI's API.",
+    "needs_api_base": false,
+    "wire_provider": "openai",
+    "api_base": null,
+    "popular_models": [
+      "gpt-5",
+      "gpt-5-mini",
+      "o3"
+    ]
+  },
+  {
+    "key": "google",
+    "label": "Gemini API",
+    "default_model": "gemini-2.5-pro",
+    "api_key_env": "GEMINI_API_KEY",
+    "name_stub": "gemini",
+    "supports_c3": true,
+    "blurb": "Gemini, called directly over Google's API.",
+    "needs_api_base": false,
+    "wire_provider": "google",
+    "api_base": null,
+    "popular_models": [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash"
+    ]
+  },
+  {
+    "key": "venice",
+    "label": "Venice.ai",
+    "default_model": "zai-org-glm-5",
+    "api_key_env": "VENICE_API_KEY",
+    "name_stub": "venice",
+    "supports_c3": true,
+    "blurb": "Private, uncensored inference over an OpenAI-compatible API.",
+    "needs_api_base": false,
+    "wire_provider": "venice",
+    "api_base": null,
+    "popular_models": [
+      "zai-org-glm-5",
+      "qwen3-235b",
+      "deepseek-r1-671b"
+    ]
+  },
+  {
+    "key": "openrouter",
+    "label": "OpenRouter",
+    "default_model": "qwen/qwen3-coder",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "name_stub": "openrouter",
+    "supports_c3": true,
+    "blurb": "One key, many providers. Models are `publisher/model` strings.",
+    "needs_api_base": false,
+    "wire_provider": "openai",
+    "api_base": "https://openrouter.ai/api/v1",
+    "popular_models": [
+      "qwen/qwen3-coder",
+      "anthropic/claude-opus-4.8",
+      "deepseek/deepseek-chat",
+      "moonshotai/kimi-k2"
+    ]
+  },
+  {
+    "key": "deepseek",
+    "label": "DeepSeek",
+    "default_model": "deepseek-v4-pro",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "name_stub": "deepseek",
+    "supports_c3": true,
+    "blurb": "DeepSeek's own API \u2014 strong models at a low price.",
+    "needs_api_base": false,
+    "wire_provider": "openai",
+    "api_base": "https://api.deepseek.com/v1",
+    "popular_models": [
+      "deepseek-v4-pro",
+      "deepseek-chat",
+      "deepseek-reasoner"
+    ]
+  },
+  {
+    "key": "claude-code",
+    "label": "Claude CLI",
+    "default_model": "claude-opus-4-8",
+    "api_key_env": null,
+    "name_stub": "claude-cli",
+    "supports_c3": true,
+    "blurb": "Uses the `claude` CLI's own login. No API key needed.",
+    "needs_api_base": false,
+    "wire_provider": "claude-code",
+    "api_base": null,
+    "popular_models": [
+      "opus",
+      "sonnet",
+      "haiku",
+      "claude-opus-4-8",
+      "claude-sonnet-5",
+      "claude-haiku-4-5-20251001"
+    ]
+  },
+  {
+    "key": "claude-code-agentic",
+    "label": "Claude CLI (agentic)",
+    "default_model": "claude-opus-4-8",
+    "api_key_env": null,
+    "name_stub": "claude-agentic",
+    "supports_c3": true,
+    "blurb": "Tooled, sandboxed Claude CLI \u2014 more capable, 5-20x more tokens.",
+    "needs_api_base": false,
+    "wire_provider": "claude-code-agentic",
+    "api_base": null,
+    "popular_models": [
+      "opus",
+      "sonnet",
+      "claude-opus-4-8",
+      "claude-sonnet-5"
+    ]
+  },
+  {
+    "key": "codex-agentic",
+    "label": "Codex CLI (agentic)",
+    "default_model": "gpt-5.6-sol",
+    "api_key_env": null,
+    "name_stub": "codex-agentic",
+    "supports_c3": true,
+    "blurb": "Agentic Codex CLI \u2014 uses `codex login`. Subscription only.",
+    "needs_api_base": false,
+    "wire_provider": "codex-agentic",
+    "api_base": null,
+    "popular_models": [
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark"
+    ]
+  },
+  {
+    "key": "custom",
+    "label": "Custom / local LLM",
+    "default_model": "",
+    "api_key_env": "CUSTOM_LLM_API_KEY",
+    "name_stub": "local-llm",
+    "supports_c3": true,
+    "blurb": "Your own OpenAI-compatible endpoint \u2014 llama.cpp, vLLM, Ollama, LM Studio, or a private gateway.",
+    "needs_api_base": true,
+    "wire_provider": "openai",
+    "api_base": null,
+    "popular_models": []
+  }
+]

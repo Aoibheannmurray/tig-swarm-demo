@@ -480,10 +480,24 @@ pub fn training_loop(
     )?;
     model.init_weights(challenge.seed.clone(), stream.clone(), module.clone())?;
 
-    // Initialize optimizer
+    // Initialize optimizer.
+    //
+    // Anti-cheat: the hook gets a one-way StdRng-derived seed, NOT the raw
+    // challenge.seed. The optimizer legitimately needs deterministic
+    // per-instance randomness (the run must be verifiable, so no OS/clock
+    // entropy), but the raw seed also regenerates the instance's *true
+    // targets* — an agent handed it could reconstruct the dataset and emit
+    // the answers directly. The derived seed is still deterministic and
+    // per-instance, but not invertible to the real one.
     let param_sizes = model.get_parameter_sizes();
+    let optimizer_seed = {
+        let mut sd = StdRng::from_seed(challenge.seed);
+        let mut b = [0u8; 32];
+        sd.fill_bytes(&mut b);
+        b
+    };
     let mut optimizer_state = optimizer_init_state(
-        challenge.seed.clone(),
+        optimizer_seed,
         &param_sizes, // FIXME pass model instead?
         stream.clone(),
         module.clone(),
@@ -703,6 +717,24 @@ pub fn training_loop(
 }
 
 pub fn load_solution(mlp: &mut MLP, solution: &Solution, stream: Arc<CudaStream>) -> Result<()> {
+    if solution.weights.len() != mlp.lin.len() || solution.biases.len() != mlp.lin.len() {
+        return Err(anyhow::anyhow!(
+            "Solution has {} weight / {} bias layers; model expects {}",
+            solution.weights.len(),
+            solution.biases.len(),
+            mlp.lin.len()
+        ));
+    }
+    if solution.bn_weights.len() != mlp.bns.len()
+        || solution.bn_biases.len() != mlp.bns.len()
+        || solution.bn_running_means.len() != mlp.bns.len()
+        || solution.bn_running_vars.len() != mlp.bns.len()
+    {
+        return Err(anyhow::anyhow!(
+            "Solution batch-norm parameter counts do not match model ({} batch-norm layers)",
+            mlp.bns.len()
+        ));
+    }
     for (i, layer) in mlp.lin.iter_mut().enumerate() {
         let w_flat: Vec<f32> = solution.weights[i].iter().flatten().cloned().collect();
         stream.memcpy_htod(&w_flat, &mut layer.weight)?;

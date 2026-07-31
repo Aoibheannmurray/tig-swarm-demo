@@ -1,0 +1,24 @@
+# Cargo settings for every build of this workspace — local, Docker, and the
+# staged C3 workspaces (c3_compute copies this file alongside Cargo.toml).
+#
+# ROOT-PINNED, like Cargo.toml: cargo only reads `.cargo/config.toml` from the
+# workspace root upward, so this cannot move into a subdirectory.
+
+[build]
+# Cap every lint at `warn`, however the compiler classifies it.
+#
+# This crate compiles Rust it does not control: algorithms written by LLMs,
+# seeds harvested from other contributors, and mainnet imports reshaped from
+# the upstream monorepo. When rustc promotes a lint to deny-by-default, all of
+# that code stops building at once — on whatever day each machine's cached
+# image happens to be rebuilt, mid-run, with no change on our side.
+#
+# That is not hypothetical: Rust 1.89 promoted `dangerous_implicit_autorefs`,
+# and the mainnet import superfast_knap_v1 failed with 252 errors from a
+# pattern (`&(*ptr).field[i]`) that had compiled fine the week before.
+#
+# `--cap-lints warn` covers lints that do not exist yet, which an explicit
+# `#![allow(...)]` list can never do. It caps LINTS ONLY — type errors, borrow
+# errors and every other genuine compile failure still fail the build, so a
+# broken algorithm is still rejected exactly as before.
+rustflags = ["--cap-lints", "warn"]
