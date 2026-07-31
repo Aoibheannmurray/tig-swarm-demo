@@ -506,9 +506,24 @@
     </div>
   </div>
   <div class="field">
-    <label class="check"><input type="checkbox" bind:checked={seedInactive} /> Seed the inactive pool from the top TIG mainnet algorithm <span class="muted">(drawn on trajectory resets)</span></label>
-    <label class="check"><input type="checkbox" bind:checked={seedPoolMainnet} /> Seed the initial pool from the top TIG mainnet algorithm <span class="muted">(fresh trajectories start from it)</span></label>
-    <label class="check"><input type="checkbox" bind:checked={failedAttemptsArchive} /> Store failed attempts in the server DB <span class="muted">(agents' failure retrospectives are archived per-agent and served back as a "you tried this before" stagnation hint; toggleable later in the Admin Console)</span></label>
+    <div class="checkrow">
+      <span class="grouplabel">Seed pools from the top TIG mainnet algorithm:</span>
+      <label class="check"><input type="checkbox" bind:checked={seedPoolMainnet} /> initial pool</label>
+      <label class="check"><input type="checkbox" bind:checked={seedInactive} /> inactive pool</label>
+    </div>
+    <label class="check"><input type="checkbox" bind:checked={failedAttemptsArchive} /> Store failed attempts in the server DB</label>
+    <details class="info">
+      <summary>ⓘ What do these do?</summary>
+      <p>
+        <b>Initial pool</b> — fresh trajectories start from the mainnet
+        algorithm. <b>Inactive pool</b> — it's handed out when a stuck
+        trajectory resets. <b>Failed attempts</b> — each agent's failure
+        retrospectives are archived on the server and served back as a
+        "you tried this before" hint when it stagnates. All of this can be
+        done later from the Admin Console too — mainnet seeding on the
+        Pools tab, the archive on Settings.
+      </p>
+    </details>
   </div>
   <div class="field">
     <label class="check"><input type="checkbox" bind:checked={useDefaults} /> Use recommended benchmark instance counts for every challenge</label>
@@ -599,10 +614,8 @@
         </li>
       </ul>
       <p class="lede" style="margin-top:14px">
-        <b>Next:</b> open the Admin Console to create a <b>join link</b> for each
-        contributor — they configure agents in the browser, then run one command
-        from the join page. To run agents yourself as well, you don't need a
-        link: you're already in the app that configures them.
+        <b>Next:</b> open the Admin Console to create a <b>join link</b> for
+        each contributor.
       </p>
 
       {#if selfJoinOpen}
@@ -634,12 +647,10 @@
         {/if}
       </div>
       {#if hostedConsoleUrl()}
-        <div class="hint" style="text-align:right">
-          The console is also served at
-          <a href={hostedConsoleUrl()} target="_blank" rel="noreferrer">{hostedConsoleUrl()}</a>
-          for admin work away from this machine — everything works there
-          except re-seeding the authored pool, whose seed files live in this
-          clone.
+        <div class="remoteadmin">
+          <a class="btn" href={hostedConsoleUrl()} target="_blank" rel="noreferrer">Open remote Admin Console →</a>
+          <span class="remotenote">For admin work away from this machine.
+            Everything works there except re-seeding the authored pool.</span>
         </div>
       {/if}
     {/if}
@@ -675,9 +686,7 @@
       {/each}
     </ul>
     <div class="hint" style="margin:-2px 0 4px">
-      Stored locally in <code>swarm.admin.json</code>, never uploaded. The base
-      password doesn't authenticate on its own — each contributor gets their own
-      derived one from a join link.
+      Stored locally in <code>swarm.admin.json</code>.
     </div>
     <div class="row" style="align-items:flex-end">
       <div class="field" style="margin-bottom:0">
@@ -753,11 +762,10 @@
       {/if}
     </div>
     {#if hostedConsoleUrl()}
-      <div class="hint" style="text-align:right">
-        The console is also served at
-        <a href={hostedConsoleUrl()} target="_blank" rel="noreferrer">{hostedConsoleUrl()}</a>
-        for admin work away from this machine — everything works there except
-        re-seeding the authored pool, whose seed files live in this clone.
+      <div class="remoteadmin">
+        <a class="btn" href={hostedConsoleUrl()} target="_blank" rel="noreferrer">Open remote Admin Console →</a>
+        <span class="remotenote">For admin work away from this machine.
+          Everything works there except re-seeding the authored pool.</span>
       </div>
     {/if}
   </div>
@@ -791,6 +799,15 @@
   .rowhead h2 { margin: 0; }
   .check { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--ink); }
   .check input { width: auto; }
+  .checkrow { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 6px; }
+  .grouplabel { font-weight: 500; color: var(--ink); }
+  .info { margin-top: 6px; font-size: 12.5px; color: var(--ink-mid); }
+  .info summary { cursor: pointer; color: var(--ink-dim); user-select: none; }
+  .info p { margin: 6px 0 0; line-height: 1.5; }
+  .remoteadmin { display: flex; flex-direction: column; align-items: flex-end;
+                 gap: 4px; margin-top: 10px; }
+  .remoteadmin .btn { padding: 6px 12px; font-size: 12.5px; }
+  .remotenote { font-size: 12px; color: var(--ink-dim); text-align: right; }
   .creds { list-style: none; margin: 6px 0 4px; }
   .creds li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }
   .creds li span { color: var(--ink-dim); }

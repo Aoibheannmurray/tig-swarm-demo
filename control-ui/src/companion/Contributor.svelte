@@ -358,7 +358,7 @@ c3 --version`;
   ]);
 
   // ── Tacit ──
-  // The guided form asks the SAME six prompts as `python setup.py tacit`, and
+  // The guided form asks the SAME prompts as `python setup.py tacit`, and
   // fetches them from the companion rather than restating them here — two
   // copies of an interview drift, and the CLI's is the one the prompt builder
   // was written against. `tacitText` stays as the paste-a-block escape hatch.
@@ -758,10 +758,8 @@ c3 --version`;
          close to them and shares their background rather than reading as a
          separate panel. -->
     <div class="note bare">
-      <p>Both can be changed later, while the swarm is running — from
-        <b>Reconfigure</b> on your fleet page.</p>
-      <p>Changes apply on the agent's next iteration. A new starting point
-        takes effect when a fresh trajectory begins.</p>
+      <p>Both can be edited later from <b>Reconfigure</b> on your fleet page,
+        even while the fleet is running.</p>
     </div>
 
     <!-- Readiness: guide the user to the prerequisites for the chosen backend
@@ -794,6 +792,11 @@ c3 --version`;
                 {c3Install?.state === "pending" ? "Installing…" : "Install c3"}
               </button>
               <button onclick={recheckPreflight}>↻ Recheck</button>
+            </div>
+            <div class="hint">
+              The installer may ask for your password (sudo). The prompt
+              appears in the terminal running this companion, not here, so
+              check there if the install looks stuck.
             </div>
             {#if c3Install?.state === "error"}
               <div class="banner err" style="white-space:pre-wrap;margin:8px 0 0">{c3Install.error || "Install failed."}</div>
@@ -859,6 +862,11 @@ c3 --version`;
               </button>
               <button onclick={recheckPreflight}>Recheck version</button>
             </div>
+            <div class="hint">
+              The updater may ask for your password (sudo). The prompt appears
+              in the terminal running this companion, not here, so check there
+              if the update looks stuck.
+            </div>
             {#if c3Install?.state === "error"}
               <div class="banner err" style="white-space:pre-wrap;margin:10px 0 0">{c3Install.error || "Update failed."}</div>
             {/if}
@@ -917,8 +925,8 @@ c3 --version`;
             onchange={() => saveKey("C3_API_KEY")}
             placeholder={secrets["C3_API_KEY"]?.set ? "paste new C3_API_KEY to replace it" : "paste C3_API_KEY (stored locally)"} />
           <div class="hint">
-            Saved when you press Continue — stored locally in
-            <code>secrets.local.json</code>, never uploaded.
+            Saved when you press Continue. The key stays on this machine, in
+            <code>secrets.local.json</code>.
           </div>
         {/if}
       </div>

@@ -286,8 +286,8 @@ def _tacit_phase(agents: list[dict], fleet_tacit: str | None) -> None:
     """Tacit-knowledge phase.
 
     Skipped entirely when stdin isn't a TTY — coding-agent / piped flows
-    can't drive the interactive wizard (the guided capture asks six
-    questions and the edit menu opens $EDITOR), so the right pattern
+    can't drive the interactive wizard (the guided capture asks a series
+    of questions and the edit menu opens $EDITOR), so the right pattern
     there is for the assistant to write `tacit_knowledge.md` directly via
     its file-write tools before launching `run.py`.
 

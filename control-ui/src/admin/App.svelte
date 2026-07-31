@@ -460,18 +460,13 @@
 
       <div class="card">
         <h2>Batch invites</h2>
-        <p class="lede">
-          Generate several invites at once — random names, or numbered ones
-          when you set a prefix (<span class="mono">team → team-1 … team-N</span>).
-          Derived locally, same as single invites.
-        </p>
         <div class="row" style="align-items:flex-end">
           <div class="field" style="margin-bottom:0;max-width:130px">
             <label for="bc">How many</label>
             <input id="bc" type="number" min="1" max="50" bind:value={bulkCount} />
           </div>
           <div class="field" style="margin-bottom:0">
-            <label for="bpfx">Prefix <span class="muted" style="text-transform:none">(optional — blank = random names)</span></label>
+            <label for="bpfx">Prefix <span class="muted" style="text-transform:none">(optional, blank = random names)</span></label>
             <input id="bpfx" type="text" bind:value={bulkPrefix} placeholder="e.g. team" />
           </div>
           <div style="flex:0 0 auto"><button class="primary" onclick={makeBulkInvites}>Generate</button></div>

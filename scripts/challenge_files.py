@@ -288,8 +288,24 @@ def read_challenge_md() -> str:
 
 
 def read_tacit_knowledge() -> str:
+    """The contributor's strategy notes, stripped down to the hints
+    themselves: the file's explanatory header (everything up to
+    `## Strategies`), the wizard's `###` question headings, and the
+    placeholder stub line are all scaffolding for the human editing the
+    file, not strategy content — an untouched file must inject nothing so
+    the empty-tacit fallback (inspiration) still fires."""
     p = ROOT / "tacit_knowledge_personal.md"
-    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+    if not p.exists():
+        return ""
+    text = p.read_text(encoding="utf-8", errors="replace")
+    if "## Strategies" in text:
+        text = text.split("## Strategies", 1)[1]
+    lines = [
+        ln for ln in text.splitlines()
+        if not ln.lstrip().startswith("#")
+        and ln.strip() != "- (replace this with your own hint, or run setup again)"
+    ]
+    return "\n".join(lines).strip()
 
 
 def is_stub_code(code: str) -> bool:
