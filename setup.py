@@ -33,17 +33,27 @@ Subcommands:
                               that survives (paste-a-block UX is awkward in
                               JSON).
 
+  python setup.py invite <username>
+  python setup.py revoke <username>
+  python setup.py list        Contributor management: derive per-user
+                              credentials + a one-link invite, revoke a
+                              contributor, list issued/registered ones.
+
+  python setup.py create-runner
+  python setup.py set-runner <url>
+                              Hosted fleet runner: provision the runner
+                              service on Railway / record its URL in the
+                              swarm config.
+
 Files this script reads / writes:
-  - README.md, CHALLENGE.md (templated with the active challenge)
   - swarm.admin.json (host-only: admin_key, stagnation knobs)
   - .swarm-cache.json (machine-managed mirror of /api/swarm_config)
   - fleet.config.json (scaffolded by `create`; user-editable thereafter)
   - .railway/config.json (managed by the `railway` CLI; gitignored)
 
 The implementation lives in the root-level `hostadmin/` package; this file
-is the thin argparse dispatcher plus a back-compat import surface — every
-name that used to be defined here is still importable as `setup.<name>`
-(run.py, control_server.py, and scripts/test_fleet_core.py rely on that).
+is the thin argparse dispatcher. It dispatches only — embedders (run.py,
+control_server.py, tests) `import hostadmin` directly.
 """
 
 from __future__ import annotations

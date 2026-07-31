@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command, no-clone contributor bootstrap (server-first onboarding).
+"""One-command, no-clone contributor bootstrap.
 
 Run straight from the web -- no manual git clone, no editing files:
 

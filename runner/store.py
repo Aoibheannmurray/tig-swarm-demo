@@ -1,4 +1,4 @@
-"""Enrollment store for the hosted runner (P3).
+"""Enrollment store for the hosted runner.
 
 One row per contributor who has opted into cloud-run: their encrypted key
 bundle, the fleet plan snapshot the runner launches, and lifecycle status.

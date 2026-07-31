@@ -21,8 +21,8 @@ sync` inside throwaway git worktrees, and a root-level tracked package is
 present in every worktree automatically.
 
 Modules:
-  config_io.py         swarm.admin.json / .swarm-cache.json / fleet config
-                       read+write, placeholder templating, atomic JSON writes
+  config_io.py         swarm.admin.json / .swarm-cache.json read+write,
+                       placeholder templating, atomic JSON writes
   prompting.py         interactive prompt helpers for the wizards
   http.py              shared POST-JSON helper + mainnet API GET
   challenges_bridge.py lazy loader for server/challenges.py (degrades cleanly
@@ -31,8 +31,8 @@ Modules:
   tacit.py             tacit-knowledge wizard (also used by run.py / the
                        control-ui companion)
   contributors.py      invite / revoke / list host-admin commands
-  swarm.py             create / switch / sync flows (Railway provisioning,
-                       config push, pool seeding)
+  swarm.py             create / switch / sync / create-runner flows (Railway
+                       provisioning, config push, pool seeding)
 """
 
 from __future__ import annotations

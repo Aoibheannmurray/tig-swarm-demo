@@ -8,7 +8,7 @@ silently no-op'd if you forgot setup.py.
 
 Now both files import from here. The Literal stays static (Python's type
 system requires it), but the validation that the Literal matches the
-registry runs at import time — so adding a 6th challenge means: add an
+registry runs at import time — so adding a new challenge means: add an
 entry below, then add the same key string to the Literal in models.py.
 A dev who forgets the second step gets an ImportError at server boot,
 not a quietly-broken endpoint at runtime.
@@ -24,7 +24,7 @@ from typing import Literal
 class ChallengeDef:
     """Server-side metadata for one challenge.
 
-    Mirrored on the dashboard by ``dashboard/src/lib/challengeRegistry.ts``.
+    Mirrored on the dashboard by ``dashboard/src/challenges/registry.ts``.
     Fields here are wire-shape only; UI metadata (panel factory, pretty
     name, score label) lives in the dashboard registry.
     """

@@ -1,9 +1,9 @@
 # runner/ — hosted fleet runner (Tier 1)
 
 A standalone service that runs contributor fleets in the cloud, so a
-contributor can join a swarm with **zero local install** — paste keys in the
-web console, agents run here. Phase 3 of
-[docs/server-first-onboarding-plan.md](../docs/server-first-onboarding-plan.md).
+contributor can join a swarm with **zero local install**: keys are enrolled
+via the runner's API and agents run here. (No web UI drives it yet — the
+`/api/runner/*` surface below is the way in.)
 
 It is a **separate deployment** from the coordination server (`server/`): its
 own Railway service, image, and volume. The coordination server stays
@@ -66,7 +66,7 @@ python setup.py create-runner
 It provisions a Railway service built from this `Dockerfile` (via
 `RAILWAY_DOCKERFILE_PATH`), generates `RUNNER_SECRET_KEY`, wires in the swarm's
 URL + admin key, attaches a `/data` volume, waits for `/api/runner/health`, and
-runs `set-runner` to enable the join page's "Run in the cloud" tab. Re-run to
+runs `set-runner` to record the runner's URL in the swarm config. Re-run to
 update.
 
 ## Run locally
@@ -81,15 +81,16 @@ uvicorn runner.service:app --port 8095
 
 ## Tests
 
-No pytest — `test_*.py` are self-running (`python runner/test_runner.py`).
-They point `RUNNER_SECRET_KEY` / `RUNNER_DATA_DIR` at temp values and drive the
-supervisor with a fake launcher, so nothing clones a repo or spawns a fleet.
+No pytest — `test_*.py` are self-running (`python runner/test_runner.py`,
+`python runner/test_service.py`). They point `RUNNER_SECRET_KEY` /
+`RUNNER_DATA_DIR` at temp values and drive the supervisor with a fake
+launcher, so nothing clones a repo or spawns a fleet.
 
 ## Security model
 
 Hosted fleets are validated **C3-only** and **non-agentic** at enrollment, so
 LLM-authored code is *submitted to C3*, never executed on the runner — which is
-why per-contributor OS sandboxing isn't required (plan §8/§9). Keys are
+why per-contributor OS sandboxing isn't required. Keys are
 encrypted at rest, shown only masked, injected only into a fleet's workspace
 secrets file, and purged on unenroll/revoke. Contributors should still use
 spend-limited keys (OpenRouter supports per-key caps) — the console says so.

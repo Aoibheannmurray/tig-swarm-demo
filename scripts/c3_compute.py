@@ -5,11 +5,15 @@ For Docker jobs C3 pulls a public Docker Hub image, uploads the project
 workspace, runs the configured bash script inside the container, then returns
 files written to `$C3_ARTIFACTS_DIR` or configured `output:` directories.
 
-A benchmark is ONE C3 job: the minimal swarm workspace (Cargo.toml + src/ +
-scripts/ + .swarm-cache.json) is staged into a temp dir and uploaded, and the
-job runs `python3 scripts/benchmark.py` inside a plain toolchain image
-(default `rust:1-bookworm` CPU / `nvidia/cuda:…-devel` GPU — the runner script
-apt-installs anything missing), then pulls back `benchmark.json`.
+A benchmark fans out into one or more C3 jobs: instances are split into
+balanced shards (`_worthwhile_shards` decides how many, up to the plan cap),
+each shard runs `python3 scripts/benchmark.py` on its window, and the
+per-shard `benchmark.json`s are merged back into one result. The default
+path uploads only the algorithm + scripts and injects them into a baked
+warm image (`_warm_c3_image`); with `c3_warm_images: false` the full
+workspace (Cargo.toml + src/ + scripts/ + .swarm-cache.json) is staged and
+built on a plain toolchain image (toolchain-pinned `rust:<version>-bookworm`
+CPU / `nvidia/cuda:…-devel` GPU).
 
 Fleet-wide slot pool: every agent sharing one C3 key draws from a single FCFS
 pool of ``c3_max_parallel_jobs`` slots (see ``c3_pool.py``), so N agents never
@@ -828,9 +832,9 @@ def _hardware_vcpus(hardware: str | None) -> int:
 
 def _profile_workers(vcpu: int, cfg: dict) -> int:
     """Concurrent solvers a CPU job would run on a box with ``vcpu`` vCPUs:
-    an explicitly configured bench_workers wins, else
-    benchmark.resolve_bench_workers' machine-scaled default (half the vCPUs
-    ~= the physical cores)."""
+    an explicitly configured bench_workers wins, else benchmark.py's
+    machine-scaled default (`_bench_workers`: half the vCPUs ~= the
+    physical cores)."""
     for raw in (os.environ.get("TIG_BENCH_WORKERS"), cfg.get("bench_workers")):
         try:
             value = int(raw)

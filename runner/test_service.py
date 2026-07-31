@@ -1,4 +1,4 @@
-"""Endpoint tests for the hosted runner service (P3).
+"""Endpoint tests for the hosted runner service.
 
 Drives the FastAPI app with TestClient, stubbing the coordination-server
 round-trips (auth + plan fetch) and the fleet launcher, so it exercises the

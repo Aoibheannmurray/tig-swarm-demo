@@ -4,9 +4,9 @@ pool seeding), `switch` (active-challenge broadcast), and `sync` (refresh
 
 Note for patching/tests: the side-effect helpers create_swarm calls
 (`_railway_provision`, `template_files`, `write_swarm_cache`, …) are
-resolved from THIS module's globals at call time. setup.py's compat layer
-forwards `setattr(setup, name, stub)` into this namespace, which is how
-scripts/test_fleet_core.py stubs the Railway/network side effects."""
+resolved from THIS module's globals at call time, so tests stub them by
+setting attributes on this module — see _patch_hostadmin in
+scripts/test_fleet_core.py."""
 
 from __future__ import annotations
 
@@ -842,15 +842,18 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
     Assumes the Railway CLI is installed and authenticated and that every
     wizard decision is already resolved into `params`. Performs the side-effect
     sequence (Railway provision → env vars → volume → deploy → domain → wait →
-    push config → seed pools → write local files) and streams human-readable
-    progress through `progress_cb(msg)` (each line is also printed). Shared by
-    the CLI wizard and the control-ui host companion so the deploy logic lives
-    in one place.
+    verify the DB landed on the volume → push config → seed pools → write
+    local files) and streams human-readable progress through
+    `progress_cb(msg)` (each line is also printed). Shared by the CLI wizard
+    and the control-ui host companion so the deploy logic lives in one place.
 
     `params`: swarm_name, workspace (optional), swarm_type ("cpu"|"gpu"),
     active_challenge, challenges_cfg (from collect_per_challenge_configs),
     stagnation_threshold, stagnation_limit, hypothesis_recall_threshold,
-    seed_inactive_pool (bool), seedable (set, optional).
+    failed_attempts_archive (bool), seed_inactive_pool (bool),
+    seed_pool_mainnet (bool), hpo_first_tune_improvements /
+    hpo_min_improvements / hpo_search_budget / hpo_num_suggested_configs
+    (optional), seedable (set, optional).
 
     Returns: server_url, admin_key, swarm_password, active_challenge,
     swarm_type, type_label, n_challenges, config_ok."""

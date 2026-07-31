@@ -2,7 +2,7 @@ import type { Panel, WSMessage, LeaderboardEntry, MainnetBaseline } from "../typ
 import { getAgentColor } from "../lib/colors";
 import { formatScore, shortenModel, escapeHTML } from "../lib/format";
 import {
-  isComparable, statusLabel, baselineRank, countBeating,
+  isComparable, baselineRank, countBeating,
 } from "../lib/mainnetBaseline";
 
 type SortKey =
@@ -203,7 +203,7 @@ export class LeaderboardPanel implements Panel {
 
     // Where the mainnet row belongs, computed against EVERY entry rather than
     // the truncated view: an agent scrolled off the tile has still beaten it,
-    // and the count under the row must say so.
+    // and the row's tooltip count must say so.
     const scoreKey = this.baselineScoreKey();
     const ghostAt = this.baseline && isComparable(this.baseline) && scoreKey
       ? baselineRank(

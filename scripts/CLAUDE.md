@@ -28,7 +28,8 @@ multi-agent fleet, benchmarking, and publishing results to the server.
   are rejected at import.
 - `benchmark.py` — compiles + scores an algorithm (local Docker or C3 cloud).
   Run with `cwd` = the agent's worktree.
-- `publish.py` — posts score + hypothesis + heartbeat to the server.
+- `publish.py` — posts score + hypothesis to the server (heartbeats are
+  run_loop's, via `swarm_client`).
 - `agentic_backends.py` / `agentic_sandbox.py` — sandboxed coding-agent mode
   (Claude Code / Codex editing in a worktree). **`agentic_backends.py` generates
   the per-worktree `CLAUDE.md` / `AGENTS.md` and permission settings** — see
@@ -43,8 +44,9 @@ multi-agent fleet, benchmarking, and publishing results to the server.
 
 ### Operator tools (standalone — nothing imports these)
 
-Run by hand, not by the loop. They have no importers, so a "find unused
-modules" sweep will flag them; they are listed here so it doesn't.
+Run by hand, not by the loop. Nothing in the production paths imports them
+(only their own tests do), so a "find unused modules" sweep will flag them;
+they are listed here so it doesn't.
 
 - `show_agent_session.py` — render a recorded Claude Code agentic session
   (system prompt, per-iteration prompt, thinking, tool calls). See
@@ -72,9 +74,11 @@ and re-saves — unsaved at the deadline = infeasible).
   `datasets/<challenge>/generated/`.
 - **C3** (`c3_compute.py`): stages a minimal workspace (Cargo.toml + src/ +
   scripts/ + .swarm-cache.json) into a temp dir, deploys it as ONE C3 job on
-  a public Docker Hub image (`rust:1-bookworm` CPU / `nvidia/cuda:…-devel`
-  GPU — the runner script apt-installs anything missing), runs
-  `scripts/benchmark.py` inside, and pulls back `benchmark.json`.
+  a public Docker Hub image (toolchain-pinned `rust:<version>-bookworm` CPU /
+  `nvidia/cuda:…-devel` GPU — the runner script apt-installs anything
+  missing), runs `scripts/benchmark.py` inside, and pulls back
+  `benchmark.json`. (This is the full-source fallback; the warm images below
+  are the default.)
 
 Algorithms author against `tig_challenges::<ch>::*` (`src/lib.rs` self-aliases
 the crate as `tig_challenges`, so a file also compiles when ported to the
@@ -130,7 +134,7 @@ clock, so take it only while that beats one shard's fixed cost
 (`_SHARD_FIXED_SECS_WARM` 60s / `_SHARD_FIXED_SECS_FULL_SOURCE` 300s, override
 per swarm with `c3_shard_fixed_secs`). `solve` is
 `ceil(instances / workers) × timeout`, where `workers` mirrors
-`benchmark.resolve_bench_workers` (explicit `bench_workers`, else half the
+benchmark.py's `_bench_workers` (explicit `bench_workers`, else half the
 vCPUs parsed out of the `c3_hardware` profile name). Never more shards than
 solving waves — a shard that can't fill its workers idles cores and still pays
 a full provision. So 6 instances × 30s → 1 job; 200 × 60s → the full cap. GPU

@@ -1,4 +1,4 @@
-"""Tests for the contributor config API (P1 of the server-first onboarding
+"""Tests for the contributor config API (hosted-console fleet-config storage
 plan): GET/PUT /api/contributor/config, GET /api/contributor/agents,
 GET /api/contributor/agent_defaults.
 

@@ -1,4 +1,4 @@
-"""Hosted fleet runner service (P3 of docs/server-first-onboarding-plan.md).
+"""Hosted fleet runner service (see runner/README.md).
 
 A separate FastAPI service (its own Railway container + volume) that runs
 fleets on behalf of contributors who opt into cloud-run — so they contribute

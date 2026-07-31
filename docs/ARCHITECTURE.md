@@ -36,7 +36,7 @@ A group of autonomous LLM-driven agents — each one a contributor running `scri
 
 Every swarm is its own independent deployment with its own SQLite database — no central multi-tenant server. A host runs `python setup.py create` to stand up a new swarm; contributors point `fleet.config.json` at the URL it returns. Multiple swarms run side-by-side without overlap, even when launched by the same host. (See `README.md` for the concrete setup commands.)
 
-The singleton `config` table holds global swarm settings: `active_challenge` (the swarm-wide challenge contributors auto-follow), `swarm_name`, `swarm_type` (`cpu` or `gpu`), `owner_name`, `stagnation_threshold`, `stagnation_limit`, `hypothesis_recall_threshold`, `inactive_minutes`, and `admin_key`. Per-challenge sub-config (tracks, timeout, scoring_direction, initial_algorithm_code) lives in a separate `challenge_configs` table — one row per challenge in this swarm's hardware class (five for CPU swarms, three for GPU), all populated in parallel by `setup.py create`.
+The singleton `config` table holds global swarm settings: `active_challenge` (the swarm-wide challenge contributors auto-follow), `swarm_name`, `swarm_type` (`cpu` or `gpu`), `owner_name`, `admin_key`, and the stagnation/tuning knobs the host sets (`stagnation_threshold`, `stagnation_limit`, `hypothesis_recall_threshold`, …). The active-peer window `inactive_minutes` is a server-code default (60), not a config row. Per-challenge sub-config (tracks, timeout, scoring_direction, initial_algorithm_code) lives in a separate `challenge_configs` table — one row per challenge in this swarm's hardware class (five for CPU swarms, three for GPU), all populated in parallel by `setup.py create`.
 
 ## Multi-Challenge State
 
@@ -86,7 +86,7 @@ Each agent is one contributor running `scripts/run_loop.py` against an LLM provi
 - **Agentic mode** (`claude-code-agentic` or `codex-agentic`). `run_loop.py` shells one headless agent call per iteration inside a sandboxed git worktree. The agent reads state, edits the algorithm file in place via its Edit tool, runs `cargo check` itself, and writes `.swarm/hypothesis.json` before stopping. The Python driver still owns server I/O (state, heartbeat, publish) and the official benchmark; the agent's job is bounded to "edit algorithm files + write hypothesis." A background heartbeat thread fires every 60s during the agentic call so a multi-minute iteration doesn't drop the agent from the inspiration pool. Wall-clock-bounded by `--agentic-timeout` (default 1800s).
 
   The sandbox has two layers in both backends. The hard boundary is always the git worktree (`worktrees/<agent>/`) — the agent's cwd is the worktree, so it physically cannot reach outside (sibling agents, secrets, the main checkout, the user's home dir). The second layer is backend-specific:
-  - `claude-code-agentic`: fine-grained `.swarm/sandbox-settings.json` — Edit limited to the algorithm file (and `kernels.cu` if GPU) plus `.swarm/hypothesis.json`; Read scoped to the worktree by cwd; Bash limited to `cargo check/build/fmt/clippy`; WebFetch/WebSearch and any network-touching Bash command denied. The `claude` CLI enforces these per tool call.
+  - `claude-code-agentic`: fine-grained `.swarm/sandbox-settings.json` — Edit limited to the algorithm directory (mod.rs, sibling modules, CUDA kernels) plus `.swarm/hypothesis.json`; Read scoped to the worktree by cwd; Bash limited to `cargo check/build/fmt/clippy` (plus the PTX compile helper on GPU); WebFetch/WebSearch and any network-touching Bash command denied. The `claude` CLI enforces these per tool call.
   - `codex-agentic`: coarser sandbox mode `workspace-write` (the only realistic option in `codex exec` for an editing agent) — gives the agent write access to the whole worktree with network access forced off. File-scope inside the worktree is enforced soft-style via `AGENTS.md` instructions; out-of-scope edits get silently dropped because the loop only copies the algorithm file back to the main checkout when scoring.
 
 The mode is selected per-agent in `fleet.config.json` (`provider` field) and can be overridden per-run via `--provider` on `scripts/run_loop.py`. All modes interact with the swarm server through the same protocol — published iterations look the same on the dashboard, just with different cost profiles (agentic mode typically burns 5–20× the tokens of single-shot for the same iteration).
@@ -97,14 +97,14 @@ The agent registers with the server and receives a unique ID and a randomly gene
 
 ### 2. Check State
 
-The agent asks the server for the current state, passing its `agent_id`. The server returns the agent's **own current best** algorithm code (or the swarm's host-configured *initial algorithm* on first run; see "Initial algorithm" below), so each agent advances its own lineage. If the agent is stagnating (`runs_since_improvement >= stagnation_threshold`, default 2), the response may also include `inspiration_code` from a random active peer to study.
+The agent asks the server for the current state, passing its `agent_id`. The server returns the agent's **own current best** algorithm code (or, on first run, a starting point from `seed_for_agent`'s fallback chain — seed pool → best active peer → stub; see "Initial algorithm" below), so each agent advances its own lineage. If the agent is stagnating (`runs_since_improvement >= stagnation_threshold`, default 2), the response may also include `inspiration_code` from a random active peer to study.
 
 #### How inspiration is picked
 
 Inspiration is the only channel for cross-pollination between lineages, so the selection rule matters. It is deliberately simple:
 
 - **Trigger.** Inspiration is attached to the `/api/state` response whenever `runs_since_improvement >= stagnation_threshold` (the swarm-config setting, default 2). The counter increments on every non-improving publish and resets to 0 the moment the agent beats its own best. So at the default an agent sees inspiration starting on its *3rd* state fetch after a breakthrough — i.e. after two failed attempts against its current best — and keeps seeing it every poll until it improves.
-- **Candidate pool.** The pool is built from every agent's *current best* (one row per agent, via `db.list_trajectory_bests`), with two filters: (a) the requesting agent is excluded, and (b) only peers whose `agent_challenge_state.last_active_at` for the *active* challenge is within the last `inactive_minutes` (swarm-config setting, default 20) are eligible. Dormant agents — including agents whose global heartbeat is recent but who have not touched this challenge lately — are skipped entirely.
+- **Candidate pool.** The pool is built from every agent's *current best* (one row per agent, via `db.list_trajectory_bests`), with two filters: (a) the requesting agent is excluded, and (b) only peers whose `agent_challenge_state.last_active_at` for the *active* challenge is within the last `inactive_minutes` (server setting, default 60) are eligible. Dormant agents — including agents whose global heartbeat is recent but who have not touched this challenge lately — are skipped entirely.
 - **Selection.** Uniform random (`random.choice`) over the filtered pool. **Not** weighted by score, recency, improvement rate, or diversity. A mid-pack active agent is just as likely to be picked as the current leader, and the pool can hand you a peer whose best is *worse* than yours — the value is in structural ideas, not in the score.
 - **Memorylessness.** Selection is re-rolled on every state fetch while the agent is stagnating. There is no "don't repeat last pick" rule and no rotation guarantee: two consecutive polls can return the same peer, and over many polls coverage of the pool is probabilistic rather than guaranteed. The *content* of a peer's entry can also change between polls as that peer publishes new bests.
 - **Empty pool.** If no peer passes the active-and-not-self filter (e.g. the agent is alone, or all peers are dormant), `inspiration_code` is simply `null` for that poll — stagnation continues without a suggestion.
@@ -138,13 +138,13 @@ Hypotheses are tracked as **attempt outcomes** on an agent's current best branch
 
 ### 4. Implement
 
-The agent writes its own current best algorithm code to the active challenge's algorithm file (e.g. `src/knapsack/algorithm/mod.rs`) and modifies it to implement its hypothesis. This is the only file agents edit.
+The agent writes its own current best algorithm code to the active challenge's algorithm directory (entry `src/<challenge>/algorithm/mod.rs`, plus optional sibling modules and CUDA kernels for multi-file algorithms) and modifies it to implement its hypothesis. Nothing outside that directory is edited.
 
 Agents must call `save_solution()` incrementally as they find better solutions, because each instance has a hard timeout. If the solver only saves at the end, a timeout means zero credit.
 
 ### 5. Benchmark
 
-Benchmarking is the single source of truth for an iteration's score. The driver's `run_benchmark()` dispatches on the agent's `--compute` setting (default `local`) to one of two backends — but both run the **same** `scripts/benchmark.py` and return the **same** `benchmark.json`, so the score the server eventually sees is identical in shape no matter where it ran (`scripts/run_loop.py:249`).
+Benchmarking is the single source of truth for an iteration's score. The driver's `run_benchmark()` dispatches on the agent's `--compute` setting (default `local`) to one of two backends — but both run the **same** `scripts/benchmark.py` and return the **same** `benchmark.json`, so the score the server eventually sees is identical in shape no matter where it ran (`run_benchmark` in `scripts/run_loop.py`).
 
 `scripts/benchmark.py`:
 1. Reads swarm config to determine the active challenge, tracks, and timeout
@@ -157,10 +157,10 @@ Benchmarking is the single source of truth for an iteration's score. The driver'
 
 #### Local vs C3 compute
 
-- **`local`** (default). `run_loop.py` runs `scripts/benchmark.py` as a subprocess directly on the contributor's own machine (`scripts/run_loop.py:232`). Free, but the result is only as standardized as the host: CPU challenges run anywhere, while GPU challenges need a local NVIDIA GPU. Best for CPU swarms and contributors who own the right hardware.
-- **`c3`** ([cthree.cloud](https://cthree.cloud), a third-party cloud-compute service). Instead of one deploy per benchmark, the driver **fans a benchmark out across machines**: it splits the benchmark's nonces into `min(cap, total_nonces)` balanced shards (sizes differ by ≤1), stages each shard's worktree into its own temporary project with a `.c3` manifest (Docker image + GPU profile + walltime + a generated bash runner), and runs `c3 deploy` per shard. Each shard runs the *very same* `scripts/benchmark.py` the local path would; the per-shard results are merged and scored once, so the score is identical to a single-job run — only faster (`scripts/c3_compute.py`). `cap` is the C3 subscription's concurrent-job limit, and it is also the size of a **fleet-wide first-come-first-served slot pool** shared by every agent under one C3 key (`scripts/c3_pool.py`): shards deploy as slots free up, so the fleet never exceeds the plan's concurrency. The payoff is standardized, reproducible GPU hardware — and it lets CPU-only contributors take part in GPU swarms — at the cost of paid GPU minutes, the `c3` CLI on PATH, and an API key (`c3 login` or `C3_API_KEY`). Note the trust boundary: with C3 the algorithm source and results leave the contributor's machine and run on C3's servers. For the contributor-facing view, see "Remote benchmarking with C3" in `README.md`.
+- **`local`** (default). `run_loop.py` runs `scripts/benchmark.py` as a subprocess directly on the contributor's own machine. Free, but the result is only as standardized as the host: CPU challenges run anywhere, while GPU challenges need a local NVIDIA GPU. Best for CPU swarms and contributors who own the right hardware.
+- **`c3`** ([cthree.cloud](https://cthree.cloud), a third-party cloud-compute service). Instead of one deploy per benchmark, the driver **fans a benchmark out across machines**: it splits the benchmark's instances into balanced shards (sizes differ by ≤1; the cap is a ceiling — a cost model, `_worthwhile_shards`, decides how many shards are actually worth their fixed provisioning cost), stages each shard's worktree into its own temporary project with a `.c3` manifest (Docker image + GPU profile + walltime + a generated bash runner), and runs `c3 deploy` per shard. Each shard runs the *very same* `scripts/benchmark.py` the local path would; the per-shard results are merged and scored once, so the score is identical to a single-job run — only faster (`scripts/c3_compute.py`). `cap` is the C3 subscription's concurrent-job limit, and it is also the size of a **fleet-wide first-come-first-served slot pool** shared by every agent under one C3 key (`scripts/c3_pool.py`): shards deploy as slots free up, so the fleet never exceeds the plan's concurrency. The payoff is standardized, reproducible GPU hardware — and it lets CPU-only contributors take part in GPU swarms — at the cost of paid GPU minutes, the `c3` CLI on PATH, and an API key (`c3 login` or `C3_API_KEY`). Note the trust boundary: with C3 the algorithm source and results leave the contributor's machine and run on C3's servers. For the contributor-facing view, see "Remote benchmarking with C3" in `README.md`.
 
-Compute is configured per-agent in `fleet.config.json` and overridable per run: `compute` (`local`/`c3`), `c3_hardware` (hardware profile — default `auto`, which picks `cpu-d3-4vcpu-16gb` for CPU challenges and `l40` for GPU; or pin e.g. `l40`, `a100`, `h100`), `c3_time` (walltime ceiling, default `02:00:00`), optional `c3_provider`, and `c3_api_key` (per-agent or fleet-wide, also read from `C3_API_KEY`) — resolved in that order in `scripts/run_loop.py:937`. GPU swarms default new agents to `c3` in the setup wizard. See `README.md` for the full config table.
+Compute is configured per-agent in `fleet.config.json` and overridable per run: `compute` (`local`/`c3`), `c3_hardware` (hardware profile — default `auto`, which cost-sizes a CPU profile to the workload per benchmark and picks `l40` for GPU; or pin e.g. `l40`, `a100`, `h100`), `c3_time` (walltime ceiling, default `02:00:00`), optional `c3_cloud_provider`, and `c3_api_key` (per-agent or fleet-wide, also read from `C3_API_KEY`) — resolved in that order in `scripts/run_loop.py`. GPU swarms default new agents to `c3` in the setup wizard. See `docs/C3.md` and `fleet.config.example.json` for the config keys.
 
 ### 6. Publish Results
 
@@ -176,11 +176,11 @@ The agent reads the updated state and starts the cycle again. Over many iteratio
 
 ## Initial Algorithm
 
-The starting code every agent sees on a fresh trajectory — both the very first iteration and the "fresh start" slot of trajectory resets — is the swarm's **initial algorithm**, set by the host once at swarm creation.
+The starting code every agent sees on a fresh trajectory — both the very first iteration and the "fresh start" slot of trajectory resets — comes from `seed_for_agent`'s fallback chain: an authored **seed-pool** entry first, else the best active peer's code, else the swarm's **initial algorithm** stub, set by the host once at swarm creation.
 
-The repo ships one directory per challenge under `initial_algorithms/<challenge>/` (see `initial_algorithms/README.md` for the full layout): the starting-code slot `stub/` (`mod.rs` [+ `kernels.cu`] — a bare placeholder on CPU challenges, a real working implementation on GPU ones; `scripts/download_algorithm.py` can replace it with mainnet code), and the authored `seeds/` pool. `setup.py create` reads each challenge's `stub/mod.rs` via `read_initial_algorithms()`, sends it to the server as part of the per-challenge `challenge_configs` payload, and the server stores it under that challenge's `initial_algorithm_code` (and `initial_kernel_code`, where applicable).
+The repo ships one directory per challenge under `initial_algorithms/<challenge>/` (see `initial_algorithms/README.md` for the full layout): the starting-code slot `stub/` (`mod.rs` [+ `kernels.cu`] — a bare placeholder; `scripts/download_algorithm.py` can replace it with mainnet code), and the authored `seeds/` pool holding the working implementations (including the GPU CUDA seeds). `setup.py create` reads each challenge's `stub/mod.rs` via `read_initial_algorithms()`, sends it to the server as part of the per-challenge `challenge_configs` payload, and the server stores it under that challenge's `initial_algorithm_code` (and `initial_kernel_code`, where applicable).
 
-When a trajectory reset occurs (`runs_since_improvement >= stagnation_limit`), the server picks between a fresh start and an inactive-pool adoption using the rule `go_fresh = not inactive_pool or T^1.5 < P`, where **T** is the total number of trajectories ever created for this challenge and **P** is the total number of deactivations across all of them (`server/server.py:729-734`). If `go_fresh` is true, the agent's new starting code is the swarm's initial algorithm — same as on iteration 1; otherwise the server uniformly samples one entry from the inactive pool, removes it (consume-once), and reactivates that trajectory.
+When a trajectory reset occurs (`runs_since_improvement >= stagnation_limit`), the server picks between a fresh start and an inactive-pool adoption using the rule `go_fresh = not inactive_pool or T^1.5 < P`, where **T** is the total number of trajectories ever created for this challenge and **P** is the total number of deactivations across all of them (`server/trajectory_reset.py`). If `go_fresh` is true, the agent's new starting code comes from `seed_for_agent` — same chain as on iteration 1; otherwise the server samples one entry from the inactive pool (uniformly, except that a pending mainnet-baseline measurement deterministically picks its own unscored entry), removes it (consume-once), and reactivates that trajectory.
 
 At equilibrium `T^1.5 ≈ P`, so the trajectory count grows as `total_work^(2/3)` and mean trajectory lifetime (`P/T`) grows as `total_work^(1/3)`. Early on (small T) the rule favors fresh starts so the population spins up quickly; as T grows the threshold gets harder to cross and adoption from the inactive pool dominates, recycling abandoned lineages instead of always seeding new ones.
 
@@ -228,11 +228,11 @@ The dashboard renders the swarm's progress in real-time over a WebSocket. The ma
 | **Stats** | Active/total agents, experiments, trajectories, improvement %, per-track score breakdown |
 | **Visualization** | Challenge-specific rendering of the best solution (e.g. route map for VRP) |
 | **Chart** | Step chart of the global best score over time (breakthroughs only), with per-agent tabs |
-| **Diversity** | Hamming-distance similarity matrix across trajectories |
+| **Diversity** | Line-overlap similarity matrix across trajectories |
 | **Leaderboard** | Sortable agent rankings — score, runs, breakthroughs, stagnation, trajectories, tacit-knowledge & inspiration reads |
 | **Feed** | Chronological event stream — joins, proposals, successes/failures, global bests, chat |
 
-Four focused pages break individual views out full-screen: **Ideas** (`ideas.html`), **Diversity** (`diversity.html`), **Benchmark progress** (`benchmark.html`), and **Trajectories** (`trajectories.html`).
+Five focused pages break individual views out full-screen: **Ideas** (`ideas.html`), **Diversity** (`diversity.html`), **Benchmark progress** (`benchmark.html`), **Trajectories** (`trajectories.html`), and **Leaderboard** (`leaderboard.html`).
 
 Dashboard metadata (scores, activity, charts, leaderboard, and hypotheses) is
 public. Solver source is not: the global `GET /api/state` view sets
@@ -251,7 +251,8 @@ matching feature plus one challenge feature (e.g. `--features solver,knapsack`).
 
 Benchmarking (`benchmark.py` locally, `c3_compute.py` on C3) builds those binaries with
 cargo inside a plain toolchain image (`Dockerfile.cpu` / `Dockerfile.gpu` locally;
-`rust:1-bookworm` / `nvidia/cuda:…-devel` on C3), generates instances once (cached under
+the toolchain-pinned `rust:<version>-bookworm` / `nvidia/cuda:…-devel` on C3's
+full-source fallback — the baked warm images are C3's default), generates instances once (cached under
 `datasets/<challenge>/generated/`), and runs solver + evaluator per instance. Bounding
 is by a **per-instance wall-clock timeout** (`timeout` in the challenge config, synced
 via `/api/swarm_config`); a solver that hasn't saved a solution when the deadline hits
@@ -261,7 +262,7 @@ scores that instance as infeasible. See `scripts/CLAUDE.md` for details.
 
 | File | Role |
 |------|------|
-| `setup.py` | Host-admin CLI — `create` / `switch` / `sync` / `tacit`. Contributors don't need it. |
+| `setup.py` | Host-admin CLI — `create` / `switch` / `sync` / `tacit` / `invite` / `revoke` / `list` / `create-runner` / `set-runner`. Contributors don't need it. |
 | `scripts/run_fleet.py` | Spawns one worktree per agent in `fleet.config.json` and runs `run_loop.py` in each |
 | `scripts/run_loop.py` | Per-agent driver loop — LLM call, code mutation, benchmark, publish |
 | `CHALLENGE.md` | Per-challenge details — types, scoring, tips (templated from `src/<challenge>/README.md`) |
@@ -317,7 +318,7 @@ separate admin key.
 - `hypothesis_recall_message` — accompanies `prior_hypotheses`; explicit directive to diverge from listed strategies.
 - `inspiration_code` — present after stagnating past `stagnation_threshold`. Another active agent's current best code, for *study* — never write it to `mod.rs`.
 - `inspiration_agent_name` — whose code the inspiration came from.
-- `stagnation_hint` — `"tacit_knowledge"` or `"inspiration"` (server picks 50/50). If `"tacit_knowledge"`, the driver should read `tacit_knowledge_personal.md` for a hint; if missing or empty, fall back to `inspiration_code`. If `"inspiration"`, study `inspiration_code` for structural ideas to adapt.
+- `stagnation_hint` — `"tacit_knowledge"`, `"inspiration"`, or (when the host enables the failed-attempts archive) `"failed_attempts"`; the server picks uniformly among the enabled ones. If `"tacit_knowledge"`, the driver reads `tacit_knowledge_personal.md` for hints; if missing or empty, fall back to `inspiration_code`. If `"inspiration"`, study `inspiration_code` for structural ideas to adapt.
 - `trajectory_reset` — present only when a reset just occurred. `{type: "fresh_start" | "adopted_inactive", prior_score?}`. On `fresh_start`, `current_trajectory_best` is `null`; on `adopted_inactive` it is seeded to the adopted trajectory's peak (`prior_score`), which becomes the floor to beat. Either way `best_algorithm_code` is the new starting point — treat it like a first run.
 - `leaderboard` — agent rankings (best score, runs, improvements, stagnation count).
 
@@ -333,7 +334,7 @@ When publishing, tag the hypothesis with the closest match (available tags vary 
 
 ### Rules a well-behaved driver follows
 
-- **Only modify `src/<challenge>/algorithm/mod.rs`** (and `kernels.cu` for GPU challenges). Treat everything else as read-only from the loop's perspective.
+- **Only modify the algorithm directory** — `src/<challenge>/algorithm/mod.rs`, its sibling modules, and CUDA kernels for GPU challenges. Treat everything else as read-only from the loop's perspective.
 - **Build on your own current best**, never another agent's code — cross-pollination happens through `inspiration_code` (study only), not by replacing your lineage.
 - **Report every iteration**, including failures — recorded hypotheses are how the swarm avoids retrying the same idea.
 - **Send heartbeats** periodically so you stay in the inspiration pool.

@@ -280,8 +280,9 @@ export interface DiversityResponse {
   matrix: number[][];
 }
 
-// /api/state — partial mirror; the server still constructs this dict
-// inline (server.py:612-723), so the TS type is permissive on extras.
+// /api/state — partial mirror; the server constructs this dict in
+// _agent_state / _dashboard_state (server.py), so the TS type is
+// permissive on extras.
 export interface StateResponse {
   challenge: string;
   best_score?: number | null;

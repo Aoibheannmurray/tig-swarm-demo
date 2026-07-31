@@ -70,7 +70,7 @@ export class StrategyLeaderboardPanel implements Panel {
 
     if (msg.type !== "experiment_published") return;
     if (!msg.feasible) return;
-    // Drop events for any other challenge — main-ideas.ts also filters but
+    // Drop events for any other challenge — pages/ideas/main.ts also filters but
     // double-check here so the panel can never accumulate cross-challenge state.
     if (msg.challenge && msg.challenge !== getViewedChallenge()) return;
     if (this.entries.has(msg.experiment_id)) return; // already recorded

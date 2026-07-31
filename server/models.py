@@ -66,7 +66,7 @@ class RenameRequest(BaseModel):
     agent_name: str = Field(max_length=MAX_LABEL_LEN)
 
 
-# Server-stored contributor fleet config (server-first onboarding P1).
+# Server-stored contributor fleet config (hosted-console storage).
 # Both fields optional so a PUT can update either independently; the handler
 # rejects a body with neither, deep-validates `config` (whitelisted keys, no
 # raw secrets — see server._validate_contributor_config), and merges with the
@@ -446,7 +446,7 @@ class IterationResponse(BaseModel):
     runs_since_improvement: int
 
 
-# Boot-time consistency check. If you add a 6th challenge by editing the
+# Boot-time consistency check. If you add a new challenge by editing the
 # registry but forget to extend ChallengeName above (or vice versa), the
 # server fails to import with a clear message — instead of half-broken
 # endpoints that silently reject an unknown name string at request time.

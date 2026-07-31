@@ -1,4 +1,4 @@
-"""Multi-fleet supervisor for the hosted runner (P3).
+"""Multi-fleet supervisor for the hosted runner.
 
 Generalizes control_server.py's single-foreground-fleet `FleetManager` into a
 keyed supervisor: one fleet per enrolled contributor, each isolated in its own

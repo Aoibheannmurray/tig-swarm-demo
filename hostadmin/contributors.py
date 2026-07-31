@@ -93,9 +93,9 @@ def build_join_link(server_url: str | None, username: str, derived: str) -> str 
 
     The credentials ride in the URL *fragment*, which browsers never send to
     the server — they stay out of Railway/proxy logs. The hosted /join page
-    reads the fragment client-side (see docs/server-first-onboarding-plan.md
-    §5). Returns None when no usable server URL is known (fresh host machine
-    before `setup.py create`), so callers can skip the link line rather than
+    (control-ui/src/join/) reads the fragment client-side. Returns None when
+    no usable server URL is known (fresh host machine before
+    `setup.py create`), so callers can skip the link line rather than
     print a broken one.
     """
     import urllib.parse
@@ -277,11 +277,11 @@ def run_revoke(username: str) -> int:
 def run_set_runner(runner_url: str) -> int:
     """Point the swarm at its hosted fleet runner (the zero-install Tier-1
     service). Two effects:
-      1. Sets the server's `runner_url` config, which makes the contributor
-         join page show the "Run in the cloud" tab.
+      1. Sets the server's `runner_url` config, which the server exposes to
+         clients (no UI consumes it yet — the runner is driven via its API).
       2. Mirrors it into swarm.admin.json so `setup.py revoke` also tears
          down a contributor's hosted fleet + purges their stored keys.
-    Pass an empty string to unset (hides the tab; stops revoke teardown)."""
+    Pass an empty string to unset (stops the revoke teardown)."""
     import urllib.parse
 
     runner_url = (runner_url or "").strip().rstrip("/")

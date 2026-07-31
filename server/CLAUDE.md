@@ -9,11 +9,13 @@ deployment per swarm** — no multi-tenancy.
 - FastAPI + uvicorn + aiosqlite (SQLite). Deps in `server/requirements.txt`
   (separate from the repo-root `requirements.txt`).
 - Run locally: `pip install -r requirements.txt && uvicorn server:app`
-  (defaults to port 8080). `DATA_DIR` sets where `swarm.db` lives — defaults to
-  this dir; in prod it's a Railway volume (see `entrypoint.sh`).
-- **Self-contained.** The production `Dockerfile` at the repo root copies *only*
-  `server/` (plus the built dashboard). Don't add imports reaching into
-  `scripts/` or the repo root — they won't exist in the image.
+  (uvicorn's default port 8000; the container listens on 8080 via
+  `entrypoint.sh`). `DATA_DIR` sets where `swarm.db` lives — defaults to
+  this dir; in prod it's a Railway volume.
+- **Self-contained.** The production `Dockerfile` at the repo root copies
+  `server/` plus the built dashboard and the control-ui admin/join bundles —
+  nothing else. Don't add imports reaching into `scripts/` or the repo
+  root — they won't exist in the image.
 
 ## Layout
 
@@ -31,9 +33,10 @@ deployment per swarm** — no multi-tenancy.
   it. Recurring boot-time invariants (e.g. the authored-seed dedup) are
   deliberately *not* migrations; they run every boot.
 - `models.py` / `api_models.py` — internal and API data shapes.
-- `challenges.py`, `tiers.py`, `dedup.py`, `names.py`, `ws_events.py` — domain
-  logic. `entrypoint.sh` — container start.
-- `data/swarm.db` — local dev DB (gitignored).
+- `challenges.py`, `tiers.py`, `dedup.py`, `names.py`, `ws_events.py`,
+  `mainnet_seed.py`, `seed_diversity.py` — domain logic. `entrypoint.sh` —
+  container start.
+- `swarm.db` — local dev DB, created in this dir (gitignored).
 
 ## Tests
 

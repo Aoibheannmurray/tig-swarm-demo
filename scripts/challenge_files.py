@@ -1,7 +1,9 @@
 """File I/O, code parsing, and validation for swarm challenge files.
 
-Handles reading/writing algorithm source (mod.rs) and optional CUDA
-kernels (kernels.cu), plus LLM response parsing and basic code validation.
+Handles reading/writing algorithm source — mod.rs plus multi-file sibling
+modules and optional CUDA kernels — LLM response parsing, basic code
+validation, tacit-knowledge reading (hints only, scaffolding stripped),
+and reshaping mainnet algorithms into the swarm layout.
 """
 
 from __future__ import annotations

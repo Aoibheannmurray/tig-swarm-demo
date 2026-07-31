@@ -24,8 +24,8 @@ hints/inspiration across the swarm.
 | `initial_algorithms/` | Editable per-challenge starting code (`<ch>/stub/`) + authored seed pool (`<ch>/seeds/`) | Rust |
 | `docs/` | Long-form internals (`ARCHITECTURE.md`, …) | — |
 | `run.py` | **Contributor** entry point (`python3 run.py`, or `--ui` for the web companion) | Python |
-| `setup.py` | **Host-admin CLI** (`create`/`switch`/`sync`/`tacit`) — NOT packaging; thin dispatcher over `hostadmin/` | Python |
-| `hostadmin/` | Implementation package behind `setup.py` (config I/O, Railway wrappers, create/switch/sync, tacit wizard, invite/revoke/list) | Python |
+| `setup.py` | **Host-admin CLI** (`create`/`switch`/`sync`/`tacit`/`invite`/`revoke`/`list`/`create-runner`/`set-runner`) — NOT packaging; thin dispatcher over `hostadmin/` | Python |
+| `hostadmin/` | Implementation package behind `setup.py` (config I/O, Railway wrappers, create/switch/sync, tacit wizard, invite/revoke/list, runner provisioning) | Python |
 
 ## Build & test
 
@@ -34,21 +34,23 @@ hints/inspiration across the swarm.
   `energy_arbitrage`, `hypergraph`, `neuralnet_optimizer`, `vector_search`.
   Every binary needs at least one challenge feature enabled.
 - **Python scripts / host CLI**: stdlib only, no install. Worker Docker deps are
-  in the root `requirements.txt`.
+  in the root `requirements.txt`; the web companion (`control_server.py`)
+  needs `control-ui-requirements.txt` (FastAPI/uvicorn).
 - **Server**: `cd server && pip install -r requirements.txt && uvicorn server:app`
   (`DATA_DIR` sets the SQLite location).
 - **Dashboard**: `cd dashboard && npm install && npm run dev` (build:
   `npm run build`).
 
 **Tests:** there is no pytest in this repo. Python `test_*.py` files (under
-`scripts/` and `server/`) are self-running — execute them directly, e.g.
-`python server/test_infeasible_floor_trap.py`. The dashboard uses vitest:
-`cd dashboard && npm test`.
+`scripts/`, `server/`, `runner/` and the root) are self-running — execute
+them directly, e.g. `python server/test_infeasible_floor_trap.py`. The
+dashboard and control-ui use vitest: `npm test` in either directory.
 
 ## Root constraints — don't "tidy" these
 
-- `Cargo.toml` / `Cargo.lock` must stay at root (workspace root; every `src/`
-  crate path and the swarm sandbox anchor here).
+- `Cargo.toml` / `Cargo.lock` must stay at root (the crate root — a single
+  `tig-challenges` package with per-challenge features; every `src/` path and
+  the swarm sandbox anchor here).
 - `.dockerignore`, `.ignore`, `railway.toml` are root-pinned — Docker honors
   `.dockerignore` only at the build-context root; Railway only reads `.ignore`
   and `railway.toml` at root.

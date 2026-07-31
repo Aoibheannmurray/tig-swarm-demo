@@ -1,7 +1,7 @@
 """Tacit-knowledge wizard: guided capture, paste, and $EDITOR flows.
 
-This is the slice run.py and control_server.py embed (via `import setup`).
-Moved verbatim from the root setup.py."""
+This is the slice run.py and control_server.py embed (via
+`import hostadmin`). Originally moved here from the root setup.py."""
 
 from __future__ import annotations
 

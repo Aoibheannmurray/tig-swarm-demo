@@ -1,11 +1,11 @@
-"""Enrollment guardrails for the hosted runner (P3).
+"""Enrollment guardrails for the hosted runner.
 
 Hosted fleets run on the runner's box, so the rules are stricter than a local
 fleet's:
 
   * C3-only compute — the runner has no Docker, and keeping compute off-box
     means LLM-authored code is *submitted* to C3, never executed on the runner.
-    That's what lets us skip per-contributor OS sandboxing (plan §8).
+    That's what lets us skip per-contributor OS sandboxing.
   * No agentic providers — claude-code / codex need interactive CLI logins the
     runner can't perform.
   * Agent-count caps — one contributor can't monopolize the shared box.
