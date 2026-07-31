@@ -99,8 +99,12 @@ Foundation's public namespace, published by CI; override the namespace with
 `c3_warm_images: false` (or `TIG_C3_WARM_IMAGES=0`) to fall back to the
 full-source path above — worth doing only when running a namespace whose
 images aren't published. Rebuild/republish the images whenever `src/` (the
-challenge harnesses) or the Cargo manifests change — CI does this on push to
-staging; a job-side cmp-guarded overlay of the Cargo manifests AND the
+challenge harnesses) or the Cargo manifests change — CI does this on each
+RELEASE (push to `tig-foundation/prometheus-swarm` main, where the
+`DOCKERHUB_*` secrets live), so published images always match the released
+code; mid-cycle, trigger `build-warm-images.yml` by `workflow_dispatch` in
+any repo with its own secrets. A job-side cmp-guarded overlay of the Cargo
+manifests AND the
 `src/` harness tree (uploaded with algorithm dirs excluded, ~0.5MB) keeps a
 drifted or stale-cached image correct (just slower) in the meantime — C3
 nodes cache `:latest`, so without the src overlay a stale node fails the
