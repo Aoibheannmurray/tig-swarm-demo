@@ -45,13 +45,16 @@ from .http import (
 )
 from .prompting import prompt, prompt_choice, prompt_int
 from .railway import (
+    RailwayError,
     _pick_workspace,
     _railway_add_volume,
     _railway_check_auth,
     _railway_check_installed,
+    _railway_db_on_volume,
     _railway_domain,
     _railway_get_variables,
     _railway_provision,
+    _railway_redeploy,
     _railway_set_variables,
     _railway_up,
     _wait_for_server,
@@ -768,6 +771,71 @@ def _resolve_swarm_credentials(
     return key or secrets.token_urlsafe(16), password or secrets.token_urlsafe(16)
 
 
+def _ensure_db_on_volume(swarm_name: str, server_url: str, emit) -> None:
+    """Verify the just-booted server's swarm.db landed on the /data volume.
+
+    A deployment that raced the volume attach runs without the mount:
+    everything the swarm stores goes to the container's ephemeral disk and is
+    destroyed by the next redeploy — silently, because the server works
+    perfectly until then. Runs before any seeding, while losing the DB is
+    still free: if the volume's file listing says swarm.db is missing,
+    redeploy once (re-snapshotting the deploy config picks up the mount) and
+    re-check. Inconclusive listings (old CLI, API blip) only warn — this
+    guard must never fail a create."""
+    emit("  verifying the database landed on the /data volume…")
+    verdict: bool | None = None
+    nones = 0
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        verdict = _railway_db_on_volume(swarm_name)
+        if verdict:
+            emit("  ✓ swarm.db is on the persistent volume")
+            return
+        if verdict is None:
+            # Missing CLI / API blip won't cure itself mid-loop; two
+            # consecutive inconclusive reads end the wait early.
+            nones += 1
+            if nones >= 2:
+                break
+        else:
+            nones = 0
+        time.sleep(10)
+    if verdict is None:
+        emit(
+            "  warning: could not confirm swarm.db is on the volume (CLI too "
+            "old or API unreachable). If a later redeploy loses data, check "
+            "`railway volume list`."
+        )
+        return
+    emit(
+        "  swarm.db is NOT on the volume — the deploy raced the volume "
+        "attach; redeploying to pick up the mount…"
+    )
+    try:
+        _railway_redeploy(swarm_name)
+    except RailwayError as exc:
+        emit(f"  warning: redeploy failed ({exc}); run `railway redeploy` "
+             "manually before pointing any fleet at this swarm.")
+        return
+    if not _wait_for_server(server_url):
+        emit("  warning: server did not come back after the redeploy; check "
+             "`railway logs`.")
+        return
+    deadline = time.time() + 60
+    verdict = None
+    while time.time() < deadline:
+        verdict = _railway_db_on_volume(swarm_name)
+        if verdict:
+            emit("  ✓ swarm.db is on the persistent volume after redeploy")
+            return
+        time.sleep(10)
+    emit(
+        "  WARNING: swarm.db is still not on the /data volume. Do NOT run a "
+        "fleet against this swarm — its data will not survive a redeploy. "
+        "Check the volume attach in the Railway dashboard, then redeploy."
+    )
+
+
 def create_swarm(params: dict, progress_cb=None) -> dict:
     """Non-interactive core of `run_create`: provision + configure a swarm.
 
@@ -893,6 +961,14 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
             "  Check `railway logs` for errors. Once it's up, the URL will be\n"
             f"  reachable at {server_url} — point fleet.config.json's server_url at it."
         )
+    else:
+        # BEFORE seeding: a deployment submitted while the volume attach was
+        # still registering runs without the mount and writes swarm.db to the
+        # container's ephemeral disk — everything published to it silently
+        # dies on the next redeploy (this lost a morning of GPU experiments
+        # on 2026-07-31). Verify the DB actually landed on the volume and
+        # redeploy once if it didn't, while the DB is still empty.
+        _ensure_db_on_volume(swarm_name, server_url, emit)
 
     n_with_code = sum(1 for v in initial_algorithms.values() if v.get("algorithm_code", "").strip())
     n_total = len(initial_algorithms)
