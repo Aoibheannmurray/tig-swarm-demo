@@ -15,14 +15,23 @@ Pure `urllib` HTTP + string manipulation; no third-party deps.
 
 from __future__ import annotations
 
-import base64
 import json
+import os
 import re
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 _MAINNET_API = "https://mainnet-api.tig.foundation"
-_GH_API = "https://api.github.com/repos/tig-foundation/tig-monorepo/contents"
+_GH_REPO = "tig-foundation/tig-monorepo"
+_GH_API = f"https://api.github.com/repos/{_GH_REPO}"
+# File CONTENTS come from the raw CDN, not the REST API: raw.githubusercontent
+# serves public files without drawing on the API quota. Only the one tree
+# listing per algorithm costs an API request — this is what keeps a 5-challenge
+# seeding run inside the anonymous 60-requests/hour budget (which is per
+# egress IP, shared with strangers on a PaaS like Railway).
+_GH_RAW = f"https://raw.githubusercontent.com/{_GH_REPO}"
 _HTTP_TIMEOUT = 8
 
 _OPTIMIZER_HOOK_CHALLENGES = {"neuralnet_optimizer"}
@@ -42,20 +51,60 @@ class MainnetSeedError(Exception):
 # ── HTTP ────────────────────────────────────────────────────────────
 
 
-def _get_json(url: str, ua: str) -> object:
-    # An explicit User-Agent is required: bare urllib ships `Python-urllib/3.X`,
-    # which the CDN in front of both APIs rejects with 403.
-    req = urllib.request.Request(
-        url, headers={"User-Agent": ua, "Accept": "application/json"})
+def _describe_rate_limit(e: urllib.error.HTTPError, url: str) -> str | None:
+    """GitHub reports quota exhaustion as 403/429 with X-RateLimit-* headers.
+    Name the real cause and when it clears — a bare "403" on a public repo
+    reads as a permissions bug and sends the next person down the wrong path
+    (this is exactly how it first presented)."""
+    if e.code not in (403, 429):
+        return None
+    remaining = e.headers.get("X-RateLimit-Remaining")
+    if remaining is None or remaining.strip() != "0":
+        return None
+    reset = e.headers.get("X-RateLimit-Reset")
+    when = ""
+    try:
+        mins = max(0, int(int(reset) - time.time()) // 60 + 1)
+        when = f" (resets in ~{mins} min)"
+    except (TypeError, ValueError):
+        pass
+    return (
+        f"GitHub API rate limit exhausted{when}: {url}. Anonymous quota is "
+        "60 requests/hour per IP and is shared with other tenants on the same "
+        "egress IP; set a GITHUB_TOKEN env var on the server to raise it to "
+        "5000/hour, or retry after the reset."
+    )
+
+
+def _get(url: str, ua: str, *, accept: str) -> bytes:
+    headers = {"User-Agent": ua, "Accept": accept}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token and url.startswith("https://api.github.com/"):
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
-            return json.load(r)
+            return r.read()
     except urllib.error.HTTPError as e:
+        limited = _describe_rate_limit(e, url)
+        if limited:
+            raise MainnetSeedError(limited) from None
         if e.code == 404:
             raise MainnetSeedError(f"not found: {url}") from None
         raise MainnetSeedError(f"HTTP {e.code}: {url}") from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
         raise MainnetSeedError(f"network error fetching {url}: {e}") from None
+
+
+def _get_json(url: str, ua: str) -> object:
+    try:
+        return json.loads(_get(url, ua, accept="application/json"))
+    except json.JSONDecodeError as e:
+        raise MainnetSeedError(f"bad JSON from {url}: {e}") from None
+
+
+def _get_raw_text(url: str, ua: str) -> str:
+    return _get(url, ua, accept="*/*").decode("utf-8", errors="replace")
 
 
 def top_algorithm(challenge: str) -> tuple[str, int] | None:
@@ -96,37 +145,37 @@ def top_algorithm(challenge: str) -> tuple[str, int] | None:
     return best
 
 
-def _decode_blob(blob: object) -> str:
-    if not isinstance(blob, dict):
-        raise MainnetSeedError("unexpected blob shape from GitHub")
-    if blob.get("encoding") == "base64":
-        return base64.b64decode(blob.get("content") or "").decode("utf-8", errors="replace")
-    if blob.get("encoding") is None and not blob.get("content"):
-        return ""
-    raise MainnetSeedError(f"unsupported blob encoding: {blob.get('encoding')!r}")
-
-
 def fetch_algorithm_files(challenge: str, algorithm: str) -> dict[str, str]:
-    """Walk the algorithm dir on GitHub → {relative_path: content}."""
+    """The algorithm dir on GitHub → {relative_path: content}.
+
+    ONE API request per algorithm: the git trees API lists the whole branch
+    recursively, and file contents come from raw.githubusercontent.com, which
+    does not draw on the API quota. The previous implementation walked the
+    contents API — one request per directory PLUS one per file — which
+    exhausted the anonymous 60/hour/IP budget partway through a five-challenge
+    seeding run (the server's PaaS egress IP is shared, so the budget is not
+    even all ours) and 403'd the remaining challenges.
+    """
     branch = f"{challenge}/{algorithm}"
-    base = f"{_GH_API}/tig-algorithms/src/{challenge}/{algorithm}"
+    subdir = f"tig-algorithms/src/{challenge}/{algorithm}/"
+    tree_url = (f"{_GH_API}/git/trees/"
+                f"{urllib.parse.quote(branch, safe='')}?recursive=1")
+    listing = _get_json(tree_url, "tig-swarm-server")
+    if not isinstance(listing, dict) or not isinstance(listing.get("tree"), list):
+        raise MainnetSeedError(f"unexpected GitHub tree response for {branch}")
+    if listing.get("truncated"):
+        # ~100k-entry limit; tig-monorepo is far below it. If this ever fires,
+        # fail loudly rather than silently seed a partial algorithm.
+        raise MainnetSeedError(f"GitHub tree listing truncated for {branch}")
+
     files: dict[str, str] = {}
-
-    def _recurse(api_url: str, prefix: str) -> None:
-        listing = _get_json(f"{api_url}?ref={branch}", "tig-swarm-server")
-        if isinstance(listing, dict) and listing.get("type") == "file":
-            files[prefix or listing["name"]] = _decode_blob(listing)
-            return
-        if not isinstance(listing, list):
-            raise MainnetSeedError(f"unexpected GitHub response for {api_url}")
-        for entry in listing:
-            rel = f"{prefix}{entry.get('name', '')}" if prefix else entry.get("name", "")
-            if entry.get("type") == "file":
-                files[rel] = _decode_blob(_get_json(f"{base}/{rel}?ref={branch}", "tig-swarm-server"))
-            elif entry.get("type") == "dir":
-                _recurse(f"{base}/{rel}", f"{rel}/")
-
-    _recurse(base, "")
+    for entry in listing["tree"]:
+        path = entry.get("path", "")
+        if entry.get("type") != "blob" or not path.startswith(subdir):
+            continue
+        rel = path[len(subdir):]
+        raw_url = f"{_GH_RAW}/{urllib.parse.quote(branch)}/{urllib.parse.quote(path)}"
+        files[rel] = _get_raw_text(raw_url, "tig-swarm-server")
     if not files:
         raise MainnetSeedError(f"upstream returned no files for {branch}")
     return files
