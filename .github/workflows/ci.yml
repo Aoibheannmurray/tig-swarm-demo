@@ -42,6 +42,15 @@ jobs:
             echo "=== $f"
             python "$f"
           done
+      - name: Runner tests
+        run: |
+          # httpx for TestClient comes from the step above; the runner keeps
+          # its own requirements (it ships as a separate Railway image).
+          pip install -r runner/requirements.txt
+          for f in runner/test_*.py; do
+            echo "=== $f"
+            python "$f"
+          done
 
   rust-check:
     runs-on: ubuntu-latest
