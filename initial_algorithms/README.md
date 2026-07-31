@@ -4,7 +4,7 @@
 > fall under the TIG Game Code EULA v2.0; a mainnet algorithm staged into a
 > `stub/` slot is under the TIG Innovator Outbound Game License v2; everything
 > else here (all `seeds/`, the CPU stubs) was authored in this repo and is
-> GPLv3 — see [LICENSE-TIG.md](../LICENSE-TIG.md).
+> GPLv3 — see [docs/LICENSE-TIG.md](../docs/LICENSE-TIG.md).
 
 Per-challenge starting code broadcast to agents on a fresh trajectory. One
 directory per challenge, two slots that feed different agent paths (see

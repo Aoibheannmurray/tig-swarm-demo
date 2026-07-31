@@ -265,5 +265,5 @@ from the [tig-monorepo](https://github.com/tig-foundation/tig-monorepo) and
 remains under the TIG Foundation's **Game Code End User License Agreement
 v2.0**. Per that EULA, algorithms produced by running the swarm against these
 challenges are developed solely for, and/or to be submitted to, The Innovation
-Game. See [LICENSE-TIG.md](./LICENSE-TIG.md) for the exact scope, including
+Game. See [docs/LICENSE-TIG.md](./docs/LICENSE-TIG.md) for the exact scope, including
 which initial algorithms were authored here (GPLv3) rather than taken from TIG.

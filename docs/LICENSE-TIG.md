@@ -1,7 +1,7 @@
 # TIG challenge code — license exception
 
 This repository is released under the GNU General Public License v3 (see
-[LICENSE](./LICENSE)), **except** for the TIG-derived code, which comes from
+[LICENSE](../LICENSE)), **except** for the TIG-derived code, which comes from
 the [TIG Foundation monorepo](https://github.com/tig-foundation/tig-monorepo)
 and remains governed by the TIG Foundation's licenses (full set:
 <https://github.com/tig-foundation/tig-monorepo/tree/main/docs/licenses>).
