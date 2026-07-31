@@ -217,13 +217,13 @@
         if (!confirm(
           `Start a new scoring era for ${poolChallenge}?\n\n` +
           `Scores published before now stop counting, so the next run becomes ` +
-          `the best even if it scores lower. Nothing is deleted — experiments, ` +
+          `the best even if it scores lower. Nothing is deleted: experiments, ` +
           `hypotheses and trajectories are kept.`
         )) return;
         const res = await hostedApi.resetChallenge(adminKey, poolChallenge);
         poolMsg =
-          `${poolChallenge} leaderboard reset — scores now counted from ` +
-          `${res.score_epoch ?? "now"}. The next feasible publish becomes the best.`;
+          `${poolChallenge} leaderboard reset. Scores now counted from ` +
+          `${res.score_epoch ?? "now"}; the next feasible publish becomes the best.`;
       }
     } catch (e: any) { error = e.message; }
   }
@@ -243,7 +243,7 @@
       const skipped = (r.results ?? []).filter((x: any) => !x.ok);
       poolMsg = `Mainnet seeded into ${poolTarget.replace("_", " ")}: `
         + (ok.length ? ok.map((x: any) => `${x.challenge} (${x.algorithm})`).join(", ") : "none")
-        + (skipped.length ? ` — skipped ${skipped.map((x: any) => x.challenge).join(", ")}` : "");
+        + (skipped.length ? `; skipped ${skipped.map((x: any) => x.challenge).join(", ")}` : "");
       await loadSeeds();
     } catch (e: any) { error = e.message; }
     finally { seedingMainnet = false; }
@@ -513,12 +513,19 @@
       <div class="card">
         <h2>Benchmark settings</h2>
         <p class="lede">
-          How many instances each benchmark runs per track, and each solver's
-          per-instance time budget. Hot-editable — contributors pick the new
-          values up on their next sync (more instances = more robust scores;
-          the timeout is the hard deadline each solver process gets per
-          instance).
+          Instances per track and the per-instance solver timeout.
+          Contributors pick up new values on their next sync.
         </p>
+        <details class="info">
+          <summary>ⓘ How these affect scoring</summary>
+          <p>
+            More instances make scores more robust (and benchmarks slower).
+            The timeout is the hard deadline each solver process gets per
+            instance; whatever it has saved by then is what gets scored.
+            Changing either makes old scores incomparable with new ones, so
+            consider a leaderboard reset (Pools tab) after.
+          </p>
+        </details>
         <div class="field" style="max-width:260px">
           <label for="tc">Challenge</label>
           <select id="tc" bind:value={trackChallenge}>{#each challengeNames as c}<option value={c}>{c}</option>{/each}</select>
@@ -579,11 +586,15 @@
             </button>
           </div>
         </div>
-        <p class="lede">
-          Fetches the current top-adoption TIG mainnet algorithm (server-side)
-          and deposits it {poolAllChallenges ? "for every configured challenge" : `for ${poolChallenge}`}.
-          Multi-file aware; a challenge with no compatible mainnet algorithm is skipped.
-        </p>
+        <details class="info">
+          <summary>ⓘ What seeding from mainnet does</summary>
+          <p>
+            Fetches the top-adoption TIG mainnet algorithm and deposits it
+            into the chosen pool(s). Initial pool: fresh trajectories start
+            from it. Inactive pool: handed out on trajectory resets.
+            Challenges with no compatible mainnet algorithm are skipped.
+          </p>
+        </details>
         <div class="row" style="align-items:flex-end;gap:12px">
           <div style="flex:0 0 auto;margin-bottom:2px">
             <button onclick={measureMainnetBaseline} disabled={measuringBaseline}>
@@ -591,47 +602,55 @@
             </button>
           </div>
         </div>
-        <p class="lede">
-          Scores the current top-adoption mainnet algorithm on
-          <b>{poolChallenge}</b>'s own instances and shows it on the dashboard
-          — as a line on the benchmark chart and a ranked entry on the
-          leaderboard — so members can see when they beat it. Nothing needs
-          seeding first: it fetches and pools the algorithm if this challenge
-          doesn't have it. The next agent to check in benchmarks it unchanged
-          and publishes the score, usually within one iteration; that agent's
-          own work is banked to the pool on the way past. Press it again to
-          re-measure after changing instances or the timeout.
-        </p>
+        <details class="info">
+          <summary>ⓘ What the baseline is</summary>
+          <p>
+            Benchmarks the top mainnet algorithm on <b>{poolChallenge}</b>'s
+            own instances and shows it on the dashboard chart and
+            leaderboard, so members can see when they beat it. The next
+            agent to check in runs it, usually within one iteration. Press
+            again to re-measure after changing instances or the timeout.
+          </p>
+        </details>
         <div class="actions" style="justify-content:flex-start">
           <button onclick={() => pool("clear")}>Clear inactive pool</button>
           <button class="danger" onclick={() => pool("reset")}>Reset leaderboard</button>
         </div>
-        <p class="lede" style="margin-top:10px">
-          <b>Reset leaderboard</b> starts a new scoring era: scores published
-          before the reset stop counting, so the next feasible run becomes the
-          best even if it scores lower. Use it after changing something that
-          makes old scores incomparable — instance counts, the solver timeout.
-          Experiments, hypotheses and trajectories are kept.
-        </p>
+        <details class="info" style="margin-top:10px">
+          <summary>ⓘ What clear and reset do</summary>
+          <p>
+            <b>Clear inactive pool</b> empties the pool that trajectory
+            resets draw from. <b>Reset leaderboard</b> starts a new scoring
+            era: earlier scores stop counting and the next feasible run
+            becomes the best even if it scores lower. Use it after changing
+            instances or the timeout. Experiments, hypotheses and
+            trajectories are kept.
+          </p>
+        </details>
         {#if poolMsg}<div class="banner ok" style="margin-top:14px">{poolMsg}</div>{/if}
       </div>
 
       <div class="card">
         <h2>Re-seed authored pool</h2>
         <p class="lede">
-          Re-deposits the host clone's authored starter algorithms
-          (<code>initial_algorithms/&lt;challenge&gt;/seeds/</code>) into the
-          swarm's seed pool for every configured challenge — an idempotent
-          upsert, safe to press twice; an edited seed file replaces the pool
-          copy. Reach for it after a server DB reset, which empties the pool.
+          Puts this clone's authored starter seeds back into the swarm's
+          seed pool. Use it after a server DB reset, which empties the pool.
         </p>
+        <details class="info">
+          <summary>ⓘ Details</summary>
+          <p>
+            Reads <code>initial_algorithms/&lt;challenge&gt;/seeds/</code>
+            and re-deposits each seed for every configured challenge. Safe
+            to press twice: it is an upsert, and an edited seed file
+            replaces the pool copy.
+          </p>
+        </details>
         {#if localSeed?.configured}
           {#if (localSeed.empty ?? []).length}
             <div class="banner warn">
-              ⚠ Empty seed pool for {localSeed.empty.join(", ")} — agents fall
-              back to the bare stub and can't produce a feasible solution.
-              This happens after a server DB reset. <b>Re-seed pool</b> below
-              restores the authored seeds.
+              ⚠ Empty seed pool for {localSeed.empty.join(", ")}. Agents
+              there fall back to the bare stub. Press <b>Re-seed pool</b> to
+              restore the authored seeds.
             </div>
           {/if}
           <div class="row" style="align-items:center;gap:12px">
@@ -645,20 +664,17 @@
           <p class="lede muted">Checking for the local companion…</p>
         {:else if localSeed === null}
           <div class="banner warn">
-            Re-seeding never works from this hosted console — the seed files
-            live in the host's clone, not on the swarm server. On the host
-            machine, run <code>python3 run.py --ui</code> and use the
-            <b>Host page</b> (its swarm card has the same seed-pool tools), or
+            Not available from this hosted console: the seed files live in
+            the host's clone. On the host machine, run
+            <code>python3 run.py --ui</code> and use the <b>Host page</b> or
             the local Admin Console at
-            <code>http://127.0.0.1:8787/admin/</code> where this card works.
+            <code>http://127.0.0.1:8787/admin/</code>.
           </div>
         {:else}
           <div class="banner warn">
-            The local companion answered, but it has no admin credentials for
-            a swarm (<code>swarm.admin.json</code> with a server URL and admin
-            key). Re-seeding runs from the machine that created the swarm —
-            that companion's clone holds both the credentials and the seed
-            files.
+            The local companion has no admin credentials for a swarm
+            (<code>swarm.admin.json</code>). Re-seed from the machine that
+            created the swarm.
           </div>
         {/if}
       </div>
@@ -670,9 +686,8 @@
           <button onclick={loadSeeds} disabled={seedsLoading}>{seedsLoading ? "Loading…" : "↻ Refresh"}</button>
         </div>
         <p class="lede">
-          Working starter algorithms handed out on fresh <b>{poolChallenge}</b>
-          trajectories (seed → best peer → stub). An empty pool means seeded
-          agents fall back to a peer's code, or the bare stub if none exists.
+          Starter algorithms handed out on fresh <b>{poolChallenge}</b>
+          trajectories. Fallback order: seed, best peer, stub.
         </p>
         {#if seedsErr}<div class="banner err">{seedsErr}</div>{/if}
         <table>
@@ -691,7 +706,7 @@
             {/each}
             {#if seeds.length === 0 && !seedsErr}
               <tr><td colspan="7" class="muted">
-                {seedsLoading ? "Loading…" : "Seed pool is empty — deposit one via setup.py or POST /api/admin/seed_pool."}
+                {seedsLoading ? "Loading…" : "Seed pool is empty. Use Re-seed authored pool above, or Seed from mainnet."}
               </td></tr>
             {/if}
           </tbody>
@@ -769,6 +784,9 @@
   .knobrow { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
   .invite-item { border: 1px solid var(--border-subtle); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
   .invite-item summary { cursor: pointer; }
+  .info { margin: -6px 0 14px; font-size: 12.5px; color: var(--ink-mid); }
+  .info summary { cursor: pointer; color: var(--ink-dim); user-select: none; }
+  .info p { margin: 6px 0 0; line-height: 1.5; }
   .rowhead h2 { margin: 0; }
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   th { text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim); padding: 8px 10px; border-bottom: 1px solid var(--border-default); }
