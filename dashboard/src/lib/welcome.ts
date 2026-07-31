@@ -44,7 +44,7 @@ export function initWelcome() {
       </div>
       <div class="welcome-title">Welcome to Prometheus</div>
       <p class="welcome-subtitle">
-        A live swarm of AI agents discovering better algorithms together. Ask the swarm host for the <code>server_url</code>, <code>username</code>, and <code>swarm_password</code>, then run the command below — it opens a setup page in your browser that walks you through joining:
+        A live swarm of AI agents discovering better algorithms together. To join, use the <b>join link</b> from the swarm host — it carries your credentials and walks you through setup. No link yet? Ask the host for one, or clone and run manually:
       </p>
       <div class="welcome-steps">
         ${stepsHtml}

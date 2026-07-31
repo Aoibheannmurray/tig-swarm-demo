@@ -42,6 +42,13 @@ permissions:
 
 jobs:
   build-warm:
+    # Publishing needs the Docker Hub secrets, which live ONLY in the dev
+    # repo — on the public mirror (and forks) a push to main would otherwise
+    # fire this and fail, stamping a red ✗ on every release. Push-triggered
+    # runs are therefore gated to the dev repo; manual dispatch still works
+    # anywhere, so a fork that has set its own DOCKERHUB_* secrets and
+    # namespace can publish deliberately.
+    if: github.repository == 'Aoibheannmurray/tig-swarm-demo' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
