@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Self-hostable swarm that runs AI coding agents in parallel to improve Rust solvers for TIG challenges"
 repository = "https://github.com/tig-foundation/prometheus-early-beta"
 readme = "README.md"
-# This crate is the TIG challenge/solver code — see LICENSE-TIG.md; the rest of
+# This crate is the TIG challenge/solver code — see docs/LICENSE-TIG.md; the rest of
 # the repo (swarm mechanics) is GPLv3, see LICENSE.
 license = "https://github.com/tig-foundation/tig-monorepo/tree/main/docs/licenses/TIG_Game_Code_End_User_License_Agreement_v2.0.pdf"
 edition = "2021"
