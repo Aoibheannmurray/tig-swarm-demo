@@ -387,14 +387,91 @@ def _railway_add_volume(service: str, mount_path: str) -> None:
     `volume add` is the one non-idempotent step — it bails if a volume is
     already mounted on the linked service. Treat that as success."""
     result = _railway_run("volume", "add", "--mount-path", mount_path, check=False, retries=4)
-    if result.returncode == 0:
-        return
-    err = (result.stderr or "").lower()
-    if "already" in err and "mount" in err:
+    if result.returncode != 0:
+        err = (result.stderr or "").lower()
+        if not ("already" in err and "mount" in err):
+            msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+            raise RailwayError(f"railway volume add failed: {msg}")
         print(f"    volume already mounted at {mount_path}; skipping")
-        return
-    msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
-    raise RailwayError(f"railway volume add failed: {msg}")
+    # The attach registers asynchronously on Railway's side, and a deployment
+    # submitted while it is still in flight snapshots the service WITHOUT the
+    # mount (observed live on gpu-finl-test: volume mkfs at 09:10:14,
+    # `railway up` one second later, and the resulting container wrote
+    # /data/swarm.db to its own ephemeral disk — every row published before
+    # the next redeploy was destroyed with the container). Wait until the
+    # control plane lists the volume as attached before the caller deploys.
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if _railway_volume_state(service, mount_path) is not None:
+            time.sleep(5)  # settle: give the attach time to reach deploy config
+            return
+        time.sleep(3)
+    print(
+        "    warning: could not confirm the volume attach in time — the "
+        "post-deploy check will verify the DB actually lands on it"
+    )
+
+
+def _railway_volume_state(service: str, mount_path: str) -> dict | None:
+    """The volume node attached to `service` at `mount_path`, or None.
+
+    Read-only; returns None on any CLI/parse failure as well, so callers
+    must treat None as "couldn't confirm", not "no volume"."""
+    result = _railway_run("volume", "list", "--json", check=False, retries=2)
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for v in data.get("volumes") or []:
+        if v.get("mountPath") == mount_path and v.get("serviceName") == service:
+            return v
+    return None
+
+
+def _railway_db_on_volume(service: str, mount_path: str = "/data") -> bool | None:
+    """Whether `swarm.db` exists on the service's persistent volume.
+
+    True/False when the volume's file listing answers; None when it can't
+    (older CLI without `volume files`, API blip). The distinction matters:
+    False AFTER the server is up means the running deployment is writing to
+    ephemeral container disk instead of the volume — everything it stores
+    dies on the next redeploy."""
+    vol = _railway_volume_state(service, mount_path)
+    if not vol or not vol.get("id"):
+        return None
+    result = _railway_run(
+        "volume", "files", "-v", str(vol["id"]), "list", "--json", "/",
+        check=False, retries=2,
+    )
+    if result.returncode != 0:
+        return None
+    # The CLI prints a "> Select a volume …" line before the JSON body.
+    out = result.stdout or ""
+    start = out.find("{")
+    if start < 0:
+        return None
+    try:
+        data = json.loads(out[start:])
+    except json.JSONDecodeError:
+        return None
+    files = data.get("files")
+    if not isinstance(files, list):
+        return None
+    return any(f.get("name") == "swarm.db" for f in files)
+
+
+def _railway_redeploy(service: str) -> None:
+    """Redeploy the service's latest deployment — same image, but the
+    deployment config (volume mounts, variables) is re-snapshotted, which is
+    how a deploy that raced the volume attach picks the mount up."""
+    result = _railway_run("redeploy", "--service", service, "--yes", check=False, retries=2)
+    if result.returncode != 0:
+        msg = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        raise RailwayError(f"railway redeploy failed: {msg}")
 
 
 def _ensure_upload_snapshot_targets() -> None:
