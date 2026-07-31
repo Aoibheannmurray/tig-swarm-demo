@@ -541,7 +541,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     _add_col_migration(13, "inactive_algorithms", "experiment_id", "TEXT"),
     # Winning hyperparameter config (JSON) for a trajectory best tuned by the
     # hyperparameter search. NULL for untuned bests. See
-    # docs/hyperparameter-search-plan.md.
+    # docs/hyperparameter-search.md.
     _add_col_migration(14, "trajectory_bests", "hyperparameters", "TEXT"),
     # The no-hyperparameters (default-config) score for this experiment. The
     # HPO gate's band is default-vs-default, so improvement scores are read
@@ -1143,7 +1143,7 @@ async def get_recent_improvement_scores(
     improvement history (and survives process restarts). Returns [] when the
     trajectory is unknown or has no recorded improvements.
 
-    Powers the hyperparameter-search gate (see docs/hyperparameter-search-plan.md):
+    Powers the hyperparameter-search gate (see docs/hyperparameter-search.md):
     the count is `len(...)`, the band floor is `result[-min_improvements]`, and
     the parent (band ceiling) is `result[-1]` — after the first tune the gate
     fires only when floor < candidate < parent (direction-aware).
@@ -1178,7 +1178,7 @@ async def trajectory_has_tuned(
     non-NULL `hyperparameters` map). The HPO gate auto-fires the FIRST time a
     mature trajectory is eligible (this returns False), then defers to the
     improvement band thereafter. Keyed by trajectory_id so it survives adoption
-    and process restarts. See docs/hyperparameter-search-plan.md."""
+    and process restarts. See docs/hyperparameter-search.md."""
     if not trajectory_id:
         return False
     cursor = await conn.execute(

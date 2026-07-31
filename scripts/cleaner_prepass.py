@@ -1,6 +1,6 @@
 """Deterministic code-bloat reduction for multi-file algorithms (Tier 0).
 
-The LLM-free half of the cleaner (docs/cleaner-agent-plan.md). Operates on an
+The LLM-free half of the cleaner (docs/cleaner-agent.md). Operates on an
 algorithm files-map ({relpath: content}, entry usually `mod.rs`) and applies
 only mechanical, provably-safe transformations:
 

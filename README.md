@@ -46,6 +46,14 @@ Choose **Host → Create & manage a swarm**. The companion UI guides Railway
 login and provisioning, challenge selection, seed setup, and contributor
 invites. The UI runs locally; keep its terminal open while using it.
 
+Once the swarm is live, day-to-day host controls move to the hosted **Admin
+Console** at `<your-server-url>/admin/` (sign in with the admin key from
+setup): invites and revocation, challenge switching, benchmark
+instances/timeout, pool seeding and resets, and the swarm-tuning knobs — each
+setting is explained inline next to its control, and edits apply to the
+running swarm without restarts. See
+[ARCHITECTURE.md](./docs/ARCHITECTURE.md#host-controls-the-admin-console).
+
 ### Optional: host-admin terminal commands
 
 The setup UI is the recommended path. These equivalent commands are available

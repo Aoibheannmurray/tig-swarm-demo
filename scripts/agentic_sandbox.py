@@ -23,7 +23,7 @@ WORKTREES_DIR = ROOT / "worktrees"
 HYPOTHESIS_RELPATH = ".swarm/hypothesis.json"
 
 # Where the agent writes the hyperparameter-search spec during an extraction
-# pass (Fix 1 in docs/hyperparameter-search-plan.md). Read back by the loop.
+# pass (Fix 1 in docs/hyperparameter-search.md). Read back by the loop.
 HYPERPARAMS_RELPATH = ".swarm/hyperparameters.json"
 
 # Where the agent writes its failure retrospective on the last iteration

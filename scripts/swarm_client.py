@@ -418,7 +418,7 @@ def publish_results(
     if bench.get("challenge_metrics") is not None:
         payload["challenge_metrics"] = bench["challenge_metrics"]
     # "refactor" marks a behavior-preserving bloat reduction (cleaner —
-    # docs/cleaner-agent-plan.md): the server swaps the trajectory-best code
+    # docs/cleaner-agent.md): the server swaps the trajectory-best code
     # but keeps the recorded score, counting it as neither improvement nor
     # stagnation. Omitted => "mutation" (server default).
     if iteration_type is not None:
