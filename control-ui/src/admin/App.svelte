@@ -619,12 +619,14 @@
         <details class="info" style="margin-top:10px">
           <summary>ⓘ What clear and reset do</summary>
           <p>
-            <b>Clear inactive pool</b> empties the pool that trajectory
-            resets draw from. <b>Reset leaderboard</b> starts a new scoring
-            era: earlier scores stop counting and the next feasible run
-            becomes the best even if it scores lower. Use it after changing
-            instances or the timeout. Experiments, hypotheses and
-            trajectories are kept.
+            <b>Clear inactive pool</b> empties the retired-trajectory pool
+            for this challenge, so stagnating agents fresh-start from the
+            seed pool or stub instead of adopting an old trajectory. Use it
+            when the pool has filled with dead ends you don't want revived.
+            <b>Reset leaderboard</b> starts a new scoring era: earlier
+            scores stop counting and the next feasible run becomes the best
+            even if it scores lower. Use it after changing instances or the
+            timeout. Experiments, hypotheses and trajectories are kept.
           </p>
         </details>
         {#if poolMsg}<div class="banner ok" style="margin-top:14px">{poolMsg}</div>{/if}

@@ -15,12 +15,13 @@ import{d as Ha,s as n,p as ye,h as Da,o as Ua,u as Oe,M as Ka,i as x,a as i,b as
             own instances and shows it on the dashboard chart and
             leaderboard, so members can see when they beat it. The next
             agent to check in runs it, usually within one iteration. Press
-            again to re-measure after changing instances or the timeout.</p></details> <div class="actions" style="justify-content:flex-start"><button>Clear inactive pool</button> <button class="danger">Reset leaderboard</button></div> <details class="info svelte-9b2mjq" style="margin-top:10px"><summary class="svelte-9b2mjq">ⓘ What clear and reset do</summary> <p class="svelte-9b2mjq"><b>Clear inactive pool</b> empties the pool that trajectory
-            resets draw from. <b>Reset leaderboard</b> starts a new scoring
-            era: earlier scores stop counting and the next feasible run
-            becomes the best even if it scores lower. Use it after changing
-            instances or the timeout. Experiments, hypotheses and
-            trajectories are kept.</p></details> <!></div> <div class="card"><h2>Re-seed authored pool</h2> <p class="lede">Puts this clone's authored starter seeds back into the swarm's
+            again to re-measure after changing instances or the timeout.</p></details> <div class="actions" style="justify-content:flex-start"><button>Clear inactive pool</button> <button class="danger">Reset leaderboard</button></div> <details class="info svelte-9b2mjq" style="margin-top:10px"><summary class="svelte-9b2mjq">ⓘ What clear and reset do</summary> <p class="svelte-9b2mjq"><b>Clear inactive pool</b> empties the retired-trajectory pool
+            for this challenge, so stagnating agents fresh-start from the
+            seed pool or stub instead of adopting an old trajectory. Use it
+            when the pool has filled with dead ends you don't want revived. <b>Reset leaderboard</b> starts a new scoring era: earlier
+            scores stop counting and the next feasible run becomes the best
+            even if it scores lower. Use it after changing instances or the
+            timeout. Experiments, hypotheses and trajectories are kept.</p></details> <!></div> <div class="card"><h2>Re-seed authored pool</h2> <p class="lede">Puts this clone's authored starter seeds back into the swarm's
           seed pool. Use it after a server DB reset, which empties the pool.</p> <details class="info svelte-9b2mjq"><summary class="svelte-9b2mjq">ⓘ Details</summary> <p class="svelte-9b2mjq">Reads <code>initial_algorithms/&lt;challenge&gt;/seeds/</code> and re-deposits each seed for every configured challenge. Safe
             to press twice: it is an upsert, and an edited seed file
             replaces the pool copy.</p></details> <!></div> <div class="card"><div class="rowhead svelte-9b2mjq"><h2 class="svelte-9b2mjq">Seed pool <span class="muted"> </span></h2> <div class="spacer"></div> <button> </button></div> <p class="lede">Starter algorithms handed out on fresh <b> </b> trajectories. Fallback order: seed, best peer, stub.</p> <!> <table class="svelte-9b2mjq"><thead><tr><th class="svelte-9b2mjq">Tag</th><th class="svelte-9b2mjq">Source</th><th class="svelte-9b2mjq">Score</th><th class="svelte-9b2mjq">Feasible</th><th class="svelte-9b2mjq">Size</th><th class="svelte-9b2mjq">Origin</th><th class="svelte-9b2mjq">Created</th></tr></thead><tbody><!><!></tbody></table></div>`,1),da=c('<div class="row knobrow svelte-9b2mjq" style="align-items:center"><div style="flex:1"><div> <span class="mono muted"> </span></div> <div class="hint" style="margin-top:2px"> </div></div> <div class="field" style="margin-bottom:0;max-width:130px"><input type="number" min="0"/></div></div>'),qs=c(`<div class="card"><h2>Swarm settings</h2> <p class="lede">Stagnation and trajectory knobs. Hot-editable: contributors read

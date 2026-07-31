@@ -1,7 +1,7 @@
 """Hyperparameter search for a mutated algorithm.
 
 This is the "decent, not optimal" random search described in
-`docs/hyperparameter-search-plan.md`. Given a hyperparameter-enabled variant of
+`docs/hyperparameter-search.md`. Given a hyperparameter-enabled variant of
 an algorithm, a search space, and a handful of LLM-suggested configurations, it
 evaluates a fixed budget of `N` configurations and returns the best one.
 
@@ -187,7 +187,7 @@ def search(
         }
 
     There is no single tuned config: `winning_configs` maps each track to the
-    config that scored best on *that* track (see docs/hyperparameter-search-plan.md).
+    config that scored best on *that* track (see docs/hyperparameter-search.md).
     `winning_config` (the best by aggregate cross-track score) is retained for
     logging / back-compat. `winning_configs` is empty when no trial produced a
     per-track breakdown, in which case the caller falls back to the default.

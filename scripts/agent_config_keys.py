@@ -142,13 +142,13 @@ KNOBS: tuple[Knob, ...] = (
             "algorithms and exploiters always use search/replace regardless. "
             "Startup-only: resolved once when the loop picks its edit path.",
     ),
-    # ── Hyperparameter search (docs/hyperparameter-search-plan.md) ──
+    # ── Hyperparameter search (docs/hyperparameter-search.md) ──
     Knob("hpo_min_improvements", fleet_default=True, hot_reload=True, live=True),
     Knob("hpo_first_tune_improvements", fleet_default=True, hot_reload=True, live=True),
     Knob("hpo_num_suggested_configs", fleet_default=True, hot_reload=True, live=True),
     Knob("hpo_search_budget", fleet_default=True, hot_reload=True, live=True),
     Knob("hpo_seed", fleet_default=True, hot_reload=True, live=True),
-    # ── Cleaner (docs/cleaner-agent-plan.md) ──
+    # ── Cleaner (docs/cleaner-agent.md) ──
     Knob("cleaner_trigger_chars", fleet_default=True, hot_reload=True, live=True),
     Knob("cleaner_target_pct", fleet_default=True, hot_reload=True, live=True),
     Knob("cleaner_score_delta_pct", fleet_default=True, hot_reload=True, live=True),

@@ -1,5 +1,5 @@
 """Tests for the `iteration_type="refactor"` publish path (cleaner agent —
-docs/cleaner-agent-plan.md).
+docs/cleaner-agent.md).
 
 A refactor is a behavior-preserving bloat reduction: the client benchmarks the
 lean code and publishes it with a score at/near the parent's. The server must

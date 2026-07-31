@@ -349,7 +349,7 @@ config editing) are stable.
 | P1 | contributor console + `contributor_configs` + config API + tacit editor | M | yes — config authored once, visible fleet status |
 | P2 | `run.py --join`, server-config fetch + cache, local secrets file (+ keys UI in companion) | M | yes — one-command setup; kills `export` for everyone |
 | P3 | hosted runner service (multi-fleet supervisor, encrypted keys, caps, revoke hook) | L | yes — zero-install tier |
-| P4 | PWA manifest for the hosted join page; no-clone contributor packaging (curl bootstrap `deploy/get-swarm.py` + `Dockerfile.contributor`) | S–M | cosmetic / packaging |
+| P4 | PWA manifest for the hosted join page; no-clone contributor packaging (curl bootstrap `deploy/get-swarm.py`; a `Dockerfile.contributor` also shipped here but was later removed — nothing instructed anyone to build it) | S–M | cosmetic / packaging |
 | P5 *(optional)* | "Deploy on Railway" (`deploy/DEPLOY_ON_RAILWAY.md`) + first-boot seeding (`server/first_boot.py`, image-baked snapshot) | M | yes — browser-only host setup |
 
 **P4/P5 note — `uvx` dropped.** Standard Python packaging (needed for

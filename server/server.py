@@ -2035,7 +2035,7 @@ async def _evaluate_iteration(
         or db.is_better(direction, req.score, prev_trajectory_best["score"])
     )
 
-    # Refactor path (docs/cleaner-agent-plan.md): a behavior-preserving
+    # Refactor path (docs/cleaner-agent.md): a behavior-preserving
     # bloat reduction the client has already benchmarked and delta-gated.
     # It swaps the trajectory-best CODE while KEEPING the recorded score
     # (a −2% refactor must not lower the bar the next mutation has to

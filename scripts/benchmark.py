@@ -1468,7 +1468,7 @@ def _track_hyperparameters(raw: str | None, track_key: str) -> str | None:
     `raw` (the TIG_HYPERPARAMETERS value) is either a flat config applied to
     every track, or a per-track map {track_key: config}. The hyperparameter
     search runs flat configs uniformly; the final tuned-score benchmark passes a
-    per-track map (a winner per track — see docs/hyperparameter-search-plan.md).
+    per-track map (a winner per track — see docs/hyperparameter-search.md).
     For a per-track map this selects the track's own config (a missing track =>
     the default config {}). Flat configs and unparseable strings pass through.
     """

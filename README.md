@@ -46,6 +46,14 @@ Choose **Host → Create & manage a swarm**. The companion UI guides Railway
 login and provisioning, challenge selection, seed setup, and contributor
 invites. The UI runs locally; keep its terminal open while using it.
 
+Once the swarm is live, day-to-day host controls move to the hosted **Admin
+Console** at `<your-server-url>/admin/` (sign in with the admin key from
+setup): invites and revocation, challenge switching, benchmark
+instances/timeout, pool seeding and resets, and the swarm-tuning knobs — each
+setting is explained inline next to its control, and edits apply to the
+running swarm without restarts. See
+[ARCHITECTURE.md](./docs/ARCHITECTURE.md#host-controls-the-admin-console).
+
 ### Optional: host-admin terminal commands
 
 The setup UI is the recommended path. These equivalent commands are available
@@ -245,13 +253,17 @@ hardware options, and details of how remote benchmark jobs run.
 
 ## License
 
-The swarm — orchestration (`scripts/`, `run.py`), coordination server
+The swarm harness — orchestration (`scripts/`, `run.py`), coordination server
 (`server/`), web UIs (`dashboard/`, `control-ui/`), hosted runner (`runner/`),
 and host-admin CLI (`setup.py` / `hostadmin/`) — is free software under the
-**GNU GPLv3** ([LICENSE](./LICENSE)).
+**GNU GPLv3** ([LICENSE](./LICENSE)). The harness is challenge-agnostic: it can
+be applied to any set of challenges you define.
 
-The TIG challenge and solver code (`src/`, `initial_algorithms/`) is the example
-workload the swarm ships with; it derives from the
-[tig-monorepo](https://github.com/tig-foundation/tig-monorepo) and remains under
-the TIG Foundation's license agreements — see
-[LICENSE-TIG.md](./LICENSE-TIG.md).
+The TIG challenge code (`src/`, plus the TIG-derived starting code in
+`initial_algorithms/`) is the example workload the swarm ships with; it derives
+from the [tig-monorepo](https://github.com/tig-foundation/tig-monorepo) and
+remains under the TIG Foundation's **Game Code End User License Agreement
+v2.0**. Per that EULA, algorithms produced by running the swarm against these
+challenges are developed solely for, and/or to be submitted to, The Innovation
+Game. See [LICENSE-TIG.md](./LICENSE-TIG.md) for the exact scope, including
+which initial algorithms were authored here (GPLv3) rather than taken from TIG.

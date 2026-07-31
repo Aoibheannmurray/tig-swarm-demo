@@ -2,6 +2,12 @@
 
 This document explains how the swarm optimization demo works at a high level — how multiple LLM-driven agents collaborate to evolve a solver for one of eight TIG challenges, and how the coordination server orchestrates their work.
 
+Companion docs: [trajectory-search-explainer.md](./trajectory-search-explainer.md)
+(the search concept, visually), [hyperparameter-search.md](./hyperparameter-search.md)
+(how and when the swarm tunes an algorithm's hyperparameters),
+[cleaner-agent.md](./cleaner-agent.md) (how algorithms are kept from growing
+without bound), and [C3.md](./C3.md) (cloud benchmarking).
+
 ## The Big Picture
 
 A group of autonomous LLM-driven agents — each one a contributor running `scripts/run_loop.py` against an LLM provider — try to improve a Rust solver for the active challenge (chosen at setup time). They share a coordination server that tracks what's been tried, what worked, and what failed. A live dashboard projects the swarm's progress in real-time.
@@ -187,6 +193,30 @@ A private tacit-knowledge file at the contributor's repo root (`tacit_knowledge.
 On the iteration just before a trajectory reset would fire — i.e. when `my_runs_since_improvement == stagnation_limit - 1` and the current attempt did not improve — an agent appends one `- LLM:` bullet to its worktree's `tacit_knowledge_personal.md`: a generalisable lesson distilled from failed attempts, abstracted away from the current challenge. The trigger scales with whatever `stagnation_limit` the host has configured (gated on `stagnation_limit >= 3` so there is enough failure evidence to distill from). Agentic providers handle the append in-band via the per-iteration prompt (`scripts/prompts.py`); API providers go through a separate driver-mediated distillation call after `publish_results` (`scripts/run_loop.py:_distill_tacit_if_due`). The switch between modes is `prompts.DRIVER_DISTILL_FOR_AGENTIC`. On fleet shutdown those bullets are collated back into the source file (deduped against existing content) so distillations accumulate across runs and across agents.
 
 `python run.py` walks contributors through populating the file every run (default skip, append-mode). `python setup.py tacit [<agent-name>]` is the standalone wizard for direct edits.
+
+## Host Controls: the Admin Console
+
+The server hosts an admin console at `<server-url>/admin/`, gated by the
+admin key (shown at `setup.py create`, or via the local companion's
+credentials page). It is the runtime control surface — everything below is
+hot: contributors pick changes up on their next iteration or state poll, no
+restart anywhere.
+
+| Tab | What it governs |
+|-----|-----------------|
+| **Contributors** | Generate single or batch invites (join link + raw credentials); revoke a contributor (blocks registers, stops their running agents). |
+| **Challenge** | Switch the active challenge; per-track instance counts and the per-instance solver timeout (more instances = more robust scores; timeout is each solver process's hard deadline). |
+| **Broadcast** | Push a banner message to every connected dashboard. |
+| **Pools** | Seed the initial/inactive pools from the top TIG mainnet algorithm; measure the mainnet baseline onto the chart and leaderboard; inspect/delete seed-pool entries; clear the inactive pool; reset the leaderboard (new scoring era — use after changing instances/timeout). |
+| **Settings** | Stagnation threshold/limit, negative-trajectory limit, hypothesis recall, the four HPO knobs, and the failed-attempts archive toggle. |
+
+Every knob and destructive button carries its explanation **inline in the
+console** (hover/hint text and consequence notes) — that inline text is the
+authoritative description, kept next to the control so it can't drift from
+the implementation. Per-agent knobs (role, seeding, cleaner, C3) are not
+here: those are contributor-owned in `fleet.config.json` — see
+`scripts/agent_config_keys.py` for the full registry and README for the
+hot-reload story.
 
 ## The Dashboard
 
