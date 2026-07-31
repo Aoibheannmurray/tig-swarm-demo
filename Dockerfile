@@ -12,7 +12,10 @@ WORKDIR /control-ui
 COPY control-ui/package.json control-ui/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY control-ui/ .
-RUN npm run build:fast
+# --ignore-scripts skips the postbuild:fast buildstamp hook: it needs python3
+# and ../scripts/, neither of which exist in this stage, and the stamp only
+# matters for the committed dist/ in a git clone — not an image build.
+RUN npm run build:fast --ignore-scripts
 
 # Stage 2: Python server
 FROM python:3.12-slim

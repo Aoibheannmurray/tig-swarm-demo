@@ -1,10 +1,13 @@
-"""Tests for C3 pools that accept a job and never run it.
+"""Tests for C3 pools that accept a job and never run it (or kill it silently).
 
-Three linked behaviours:
+Linked behaviours:
   * `_poll_c3_job` gives up on a job stuck in a pre-run state instead of
     waiting out the walltime-derived timeout (2h45m at the default c3_time);
-  * an auto-selected profile that does this is dropped from later auto-picks,
-    so the agent moves to a working pool by itself;
+  * `_poll_c3_job` samples the job's logs for C3's internal-error banner
+    ("Contact C3 support … Code: C3-JOB-…"), which can appear while squeue
+    still reports the job RUNNING — the job is dead but never goes terminal;
+  * an auto-selected profile that does either is dropped from later
+    auto-picks, so the agent moves to a working pool by itself;
   * a run of C3 failures prints the switch-to-local-compute advice once.
 
 Self-running: `python scripts/test_c3_queue_stall.py`.
@@ -33,8 +36,17 @@ def _fake_clock():
     return now
 
 
+def _quiet_logs():
+    """Stub _read_logs: the poll loop samples logs for the internal-error
+    banner, and these tests must not shell out to a real c3 CLI."""
+    orig = cc._read_logs
+    cc._read_logs = lambda *a, **k: ""
+    return orig
+
+
 def test_stuck_in_queue_gives_up_early():
     orig_mono, orig_sleep, orig_status = time.monotonic, time.sleep, cc._read_job_status
+    orig_logs = _quiet_logs()
     polls = []
     try:
         time.monotonic = _fake_clock()
@@ -50,6 +62,7 @@ def test_stuck_in_queue_gives_up_early():
         assert len(polls) < 45, len(polls)
     finally:
         time.monotonic, time.sleep, cc._read_job_status = orig_mono, orig_sleep, orig_status
+        cc._read_logs = orig_logs
     print("PASS test_stuck_in_queue_gives_up_early")
 
 
@@ -57,6 +70,7 @@ def test_a_job_that_starts_keeps_the_full_timeout():
     """Reaching RUNNING clears the queue guard — a long solve must not be
     mistaken for a pool that never provisioned."""
     orig_mono, orig_sleep, orig_status = time.monotonic, time.sleep, cc._read_job_status
+    orig_logs = _quiet_logs()
     seq = ["QUEUED", "QUEUED", "RUNNING"] + ["RUNNING"] * 60 + ["COMPLETED"]
     try:
         time.monotonic = _fake_clock()
@@ -67,6 +81,7 @@ def test_a_job_that_starts_keeps_the_full_timeout():
         assert status == "completed", status
     finally:
         time.monotonic, time.sleep, cc._read_job_status = orig_mono, orig_sleep, orig_status
+        cc._read_logs = orig_logs
     print("PASS test_a_job_that_starts_keeps_the_full_timeout")
 
 
@@ -84,6 +99,7 @@ def test_queue_grace_is_configurable_and_disablable():
 
     # 0 disables: the job stays queued forever and we wait, as before.
     orig_mono, orig_sleep, orig_status = time.monotonic, time.sleep, cc._read_job_status
+    orig_logs = _quiet_logs()
     try:
         time.monotonic = _fake_clock()
         time.sleep = lambda s: None
@@ -94,7 +110,48 @@ def test_queue_grace_is_configurable_and_disablable():
         assert status == "timeout", status
     finally:
         time.monotonic, time.sleep, cc._read_job_status = orig_mono, orig_sleep, orig_status
+        cc._read_logs = orig_logs
     print("PASS test_queue_grace_is_configurable_and_disablable")
+
+
+def test_support_error_code_parsing():
+    banner = ("The job could not be completed. Contact C3 support with the "
+              "error code below. Code: C3-JOB-531022R88XJW.")
+    assert cc._support_error_code(banner) == "C3-JOB-531022R88XJW"
+    # Banner without a parseable code still counts as an infra error.
+    assert cc._support_error_code(
+        "The job could not be completed. Contact C3 support.") == "unknown"
+    # Benign logs — including our own runner/benchmark noise — never match.
+    for benign in ("", "Compiling tig-swarm v0.1.0", "error[E0599]: no method",
+                   "solved 5/5 instances"):
+        assert cc._support_error_code(benign) is None, benign
+    print("PASS test_support_error_code_parsing")
+
+
+def test_internal_error_banner_fails_fast_despite_running_status():
+    """The reported failure mode: the job errored on C3 (support-code banner
+    in its logs) but squeue kept saying RUNNING, so the swarm sat on it as if
+    it were still working. The log sampler must catch it within a few polls."""
+    orig_mono, orig_sleep = time.monotonic, time.sleep
+    orig_status, orig_logs = cc._read_job_status, cc._read_logs
+    log_reads = []
+    try:
+        time.monotonic = _fake_clock()
+        time.sleep = lambda s: None
+        cc._read_job_status = lambda *a, **k: "RUNNING"
+        cc._read_logs = lambda *a, **k: log_reads.append(1) or (
+            "The job could not be completed. Contact C3 support with the "
+            "error code below. Code: C3-JOB-531022R88XJW.")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            status = cc._poll_c3_job("job_4", {}, ROOT, 7200)
+        assert status == "infra_error:C3-JOB-531022R88XJW", status
+        assert len(log_reads) == 1, log_reads  # first sample already caught it
+        assert "C3 internal error" in buf.getvalue(), buf.getvalue()
+    finally:
+        time.monotonic, time.sleep = orig_mono, orig_sleep
+        cc._read_job_status, cc._read_logs = orig_status, orig_logs
+    print("PASS test_internal_error_banner_fails_fast_despite_running_status")
 
 
 def test_dead_pool_is_dropped_from_auto_picks():
@@ -105,12 +162,14 @@ def test_dead_pool_is_dropped_from_auto_picks():
     orig_cache = cc._hw_cache
     try:
         cc._session_hw_blocklist.clear()
-        cc._hw_cache = (time.monotonic(), "cpu-e2-48vcpu-192gb")
+        cc._hw_cache = (time.monotonic(), [
+            {"name": "cpu-e2-48vcpu-192gb", "tier": 2, "vcpu": 48, "rate": 1.15},
+        ])
         with redirect_stdout(io.StringIO()):
             cc._blocklist_profile_for_session("cpu-e2-48vcpu-192gb", "test")
         assert "cpu-e2-48vcpu-192gb" in cc._hw_blocklist(None)
-        # The cached pick is dropped too, or auto would keep returning it for
-        # the rest of the 10-minute TTL.
+        # The cached listing is dropped too — a freshly-blocked pool should
+        # trigger a re-query, not ride out the 10-minute TTL.
         assert cc._hw_cache is None
         # Still merged with a per-fleet standing blocklist.
         merged = cc._hw_blocklist({"c3_hardware_blocklist": "cpu-e2-4vcpu-16gb"})
@@ -192,6 +251,8 @@ if __name__ == "__main__":
     test_stuck_in_queue_gives_up_early()
     test_a_job_that_starts_keeps_the_full_timeout()
     test_queue_grace_is_configurable_and_disablable()
+    test_support_error_code_parsing()
+    test_internal_error_banner_fails_fast_despite_running_status()
     test_dead_pool_is_dropped_from_auto_picks()
     test_nothing_is_blocklisted_out_of_the_box()
     test_only_the_pool_s_own_failures_are_learned_from()

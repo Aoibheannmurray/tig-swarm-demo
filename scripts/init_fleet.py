@@ -467,6 +467,8 @@ _C3_HARDWARE_CHOICES = [
     ("auto", "Auto (CPU challenges: cpu-d3-4vcpu-16gb; GPU challenges: NVIDIA L40)"),
     ("cpu-d3-4vcpu-16gb", "CPU: AMD EPYC Genoa 4 vCPU / 16 GiB"),
     ("cpu-e2-4vcpu-16gb", "CPU: Intel Ice Lake 4 vCPU / 16 GiB"),
+    ("cpu-n1-4vcpu-4gb", "CPU: Hyperstack N1 4 vCPU / 4 GiB"),
+    ("cpu-n1-16vcpu-32gb", "CPU: Hyperstack N1 16 vCPU / 32 GiB"),
     ("cpu-e2-48vcpu-192gb", "CPU: Intel Ice Lake 48 vCPU / 192 GiB"),
     ("cpu-d3-96vcpu-384gb", "CPU: AMD EPYC Genoa 96 vCPU / 384 GiB"),
     ("l40", "NVIDIA L40"),

@@ -3,6 +3,7 @@
   import LogStream from "../components/LogStream.svelte";
   import CopyCommand from "../components/CopyCommand.svelte";
   import { localApi } from "../lib/api";
+  import { formatReseedResult } from "../lib/reseed";
   import { ensureStream, deployLog, deployStatus } from "../lib/stream";
 
   // The companion runs on the host's own machine, so the OS it detects is the
@@ -59,6 +60,7 @@
   let recallThreshold = $state(3);
   let seedInactive = $state(false);
   let seedPoolMainnet = $state(false);
+  let failedAttemptsArchive = $state(false);
   let useDefaults = $state(true);
   // Per-challenge {track_key: instances} edits for the customize view,
   // seeded from the server's track_defaults (same values the CLI wizard uses).
@@ -97,18 +99,7 @@
     reseeding = true; seedMsg = ""; error = "";
     try {
       const r = await localApi.reseed(reseedMainnet);
-      // `verified: false` means the pool could not be read back — an empty
-      // `missing` list there proves nothing, so don't claim it's verified.
-      let msg = `Re-seeded ${r.deposited}/${r.total} authored seed(s)`;
-      if (r.missing?.length) msg += ` — still missing: ${r.missing.join(", ")}`;
-      else if (r.verified === false) msg += " — UNCONFIRMED (could not read the pool back).";
-      else msg += " — pool verified.";
-      if (r.mainnet) {
-        msg += r.mainnet_failed?.length
-          ? ` Mainnet: failed for ${r.mainnet_failed.join(", ")}.`
-          : " Mainnet algorithm deposited.";
-      }
-      seedMsg = msg;
+      seedMsg = formatReseedResult(r);
       await refreshSeed();
     } catch (e: any) {
       error = e.message;
@@ -292,6 +283,7 @@
         hypothesis_recall_threshold: recallThreshold,
         seed_inactive_pool: seedInactive,
         seed_pool_mainnet: seedPoolMainnet,
+        failed_attempts_archive: failedAttemptsArchive,
       };
       if (workspace) payload.workspace = workspace;
       if (!useDefaults) {
@@ -346,10 +338,17 @@
     }
   }
 
+  // The Admin Console exists in two places. This page is served by the local
+  // companion, whose /admin/ is the SUPERSET: the same console plus the
+  // /local-api-backed tools (re-seed authored pool), since the seed files
+  // live in this clone. The swarm server also serves it at <server>/admin/
+  // for admins away from this machine — offered as the secondary link.
   function adminConsoleUrl(): string {
-    // The Admin Console is served by the swarm's own server at /admin/.
+    return "/admin/";
+  }
+  function hostedConsoleUrl(): string {
     const base = ($deployStatus.result?.server_url || admin?.server_url || "").replace(/\/$/, "");
-    return base ? `${base}/admin/` : "/admin/";
+    return base ? `${base}/admin/` : "";
   }
 </script>
 
@@ -509,6 +508,7 @@
   <div class="field">
     <label class="check"><input type="checkbox" bind:checked={seedInactive} /> Seed the inactive pool from the top TIG mainnet algorithm <span class="muted">(drawn on trajectory resets)</span></label>
     <label class="check"><input type="checkbox" bind:checked={seedPoolMainnet} /> Seed the initial pool from the top TIG mainnet algorithm <span class="muted">(fresh trajectories start from it)</span></label>
+    <label class="check"><input type="checkbox" bind:checked={failedAttemptsArchive} /> Store failed attempts in the server DB <span class="muted">(agents' failure retrospectives are archived per-agent and served back as a "you tried this before" stagnation hint; toggleable later in the Admin Console)</span></label>
   </div>
   <div class="field">
     <label class="check"><input type="checkbox" bind:checked={useDefaults} /> Use recommended benchmark instance counts for every challenge</label>
@@ -633,6 +633,15 @@
           </button>
         {/if}
       </div>
+      {#if hostedConsoleUrl()}
+        <div class="hint" style="text-align:right">
+          The console is also served at
+          <a href={hostedConsoleUrl()} target="_blank" rel="noreferrer">{hostedConsoleUrl()}</a>
+          for admin work away from this machine — everything works there
+          except re-seeding the authored pool, whose seed files live in this
+          clone.
+        </div>
+      {/if}
     {/if}
   </div>
 {/if}
@@ -743,6 +752,14 @@
         </button>
       {/if}
     </div>
+    {#if hostedConsoleUrl()}
+      <div class="hint" style="text-align:right">
+        The console is also served at
+        <a href={hostedConsoleUrl()} target="_blank" rel="noreferrer">{hostedConsoleUrl()}</a>
+        for admin work away from this machine — everything works there except
+        re-seeding the authored pool, whose seed files live in this clone.
+      </div>
+    {/if}
   </div>
 {/if}
 

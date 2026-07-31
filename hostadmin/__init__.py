@@ -62,7 +62,6 @@ from .railway import (
     tool_argv,
 )
 from .swarm import (
-    DEFAULT_TRACKS_PER_CHALLENGE,
     collect_per_challenge_configs,
     create_swarm,
     push_config_to_server,
@@ -91,19 +90,25 @@ from .tacit import (
 # runs inside worktrees) must keep working there, so resolution stays lazy and
 # raises a clean message rather than an ImportError at package load.
 from . import challenges_bridge as _challenges_bridge
+from . import swarm as _swarm
 
 _LAZY = ("CHALLENGES", "CPU_CHALLENGES", "GPU_CHALLENGES", "_CHALLENGE_REGISTRY")
+# Registry-derived like _LAZY, but defined in swarm.py (which resolves it
+# through its own module __getattr__ on first use).
+_LAZY_SWARM = ("DEFAULT_TRACKS_PER_CHALLENGE",)
 
 
 def __getattr__(name: str):
     """PEP 562 — resolve the lazily-loaded challenge registries on first use."""
     if name in _LAZY:
         return getattr(_challenges_bridge, name)
+    if name in _LAZY_SWARM:
+        return getattr(_swarm, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_LAZY))
+    return sorted(set(globals()) | set(_LAZY) | set(_LAZY_SWARM))
 
 
 __all__ = [

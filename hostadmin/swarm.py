@@ -58,16 +58,28 @@ from .railway import (
 )
 
 DEFAULT_INSTANCES_PER_TRACK = 5
-DEFAULT_TRACKS_PER_CHALLENGE = {
-    "satisfiability": {"n_vars=100000,ratio=4150": 5},
-    "vehicle_routing": {"n_nodes=600": 5},
-    "knapsack": {"n_items=1000,budget=10": 5},
-    "job_scheduling": {"n=50,s=flow_shop": 5},
-    "energy_arbitrage": {"s=baseline": 5},
-    "hypergraph": {"n_h_edges=10000": 5},
-    "neuralnet_optimizer": {"n_hidden=4": 5},
-    "vector_search": {"n_queries=7000": 5},
-}
+
+
+def default_tracks_per_challenge() -> dict[str, dict[str, int]]:
+    """Every track of every challenge at DEFAULT_INSTANCES_PER_TRACK.
+
+    Derived from the challenge registry, so it must stay behind a call:
+    building it at import time would load server/challenges.py, which a
+    trimmed clone / swarm worktree does not have (see test_hostadmin_surface).
+    """
+    return {
+        ch: {key: DEFAULT_INSTANCES_PER_TRACK for key in meta["track_keys"]}
+        for ch, meta in get_challenges().items()
+    }
+
+
+def __getattr__(name: str):
+    # PEP 562 — embedders (control_server's /local-api/challenges) read
+    # DEFAULT_TRACKS_PER_CHALLENGE as an attribute; keep that surface without
+    # paying the registry load at import time.
+    if name == "DEFAULT_TRACKS_PER_CHALLENGE":
+        return default_tracks_per_challenge()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _arg_value(args: argparse.Namespace | None, name: str):
@@ -670,20 +682,14 @@ def collect_per_challenge_configs(
         # challenge registry; not prompted in the wizard.
         timeout = ch_def.default_timeout
         if use_defaults:
-            default_tracks = DEFAULT_TRACKS_PER_CHALLENGE.get(ch)
-            if default_tracks:
-                for key, count in default_tracks.items():
-                    tracks[key] = count
-            else:
-                for key in meta["track_keys"]:
-                    tracks[key] = DEFAULT_INSTANCES_PER_TRACK
+            for key in meta["track_keys"]:
+                tracks[key] = DEFAULT_INSTANCES_PER_TRACK
         else:
             print(f"\n── {ch} ──")
-            ch_track_defaults = DEFAULT_TRACKS_PER_CHALLENGE.get(ch, {})
             for key in meta["track_keys"]:
                 tracks[key] = prompt_int(
                     f"  instances for {key}",
-                    ch_track_defaults.get(key, 0),
+                    DEFAULT_INSTANCES_PER_TRACK,
                     minimum=0,
                 )
         algo_data = initial_algorithms.get(ch, {})
@@ -802,9 +808,9 @@ def create_swarm(params: dict, progress_cb=None) -> dict:
     stagnation_threshold = params["stagnation_threshold"]
     stagnation_limit = params["stagnation_limit"]
     hypothesis_recall_threshold = params["hypothesis_recall_threshold"]
-    # Failed-attempts archive (0/1). Defaults off for callers that don't
-    # set it (e.g. the control-ui host companion) — toggleable later from
-    # the Admin Console's Settings tab.
+    # Failed-attempts archive (0/1). Both the CLI wizard and the control-ui
+    # create form ask; defaults off for callers that don't set it —
+    # toggleable later from the Admin Console's Settings tab.
     failed_attempts_archive = 1 if params.get("failed_attempts_archive") else 0
     # HPO knobs default in for other callers (e.g. the control-ui companion)
     # that don't set them explicitly.

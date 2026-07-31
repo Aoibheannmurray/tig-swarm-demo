@@ -253,13 +253,17 @@ hardware options, and details of how remote benchmark jobs run.
 
 ## License
 
-The swarm — orchestration (`scripts/`, `run.py`), coordination server
+The swarm harness — orchestration (`scripts/`, `run.py`), coordination server
 (`server/`), web UIs (`dashboard/`, `control-ui/`), hosted runner (`runner/`),
 and host-admin CLI (`setup.py` / `hostadmin/`) — is free software under the
-**GNU GPLv3** ([LICENSE](./LICENSE)).
+**GNU GPLv3** ([LICENSE](./LICENSE)). The harness is challenge-agnostic: it can
+be applied to any set of challenges you define.
 
-The TIG challenge and solver code (`src/`, `initial_algorithms/`) is the example
-workload the swarm ships with; it derives from the
-[tig-monorepo](https://github.com/tig-foundation/tig-monorepo) and remains under
-the TIG Foundation's license agreements — see
-[LICENSE-TIG.md](./LICENSE-TIG.md).
+The TIG challenge code (`src/`, plus the TIG-derived starting code in
+`initial_algorithms/`) is the example workload the swarm ships with; it derives
+from the [tig-monorepo](https://github.com/tig-foundation/tig-monorepo) and
+remains under the TIG Foundation's **Game Code End User License Agreement
+v2.0**. Per that EULA, algorithms produced by running the swarm against these
+challenges are developed solely for, and/or to be submitted to, The Innovation
+Game. See [LICENSE-TIG.md](./LICENSE-TIG.md) for the exact scope, including
+which initial algorithms were authored here (GPLv3) rather than taken from TIG.

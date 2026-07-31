@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import Masthead from "../components/Masthead.svelte";
   import { hostedApi, hostedBase, deriveInvitePassword, buildJoinLink, localApi } from "../lib/api";
+  import { formatReseedResult } from "../lib/reseed";
 
   let adminKey = $state(sessionStorage.getItem("prom_admin_key") ?? "");
   let basePassword = $state(sessionStorage.getItem("prom_base_pw") ?? "");
@@ -172,6 +173,36 @@
     }
   }
   $effect(() => { if (authed && tab === "pools" && poolChallenge) loadSeeds(); });
+
+  // ── Authored re-seed (the Host page's "Re-seed pool", available here too) ──
+  //
+  // Re-deposits the host's AUTHORED seeds from the local clone's
+  // initial_algorithms/<challenge>/seeds/ — an idempotent upsert only the
+  // companion can perform, because those files live in the host's clone, not
+  // on the swarm server. The card always renders so a host looking for it
+  // finds an explanation rather than nothing; the controls themselves need
+  // /local-api to answer (served at the companion's /admin/ it does; opened
+  // hosted via ?server=… it doesn't) AND the companion to hold this swarm's
+  // admin credentials. undefined = probe not run yet, null = probe failed.
+  let localSeed: any = $state(undefined);
+  let reseedMainnet = $state(false);
+  let reseeding = $state(false);
+  let reseedMsg = $state("");
+  async function refreshLocalSeed() {
+    try { localSeed = await localApi.seedStatus(); } catch { localSeed = null; }
+  }
+  $effect(() => { if (authed && tab === "pools") refreshLocalSeed(); });
+  async function doReseed() {
+    reseeding = true; reseedMsg = ""; error = "";
+    try {
+      const r = await localApi.reseed(reseedMainnet);
+      reseedMsg = formatReseedResult(r);
+      await refreshLocalSeed();
+      await loadSeeds();
+    } catch (e: any) { error = e.message; }
+    finally { reseeding = false; }
+  }
+
   async function pool(action: "clear" | "reset") {
     poolMsg = ""; error = "";
     try {
@@ -592,6 +623,53 @@
           Experiments, hypotheses and trajectories are kept.
         </p>
         {#if poolMsg}<div class="banner ok" style="margin-top:14px">{poolMsg}</div>{/if}
+      </div>
+
+      <div class="card">
+        <h2>Re-seed authored pool</h2>
+        <p class="lede">
+          Re-deposits the host clone's authored starter algorithms
+          (<code>initial_algorithms/&lt;challenge&gt;/seeds/</code>) into the
+          swarm's seed pool for every configured challenge — an idempotent
+          upsert, safe to press twice; an edited seed file replaces the pool
+          copy. Reach for it after a server DB reset, which empties the pool.
+        </p>
+        {#if localSeed?.configured}
+          {#if (localSeed.empty ?? []).length}
+            <div class="banner warn">
+              ⚠ Empty seed pool for {localSeed.empty.join(", ")} — agents fall
+              back to the bare stub and can't produce a feasible solution.
+              This happens after a server DB reset. <b>Re-seed pool</b> below
+              restores the authored seeds.
+            </div>
+          {/if}
+          <div class="row" style="align-items:center;gap:12px">
+            <label class="check" style="margin:0"><input type="checkbox" bind:checked={reseedMainnet} /> from mainnet too</label>
+            <button class="primary" onclick={doReseed} disabled={reseeding}>
+              {reseeding ? "Re-seeding…" : "Re-seed pool"}
+            </button>
+          </div>
+          {#if reseedMsg}<div class="banner ok" style="margin-top:14px">{reseedMsg}</div>{/if}
+        {:else if localSeed === undefined}
+          <p class="lede muted">Checking for the local companion…</p>
+        {:else if localSeed === null}
+          <div class="banner warn">
+            Re-seeding never works from this hosted console — the seed files
+            live in the host's clone, not on the swarm server. On the host
+            machine, run <code>python3 run.py --ui</code> and use the
+            <b>Host page</b> (its swarm card has the same seed-pool tools), or
+            the local Admin Console at
+            <code>http://127.0.0.1:8787/admin/</code> where this card works.
+          </div>
+        {:else}
+          <div class="banner warn">
+            The local companion answered, but it has no admin credentials for
+            a swarm (<code>swarm.admin.json</code> with a server URL and admin
+            key). Re-seeding runs from the machine that created the swarm —
+            that companion's clone holds both the credentials and the seed
+            files.
+          </div>
+        {/if}
       </div>
 
       <div class="card">
