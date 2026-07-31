@@ -41,14 +41,37 @@ permissions:
   contents: read
 
 jobs:
+  # Publishing home: tig-foundation/prometheus-swarm. Images are published on
+  # RELEASE (push to the public repo's main), so the warm images on Docker Hub
+  # always match the code contributors clone — not a dev branch that may have
+  # drifted ahead. Development pushes never auto-publish; when a dev cycle
+  # needs fresh images before a release, run workflow_dispatch (works in any
+  # repo/fork that has DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets set).
+  #
+  # The secrets check is a separate job because the `secrets` context is not
+  # available in a job-level `if` — and it must be a SKIP, not a failure:
+  # without it, a repo missing the secrets (a fresh mirror, any fork) gets a
+  # red ✗ stamped on every push that touches src/.
+  preflight:
+    if: github.repository == 'tig-foundation/prometheus-swarm' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - id: check
+        env:
+          HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          if [ -n "$HUB_USER" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN secrets not set — skipping warm-image publish."
+          fi
+
   build-warm:
-    # Publishing needs the Docker Hub secrets, which live ONLY in the dev
-    # repo — on the public mirror (and forks) a push to main would otherwise
-    # fire this and fail, stamping a red ✗ on every release. Push-triggered
-    # runs are therefore gated to the dev repo; manual dispatch still works
-    # anywhere, so a fork that has set its own DOCKERHUB_* secrets and
-    # namespace can publish deliberately.
-    if: github.repository == 'Aoibheannmurray/tig-swarm-demo' || github.event_name == 'workflow_dispatch'
+    needs: preflight
+    if: needs.preflight.outputs.publish == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
