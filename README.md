@@ -43,8 +43,8 @@ the Railway CLI if it is not already available.
 Clone the repository, then start the setup UI:
 
 ```bash
-git clone https://github.com/tig-foundation/prometheus-early-beta.git
-cd prometheus-early-beta
+git clone https://github.com/tig-foundation/prometheus-swarm.git
+cd prometheus-swarm
 python3 run.py --ui
 ```
 
@@ -113,14 +113,14 @@ command.
 
 ```bash
 # macOS / Linux
-git clone https://github.com/tig-foundation/prometheus-early-beta.git && cd prometheus-early-beta
+git clone https://github.com/tig-foundation/prometheus-swarm.git && cd prometheus-swarm
 python3 run.py --join "<your-join-link>" --ui
 ```
 
 ```powershell
 # Windows PowerShell (`py` avoids the Microsoft Store `python` alias)
-git clone https://github.com/tig-foundation/prometheus-early-beta.git
-cd prometheus-early-beta
+git clone https://github.com/tig-foundation/prometheus-swarm.git
+cd prometheus-swarm
 py run.py --join "<your-join-link>" --ui
 ```
 

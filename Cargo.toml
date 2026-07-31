@@ -2,7 +2,7 @@
 name = "tig-challenges"
 version = "0.1.0"
 description = "Self-hostable swarm that runs AI coding agents in parallel to improve Rust solvers for TIG challenges"
-repository = "https://github.com/tig-foundation/prometheus-early-beta"
+repository = "https://github.com/tig-foundation/prometheus-swarm"
 readme = "README.md"
 # This crate is the TIG challenge/solver code — see docs/LICENSE-TIG.md; the rest of
 # the repo (swarm mechanics) is GPLv3, see LICENSE.

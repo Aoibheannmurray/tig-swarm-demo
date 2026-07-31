@@ -44,7 +44,7 @@ def _generate_invite_slug(taken: set[str]) -> str:
 # and the clone to it. Keep in sync with BOOTSTRAP_REF in
 # control-ui/src/join/App.svelte.
 _BOOTSTRAP_REF = "main"
-_RAW_BASE = "https://raw.githubusercontent.com/tig-foundation/prometheus-early-beta"
+_RAW_BASE = "https://raw.githubusercontent.com/tig-foundation/prometheus-swarm"
 
 
 def build_join_command(join_link: str) -> str:
