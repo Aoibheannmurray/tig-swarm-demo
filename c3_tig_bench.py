@@ -15,6 +15,11 @@ Usage:
       --tracks n_hidden=4 --nonces 100 --seed test --walltime 01:30:00 \
       --out reports/tig_bench_n4.json
 
+Build-time rollout (optimized is the default; official remains the fallback):
+  python3 c3_tig_bench.py --challenge hypergraph --build <algorithm> \
+      --build-so optimized --tracks <track> --nonces 4 \
+      --out reports/buildso_optimized.json
+
 Needs a local tig-monorepo checkout: pass --monorepo, set $TIG_MONOREPO, or
 clone it at ./tig-monorepo next to this script.
 """
@@ -35,6 +40,8 @@ from pathlib import Path
 
 # tig-monorepo checkout to stage from: --monorepo > $TIG_MONOREPO > ./tig-monorepo.
 DEFAULT_MONOREPO = Path(__file__).resolve().parent / "tig-monorepo"
+OPTIMIZED_BUILD_SO = Path(__file__).resolve().parent / "scripts" / "build_so.llsplit"
+DEFAULT_BUILD_SO = "optimized"
 IMAGE = "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04"
 POLL_SECS = 20
 
@@ -69,7 +76,8 @@ def lf_write(path: Path, text: str, exe: bool = False) -> None:
         path.chmod(0o755)
 
 
-def stage_workspace(stage: Path, monorepo: Path) -> None:
+def stage_workspace(stage: Path, monorepo: Path,
+                    optimized_build_so: Path | None = None) -> None:
     for name in ("Cargo.toml", "Cargo.lock"):
         shutil.copy2(monorepo / name, stage / name)
     ignore = shutil.ignore_patterns(
@@ -86,6 +94,8 @@ def stage_workspace(stage: Path, monorepo: Path) -> None:
         src = monorepo / extra
         if src.exists():
             shutil.copy2(src, stage / extra)
+    if optimized_build_so is not None:
+        shutil.copy2(optimized_build_so, stage / "build_so.llsplit")
 
 
 BENCH_PY = r'''#!/usr/bin/env python3
@@ -138,6 +148,10 @@ def run_one(cfg, track, nonce):
                              out_file, "--ptx", ptx, "--gpu", "0"],
                             capture_output=True, text=True)
         t2 = time.time()
+        try:
+            runtime_data = json.load(open(out_file))
+        except (OSError, json.JSONDecodeError):
+            runtime_data = {}
     quality = None
     for line in (r2.stdout or "").strip().splitlines()[::-1]:
         if line.startswith("quality: "):
@@ -146,7 +160,9 @@ def run_one(cfg, track, nonce):
     row = {"algorithm": algo, "label": label, "track": track, "nonce": nonce,
            "runtime_secs": round(t1 - t0, 3), "verify_secs": round(t2 - t1, 3),
            "runtime_exit": r1.returncode, "verifier_exit": r2.returncode,
-           "ok": r2.returncode == 0 and quality is not None, "quality": quality}
+           "ok": r2.returncode == 0 and quality is not None, "quality": quality,
+           "fuel_consumed": runtime_data.get("fuel_consumed"),
+           "runtime_signature": runtime_data.get("runtime_signature")}
     if r1.returncode == 87:
         row["error"] = "out of fuel"
     elif r1.returncode != 0:
@@ -193,7 +209,10 @@ def runner_script(build_algos: list[str], download_algos: list[str],
                   sweep: bool = False,
                   binaries_cache: bool = False) -> str:
     build_lines = "\n".join(
-        f'log "build_algorithm {a}"\nbash tig-binary/scripts/build_algorithm {a}'
+        f'''log "build_algorithm {a}"
+build_start=$(date +%s)
+bash tig-binary/scripts/build_algorithm {a} 2>&1 | tee "c3-artifacts/build-{a}.log"
+echo "{a} $(( $(date +%s) - build_start ))" | tee -a c3-artifacts/build-times.txt'''
         for a in build_algos
     )
     dl_lines = "\n".join(
@@ -247,6 +266,11 @@ export CHALLENGE={challenge}
 export CHALLENGE_ID={challenge_id}
 chmod +x tig-binary/scripts/* scripts/* 2>/dev/null || true
 export PATH="$PWD/tig-binary/scripts:$PWD/scripts:$PATH"
+
+if [ -f build_so.llsplit ]; then
+  log "install optimized build_so.llsplit"
+  install -m 0755 build_so.llsplit tig-binary/scripts/build_so
+fi
 
 {harness_build}
 log "toolchain ready"
@@ -342,6 +366,9 @@ def main() -> int:
                     help="local JSON file: list of {label, algorithm, hyperparameters}")
     ap.add_argument("--binaries-cache", default=None,
                     help="local tig-binaries.tar.zst from a previous job (skips harness build)")
+    ap.add_argument("--build-so", choices=("official", "optimized"),
+                    default=DEFAULT_BUILD_SO,
+                    help="TIG build_so implementation (default: optimized; official is the fallback)")
     ap.add_argument("--monorepo", default=None,
                     help="path to a tig-monorepo checkout "
                          "(default: $TIG_MONOREPO, then ./tig-monorepo)")
@@ -358,6 +385,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if args.build_so == "optimized" and not OPTIMIZED_BUILD_SO.is_file():
+        print(f"optimized build_so not found at {OPTIMIZED_BUILD_SO}", file=sys.stderr)
+        return 2
 
     challenge = args.challenge
     challenge_id = args.challenge_id or CHALLENGE_IDS[challenge]
@@ -371,7 +401,11 @@ def main() -> int:
     run_id = uuid.uuid4().hex[:8]
     with tempfile.TemporaryDirectory(prefix="tig-c3-") as tmp:
         stage = Path(tmp)
-        stage_workspace(stage, monorepo)
+        stage_workspace(
+            stage,
+            monorepo,
+            OPTIMIZED_BUILD_SO if args.build_so == "optimized" else None,
+        )
         lf_write(stage / "bench_tig.py", BENCH_PY)
         if args.sweep_file:
             shutil.copy2(args.sweep_file, stage / "configs.json")
@@ -459,6 +493,24 @@ def main() -> int:
 
         results["job_id"] = job_id
         results["final_status"] = final
+        results["build_so"] = args.build_so
+        build_times = {}
+        for f in stage.rglob("build-times.txt"):
+            for line in f.read_text(errors="replace").splitlines():
+                fields = line.split()
+                if len(fields) == 2 and fields[1].isdigit():
+                    build_times[fields[0]] = int(fields[1])
+        results["build_seconds"] = build_times
+        build_phases = {}
+        for f in stage.rglob("build-*.log"):
+            phases = {}
+            for line in f.read_text(errors="replace").splitlines():
+                match = re.search(r"\[phase\] ([^:]+): (\d+)s", line)
+                if match:
+                    phases[match.group(1)] = int(match.group(2))
+            if phases:
+                build_phases[f.stem.removeprefix("build-")] = phases
+        results["build_phase_seconds"] = build_phases
         out_path.write_text(json.dumps(results, indent=1))
         print(f"[done] wrote {out_path}")
         for key, s in results["summary"].items():
